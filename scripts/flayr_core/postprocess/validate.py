@@ -16,14 +16,19 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any
 
+from ..artifacts import parse_time_range_seconds
 from ..llm.parse import (
     is_effective_voiceover,
     normalized_transcript_text,
     read_transcript_text,
 )
 from .utils import evidence_overlaps_range
+
+
+ROOT = Path(__file__).resolve().parents[3]
 
 
 def validate_evidence_alignment(result: dict[str, Any]) -> None:
@@ -77,24 +82,144 @@ def validate_analysis_dimensions(result: dict[str, Any]) -> None:
     warnings: list[str] = []
 
     if not str(result.get("one_line_verdict") or "").strip():
-        warnings.append("[R01] 缺少第一步整体感知的 one_line_verdict。")
+        warnings.append("[Q03] 缺少第一步整体感知的 one_line_verdict。")
     holistic = result.get("holistic_assessment", {})
     if any(value == "未完成评估。" for value in holistic.values()):
-        warnings.append("[R01] 缺少第一步整体感知的五维速评或整体转化预判。")
+        warnings.append("[Q03] 缺少第一步整体感知的五维速评或整体转化预判。")
     visibility = result.get("product_visibility", {})
     if visibility.get("first_appearance_sec") is None or visibility.get("ratio") is None:
-        warnings.append("[R04] 缺少第二步产品可见度统计。")
+        warnings.append("[Q09] 缺少第二步产品可见度统计。")
     if result.get("loop_closure", {}).get("note") == "未完成闭环校验。":
-        warnings.append("[R18] 缺少第二步槽位间闭环校验。")
+        warnings.append("[Q03] 缺少第二步槽位间闭环校验。")
     for stage in result.get("stage_analysis", []):
         if not stage.get("gap_summary") or not str(stage.get("module_fit_reason") or "").strip():
-            warnings.append(f"[R02] {stage.get('stage')} 缺少模块适配判断或分点差距。")
+            warnings.append(f"[Q03] {stage.get('stage')} 缺少模块适配判断或分点差距。")
 
     if warnings:
         existing = result.get("qa_warnings", [])
         if not isinstance(existing, list):
             existing = []
         result["qa_warnings"] = existing + warnings
+
+
+def validate_quality_contract(result: dict[str, Any], analysis: dict[str, Any]) -> None:
+    """执行 QA-RULES.md 里已落地的通用质量契约。
+
+    本函数是 QA-RULES 从"文档"进入主流程的收口点：
+      - 可确定为错误的规则抛 SystemExit，触发 repair；
+      - 历史结果中常见、且已有下游兜底的弱问题写入 qa_warnings。
+    """
+    validate_module_ids(result)
+    validate_stage_time_coherence(result)
+    validate_product_visibility(result, analysis)
+
+
+def validate_module_ids(result: dict[str, Any]) -> None:
+    """Q02/G02：module_id 必须来自 structure_library_full.md，且前缀匹配阶段。"""
+    valid_ids = official_module_ids()
+    invalid: list[str] = []
+    for index, stage in enumerate(result.get("stage_analysis", []), start=1):
+        expected_prefix = f"S{index}-"
+        for role in ("creator", "benchmark"):
+            key = f"{role}_module_id"
+            module_id = str(stage.get(key) or "").strip()
+            if not module_id or module_id == "unknown":
+                continue
+            if module_id not in valid_ids:
+                invalid.append(f"{stage.get('stage')} {key}={module_id} 不在结构库官方编号中")
+                continue
+            if not module_id.startswith(expected_prefix):
+                invalid.append(f"{stage.get('stage')} {key}={module_id} 与阶段前缀 {expected_prefix} 不匹配")
+    if invalid:
+        raise SystemExit("模块编号不符合 QA-RULES： " + "；".join(invalid))
+
+
+def official_module_ids() -> set[str]:
+    """从结构库标题中提取官方模块编号，避免手写列表漂移。"""
+    path = ROOT / "structure_library_full.md"
+    if not path.is_file():
+        return set()
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    return set(re.findall(r"^###\s+(S[1-6]-[A-Z])[:：]", text, flags=re.M))
+
+
+def validate_stage_time_coherence(result: dict[str, Any]) -> None:
+    """Q09/G03：阶段时间应可解析；明显重叠写 warning，避免报告证据串位静默发生。"""
+    warnings: list[str] = []
+    for role in ("benchmark", "creator"):
+        previous_stage = ""
+        previous_end: float | None = None
+        for stage in result.get("stage_analysis", []):
+            label = str(stage.get("stage") or "")
+            time_range = stage.get(f"{role}_time_range")
+            start, end = parse_time_range_seconds(time_range, None)
+            if end <= start:
+                raise SystemExit(f"{label} 的 {role}_time_range 无法形成有效时间段：{time_range}")
+            if previous_end is not None:
+                overlap = previous_end - start
+                if overlap > 0.5:
+                    warnings.append(
+                        f"[Q09] {role} {previous_stage} 与 {label} 时间重叠 {overlap:.1f}s，需复核阶段边界。"
+                    )
+            previous_stage = label
+            previous_end = end
+    append_qa_warnings(result, warnings)
+
+
+def validate_product_visibility(result: dict[str, Any], analysis: dict[str, Any]) -> None:
+    """Q09/G04：产品出镜统计必须数值自洽；缺失统计先 warning，不阻断报告。"""
+    visibility = result.get("product_visibility", {})
+    if not isinstance(visibility, dict):
+        raise SystemExit("product_visibility 必须是 object。")
+
+    first = numeric_value(visibility.get("first_appearance_sec"))
+    total = numeric_value(visibility.get("total_screen_time_sec"))
+    duration = numeric_value(visibility.get("video_duration_sec"))
+    ratio = numeric_value(visibility.get("ratio"))
+    note = str(visibility.get("estimation_note") or "")
+
+    if any(value is None for value in (first, total, duration, ratio)):
+        raise SystemExit("product_visibility 必须包含可解析的 first_appearance_sec、total_screen_time_sec、video_duration_sec、ratio。")
+    assert first is not None and total is not None and duration is not None and ratio is not None
+
+    if first < 0 or total < 0 or ratio < 0 or ratio > 1:
+        raise SystemExit("product_visibility 数值越界：first/total/ratio 必须非负，ratio 必须在 0~1。")
+    if duration < 0:
+        raise SystemExit("product_visibility.video_duration_sec 不能为负数。")
+    if duration > 0 and (first > duration + 1.0 or total > duration + 1.0):
+        raise SystemExit("product_visibility 出镜时间超出视频时长。")
+    if duration > 0 and abs(ratio - (total / duration)) > 0.05:
+        raise SystemExit("product_visibility.ratio 与 total_screen_time_sec / video_duration_sec 不一致。")
+
+    expected_duration = max(
+        numeric_value(analysis.get("videos", {}).get("benchmark", {}).get("duration_seconds")) or 0.0,
+        numeric_value(analysis.get("videos", {}).get("creator", {}).get("duration_seconds")) or 0.0,
+    )
+    warnings: list[str] = []
+    if duration == 0 or ("未输出" in note or "需人工复核" in note):
+        warnings.append("[Q09] product_visibility 未完成有效统计，报告中的产品出镜数据需人工复核。")
+    elif expected_duration and duration > expected_duration + 1.0:
+        warnings.append("[Q09] product_visibility.video_duration_sec 大于输入视频时长，需复核统计口径。")
+    append_qa_warnings(result, warnings)
+
+
+def numeric_value(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    return float(match.group(0)) if match else None
+
+
+def append_qa_warnings(result: dict[str, Any], warnings: list[str]) -> None:
+    if not warnings:
+        return
+    existing = result.get("qa_warnings", [])
+    if not isinstance(existing, list):
+        existing = []
+    result["qa_warnings"] = list(dict.fromkeys([*existing, *warnings]))
 
 
 def validate_transcript_attribution(result: dict[str, Any], analysis: dict[str, Any]) -> None:

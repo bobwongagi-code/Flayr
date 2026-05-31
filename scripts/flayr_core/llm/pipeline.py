@@ -28,6 +28,7 @@ from .payload import (
     build_llm_comparison_payload,
     build_llm_payload,
     build_llm_repair_payload,
+    build_stage_review_payload,
     build_video_fact_payload,
     select_role_visual_inputs,
 )
@@ -47,6 +48,7 @@ from ..postprocess.repair import (
 from ..postprocess.validate import (
     validate_analysis_dimensions,
     validate_evidence_alignment,
+    validate_quality_contract,
     validate_stage_ownership,
 )
 
@@ -58,6 +60,7 @@ from ..postprocess.validate import (
 def merge_analysis_result(analysis: dict[str, Any], result_path: Path) -> None:
     """把外部 analysis_result.json 经过 normalize + postprocess + 校验后合并入 analysis。"""
     result = json.loads(result_path.read_text(encoding="utf-8"))
+    phase_c_review = result.get("phase_c_review")
     normalized = normalize_analysis_result(result)
 
     apply_postprocess_chain(normalized, analysis)
@@ -72,6 +75,7 @@ def merge_analysis_result(analysis: dict[str, Any], result_path: Path) -> None:
     validate_stage_ownership(normalized)
     remove_unverified_brand_models(normalized, analysis)
     clamp_result_time_ranges(normalized, analysis)
+    validate_quality_contract(normalized, analysis)
 
     analysis["executive_summary"] = normalized["executive_summary"]
     analysis["one_line_summary"] = normalized["one_line_summary"]
@@ -83,6 +87,8 @@ def merge_analysis_result(analysis: dict[str, Any], result_path: Path) -> None:
     analysis["video_understanding"] = normalized["video_understanding"]
     analysis["stage_analysis"] = normalized["stage_analysis"]
     analysis["improvements"] = normalized["improvements"]
+    if isinstance(phase_c_review, dict):
+        analysis["phase_c_review"] = phase_c_review
     # LLM 分析已成功合并，标记 status 让 report 不再渲染"未跑 LLM"警告
     analysis["improvements_status"] = "llm_completed"
     analysis["analysis_source"] = {
@@ -158,11 +164,22 @@ def parse_and_validate_llm_result(
 ) -> dict[str, Any]:
     """解析 LLM 输出并跑全套校验；首次失败时构造 repair payload 再跑一次。"""
     try:
-        return _process_llm_result(
-            parse_json_text(raw_result_text),
+        raw_result = parse_json_text(raw_result_text)
+        result = _process_llm_result(
+            raw_result,
             analysis,
             analysis_input,
             locked_video_understanding,
+        )
+        return maybe_refine_low_confidence_stages(
+            args=args,
+            api_key=api_key,
+            raw_result=raw_result,
+            result=result,
+            analysis_input=analysis_input,
+            run_dir=run_dir,
+            analysis=analysis,
+            locked_video_understanding=locked_video_understanding,
         )
     except SystemExit as exc:
         first_error = str(exc)
@@ -176,14 +193,162 @@ def parse_and_validate_llm_result(
 
     repair_result_text = extract_chat_completion_text(json.loads(repair_raw_text))
     try:
-        return _process_llm_result(
-            parse_json_text(repair_result_text),
+        raw_repair_result = parse_json_text(repair_result_text)
+        result = _process_llm_result(
+            raw_repair_result,
             analysis,
             analysis_input,
             locked_video_understanding,
         )
+        return maybe_refine_low_confidence_stages(
+            args=args,
+            api_key=api_key,
+            raw_result=raw_repair_result,
+            result=result,
+            analysis_input=analysis_input,
+            run_dir=run_dir,
+            analysis=analysis,
+            locked_video_understanding=locked_video_understanding,
+        )
     except SystemExit as exc:
         raise SystemExit(f"LLM output repair failed. First error: {first_error}. Repair error: {exc}") from exc
+
+
+def maybe_refine_low_confidence_stages(
+    args: argparse.Namespace,
+    api_key: str,
+    raw_result: dict[str, Any],
+    result: dict[str, Any],
+    analysis_input: str,
+    run_dir: Path,
+    analysis: dict[str, Any],
+    locked_video_understanding: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Phase C：模型主动声明低置信阶段后，只回看一次原生视频切片并重判。
+
+    硬约束：
+      - 只接受第一遍输出里的 low_confidence_stages；
+      - 最多 2 个阶段；
+      - 最多 1 次回看，不做循环；
+      - facts 仍是唯一事实源，回看只修 stage_analysis。
+    """
+    if not locked_video_understanding:
+        return result
+    stage_codes = extract_low_confidence_stages(raw_result)
+    if not stage_codes:
+        return result
+
+    review_payload = build_stage_review_payload(
+        args.llm_model,
+        analysis,
+        locked_video_understanding,
+        result,
+        stage_codes,
+    )
+    if not payload_has_video(review_payload):
+        result["phase_c_review"] = {
+            "requested_stages": stage_codes,
+            "applied": False,
+            "reason": "low_confidence_stages 已声明，但本地视频切片构造失败。",
+        }
+        return result
+
+    review_request_path = run_dir / "llm_stage_review_request.json"
+    review_response_path = run_dir / "llm_stage_review_response.json"
+    write_json(review_request_path, review_payload)
+    try:
+        review_raw_text = call_llm_api(args.llm_api_url, api_key, review_request_path, review_response_path)
+        review_response_path.write_text(review_raw_text, encoding="utf-8")
+        review_text = extract_chat_completion_text(json.loads(review_raw_text))
+        review_result = parse_json_text(review_text)
+        refined = apply_stage_review_updates(
+            result,
+            review_result,
+            analysis,
+            analysis_input,
+            locked_video_understanding,
+        )
+    except (SystemExit, json.JSONDecodeError) as exc:
+        result["phase_c_review"] = {
+            "requested_stages": stage_codes,
+            "applied": False,
+            "reason": f"低置信阶段回看失败：{exc}",
+        }
+        return result
+
+    refined["phase_c_review"] = {
+        "requested_stages": stage_codes,
+        "applied": True,
+        "response_path": str(review_response_path),
+        "notes": review_result.get("review_notes", []),
+    }
+    return refined
+
+
+def extract_low_confidence_stages(raw_result: dict[str, Any]) -> list[str]:
+    """从第一遍 LLM 输出中提取 S1-S6 低置信阶段代码。"""
+    values = raw_result.get("low_confidence_stages")
+    if values is None and isinstance(raw_result.get("quality_control"), dict):
+        values = raw_result["quality_control"].get("low_confidence_stages")
+    if not isinstance(values, list):
+        return []
+    codes: list[str] = []
+    for value in values:
+        text = str(value or "").strip().upper()
+        if text.startswith("S") and len(text) >= 2:
+            code = text[:2]
+            if code in {"S1", "S2", "S3", "S4", "S5", "S6"} and code not in codes:
+                codes.append(code)
+    return codes[:2]
+
+
+def payload_has_video(payload: dict[str, Any]) -> bool:
+    """判断回看 payload 是否真正挂了 video_url。"""
+    for message in payload.get("messages", []):
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        if any(isinstance(item, dict) and item.get("type") == "video_url" for item in content):
+            return True
+    return False
+
+
+def apply_stage_review_updates(
+    current_result: dict[str, Any],
+    review_result: dict[str, Any],
+    analysis: dict[str, Any],
+    analysis_input: str,
+    locked_video_understanding: dict[str, Any],
+) -> dict[str, Any]:
+    """把 Phase C 返回的 stage_updates 合并回完整结果，再走现有校验链。"""
+    updates = review_result.get("stage_updates")
+    if not isinstance(updates, list) or not updates:
+        raise SystemExit("Phase C review returned no stage_updates.")
+
+    updates_by_code: dict[str, dict[str, Any]] = {}
+    for update in updates:
+        if not isinstance(update, dict):
+            continue
+        code = stage_code(update.get("stage"))
+        if code:
+            updates_by_code[code] = update
+    if not updates_by_code:
+        raise SystemExit("Phase C review returned no valid stage codes.")
+
+    merged = json.loads(json.dumps(current_result, ensure_ascii=False))
+    merged_stages = []
+    for stage in merged.get("stage_analysis", []):
+        code = stage_code(stage.get("stage"))
+        merged_stages.append(updates_by_code.get(code, stage))
+    merged["stage_analysis"] = merged_stages
+    return _process_llm_result(merged, analysis, analysis_input, locked_video_understanding)
+
+
+def stage_code(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if len(text) >= 2 and text[:2] in {"S1", "S2", "S3", "S4", "S5", "S6"}:
+        return text[:2]
+    return ""
 
 
 def _process_llm_result(
@@ -216,6 +381,7 @@ def _process_llm_result(
     validate_creator_script_language(normalized, analysis_input)
     remove_unverified_brand_models(normalized, analysis)
     clamp_result_time_ranges(normalized, analysis)
+    validate_quality_contract(normalized, analysis)
     return normalized
 
 

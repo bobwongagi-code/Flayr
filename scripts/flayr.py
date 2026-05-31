@@ -15,6 +15,8 @@ from flayr_core.llm.pipeline import (
     run_large_model_analysis,
 )
 from flayr_core.prompt import write_analysis_input
+from flayr_core.proposal_clip import generate_proposal_clips
+from flayr_core.proposal_video import config_from_args
 from flayr_core.report import write_report
 from flayr_core.translation import sync_chinese_translation, translate_transcript_with_llm
 from flayr_core.utils import write_json, write_text
@@ -58,6 +60,8 @@ def main() -> int:
             args.analysis_result_json = llm_result_path
     if args.analysis_result_json:
         merge_analysis_result(analysis, args.analysis_result_json)
+    if args.mode in {"compare", "improve"}:
+        analysis["proposal_clips"] = generate_proposal_clips(run_dir, analysis, config_from_args(args))
     write_json(run_dir / "analysis.json", analysis)
     write_analysis_input(run_dir, analysis)
 
@@ -174,6 +178,60 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--translation-model",
         help="Optional model for transcript translation. Defaults to --llm-model.",
+    )
+    parser.add_argument(
+        "--proposal-video-backend",
+        choices=("none", "dashscope-i2v", "dashscope-s2v"),
+        default="none",
+        help="Optional AI demo clip backend for Top improvements. Default: none.",
+    )
+    parser.add_argument(
+        "--proposal-video-model",
+        default="",
+        help="Optional Wan model override. Defaults: wan2.6-i2v-flash for i2v, wan2.2-s2v for s2v.",
+    )
+    parser.add_argument(
+        "--proposal-video-api-url",
+        default="",
+        help="Optional DashScope Wan endpoint override. Defaults to the Beijing endpoint for the selected backend.",
+    )
+    parser.add_argument(
+        "--proposal-video-resolution",
+        choices=("480P", "720P", "1080P"),
+        default="720P",
+        help="Resolution tier for generated proposal clips. Default: 720P.",
+    )
+    parser.add_argument(
+        "--proposal-video-timeout",
+        type=int,
+        default=600,
+        help="Seconds to wait for each DashScope video task when backend is enabled. Default: 600.",
+    )
+    parser.add_argument(
+        "--proposal-video-poll-interval",
+        type=int,
+        default=15,
+        help="Seconds between DashScope task polls. Default: 15.",
+    )
+    parser.add_argument(
+        "--proposal-video-submit-only",
+        action="store_true",
+        help="Submit DashScope proposal video tasks but do not wait for completion.",
+    )
+    parser.add_argument(
+        "--proposal-face-image-url",
+        default="",
+        help="Public face image URL fallback for dashscope-s2v. Per-improvement face_image_url overrides this.",
+    )
+    parser.add_argument(
+        "--proposal-line-audio-url",
+        default="",
+        help="Public line audio URL fallback for dashscope-s2v. Per-improvement line_audio_url overrides this.",
+    )
+    parser.add_argument(
+        "--proposal-skip-s2v-detect",
+        action="store_true",
+        help="Skip wan2.2-s2v-detect before dashscope-s2v generation.",
     )
     return parser
 

@@ -125,7 +125,13 @@ def image_to_data_url(path: Path) -> str:
     return f"data:{mime_type};base64,{encoded}"
 
 
-def video_to_data_url(path: Path, fps: float = 3.0, max_width: int = 480) -> str | None:
+def video_to_data_url(
+    path: Path,
+    fps: float = 3.0,
+    max_width: int = 480,
+    start: float | None = None,
+    duration: float | None = None,
+) -> str | None:
     """把本地视频重编码成小体积 mp4 的 base64 data URL，供 omni 原生视频理解。
 
     用 ffmpeg 在客户端直接控制抽帧密度（fps）和分辨率，不依赖 API 端 fps 参数：
@@ -133,6 +139,7 @@ def video_to_data_url(path: Path, fps: float = 3.0, max_width: int = 480) -> str
       - max_width：降到 480 宽（保持宽高比），把 base64 payload 压到几 MB，
         既够 omni 看清画面又规避大 body 走代理失败的问题；
       - 音轨完整保留（omni 据此听 BGM / 语气 / 音效）。
+      - start/duration：只切一个时间窗，用于 Phase C 回看低置信阶段。
 
     ffmpeg 不可用或转码失败时返回 None，调用方应回退到抽帧+音频模式。
     """
@@ -145,15 +152,21 @@ def video_to_data_url(path: Path, fps: float = 3.0, max_width: int = 480) -> str
     try:
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             tmp_path = tmp.name
+        command = [ffmpeg, "-y"]
+        if start is not None:
+            command += ["-ss", str(max(0.0, start))]
+        if duration is not None:
+            command += ["-t", str(max(0.1, duration))]
+        command += [
+            "-i", str(path),
+            "-vf", f"fps={fps},scale={max_width}:-2",
+            "-c:v", "libx264", "-crf", "28", "-preset", "veryfast",
+            "-c:a", "aac", "-b:a", "64k",
+            "-movflags", "+faststart",
+            tmp_path,
+        ]
         subprocess.run(
-            [
-                ffmpeg, "-y", "-i", str(path),
-                "-vf", f"fps={fps},scale={max_width}:-2",
-                "-c:v", "libx264", "-crf", "28", "-preset", "veryfast",
-                "-c:a", "aac", "-b:a", "64k",
-                "-movflags", "+faststart",
-                tmp_path,
-            ],
+            command,
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

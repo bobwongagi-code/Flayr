@@ -15,7 +15,9 @@
   → 视频解析、抽帧、抽音频、转写、中文翻译
   → 阶段一：全模态 LLM（omni）原生视频各跑一次，建立单视频事实清单（含画面/口播/字幕/音频事实）
   → 阶段二：对比判断，喂 facts 文字 + 每条 evidence 的关键帧 + 切片音频，按 S1-S6 横向对比
-  → report.html + analysis.json + improved_video_plan.json
+  → Phase C：仅当模型声明 low_confidence_stages 时，对对应阶段切原生视频片段回看一次并重判
+  → 提案样片模块：Top 提升点切达人原片 3-5 秒，打包本地话术和改造理由
+  → report.html + analysis.json + improved_video_plan.json + proposal_clips.json
 ```
 
 核心理念：**全模态主导 + 事实判断分离**（详见 3.6）。模型用 omni 同时"看连续画面 + 听音轨"，
@@ -69,6 +71,8 @@ scripts/
     │   ├── health_rewrite.py         # 健康品类合规重写专项
     │   └── chain.py                  # apply_postprocess_chain 流水线编排
     ├── prompt.py                     # analysis_input.md 装配（LLM 输入包）
+    ├── proposal_clip.py              # Top 提升点提案样片结构化 + 达人原片切片
+    ├── proposal_video.py             # DashScope/Wan 提案样片生成 adapter
     ├── report.py                     # HTML 报告渲染
     ├── translation.py                # 本地语言转中文（调用 llm.api）
     ├── utils.py                      # 通用文件/进程 helper（read_optional_text、write_json 等）
@@ -88,6 +92,8 @@ scripts/
 | LLM 请求构造 / 调用 / schema 解析 | `llm/` 包（api / payload / parse / pipeline） | 已覆盖 |
 | 分析结果修补 / 校验 / 品类合规 | `postprocess/` 包 | 已覆盖 |
 | analysis_input.md 装配 | `prompt.py` | 已覆盖 |
+| 提案样片结构化 / 原片切片 | `proposal_clip.py` | 已覆盖 |
+| DashScope/Wan AI 示意样片 adapter | `proposal_video.py` | 已覆盖 |
 | HTML 报告 | `report.py` | 已覆盖 |
 
 ---
@@ -103,7 +109,7 @@ scripts/
 - 输入校验。
 - 创建 run directory。
 - 串联 video / whisper / translation / prompt / llm / report。
-- 装配 analysis dict、写出 `analysis.json` 和 `improved_video_plan.json`。
+- 装配 analysis dict、写出 `analysis.json`、`improved_video_plan.json` 和 `proposal_clips.json`。
 - 计算分析等级和结论边界，并随分析输入、结构化结果与报告输出；缺少产品策略时不阻止事实分析，但限制策略结论。
 
 约束：
@@ -176,10 +182,10 @@ scripts/
 
 | 子模块 | 职责 |
 |------|------|
-| `llm/api.py` | HTTP 调用底层 + 三个 data URL 工具：`video_to_data_url`（原生视频 ffmpeg 重编码 fps=3+降分辨率含音轨）/ `audio_to_mp3_data_url`（整条或按 start/duration 切片）/ `image_to_data_url`（关键帧）。不含业务规则。 |
+| `llm/api.py` | HTTP 调用底层 + 三个 data URL 工具：`video_to_data_url`（原生视频 ffmpeg 重编码 fps=3+降分辨率含音轨，支持 start/duration 切片）/ `audio_to_mp3_data_url`（整条或按 start/duration 切片）/ `image_to_data_url`（关键帧）。不含业务规则。 |
 | `llm/parse.py` | JSON 解析 + schema normalize。含 `STAGES` 常量、`is_effective_voiceover` 等基础工具，被 `postprocess` 复用。evidence_unit 含 `audio_fact` 字段（BGM/语气/音效）。 |
-| `llm/payload.py` | `build_*_payload` 系列。阶段一 `build_video_fact_payload`（原生视频直传）；阶段二 `build_llm_comparison_payload` + `build_evidence_sensory_inputs`（每条 evidence 配关键帧+切片音频）。 |
-| `llm/pipeline.py` | 主入口：`merge_analysis_result` / `parse_and_validate_llm_result` / `run_large_model_analysis` / `run_video_fact_extraction`。内部用 `_process_llm_result` 抽取主链与 repair 重试共享逻辑。 |
+| `llm/payload.py` | `build_*_payload` 系列。阶段一 `build_video_fact_payload`（原生视频直传）；阶段二 `build_llm_comparison_payload` + `build_evidence_sensory_inputs`（每条 evidence 配关键帧+切片音频）；Phase C `build_stage_review_payload`（低置信阶段原生视频切片）。 |
+| `llm/pipeline.py` | 主入口：`merge_analysis_result` / `parse_and_validate_llm_result` / `run_large_model_analysis` / `run_video_fact_extraction`。内部用 `_process_llm_result` 抽取主链与 repair 重试共享逻辑，并在第一遍成功后最多触发一次 Phase C 回看。 |
 
 **两阶段架构（全模态主导）**：
 
@@ -187,9 +193,11 @@ scripts/
 |------|------|------|------|------|
 | 一：事实抽取 | `run_video_fact_extraction` → `build_video_fact_payload` | 原生视频（fps=3+音轨），benchmark/creator 各一次 | 锁定的 `evidence_units`（唯一事实源） | omni 自定位变化点，像人一样看连续画面+听声音 |
 | 二：对比判断 | `build_llm_comparison_payload` → `build_evidence_sensory_inputs` | facts 文字 + 每条 evidence 的关键帧 + 切片音频 | severity / key_conclusions / 改进 | 判断环节重获感官，按 S1-S6 功能阶段横向对比 |
+| C：低置信回看 | `maybe_refine_low_confidence_stages` → `build_stage_review_payload` | 第一遍声明的 low_confidence_stages + 对应阶段原生视频片段 | 仅替换对应 `stage_analysis` | 解决代表帧信息不足导致的边界阶段漂移，硬限制 1 次 |
 
 关键约束：阶段一 facts 一旦锁定即"唯一事实源"，阶段二感官素材仅辅助评估声画质感，
 **不可新增或改写 facts**（冲突以 facts 为准，可标注"感知歧义"）；阶段二 temperature=0 保证可复现；
+Phase C 只允许模型主动声明低置信后触发，最多回看 2 个阶段、最多 1 次，不做无限 agent loop；
 ffmpeg 不可用时阶段一降级为"关键帧+完整音频"，不中断。
 背景：早期 qwen-vl-max（抽帧式 VL）听不到音轨、对比判断只喂文字 facts，导致判断环节"看不见画面听不见声音"；
 换 qwen3.5-omni-plus + 两阶段后根治。
@@ -274,9 +282,27 @@ ffmpeg 不可用时阶段一降级为"关键帧+完整音频"，不中断。
 - 不展示孤立的"全链路代表帧"区块。
 - Top 提升点固定聚焦前三项，绑定标杆证据 ID 与达人基底证据 ID，同时展示方案 A（已有 AI 成图或可执行出图基底/指令）和方案 B（标杆对应镜头）；没有合适达人基底时明确要求补素材。
 - Top 提升点展示目标槽位、GMV 影响和结构性/执行性/资源性差距类型，避免仅按视频时间顺序排列。
+
+### 3.10 `proposal_clip.py` / `proposal_video.py` — 改进点提案样片
+
+职责：
+
+- 消费 `analysis["improvements"]` 的 Top3，而不是重新判断问题。
+- 从达人原视频按提升点时间窗切 3-5 秒原片片段。
+- 打包本地语言话术、中文解释、改造理由、AI prompt 和达人确认标记。
+- 写出 `proposal_clips.json`，并让 `report.py` 在 Top 提升点中作为独立区块展示。
+- 可选调用 `proposal_video.py` 的 DashScope/Wan adapter 生成 `proposal_*_ai.mp4`。
+
+约束：
+
+- 默认不调用 AIGC 后端；未配置时，报告显示达人原片切片 + 改造文案。
+- `dashscope-i2v` 使用 Wan 图生视频接口，基于本地达人关键帧 data URL 生成 AI 示意样片。
+- `dashscope-s2v` 使用 `wan2.2-s2v` 数字人接口，必须提供公网可访问的正脸图和台词音频 URL，并可先走 `wan2.2-s2v-detect`。
+- AI 样片生成失败只降级该 unit，不阻塞报告和其他提升点。
+- 单条样片默认 4 秒、最长 5 秒，Top3 总时长不超过 15 秒。
 - AI 成图仅作构图与镜头执行参考；其中包装文字、认证、成分和价格信息不得作为分析证据，事实仍以原视频和可验证帧为准。
 
-### 3.10 `utils.py`
+### 3.11 `utils.py`
 
 职责：
 
@@ -353,11 +379,11 @@ flayr.py
 ### 5.3 视频片段切割仅用于分析侧，生产侧仍缺
 
 分析侧已具备：`video.py` 导出 `audio.wav`；`api.audio_to_mp3_data_url(start, duration)`
-按时间窗切音频片段（阶段二声画对齐用）；`api.video_to_data_url` 整片重编码喂 omni。
+按时间窗切音频片段（阶段二声画对齐用）；`api.video_to_data_url(start, duration)` 可整片或按时间窗重编码喂 omni。
 
 进入 improved.mp4 生产阶段前仍需补：
 
-- 按时间段切**视频** segment（当前只切音频）。
+- 写出可复用的生产侧视频 segment manifest（当前 Phase C 只在 LLM 请求内临时切片，不落生产产物）。
 - 视频元信息 manifest，包括分辨率、帧率、编码。
 
 ---

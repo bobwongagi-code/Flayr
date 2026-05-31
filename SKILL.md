@@ -105,6 +105,11 @@ For `whisper-cli` or `whisper-cpp`, pass `--whisper-model` when the default `mod
 For Qwen / 千问 on this Mac, use the DashScope OpenAI-compatible endpoint and the VidLingo Keychain item:
 `--llm-api-url https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions --llm-api-key-keychain-service VidLingo.Qwen`.
 
+Proposal AI demo clips are optional and off by default. Use `--proposal-video-backend dashscope-i2v`
+to generate Wan image-to-video samples from local creator frames. Use `--proposal-video-backend dashscope-s2v`
+only when public HTTP(S) face image and line audio URLs are available; `wan2.2-s2v` cannot consume local files directly.
+Do not enable these backends unless the user explicitly wants AI demo generation, because the calls are billed and can take minutes.
+
 Default to `--whisper-language auto`. Southeast Asia commerce videos often use Malay, Thai, Indonesian, or English local口播, so do not force Chinese unless the user explicitly says the video is Chinese.
 
 When generating `transcript.zh.txt`, follow `references/commerce-translation-guidelines.md`. The Chinese translation must be commerce-aware: correct likely Whisper mistakes from product context, preserve product facts, and translate purchase calls such as `beg kuning` / `back kuning` as `黄色购物车`.

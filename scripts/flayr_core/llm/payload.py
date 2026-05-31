@@ -301,6 +301,7 @@ def build_llm_comparison_payload(
     context = extract_comparison_context(analysis_input)
     commercial_framework = read_text_if_exists(ROOT / "references" / "commercial-judgement-framework.md")
     market_knowledge = read_text_if_exists(ROOT / "references" / "market-knowledge-my.md")
+    qa_rules = read_text_if_exists(ROOT / "QA-RULES.md")
     user_text = "\n\n".join(
         [
             context,
@@ -312,6 +313,8 @@ def build_llm_comparison_payload(
                 "发现明确马来语或马来市场信号时可提高权重，但不得当作已确认事实。\n\n"
                 + market_knowledge
             ),
+            "## QA-RULES.md 自检契约（输出前必须自检）",
+            qa_rules,
             "## 已校验单视频事实清单（唯一事实来源）",
             json.dumps(facts, ensure_ascii=False, indent=2),
             "## 输出要求",
@@ -319,7 +322,8 @@ def build_llm_comparison_payload(
             "必须输出：one_line_verdict, one_line_summary, executive_summary, holistic_assessment（每维独立）, key_conclusions（1-5 条消费者视角）, product_visibility, loop_closure, video_understanding, stage_analysis[6], improvements（1-5 条，按 GMV 杠杆排序）。",
             "stage_analysis 每项必须含：stage, time_range, benchmark_time_range, creator_time_range, core_question, creator_module_id, benchmark_module_id, module_fit, module_fit_reason, task_completion, gap_type, gap_summary, voice_performance, benchmark_summary, benchmark_key_message, benchmark_evidence_ids, benchmark_visual_evidence, benchmark_support_status, benchmark_quote, benchmark_quote_zh, creator_summary, creator_key_message, creator_evidence_ids, creator_visual_evidence, creator_support_status, creator_quote, creator_quote_zh, gap, evidence, severity。",
             "improvements 每项必须含：title,target_stage,gmv_impact,gap_type,time_range,creator_time_range,benchmark_time_range,problem,benchmark_reference,benchmark_evidence_ids,suggestion,actions,gmv_reason,evidence,creator_script,creator_script_zh,base_frame_suitability,best_base_frame_time,base_frame_evidence_id,base_frame_reason,aigc_prompt,aigc_image_path,expected_effect,priority。",
-            "所有数组最多 1 条。所有描述字段最多一句且不超过 40 个汉字。video_understanding 必须原样使用事实清单，不得新增、改写或跨视频移动 evidence_units。",
+            "可额外输出 top-level low_confidence_stages，数组元素只能是 S1-S6；只有当该阶段现有帧/音频不足以支撑 severity 时才填写，最多 2 个。",
+            "除 stage_analysis、improvements、video_understanding.evidence_units 和 low_confidence_stages 外，所有数组最多 1 条。所有描述字段最多一句且不超过 40 个汉字。video_understanding 必须原样使用事实清单，不得新增、改写或跨视频移动 evidence_units。",
         ]
     )
     payload = build_llm_payload(model, user_text, [])
@@ -357,8 +361,174 @@ def build_llm_comparison_payload(
         "不得据此新增或改写 facts 的事实单元；"
         "当帧/音频与 facts 文字描述冲突时以 facts 为准，可在该处判断理由中标注'此处存在感知歧义'。"
         "请按 S1-S6 功能阶段对齐两条视频的 evidence 再做横向对比，不要按绝对时间对齐。"
+        "\n\n## 低置信阶段声明（Phase C）\n"
+        "如果某个阶段的 severity 需要观察连续动作、效果瞬间或声画关系，而当前 evidence 代表帧/切片音频不足，"
+        "可在 top-level low_confidence_stages 写入该阶段代码（如 [\"S4\"]），最多 2 个。"
+        "普通商业判断困难、双方都缺内容、或 facts 已足够判断时不要标低置信。"
+        "\n\n## QA 自检规则\n"
+        "输出前必须按 QA-RULES.md 检查：module_id 必须来自结构库官方编号；"
+        "stage evidence_ids 必须存在且与阶段时间相交；product_visibility 数值必须自洽；"
+        "若发现会违反 QA 的内容，先自行修正再输出 JSON。"
     )
     return payload
+
+
+def build_stage_review_payload(
+    model: str,
+    analysis: dict[str, Any],
+    facts: dict[str, Any],
+    current_result: dict[str, Any],
+    stage_codes: list[str],
+) -> dict[str, Any]:
+    """Phase C：对低置信阶段切原生视频片段，只重判这些阶段。
+
+    这是一次性回看，不允许模型继续索要素材；事实清单仍是唯一事实源。
+    """
+    target_codes = normalize_stage_codes(stage_codes)[:2]
+    target_stages = [
+        stage for stage in current_result.get("stage_analysis", [])
+        if stage_code(stage.get("stage")) in target_codes
+    ]
+    content: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "\n\n".join(
+                [
+                    "# Phase C 低置信阶段回看",
+                    "你将看到低置信阶段对应的原生视频切片（含画面和声音）。",
+                    "只重判 target_stages 中列出的阶段；不要改写 video_understanding，不要新增 evidence_unit。",
+                    "必须先在 gap 字段写清判断依据（达人做了什么→标杆做了什么→对购买意愿影响），再给 severity。",
+                    "只输出严格 JSON，不要 Markdown。",
+                    "输出格式：",
+                    json.dumps(
+                        {
+                            "stage_updates": [
+                                {
+                                    "stage": "S4 效果呈现",
+                                    "time_range": "标杆真实时间 / 达人真实时间",
+                                    "benchmark_time_range": "0.0s - 0.0s",
+                                    "creator_time_range": "0.0s - 0.0s",
+                                    "core_question": "用户能不能看见价值",
+                                    "creator_module_id": "unknown",
+                                    "benchmark_module_id": "unknown",
+                                    "module_fit": "fit | degraded | unfit | unknown",
+                                    "module_fit_reason": "一句话",
+                                    "task_completion": "complete | partial | missing",
+                                    "gap_type": "structural | execution | resource",
+                                    "gap_summary": ["一句话"],
+                                    "voice_performance": {
+                                        "pace": "语速判断",
+                                        "energy": "情绪判断",
+                                        "key_pause": False,
+                                        "note": "一句话",
+                                    },
+                                    "benchmark_summary": "一句话",
+                                    "benchmark_key_message": "一句话",
+                                    "benchmark_evidence_ids": ["B1"],
+                                    "benchmark_visual_evidence": ["一句话"],
+                                    "benchmark_support_status": "supported | voice_only | visual_only | conflict",
+                                    "benchmark_quote": "本地语言口播；没有留空",
+                                    "benchmark_quote_zh": "中文翻译；没有留空",
+                                    "creator_summary": "一句话",
+                                    "creator_key_message": "一句话",
+                                    "creator_evidence_ids": ["C1"],
+                                    "creator_visual_evidence": ["一句话"],
+                                    "creator_support_status": "supported | voice_only | visual_only | conflict",
+                                    "creator_quote": "本地语言口播；没有留空",
+                                    "creator_quote_zh": "中文翻译；没有留空",
+                                    "gap": "达人做了什么→标杆做了什么→对购买意愿影响。",
+                                    "evidence": ["引用时间段、画面或口播证据"],
+                                    "severity": "large | medium | small",
+                                }
+                            ],
+                            "review_notes": ["为什么回看后这样判断"],
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    "## 目标阶段",
+                    json.dumps(target_codes, ensure_ascii=False),
+                    "## 当前阶段判断",
+                    json.dumps(target_stages, ensure_ascii=False, indent=2),
+                    "## 已校验单视频事实清单（唯一事实来源）",
+                    json.dumps(facts, ensure_ascii=False, indent=2),
+                ]
+            ),
+        }
+    ]
+    content.extend(build_stage_review_video_inputs(analysis, target_stages))
+    return {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "你是 Flayr 的低置信阶段复核器。只输出严格 JSON。"
+                    "本轮只能基于用户给出的 facts 和原生视频切片，重判指定 S1-S6 阶段。"
+                    "不得新增、删除或改写 evidence_units；可修正该阶段的 gap、severity、support_status、summary、quote 和 evidence 引用。"
+                    "severity 仍按购买意愿影响定级：large=直接影响购买意愿的硬伤；medium=削弱说服力但不致命；small=细节瑕疵或达人持平/更优。"
+                    "回看后如果达人持平或更优，必须给 small。不要继续要求更多素材。"
+                ),
+            },
+            {"role": "user", "content": content},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 8192,
+    }
+
+
+def build_stage_review_video_inputs(
+    analysis: dict[str, Any],
+    target_stages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """为 Phase C 低置信阶段附上对应时间窗的原生视频切片。"""
+    content: list[dict[str, Any]] = []
+    videos = analysis.get("videos", {})
+    for stage in target_stages:
+        code = stage_code(stage.get("stage"))
+        for role in ("benchmark", "creator"):
+            info = videos.get(role) or {}
+            video_path = Path(str(info.get("path") or ""))
+            if not video_path.is_file():
+                continue
+            time_range = str(stage.get(f"{role}_time_range") or stage.get("time_range") or "")
+            start, end = parse_time_range_seconds(time_range, info.get("duration_seconds"))
+            padded_start = max(0.0, start - 0.5)
+            padded_end = min(float(info.get("duration_seconds") or end), end + 0.5)
+            data_url = video_to_data_url(
+                video_path,
+                fps=3.0,
+                max_width=480,
+                start=padded_start,
+                duration=max(0.5, padded_end - padded_start),
+            )
+            if data_url is None:
+                continue
+            content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"【Phase C 回看视频｜{role}｜{code}｜"
+                        f"{format_seconds(padded_start)} - {format_seconds(padded_end)}】"
+                    ),
+                }
+            )
+            content.append({"type": "video_url", "video_url": {"url": data_url}})
+    return content
+
+
+def normalize_stage_codes(values: list[str]) -> list[str]:
+    codes: list[str] = []
+    for value in values:
+        code = stage_code(value)
+        if code and code not in codes:
+            codes.append(code)
+    return codes
+
+
+def stage_code(value: Any) -> str:
+    match = re.search(r"S[1-6]", str(value or "").upper())
+    return match.group(0) if match else ""
 
 
 def extract_comparison_context(analysis_input: str) -> str:

@@ -14,14 +14,15 @@ Flayr 接收一条**爆款参考视频**和一条**达人视频**，用全模态
 | 全模态理解 | omni 模型（qwen3.5-omni-plus）原生吃视频：连续画面 + 完整音轨（BGM/语气/音效），自定位变化点 |
 | 结构化分析 | 对照 Chimera 6 槽位结构库（S1-S6），逐段对比达人与爆款差距 |
 | 改进建议 | 按 GMV 杠杆排序的提升点，含话术、画面、AI 改造 prompt |
-| HTML 报告 | 自包含的可视化报告，含关键结论、差距概览、阶段拆解、提升点 |
+| 提案样片 | Top 提升点自动切达人原片 3-5 秒，配本地话术和改造理由，嵌入 HTML 报告 |
+| HTML 报告 | 可视化主报告，含关键结论、差距概览、阶段拆解、提升点与提案样片 |
 | 改进视频计划 | improved_video_plan.json，供后续剪辑/AIGC 使用 |
 
 ---
 
 ## 二、两阶段分析架构
 
-Flayr 用**两段式 pipeline**，而非一次性看完整视频：
+Flayr 用**两阶段 pipeline + 一次性回看**，而非一次性看完整视频：
 
 ```
 阶段一：单视频事实抽取（fact extraction）
@@ -35,9 +36,15 @@ Flayr 用**两段式 pipeline**，而非一次性看完整视频：
   → 让判断环节能"看着证据、听着声音"评估声画质感与情绪强度
   → 按 S1-S6 功能阶段横向对比，产出 severity、key_conclusions、改进建议
   感官素材仅辅助判断，不可新增/改写 facts
+
+Phase C：低置信阶段回看（只触发一次）
+  如果阶段二主动输出 low_confidence_stages（最多 2 个 S1-S6 阶段）
+  → 代码按该阶段真实时间窗切标杆/达人原生视频片段（含音轨）
+  → 第二次只重判这些阶段，并重新走现有 postprocess/validate
+  不做无限多轮，也不允许模型继续索要素材
 ```
 
-设计理由：阶段一锁定事实防串供，阶段二重获感官避免"读文字摘要做判断"。
+设计理由：阶段一锁定事实防串供，阶段二重获感官避免"读文字摘要做判断"；Phase C 只补“代表帧不足以判断”的少数阶段。
 详见 `ARCHITECTURE.md`。
 
 ---
@@ -54,6 +61,7 @@ Flayr/
 │       ├── translation.py        # 转写翻译
 │       ├── prompt.py             # analysis_input.md 装配
 │       ├── artifacts.py          # 帧/时间区间选取
+│       ├── proposal_clip.py      # Top 提升点提案样片结构化与原片切片
 │       ├── report.py             # HTML 报告渲染
 │       ├── llm/                  # LLM 调用层
 │       │   ├── api.py            #   HTTP 调用 + 视频/音频/图片转 data URL
@@ -120,6 +128,27 @@ python3 scripts/flayr.py \
 | `--whisper-model` | Whisper 模型文件路径 |
 | `--skip-whisper` | 跳过转写（用于调试） |
 
+### 提案样片 AI 后端（可选）
+
+默认只生成达人原片切片，不调用视频生成模型。需要 AI 示意样片时显式打开：
+
+```bash
+python3 scripts/flayr.py ... improve \
+  --proposal-video-backend dashscope-i2v \
+  --proposal-video-resolution 720P \
+  --llm-api-key-keychain-service VidLingo.Qwen
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--proposal-video-backend none` | 默认值，不调用 DashScope，仅输出原片切片 + 文案提案 |
+| `--proposal-video-backend dashscope-i2v` | 用 Wan 图生视频生成 AI 示意样片；默认模型 `wan2.6-i2v-flash`，可直接使用本地关键帧 base64 |
+| `--proposal-video-backend dashscope-s2v` | 用 `wan2.2-s2v` 数字人口播样片；要求公网可访问的正脸图和音频 URL |
+| `--proposal-video-submit-only` | 只提交任务，不等待生成完成；报告显示 task_id |
+| `--proposal-face-image-url` / `--proposal-line-audio-url` | `dashscope-s2v` 的公网素材兜底 URL |
+
+说明：官方 `wan2.2-s2v` 只接受公网 HTTP(S) 图片和音频，不能直接吃本地文件；`dashscope-i2v` 更适合当前本地报告链路。
+
 > 注：ffmpeg 不可用时，阶段一自动降级为"关键帧抽帧 + 完整音频"，不中断。
 
 ---
@@ -137,9 +166,13 @@ python3 scripts/flayr.py \
   ↓
 [4] 阶段二：对比判断（facts + 关键帧 + 切片音频）
   ↓
-[5] 校验 + 修补（postprocess chain + QA-RULES）
+[5] Phase C 可选回看（低置信阶段原生视频片段，只重判一次）
   ↓
-[6] 渲染报告（report.html）+ 改进计划（improved_video_plan.json）
+[6] 校验 + 修补（postprocess chain + QA-RULES）
+  ↓
+[7] 生成提案样片（proposal_clips.json + 3-5 秒达人原片切片）
+  ↓
+[8] 渲染报告（report.html）+ 改进计划（improved_video_plan.json）
   ↓
 输出到 runs/<时间戳>/
 ```
@@ -153,8 +186,11 @@ python3 scripts/flayr.py \
 | `report.html` | 主报告，可直接在浏览器打开 |
 | `analysis.json` | 完整分析数据 |
 | `analysis_result.json` | LLM 分析结果（归一化后） |
+| `llm_stage_review_request.json` / `llm_stage_review_response.json` | Phase C 低置信阶段回看请求与响应（仅触发时存在） |
 | `video_facts_{benchmark,creator}.json` | 阶段一单视频事实清单 |
 | `improved_video_plan.json` | 改进视频的拍摄/剪辑计划 |
+| `proposal_clips.json` / `proposal_clips/*.mp4` | Top 提升点提案样片数据与达人原片切片 |
+| `proposal_clips/proposal_*_ai.mp4` | AI 示意样片（仅启用 `--proposal-video-backend` 且任务成功时存在） |
 | `transcript.txt` / `.srt` / `.zh.txt` | 转写与翻译 |
 | `frames/` `focus_frames/` | 抽取的关键帧 |
 

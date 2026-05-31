@@ -524,11 +524,13 @@ def render_improvement_cards(analysis: dict[str, Any]) -> str:
             return '<div class="card">LLM 本次未给出提升点建议。</div>'
         return '<div class="card">拆解模式暂无对比提升点。</div>'
 
+    proposal_units = proposal_units_by_rank(analysis)
     cards = []
     for rank, item in enumerate(improvements, start=1):
         creator_range = item.get("creator_time_range") or item.get("time_range", "")
         base_frame_time = item.get("best_base_frame_time") or ""
         creator_frame = select_base_frame(analysis["videos"].get("creator", {}), item)
+        proposal_unit = proposal_units.get(rank)
         cards.append(
             "\n".join(
                 [
@@ -544,6 +546,7 @@ def render_improvement_cards(analysis: dict[str, Any]) -> str:
                     "</ol>",
                     render_expected_effect(item),
                     render_script_block(item),
+                    render_proposal_unit(proposal_unit),
                     "</div>",
                     '<div class="ai-reference">',
                     "<h3>AI 改造参考</h3>",
@@ -557,6 +560,83 @@ def render_improvement_cards(analysis: dict[str, Any]) -> str:
             )
         )
     return "\n".join(cards)
+
+
+def proposal_units_by_rank(analysis: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    proposal = analysis.get("proposal_clips", {})
+    units = proposal.get("units", []) if isinstance(proposal, dict) else []
+    result: dict[int, dict[str, Any]] = {}
+    for unit in units:
+        if not isinstance(unit, dict):
+            continue
+        try:
+            rank = int(unit.get("rank"))
+        except (TypeError, ValueError):
+            continue
+        result[rank] = unit
+    return result
+
+
+def render_proposal_unit(unit: dict[str, Any] | None) -> str:
+    if not unit:
+        return ""
+    original_uri = str(unit.get("clip_original_uri") or "").strip()
+    ai_uri = str(unit.get("clip_ai_uri") or "").strip()
+    rows = [
+        '<div class="proposal-unit">',
+        '<div class="proposal-head">',
+        "<h4>提案样片</h4>",
+        f'<span class="proposal-chip">{escape(proposal_status_label(unit))}</span>',
+        "</div>",
+        '<div class="proposal-grid">',
+        render_video_slot("达人原片", original_uri, unit.get("duration_sec")),
+        render_video_slot("AI 示意", ai_uri, unit.get("duration_sec"), placeholder=proposal_ai_placeholder(unit)),
+        "</div>",
+        '<div class="proposal-copy">',
+        f'<div><span class="label-inline">本地话术：</span>{escape(unit.get("line") or "待补充")}</div>',
+    ]
+    if unit.get("line_zh"):
+        rows.append(f'<div class="meta">中文：{escape(unit.get("line_zh"))}</div>')
+    rows.extend(
+        [
+            f'<div class="proposal-rationale"><span class="label-inline">改造理由：</span>{escape(unit.get("rationale") or "待补充")}</div>',
+            "</div>",
+            "</div>",
+        ]
+    )
+    return "\n".join(rows)
+
+
+def proposal_status_label(unit: dict[str, Any]) -> str:
+    status = str(unit.get("ai_generation_status") or "").strip()
+    if status == "ready":
+        return "AI 示意已生成"
+    if status == "submitted":
+        return "AI 任务已提交"
+    return "需达人确认"
+
+
+def proposal_ai_placeholder(unit: dict[str, Any]) -> str:
+    status = str(unit.get("ai_generation_status") or "").strip()
+    if status == "submitted":
+        return f"AI 任务已提交，task_id：{unit.get('ai_task_id') or '待查询'}。"
+    error = str(unit.get("ai_generation_error") or "").strip()
+    if error:
+        return f"AI 示意暂未生成：{error}"
+    return "AI 样片后端未配置，本次先展示原片切片 + 改造文案。"
+
+
+def render_video_slot(label: str, uri: str, duration: Any, placeholder: str = "暂无样片。") -> str:
+    rows = ['<div class="proposal-video-slot">', f'<div class="label">{escape(label)}</div>']
+    if uri:
+        rows.append(
+            f'<video class="proposal-video" controls preload="metadata" src="{escape(uri)}"></video>'
+        )
+        rows.append(f'<div class="proposal-caption">{escape(format_seconds(duration))}</div>')
+    else:
+        rows.append(f'<div class="proposal-empty">{escape(placeholder)}</div>')
+    rows.append("</div>")
+    return "\n".join(rows)
 
 
 def render_improvement_meta(item: dict[str, Any], creator_range: str) -> str:

@@ -13,6 +13,9 @@
   "key_conclusions": [
     "代入本地目标消费者视角，按 GMV 影响从大到小排列。每条：达人做了什么→标杆做了什么→对购买意愿的影响。可跨阶段，用消费者语言。1-5 条。"
   ],
+  "low_confidence_stages": [
+    "可选。仅当代表帧/切片音频不足以稳定判断该阶段 severity 时填写 S1-S6 阶段代码，最多 2 个。"
+  ],
 
   "product_visibility": {
     "first_appearance_sec": 0.0,

@@ -129,6 +129,22 @@
 
 ⚠️ **severity = medium 但 gap_summary 写"无明显差距"是自相矛盾。** gap_summary 说差距小/无，severity 就必须是 small。
 
+##### 低置信阶段声明（Phase C）
+
+当某个阶段的判断依赖连续动作、效果瞬间或声画关系，而当前代表帧/切片音频不足以稳定支撑 `severity` 时，可以在顶层额外输出：
+
+```json
+{
+  "low_confidence_stages": ["S4"]
+}
+```
+
+规则：
+
+- 只填 S1-S6 阶段代码，最多 2 个。
+- 只有“素材不足以判准”才填；商业权重难判断、双方都缺内容、或 facts 已足够判断时不要填。
+- 声明后代码会切该阶段原生视频片段回看一次；不得在第一次输出中要求更多素材或进入无限多轮。
+
 ##### gap_type 决策树
 
 每段必须给出 `gap_type`（差距类型），按以下顺序判断：
@@ -423,6 +439,7 @@ GMV 影响权重（从高到低）：
 | `video_understanding.{benchmark,creator}.evidence_units[]` | 全片事实清单，id 形如 `B1/C1`，作为阶段和提升点的证据引用源 | `report.py` 选帧、阶段归因 |
 | `stage_analysis[].benchmark_time_range` / `creator_time_range` | LLM 识别的真实阶段时间（达人和标杆分开） | `artifacts.py` 按阶段选帧 |
 | `stage_analysis[].severity` | 差距等级：`large` / `medium` / `small` | 报告差距概览色块 🟥🟧🟩 |
+| `low_confidence_stages` | 可选，S1-S6 数组；代表该阶段需要 Phase C 原生视频片段回看 | `llm/pipeline.py` 触发一次性回看 |
 | `stage_analysis[].gap_type` | 差距类型：`structural` / `execution` / `resource` | 报告差距诊断 |
 | `stage_analysis[].gap_summary` | 差距要点列表 | 报告左列差距诊断分点 |
 | `stage_analysis[].voice_performance` | 口播表现力评估 | 报告逐段分析 |
