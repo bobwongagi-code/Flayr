@@ -1,0 +1,150 @@
+{
+  "one_line_verdict": "一个核心判断词，例如卖点失焦或节奏失速。",
+  "one_line_summary": "一句话核心结论，直接说明达人视频最大 GMV 短板。",
+  "executive_summary": "一句话核心结论，直接说明达人视频最大 GMV 短板。",
+  "holistic_assessment": {
+    "structure_integrity": "整体感知判断，不引用具体画面证据。",
+    "selling_point_efficiency": "整体感知判断，不引用具体画面证据。",
+    "audience_resonance": "整体感知判断，不引用具体画面证据。",
+    "pace_and_emotion": "整体感知判断，不引用具体画面证据。",
+    "trust_and_purchase_impulse": "整体感知判断，不引用具体画面证据。",
+    "conversion_prediction": "目标用户是否产生购买冲动，主要卡点是什么。"
+  },
+  "key_conclusions": [
+    "代入本地目标消费者视角，按 GMV 影响从大到小排列。每条：达人做了什么→标杆做了什么→对购买意愿的影响。可跨阶段，用消费者语言。1-5 条。"
+  ],
+
+  "product_visibility": {
+    "first_appearance_sec": 0.0,
+    "total_screen_time_sec": 0.0,
+    "video_duration_sec": 0.0,
+    "ratio": 0.0,
+    "estimation_note": "统计或估算依据。"
+  },
+  "loop_closure": {
+    "pain_resolved_in_s4": false,
+    "benefit_delivered_in_s6": false,
+    "suspense_revealed": false,
+    "suspense_reveal_time": null,
+    "note": "S1 到 S4/S6 的闭环判断及依据。"
+  },
+  "video_understanding": {
+    "benchmark": {
+      "content_summary": "先整体概括标杆视频传递了什么信息、如何推进成交。",
+      "communication_strategy": "概括口播、画面、字幕如何配合。",
+      "evidence_units": [
+        {
+          "id": "B1",
+          "time_range": "0.0s - 4.5s",
+          "information": "该片段实际传递的核心信息，不做阶段推断。",
+          "voiceover": "本地语言口播原句；没有有效口播则留空。",
+          "voiceover_zh": "口播中文翻译；没有则留空。",
+          "visual_fact": "画面中实际可见事实，不推断认证、功效或身份。",
+          "subtitle_fact": "画面中实际可读字幕；没有则留空。",
+          "audio_fact": "该时段的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。"
+        }
+      ]
+    },
+    "creator": {
+      "content_summary": "先整体概括达人视频传递了什么信息、如何推进成交。",
+      "communication_strategy": "概括口播、画面、字幕如何配合。",
+      "evidence_units": [
+        {
+          "id": "C1",
+          "time_range": "0.0s - 3.0s",
+          "information": "该片段实际传递的核心信息，不做阶段推断。",
+          "voiceover": "本地语言口播原句；没有有效口播则留空。",
+          "voiceover_zh": "口播中文翻译；没有则留空。",
+          "visual_fact": "画面中实际可见事实，不推断。",
+          "subtitle_fact": "画面中实际可读字幕；没有则留空。",
+          "audio_fact": "该时段的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。"
+        }
+      ]
+    }
+  },
+  "stage_analysis": [
+    {
+      "stage": "S1 Hook",
+      "time_range": "标杆真实时间 / 达人真实时间",
+      "benchmark_time_range": "标杆视频中该阶段真实起止时间，例如 0~5s",
+      "creator_time_range": "达人视频中该阶段真实起止时间，例如 0~8s",
+      "core_question": "用户凭什么停下来",
+      "creator_module_id": "S1-A 等结构库官方模块编号；无法识别写 unknown。",
+      "benchmark_module_id": "S1-A 等结构库官方模块编号；无法识别写 unknown。",
+      "module_fit": "fit | degraded | unfit | unknown",
+      "module_fit_reason": "按适配条件、降级规则和品类排除规则给出结论。",
+      "task_completion": "complete | partial | missing",
+      "gap_type": "structural | execution | resource",
+      "gap_summary": [
+        "差距要点，分点输出。"
+      ],
+      "voice_performance": {
+        "pace": "语速判断",
+        "energy": "情绪/感染力判断",
+        "key_pause": false,
+        "note": "口播节奏与段落任务是否匹配。"
+      },
+      "benchmark_summary": "爆款在这个阶段怎么做，必须具体。",
+      "benchmark_key_message": "该阶段标杆真正传递的一个核心信息；优先由有效口播确定。",
+      "benchmark_evidence_ids": [
+        "B1"
+      ],
+      "benchmark_visual_evidence": [
+        "与该核心信息对应、实际可见的画面事实；若画面不能验证口播信息，要直接说明。"
+      ],
+      "benchmark_support_status": "supported | voice_only | visual_only | conflict",
+      "benchmark_quote": "标杆该阶段的本地语言口播原句；没有明确口播则留空。",
+      "benchmark_quote_zh": "benchmark_quote 的中文翻译；没有则留空。",
+      "creator_summary": "达人在这个阶段怎么做，必须具体。",
+      "creator_key_message": "该阶段达人真正传递的一个核心信息；无有效口播时以字幕/画面为核心。",
+      "creator_evidence_ids": [
+        "C1"
+      ],
+      "creator_visual_evidence": [
+        "与该核心信息对应、实际可见的画面事实；若不能验证则直接说明。"
+      ],
+      "creator_support_status": "supported | voice_only | visual_only | conflict",
+      "creator_quote": "达人该阶段的本地语言口播原句；没有明确口播则留空。",
+      "creator_quote_zh": "creator_quote 的中文翻译；没有则留空。",
+      "gap": "达人和爆款的具体差距，必须指向画面、话术或节奏。",
+      "evidence": [
+        "必须至少 1 条，引用时间段、画面证据或口播证据。"
+      ],
+      "severity": "large | medium | small"
+    }
+  ],
+  "improvements": [
+    {
+      "title": "一句大白话标题",
+      "target_stage": "S1 | S2 | S3 | S4 | S5 | S6",
+      "gmv_impact": "极高 | 高 | 中",
+      "gap_type": "structural | execution | resource",
+      "time_range": "具体时间段",
+      "creator_time_range": "达人视频中要修改的具体时间段",
+      "benchmark_time_range": "标杆视频中可参考的具体时间段",
+      "problem": "当前问题，具体到秒、画面、话术或节奏。",
+      "benchmark_reference": "爆款对应做法。",
+      "benchmark_evidence_ids": [
+        "支持该建议的标杆 evidence_unit ID；不得用其他阶段片段代替。"
+      ],
+      "suggestion": "具体改法，可以直接交给达人执行；不要臆造品牌、价格、优惠、型号或参数。",
+      "actions": [
+        "具体改造动作，分点输出。"
+      ],
+      "gmv_reason": "为什么这个改动有助于提升成交。",
+      "evidence": [
+        "支持该提升点的时间段、画面或口播证据。"
+      ],
+      "creator_script": "给达人直接看的本地语言执行话术，例如马来语/泰语/印尼语。",
+      "creator_script_zh": "creator_script 的中文翻译，给中国运营理解。",
+      "base_frame_suitability": "usable | no_suitable_frame",
+      "best_base_frame_time": "达人全片中可作为 AI 改造基底的真实画面时间点，例如 18.0s；没有合适素材时必须留空。",
+      "base_frame_evidence_id": "best_base_frame_time 所属的达人 evidence_unit ID；没有素材时留空。",
+      "base_frame_reason": "为什么这张达人帧适合改造成目标画面，一句话说明。",
+      "aigc_prompt": "以达人原始画面为素材输入的改图提示词，具体到镜头角度、产品位置、动作、字幕。",
+      "aigc_image_path": "可选；实际生成并保存到本次 run directory 后的图片路径，模型分析阶段留空。",
+      "expected_effect": "该改造预期改善的观看或转化环节。",
+      "priority": 1
+    }
+  ]
+}
