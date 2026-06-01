@@ -17,6 +17,9 @@ Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-s
 - 不要删除任何文件，除非我明确说删掉。
 - 不要在没确认前直接执行 npm install 装新依赖。
 
+# 架构不变量
+- 可选功能（voice clone / OCR / proposal video 等带成本或带可选依赖的能力）失败时必须优雅降级：把失败原因写进各自的结果 JSON，绝不能抛错拖垮主分析流程。主分析（两阶段事实提取+对比）必须始终能跑完出报告。
+
 # 压缩时保留
 长对话被自动压缩时，按优先级保留：
 1. 架构决策和它背后的理由

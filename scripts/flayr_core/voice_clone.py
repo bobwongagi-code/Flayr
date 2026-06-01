@@ -88,12 +88,16 @@ def clone_voice_and_synthesize(
         # 用完即删，不在账号留垃圾音色（音色配额有限）
         _delete_voice(voice_id, api_key)
 
-    return {
+    result = {
         "status": "ready",
         "voice_id": voice_id,
         "sample": window,
         "outputs": outputs,
     }
+    # 样本短于理想时长时把警告提到顶层，避免"音色不像"时还要翻 sample 子字段才发现原因。
+    if window.get("status") == "short_sample":
+        result["warning"] = window.get("reason") or "音色样本偏短，克隆相似度可能不足"
+    return result
 
 
 def _upload_to_dashscope(file_path: Path, api_key: str) -> str | None:

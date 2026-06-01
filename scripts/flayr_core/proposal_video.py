@@ -15,6 +15,7 @@ from typing import Any
 
 from .llm.api import audio_to_mp3_data_url, image_to_data_url, read_llm_api_key
 from .utils import run_command, write_json
+from .video import probe_duration_seconds
 
 
 I2V_ENDPOINT = "https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis"
@@ -70,7 +71,7 @@ def config_from_args(args: argparse.Namespace) -> ProposalVideoConfig:
 
 def default_model_for_backend(backend: str) -> str:
     if backend == "dashscope-i2v":
-        return "wan2.6-i2v-flash"
+        return "wan2.6-i2v"
     if backend == "dashscope-s2v":
         return "wan2.2-s2v"
     return ""
@@ -148,12 +149,24 @@ def generate_i2v_clip(
         if refs.line_audio_path and refs.line_audio_path.is_file()
         else None
     )
+    audio_note = ""
     if audio_data_url:
         payload["input"]["audio_url"] = audio_data_url
         payload["parameters"]["audio"] = True
+        # 用配音时长定 i2v 时长，让画面贴合口播长度（默认值是源切片窗口，与配音无关）。
+        # 超过模型时长上限时按上限生成，并标注口型只覆盖前段，避免悄悄产出声画不齐样片。
+        audio_sec = probe_duration_seconds(refs.line_audio_path) if refs.line_audio_path else None
+        if audio_sec:
+            target = normalized_i2v_duration(config.model, audio_sec)
+            payload["parameters"]["duration"] = target
+            if audio_sec > target + 0.5:
+                audio_note = f"配音 {audio_sec:.1f}s 超过 i2v 时长上限 {target}s，口型仅覆盖前 {target}s"
     elif config.model == "wan2.6-i2v-flash":
         payload["parameters"]["audio"] = False
-    return submit_and_resolve_video_task(config, payload, trace_prefix, refs.output_path)
+    result = submit_and_resolve_video_task(config, payload, trace_prefix, refs.output_path)
+    if audio_note:
+        result["audio_duration_note"] = audio_note
+    return result
 
 
 def generate_s2v_clip(

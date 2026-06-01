@@ -1,0 +1,8 @@
+# Voice Clone 专属可选依赖（仅 --with-voice-clone 需要）。
+# 主分析 pipeline 是纯 Python 标准库（外加 ffmpeg / whisper 命令行工具），无需任何 pip 依赖。
+# 启用音色克隆前安装：  pip install -r requirements-voice.txt
+#
+# - dashscope: CosyVoice 音色克隆合成只走 WebSocket，REST 不支持，必须用官方 SDK。
+# - certifi:   dashscope wss 在部分环境（如 python.org 的 macOS Python）缺 CA bundle 会 SSL 失败。
+dashscope>=1.25.0
+certifi

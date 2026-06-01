@@ -190,7 +190,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Run subtitle OCR (DashScope qwen-vl-ocr) on sampled frames to build an "
-            "authoritative subtitle track. Adds API cost (~18 calls/video). Default off."
+            "authoritative subtitle track. Reuses the analysis LLM key (--llm-api-key-*), "
+            "which must be a DashScope key (endpoint is hardcoded to DashScope). "
+            "Adds API cost (~18 calls/video). Default off."
         ),
     )
     parser.add_argument(
@@ -198,8 +200,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Clone the creator's voice (CosyVoice) and synthesize improvement scripts "
-            "for i2v lip-sync proposal clips. Requires the dashscope SDK (optional dep). "
-            "Default off."
+            "for i2v lip-sync proposal clips. Requires the dashscope SDK (optional dep; "
+            "pip install -r requirements-voice.txt). Reuses the analysis LLM key "
+            "(--llm-api-key-*), which must be a DashScope key. Default off."
         ),
     )
     parser.add_argument(
@@ -211,7 +214,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--proposal-video-model",
         default="",
-        help="Optional Wan model override. Defaults: wan2.6-i2v-flash for i2v, wan2.2-s2v for s2v.",
+        help="Optional Wan model override. Defaults: wan2.6-i2v for i2v, wan2.2-s2v for s2v.",
     )
     parser.add_argument(
         "--proposal-video-api-url",
