@@ -103,7 +103,14 @@ def _upload_to_dashscope(file_path: Path, api_key: str) -> str | None:
         "-H", f"Authorization: Bearer {api_key}",
     ])
     data = policy.get("data") if isinstance(policy, dict) else None
-    if not data:
+    if not isinstance(data, dict):
+        return None
+    # 校验所有必需字段都在，避免畸形/错误响应（带残缺 data）触发 KeyError 崩主流程。
+    required = (
+        "upload_dir", "upload_host", "oss_access_key_id", "policy",
+        "signature", "x_oss_object_acl", "x_oss_forbid_overwrite",
+    )
+    if any(field not in data for field in required):
         return None
     key = f"{data['upload_dir']}/{file_path.name}"
     upload = run_command([

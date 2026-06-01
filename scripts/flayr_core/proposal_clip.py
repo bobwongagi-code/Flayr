@@ -20,6 +20,8 @@ from .voice_clone import clone_voice_and_synthesize
 MAX_UNITS = 3
 DEFAULT_CLIP_SECONDS = 4.0
 MAX_CLIP_SECONDS = 5.0
+# 无任何话术字段时的占位文案。不能拿去做音色合成（会克隆出"达人念占位"的废样片）。
+PLACEHOLDER_LINE = "待补充本地语言话术。"
 
 
 def generate_proposal_clips(
@@ -207,7 +209,7 @@ def local_line(item: dict[str, Any]) -> str:
         value = str(item.get(key) or "").strip()
         if value:
             return compact_sentence(value, 180)
-    return "待补充本地语言话术。"
+    return PLACEHOLDER_LINE
 
 
 def chinese_line(item: dict[str, Any]) -> str:
@@ -287,11 +289,20 @@ def _maybe_clone_voice(
     role_dir = run_dir / "creator"
     audio_path = role_dir / "audio.wav"
     srt_path = role_dir / "transcript.srt"
-    lines = [
-        {"id": f"p{rank}", "text": local_line(item)}
-        for rank, item in enumerate(improvements, start=1)
-    ]
-    result = clone_voice_and_synthesize(role_dir, audio_path, srt_path, lines, api_key)
+    # 只合成有真实话术的提升点；占位文案跳过（id 仍按 rank 对齐 p1/p2/...）。
+    lines = []
+    for rank, item in enumerate(improvements, start=1):
+        text = local_line(item)
+        if text == PLACEHOLDER_LINE:
+            continue
+        lines.append({"id": f"p{rank}", "text": text})
+    if not lines:
+        return {}
+    # voice clone 任何意外都不应拖垮主分析流程（兑现本模块"不抛错"契约）。
+    try:
+        result = clone_voice_and_synthesize(role_dir, audio_path, srt_path, lines, api_key)
+    except Exception as exc:  # noqa: BLE001 — 网络/SDK/响应畸形等异常类型多，统一兜底
+        result = {"status": "failed", "error": f"voice clone 异常: {str(exc)[:160]}", "outputs": []}
     write_json(run_dir / "voice_clone.json", result)
     mapping: dict[str, str] = {}
     for out in result.get("outputs", []):
