@@ -19,6 +19,8 @@ from ..artifacts import (
     sample_evenly,
     select_frames_for_time_range,
 )
+from ..shot_track import render_shot_track_markdown
+from ..subtitle_track import render_subtitle_track_markdown
 from .api import audio_to_mp3_data_url, image_to_data_url, video_to_data_url
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -122,6 +124,17 @@ def read_text_if_exists(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="ignore").strip() if path.is_file() else "（缺失）"
 
 
+def read_track_markdown(track_path: Path, renderer: Any, disabled_hint: str) -> str:
+    """读取预处理轨 json 并渲染成 markdown；文件不存在时返回提示（未启用/未生成）。"""
+    if not track_path.is_file():
+        return disabled_hint
+    try:
+        track = json.loads(track_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return disabled_hint
+    return renderer(track)
+
+
 # ---------------------------------------------------------------------------
 # Payload 构造
 # ---------------------------------------------------------------------------
@@ -170,6 +183,20 @@ def build_video_fact_payload(
             "",
             "## 中文翻译",
             read_text_if_exists(role_dir / "transcript.zh.txt"),
+            "",
+            "## 权威字幕轨（OCR 识别，字幕文本以此为准，胜过你自己认字）",
+            read_track_markdown(
+                role_dir / "subtitle_track.json",
+                render_subtitle_track_markdown,
+                "（未启用 OCR 字幕轨；字幕以你从画面识别为准）",
+            ),
+            "",
+            "## 镜头切分轨（精确镜头边界，划分 S1-S6 阶段时参考它，别切在镜头中间）",
+            read_track_markdown(
+                role_dir / "shot_track.json",
+                render_shot_track_markdown,
+                "（未生成镜头轨）",
+            ),
             "",
             "## 输出 JSON",
             json.dumps(

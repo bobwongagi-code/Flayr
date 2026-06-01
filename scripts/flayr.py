@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from flayr_core.llm.api import read_llm_api_key
 from flayr_core.llm.pipeline import (
     merge_analysis_result,
     run_large_model_analysis,
@@ -18,6 +19,8 @@ from flayr_core.prompt import write_analysis_input
 from flayr_core.proposal_clip import generate_proposal_clips
 from flayr_core.proposal_video import config_from_args
 from flayr_core.report import write_report
+from flayr_core.shot_track import build_shot_track
+from flayr_core.subtitle_track import build_subtitle_track
 from flayr_core.translation import sync_chinese_translation, translate_transcript_with_llm
 from flayr_core.utils import write_json, write_text
 from flayr_core.video import (
@@ -178,6 +181,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--translation-model",
         help="Optional model for transcript translation. Defaults to --llm-model.",
+    )
+    parser.add_argument(
+        "--with-ocr",
+        action="store_true",
+        help=(
+            "Run subtitle OCR (DashScope qwen-vl-ocr) on sampled frames to build an "
+            "authoritative subtitle track. Adds API cost (~18 calls/video). Default off."
+        ),
     )
     parser.add_argument(
         "--proposal-video-backend",
@@ -400,6 +411,22 @@ def process_video(
     sync_chinese_translation(role_dir, result)
     if args.translate_with_llm:
         translate_transcript_with_llm(args, role, role_dir, result)
+
+    # 镜头轨：本地 ffmpeg 自适应切分，默认跑（无成本）。供 omni 拿精确镜头边界。
+    shot_track = build_shot_track(role_dir, video_path, result.get("duration_seconds"))
+    result["shot_track_status"] = shot_track.get("status")
+    result["shot_track_path"] = str(role_dir / "shot_track.json") if shot_track.get("shots") else None
+
+    # 字幕轨：读光 OCR，有 API 成本，靠 --with-ocr 显式开启（默认关）。
+    result["subtitle_track_status"] = "disabled_by_flag"
+    result["subtitle_track_path"] = None
+    if getattr(args, "with_ocr", False):
+        api_key = read_llm_api_key(args).strip()
+        subtitle_track = build_subtitle_track(role_dir, result, api_key)
+        result["subtitle_track_status"] = subtitle_track.get("status")
+        if subtitle_track.get("segments"):
+            result["subtitle_track_path"] = str(role_dir / "subtitle_track.json")
+
     return result
 
 
