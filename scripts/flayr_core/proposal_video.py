@@ -13,7 +13,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
-from .llm.api import image_to_data_url, read_llm_api_key
+from .llm.api import audio_to_mp3_data_url, image_to_data_url, read_llm_api_key
 from .utils import run_command, write_json
 
 
@@ -45,6 +45,8 @@ class ClipRefs:
     duration_sec: float
     face_image_url: str = ""
     line_audio_url: str = ""
+    # voice clone 合成的本地话术音频；有则 i2v 打开 audio 做口型同步（实测可用本地 base64）。
+    line_audio_path: Path | None = None
 
 
 def config_from_args(args: argparse.Namespace) -> ProposalVideoConfig:
@@ -139,7 +141,17 @@ def generate_i2v_clip(
             "shot_type": "single",
         },
     }
-    if config.model == "wan2.6-i2v-flash":
+    # 有 voice clone 合成的本地话术音频 → 打开 audio 做口型同步（实测 i2v 吃本地 base64）。
+    # 否则保持 audio=False（纯画面生成，不配音）。
+    audio_data_url = (
+        audio_to_mp3_data_url(refs.line_audio_path)
+        if refs.line_audio_path and refs.line_audio_path.is_file()
+        else None
+    )
+    if audio_data_url:
+        payload["input"]["audio_url"] = audio_data_url
+        payload["parameters"]["audio"] = True
+    elif config.model == "wan2.6-i2v-flash":
         payload["parameters"]["audio"] = False
     return submit_and_resolve_video_task(config, payload, trace_prefix, refs.output_path)
 

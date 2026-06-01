@@ -14,6 +14,7 @@ from .artifacts import (
 )
 from .proposal_video import ClipRefs, ProposalVideoConfig, maybe_generate_ai_clip
 from .utils import run_command, write_json
+from .voice_clone import clone_voice_and_synthesize
 
 
 MAX_UNITS = 3
@@ -27,12 +28,16 @@ def generate_proposal_clips(
     video_config: ProposalVideoConfig | None = None,
     limit: int = MAX_UNITS,
     default_duration: float = DEFAULT_CLIP_SECONDS,
+    voice_clone_api_key: str = "",
 ) -> dict[str, Any]:
     """Build proposal micro-units and cut matching creator source clips.
 
     The module is intentionally downstream of analysis: it does not decide what
     the problems are; it packages the top improvements into report-ready evidence
     and proposal units.
+
+    voice_clone_api_key 非空时，对达人做一次音色克隆，合成各提升点话术音频，
+    供 i2v 做口型同步（达人音色）。为空或依赖缺失时静默跳过，不影响切片产出。
     """
 
     output_dir = run_dir / "proposal_clips"
@@ -46,6 +51,11 @@ def generate_proposal_clips(
         [item for item in analysis.get("improvements", []) if isinstance(item, dict)],
         key=lambda item: numeric_priority(item.get("priority")),
     )[: max(0, limit)]
+
+    # voice clone：循环前一次性注册音色 + 合成所有话术（避免每条重复注册）。
+    voice_audio_by_id = _maybe_clone_voice(
+        run_dir, creator, improvements, voice_clone_api_key,
+    )
 
     units = []
     for rank, item in enumerate(improvements, start=1):
@@ -61,6 +71,7 @@ def generate_proposal_clips(
             duration,
         )
         prompt = item.get("aigc_prompt") or proposal_prompt(item)
+        cloned_audio = voice_audio_by_id.get(f"p{rank}")
         ai_result = maybe_generate_ai_clip(
             video_config or ProposalVideoConfig(),
             ClipRefs(
@@ -70,6 +81,7 @@ def generate_proposal_clips(
                 duration_sec=duration,
                 face_image_url=str(item.get("face_image_url") or ""),
                 line_audio_url=str(item.get("line_audio_url") or ""),
+                line_audio_path=Path(cloned_audio) if cloned_audio else None,
             ),
             output_dir / f"proposal_{rank:02d}_ai",
         )
@@ -257,3 +269,32 @@ def stage_from_title(value: Any) -> str:
         if marker in text:
             return marker
     return "待确认"
+
+
+def _maybe_clone_voice(
+    run_dir: Path,
+    creator: dict[str, Any],
+    improvements: list[dict[str, Any]],
+    api_key: str,
+) -> dict[str, str]:
+    """对达人做一次音色克隆，合成各提升点话术。返回 {pN: 本地音频路径}。
+
+    api_key 为空、依赖缺失、或合成失败时返回空 dict（i2v 自动退回无配音）。
+    话术取每条 improvement 的本地语言话术（local_line），id 对齐 rank（p1/p2/...）。
+    """
+    if not api_key.strip() or not improvements:
+        return {}
+    role_dir = run_dir / "creator"
+    audio_path = role_dir / "audio.wav"
+    srt_path = role_dir / "transcript.srt"
+    lines = [
+        {"id": f"p{rank}", "text": local_line(item)}
+        for rank, item in enumerate(improvements, start=1)
+    ]
+    result = clone_voice_and_synthesize(role_dir, audio_path, srt_path, lines, api_key)
+    write_json(run_dir / "voice_clone.json", result)
+    mapping: dict[str, str] = {}
+    for out in result.get("outputs", []):
+        if out.get("audio_path"):
+            mapping[str(out.get("id"))] = str(out["audio_path"])
+    return mapping

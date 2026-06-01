@@ -64,7 +64,10 @@ def main() -> int:
     if args.analysis_result_json:
         merge_analysis_result(analysis, args.analysis_result_json)
     if args.mode in {"compare", "improve"}:
-        analysis["proposal_clips"] = generate_proposal_clips(run_dir, analysis, config_from_args(args))
+        voice_key = read_llm_api_key(args).strip() if getattr(args, "with_voice_clone", False) else ""
+        analysis["proposal_clips"] = generate_proposal_clips(
+            run_dir, analysis, config_from_args(args), voice_clone_api_key=voice_key,
+        )
     write_json(run_dir / "analysis.json", analysis)
     write_analysis_input(run_dir, analysis)
 
@@ -188,6 +191,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Run subtitle OCR (DashScope qwen-vl-ocr) on sampled frames to build an "
             "authoritative subtitle track. Adds API cost (~18 calls/video). Default off."
+        ),
+    )
+    parser.add_argument(
+        "--with-voice-clone",
+        action="store_true",
+        help=(
+            "Clone the creator's voice (CosyVoice) and synthesize improvement scripts "
+            "for i2v lip-sync proposal clips. Requires the dashscope SDK (optional dep). "
+            "Default off."
         ),
     )
     parser.add_argument(
