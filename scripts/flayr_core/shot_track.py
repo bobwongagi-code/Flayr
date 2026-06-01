@@ -22,9 +22,15 @@ from .artifacts import format_seconds
 from .utils import run_command, write_json
 
 
-# 场景切分阈值：实测 0.3 对带货视频适中（0.2 过敏感把镜头内大动作也算切点，
-# 0.4 过钝会漏真实切换）。改这个值前用真实视频回归两端：别切太碎、也别漏。
-DEFAULT_SCENE_THRESHOLD = 0.3
+# 候选切点的最低分数门槛：低于这个分基本是画面微动/噪声，不可能是真镜头切换。
+# 用它捞全部候选（含分数），再按目标密度自适应筛选，而不是用固定阈值一刀切。
+CANDIDATE_FLOOR = 0.2
+# 目标镜头密度：平均每个镜头约这么多秒。带货视频镜头通常 5-12 秒，取 8 居中。
+# 自适应据此算"该保留几个切点"，从而对快剪/单镜头/不同时长都收敛到合理密度。
+TARGET_SHOT_SECONDS = 8.0
+# 镜头数硬上下限，防止极端视频算出离谱的目标数。
+MIN_TARGET_SHOTS = 1
+MAX_TARGET_SHOTS = 12
 # 两个切点间隔小于这个秒数时视为同一次切换的抖动，合并掉。
 MIN_SHOT_GAP_SEC = 0.4
 
@@ -33,9 +39,12 @@ def build_shot_track(
     role_dir: Path,
     video_path: Path,
     duration_seconds: Any,
-    threshold: float = DEFAULT_SCENE_THRESHOLD,
 ) -> dict[str, Any]:
-    """对单个视频做镜头切分，产出 shot_track.json 并返回结果。
+    """对单个视频做自适应镜头切分，产出 shot_track.json 并返回结果。
+
+    自适应逻辑：先用低门槛 CANDIDATE_FLOOR 捞出所有候选切点（带分数），
+    再按时长算出"目标镜头数"，取分数最高的若干切点。这样不依赖固定阈值，
+    快剪视频自动多切、单镜头视频自动少切，对不同时长/风格都泛化。
 
     ffmpeg 不可用或视频缺失时返回 disabled 状态，由调用方决定是否跳过，
     不中断整条 pipeline（与 subtitle_track 的降级策略一致）。
@@ -46,17 +55,22 @@ def build_shot_track(
     if not video_path.is_file():
         return _empty_track("video_missing")
 
-    cut_points = detect_scene_cuts(ffmpeg, video_path, threshold)
-    cut_points = merge_close_cuts(cut_points, MIN_SHOT_GAP_SEC)
-
     duration = float(duration_seconds) if isinstance(duration_seconds, (int, float)) else 0.0
+
+    candidates = detect_scene_candidates(ffmpeg, video_path)
+    cut_points, target = select_adaptive_cuts(candidates, duration)
+    cut_points = merge_close_cuts(cut_points, MIN_SHOT_GAP_SEC)
     shots = build_shots(cut_points, duration)
 
     track = {
-        "version": "0.1",
-        "threshold": threshold,
+        "version": "0.2",
+        "method": "adaptive_density",
+        "candidate_floor": CANDIDATE_FLOOR,
+        "target_shot_seconds": TARGET_SHOT_SECONDS,
+        "target_cut_count": target,
         "status": "ready" if shots else "empty",
         "duration_sec": round(duration, 2),
+        "candidate_count": len(candidates),
         "cut_count": len(cut_points),
         "shot_count": len(shots),
         "cut_points_sec": [round(c, 2) for c in cut_points],
@@ -66,24 +80,61 @@ def build_shot_track(
     return track
 
 
-def detect_scene_cuts(ffmpeg: str, video_path: Path, threshold: float) -> list[float]:
-    """用 ffmpeg scene 滤镜检测镜头切点，返回切点时间（秒，升序）。"""
+def detect_scene_candidates(ffmpeg: str, video_path: Path) -> list[tuple[float, float]]:
+    """用低门槛捞所有候选切点，返回 [(时间, 分数)]，按时间升序。
+
+    metadata=print 把每个超过门槛的帧的 scene_score 和时间一起打到 stderr，
+    供自适应筛选用分数排序。
+    """
     command = [
         ffmpeg,
         "-hide_banner",
         "-i",
         str(video_path),
         "-filter:v",
-        f"select='gt(scene,{threshold})',showinfo",
+        f"select='gt(scene,{CANDIDATE_FLOOR})',metadata=print",
         "-f",
         "null",
         "-",
     ]
     completed = run_command(command)
-    # showinfo 输出在 stderr。失败时返回空列表（上游按 empty 处理，不抛错）。
     text = completed.stderr or ""
-    times = [float(m) for m in re.findall(r"pts_time:([0-9.]+)", text)]
-    return sorted(set(times))
+    # metadata=print 输出形如：
+    #   frame:.. pts_time:16.9667
+    #   lavfi.scene_score=0.431470
+    # 两行配对，按出现顺序把 time 和紧随的 score 组合起来。
+    candidates: list[tuple[float, float]] = []
+    pending_time: float | None = None
+    for time_str, score_str in re.findall(r"pts_time:([0-9.]+)|scene_score=([0-9.]+)", text):
+        if time_str:
+            pending_time = float(time_str)
+        elif score_str and pending_time is not None:
+            candidates.append((pending_time, float(score_str)))
+            pending_time = None
+    candidates.sort(key=lambda item: item[0])
+    return candidates
+
+
+def select_adaptive_cuts(
+    candidates: list[tuple[float, float]],
+    duration: float,
+) -> tuple[list[float], int]:
+    """按目标镜头密度从候选里挑分数最高的切点。返回 (切点时间列表, 目标切点数)。
+
+    目标镜头数 = 时长 / TARGET_SHOT_SECONDS（夹在上下限内）；
+    目标切点数 = 目标镜头数 - 1。取分数最高的前若干个，再按时间排序。
+    """
+    if not candidates or duration <= 0:
+        return [], 0
+    target_shots = round(duration / TARGET_SHOT_SECONDS)
+    target_shots = max(MIN_TARGET_SHOTS, min(MAX_TARGET_SHOTS, target_shots))
+    target_cuts = max(0, target_shots - 1)
+    if target_cuts == 0:
+        return [], 0
+    # 按分数降序取前 target_cuts 个；候选不足则全要。
+    top = sorted(candidates, key=lambda item: item[1], reverse=True)[:target_cuts]
+    times = sorted(time for time, _ in top)
+    return times, target_cuts
 
 
 def merge_close_cuts(cut_points: list[float], min_gap: float) -> list[float]:
