@@ -2,7 +2,8 @@
 
 ⚠️ 仅适用于 MY 市场。本模块所有函数都围绕 KKM / KKMA / kelulusan / "认证" 这些
    马来西亚卫生部审批与一般认证关键词处理：
-     - 把认证主张统一归到 S2 产品引出阶段
+     - 把第三方认证主张统一归到 S5 信任放大阶段（认证功能是外部背书，按功能归 S5，
+       而非按出现位置归 S2；自述功效不算认证）
      - 删除阶段文本中未被 evidence_unit 支持的认证 / 评论 / 证书表述
      - 对应文案降级或替换为中性表达
 
@@ -20,36 +21,39 @@ from typing import Any
 
 
 def reconcile_certification_ownership(result: dict[str, Any]) -> None:
-    """把 KKM/认证主张统一归到 S2（产品引出），并从其他阶段移除重复出现。"""
+    """把第三方认证主张统一归到 S5（信任放大），并从其他阶段移除重复出现。
+
+    认证功能是外部背书，按功能归 S5，而非按出现位置归 S2。
+    """
     stages = result.get("stage_analysis", [])
-    if len(stages) < 2:
+    if len(stages) < 5:
         return
-    product_intro = stages[1]
-    quote = str(product_intro.get("benchmark_quote") or "")
+    trust = stages[4]
+    quote = str(trust.get("benchmark_quote") or "")
     if not re.search(r"KKM|KKMA|认证|kelulusan", quote, flags=re.IGNORECASE):
         return
 
     benchmark = result.get("video_understanding", {}).get("benchmark", {})
     units = benchmark.get("evidence_units", []) if isinstance(benchmark, dict) else []
-    cert_id = "B_CERT_S2"
+    cert_id = "B_CERT_S5"
     if not any(str(unit.get("id")) == cert_id for unit in units if isinstance(unit, dict)):
         units.append(
             {
                 "id": cert_id,
-                "time_range": str(product_intro.get("benchmark_time_range") or ""),
-                "information": str(product_intro.get("benchmark_key_message") or "口播说明产品认证信息。"),
+                "time_range": str(trust.get("benchmark_time_range") or ""),
+                "information": str(trust.get("benchmark_key_message") or "口播说明产品第三方认证背书。"),
                 "voiceover": quote,
-                "voiceover_zh": str(product_intro.get("benchmark_quote_zh") or ""),
-                "visual_fact": "口播提及认证信息；当前关键帧未见可核验的认证标记。",
+                "voiceover_zh": str(trust.get("benchmark_quote_zh") or ""),
+                "visual_fact": "口播提及第三方认证背书；当前关键帧未见可核验的认证标记。",
                 "subtitle_fact": "",
             }
         )
-    product_intro["benchmark_evidence_ids"] = list(dict.fromkeys([*product_intro.get("benchmark_evidence_ids", []), cert_id]))
-    product_intro["benchmark_visual_evidence"] = ["口播提及认证信息；当前关键帧未见可核验的认证标记。"]
-    product_intro["benchmark_support_status"] = "voice_only"
+    trust["benchmark_evidence_ids"] = list(dict.fromkeys([*trust.get("benchmark_evidence_ids", []), cert_id]))
+    trust["benchmark_visual_evidence"] = ["口播提及第三方认证背书；当前关键帧未见可核验的认证标记。"]
+    trust["benchmark_support_status"] = "voice_only"
 
     for index, stage in enumerate(stages):
-        if index == 1:
+        if index == 4:
             continue
         for key in (
             "benchmark_key_message",
