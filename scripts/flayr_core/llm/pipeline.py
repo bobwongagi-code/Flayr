@@ -103,6 +103,33 @@ def merge_analysis_result(analysis: dict[str, Any], result_path: Path) -> None:
 # LLM 调用 + 校验主入口
 # ---------------------------------------------------------------------------
 
+def fetch_json_completion(
+    args: argparse.Namespace,
+    api_key: str,
+    payload_path: Path,
+    raw_path: Path,
+    max_attempts: int = 3,
+) -> str:
+    """调用 LLM 并确保返回内容是可解析 JSON；静默截断时整体重取。
+
+    DashScope 大响应偶发在传输途中被截断（无错误、finish_reason=None、body 不完整），
+    导致 JSON 残缺。这类截断 repair 无效（重发也会截断），唯一可靠解是重取整次调用。
+    重试 max_attempts 次仍不完整，则返回最后一次内容，交由下游 repair 兜底。
+    """
+    last_text = ""
+    for attempt in range(max_attempts):
+        raw_text = call_llm_api(args.llm_api_url, api_key, payload_path, raw_path)
+        raw_path.write_text(raw_text, encoding="utf-8")
+        last_text = extract_chat_completion_text(json.loads(raw_text))
+        try:
+            parse_json_text(last_text)
+            return last_text
+        except SystemExit:
+            if attempt + 1 >= max_attempts:
+                break
+    return last_text
+
+
 def run_large_model_analysis(
     args: argparse.Namespace,
     analysis: dict[str, Any],
@@ -136,10 +163,7 @@ def run_large_model_analysis(
         return None
 
     raw_path = run_dir / "llm_response.json"
-    raw_text = call_llm_api(args.llm_api_url, api_key, payload_path, raw_path)
-    raw_path.write_text(raw_text, encoding="utf-8")
-
-    result_text = extract_chat_completion_text(json.loads(raw_text))
+    result_text = fetch_json_completion(args, api_key, payload_path, raw_path)
     result = parse_and_validate_llm_result(
         args=args,
         api_key=api_key,
@@ -461,9 +485,7 @@ def run_video_fact_extraction(
         write_json(request_path, payload)
         if args.llm_dry_run:
             continue
-        raw_text = call_llm_api(args.llm_api_url, api_key, request_path, response_path)
-        response_path.write_text(raw_text, encoding="utf-8")
-        result_text = extract_chat_completion_text(json.loads(raw_text))
+        result_text = fetch_json_completion(args, api_key, request_path, response_path)
         fact_result = normalize_video_fact_result(role, parse_json_text(result_text), analysis)
         facts[role] = fact_result
         write_json(result_path, fact_result)

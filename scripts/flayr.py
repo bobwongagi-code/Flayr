@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -120,6 +121,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-whisper",
         action="store_true",
         help="Skip transcription even when Whisper exists.",
+    )
+    parser.add_argument(
+        "--reuse-preprocessing",
+        action="store_true",
+        help=(
+            "复用 --output-dir 中已有的预处理（抽帧/转写/镜头轨/字幕轨），跳过重抽。"
+            "用于实验迭代（同视频改 prompt/代码重跑）和 LLM 失败后补跑，大幅省时。"
+        ),
     )
     parser.add_argument(
         "--whisper-model",
@@ -383,6 +392,22 @@ def validate_optional_file(path: Path | None, label: str) -> Path | None:
     return resolved
 
 
+def load_existing_video_result(role_dir: Path) -> dict[str, Any] | None:
+    """复用上次预处理：读 _preprocess.json，校验关键产物仍在则返回，否则 None 触发重抽。"""
+    cache = role_dir / "_preprocess.json"
+    if not cache.is_file():
+        return None
+    try:
+        info = json.loads(cache.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    frames_dir = Path(str(info.get("frames_dir") or ""))
+    transcript = Path(str(info.get("transcript_path") or ""))
+    if not frames_dir.is_dir() or not transcript.is_file():
+        return None
+    return info
+
+
 def process_video(
     role: str,
     video_path: Path,
@@ -391,6 +416,11 @@ def process_video(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     role_dir = run_dir / role
+    if getattr(args, "reuse_preprocessing", False):
+        cached = load_existing_video_result(role_dir)
+        if cached is not None:
+            print(f"[reuse] {role}: 复用已有预处理（跳过抽帧/转写/OCR）")
+            return cached
     frames_dir = role_dir / "frames"
     focus_frames_dir = role_dir / "focus_frames"
     role_dir.mkdir(parents=True, exist_ok=True)
@@ -473,6 +503,8 @@ def process_video(
     else:
         result["subtitle_track_status"] = "disabled_no_dashscope_key"
 
+    # 落盘预处理结果，供 --reuse-preprocessing 下次复用（即使本次 LLM 阶段后续失败也已写）。
+    write_json(role_dir / "_preprocess.json", result)
     return result
 
 

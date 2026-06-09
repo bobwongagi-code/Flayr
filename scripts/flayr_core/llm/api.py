@@ -9,20 +9,18 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import mimetypes
 import os
 import shutil
 import subprocess
 import tempfile
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
 
 from ..utils import run_command
 
-LLM_READ_TIMEOUT_SECONDS = 600
 LLM_CURL_MAX_TIME_SECONDS = 900
 LLM_CURL_RETRIES = 2
 
@@ -51,36 +49,32 @@ def read_llm_api_key(args: argparse.Namespace) -> str:
 
 
 def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path) -> str:
-    """调用 OpenAI 兼容的 chat completions endpoint，返回原始响应文本。
+    """流式（SSE）调用 OpenAI 兼容 chat completions，分块拼装后合成标准 completion JSON 返回。
 
-    优先使用 urllib，遇到 SSL 证书问题且系统有 curl 时回退到 curl。
-    任何失败都抛 SystemExit，让上层 fail-loud。
+    为什么流式：非流式下大响应体会被网络/代理按体积静默截断（无错误、finish_reason=None、
+    body 不完整），导致 JSON 残缺，且无法靠重发修复（重发也截断在同一长度）。流式分块传输
+    规避"单个大 body 被切"，并能用 data:[DONE] 哨兵可靠判断是否完整；连接中途断则整次重试。
+    返回值仍是标准 {"choices":[{"message":{"content":...}}]} 形状，下游无需改动。
     """
-    payload_bytes = payload_path.read_bytes()
-    request = urllib.request.Request(
-        api_url,
-        data=payload_bytes,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+    if not shutil.which("curl"):
+        raise SystemExit("LLM streaming 需要 curl，但系统未找到 curl。")
 
-    try:
-        with urllib.request.urlopen(request, timeout=LLM_READ_TIMEOUT_SECONDS) as response:
-            return response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        error_body = exc.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"LLM request failed: HTTP {exc.code}: {error_body}") from exc
-    except urllib.error.URLError as exc:
-        if "CERTIFICATE_VERIFY_FAILED" not in str(exc) or not shutil.which("curl"):
-            raise SystemExit(f"LLM request failed: {exc}") from exc
+    payload = json.loads(payload_path.read_bytes())
+    payload["stream"] = True
+    stream_options = payload.get("stream_options")
+    if not isinstance(stream_options, dict):
+        stream_options = {}
+    stream_options["include_usage"] = True
+    payload["stream_options"] = stream_options
+    req_path = raw_path.with_name(raw_path.stem + ".stream_req.json")
+    req_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    sse_path = raw_path.with_name(raw_path.stem + ".sse")
 
     curl_command = [
         "curl",
         "-sS",
-        "--fail-with-body",
+        "--http1.1",
+        "--no-buffer",
         "--connect-timeout",
         "30",
         "--max-time",
@@ -90,46 +84,72 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
         "-H",
         "Content-Type: application/json",
         "--data-binary",
-        f"@{payload_path}",
+        f"@{req_path}",
         api_url,
         "-o",
-        str(raw_path),
+        str(sse_path),
     ]
+
     last_error = ""
     for attempt in range(LLM_CURL_RETRIES + 1):
         completed = run_command(curl_command)
-        if completed.returncode == 0:
-            return raw_path.read_text(encoding="utf-8")
-        last_error = completed.stderr.strip() or completed.stdout.strip()
-        if raw_path.exists():
-            body = raw_path.read_text(encoding="utf-8", errors="replace").strip()
-            if body:
-                last_error = f"{last_error}\n{body}" if last_error else body
-        if attempt >= LLM_CURL_RETRIES or not is_transient_curl_error(last_error):
+        if completed.returncode != 0:
+            last_error = completed.stderr.strip() or completed.stdout.strip()
+        else:
+            content, usage, complete = parse_sse_stream(sse_path)
+            if complete and content:
+                response: dict[str, Any] = {
+                    "choices": [{"message": {"content": content}, "finish_reason": "stop"}]
+                }
+                if usage:
+                    response["usage"] = usage
+                raw_text = json.dumps(response, ensure_ascii=False)
+                raw_path.write_text(raw_text, encoding="utf-8")
+                return raw_text
+            snippet = sse_path.read_text(encoding="utf-8", errors="replace").strip()[:400] if sse_path.is_file() else ""
+            last_error = (
+                "流式响应不完整（连接在 [DONE] 前中断）"
+                if content
+                else f"流式响应无内容；响应片段：{snippet}"
+            )
+        if attempt >= LLM_CURL_RETRIES:
             break
         time.sleep(5 * (attempt + 1))
-    if last_error:
-        raise SystemExit(f"LLM request failed via curl: {last_error}")
-    return raw_path.read_text(encoding="utf-8")
+    raise SystemExit(f"LLM streaming request failed: {last_error}")
 
 
-def is_transient_curl_error(error_text: str) -> bool:
-    """Return true for network failures worth retrying once or twice."""
-    lowered = error_text.lower()
-    return any(
-        marker in lowered
-        for marker in (
-            "timed out",
-            "operation timed out",
-            "recv failure",
-            "empty reply",
-            "connection reset",
-            "http/2 stream",
-            "internal_server_error",
-            "requested url returned error: 500",
-            "backend response failed",
-        )
-    )
+def parse_sse_stream(sse_path: Path) -> tuple[str, dict[str, Any] | None, bool]:
+    """解析 SSE 文件，拼装 delta.content；返回 (内容, usage, 是否完整)。
+
+    完整判据：出现 data:[DONE] 或某 chunk 带 finish_reason。两者都没有 = 流被中途截断。
+    """
+    if not sse_path.is_file():
+        return "", None, False
+    parts: list[str] = []
+    usage: dict[str, Any] | None = None
+    complete = False
+    for raw_line in sse_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[len("data:"):].strip()
+        if data == "[DONE]":
+            complete = True
+            continue
+        try:
+            chunk = json.loads(data)
+        except ValueError:
+            continue
+        choices = chunk.get("choices") or []
+        if choices:
+            piece = (choices[0].get("delta") or {}).get("content")
+            if piece:
+                parts.append(piece)
+            if choices[0].get("finish_reason"):
+                complete = True
+        if chunk.get("usage"):
+            usage = chunk["usage"]
+    return "".join(parts), usage, complete
 
 
 def extract_chat_completion_text(response: dict[str, Any]) -> str:
