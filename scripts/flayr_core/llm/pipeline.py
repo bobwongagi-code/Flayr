@@ -119,12 +119,15 @@ def fetch_json_completion(
     last_text = ""
     for attempt in range(max_attempts):
         raw_text = call_llm_api(args.llm_api_url, api_key, payload_path, raw_path)
-        raw_path.write_text(raw_text, encoding="utf-8")
-        last_text = extract_chat_completion_text(json.loads(raw_text))
+        raw = json.loads(raw_text)
+        last_text = extract_chat_completion_text(raw)
         try:
             parse_json_text(last_text)
             return last_text
         except SystemExit:
+            # max_tokens 截断（finish_reason=length）重发也会在同处截断，直接交给 repair，不徒劳重取。
+            if str(raw.get("choices", [{}])[0].get("finish_reason")) == "length":
+                break
             if attempt + 1 >= max_attempts:
                 break
     return last_text

@@ -75,6 +75,7 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
         "-sS",
         "--http1.1",
         "--no-buffer",
+        "--fail-with-body",  # HTTP 4xx/5xx 时返回非零并把错误体写入 -o，便于区分硬错误
         "--connect-timeout",
         "30",
         "--max-time",
@@ -94,40 +95,60 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
     for attempt in range(LLM_CURL_RETRIES + 1):
         completed = run_command(curl_command)
         if completed.returncode != 0:
-            last_error = completed.stderr.strip() or completed.stdout.strip()
+            body = sse_path.read_text(encoding="utf-8", errors="replace").strip()[:400] if sse_path.is_file() else ""
+            last_error = completed.stderr.strip() or completed.stdout.strip() or "curl failed"
+            if body:
+                last_error = f"{last_error}\n{body}"
+            # 鉴权/请求错误等硬错误快速失败，不浪费重试。
+            if not is_retryable_error(last_error):
+                break
         else:
-            content, usage, complete = parse_sse_stream(sse_path)
+            content, usage, complete, finish_reason = parse_sse_stream(sse_path)
             if complete and content:
                 response: dict[str, Any] = {
-                    "choices": [{"message": {"content": content}, "finish_reason": "stop"}]
+                    "choices": [{"message": {"content": content}, "finish_reason": finish_reason or "stop"}]
                 }
                 if usage:
                     response["usage"] = usage
                 raw_text = json.dumps(response, ensure_ascii=False)
                 raw_path.write_text(raw_text, encoding="utf-8")
                 return raw_text
-            snippet = sse_path.read_text(encoding="utf-8", errors="replace").strip()[:400] if sse_path.is_file() else ""
-            last_error = (
-                "流式响应不完整（连接在 [DONE] 前中断）"
-                if content
-                else f"流式响应无内容；响应片段：{snippet}"
-            )
+            # 流被中途截断（无 [DONE]/finish_reason）→ 传输问题，可重试。
+            last_error = "流式响应不完整（连接在 [DONE] 前中断）" if content else "流式响应无内容"
         if attempt >= LLM_CURL_RETRIES:
             break
         time.sleep(5 * (attempt + 1))
     raise SystemExit(f"LLM streaming request failed: {last_error}")
 
 
-def parse_sse_stream(sse_path: Path) -> tuple[str, dict[str, Any] | None, bool]:
-    """解析 SSE 文件，拼装 delta.content；返回 (内容, usage, 是否完整)。
+def is_retryable_error(error_text: str) -> bool:
+    """传输/服务端瞬时错误才重试；鉴权/请求错误（401/400/403 等）不重试，快速失败。"""
+    lowered = error_text.lower()
+    if any(marker in lowered for marker in ("401", "403", "400", "unauthorized", "forbidden", "invalid api", "bad request")):
+        return False
+    return any(
+        marker in lowered
+        for marker in (
+            "timed out", "timeout", "connection reset", "recv failure", "empty reply",
+            "framing layer", "http/2", "429", "too many requests",
+            "500", "502", "503", "504", "internal_server_error", "backend",
+            "could not resolve", "connection refused",
+        )
+    )
+
+
+def parse_sse_stream(sse_path: Path) -> tuple[str, dict[str, Any] | None, bool, str | None]:
+    """解析 SSE 文件，拼装 delta.content；返回 (内容, usage, 是否完整, finish_reason)。
 
     完整判据：出现 data:[DONE] 或某 chunk 带 finish_reason。两者都没有 = 流被中途截断。
+    finish_reason 用于区分 stop（正常）与 length（max_tokens 截断，重发无益）。
     """
     if not sse_path.is_file():
-        return "", None, False
+        return "", None, False, None
     parts: list[str] = []
     usage: dict[str, Any] | None = None
     complete = False
+    finish_reason: str | None = None
     for raw_line in sse_path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = raw_line.strip()
         if not line.startswith("data:"):
@@ -145,11 +166,13 @@ def parse_sse_stream(sse_path: Path) -> tuple[str, dict[str, Any] | None, bool]:
             piece = (choices[0].get("delta") or {}).get("content")
             if piece:
                 parts.append(piece)
-            if choices[0].get("finish_reason"):
+            reason = choices[0].get("finish_reason")
+            if reason:
                 complete = True
+                finish_reason = reason
         if chunk.get("usage"):
             usage = chunk["usage"]
-    return "".join(parts), usage, complete
+    return "".join(parts), usage, complete, finish_reason
 
 
 def extract_chat_completion_text(response: dict[str, Any]) -> str:

@@ -20,6 +20,12 @@ import re
 from typing import Any
 
 
+def _is_empty_time_range(text: str) -> bool:
+    """时间区间是否为空/全零（如 ""、"0.0s - 0.0s"）；用于判断 S5 是否需借用认证时间。"""
+    numbers = re.findall(r"\d+(?:\.\d+)?", str(text or ""))
+    return not numbers or all(float(number) == 0 for number in numbers)
+
+
 def reconcile_certification_ownership(result: dict[str, Any]) -> None:
     """把第三方认证主张统一归到 S5（信任放大），并从其他阶段移除重复出现。
 
@@ -54,9 +60,10 @@ def reconcile_certification_ownership(result: dict[str, Any]) -> None:
 
     benchmark = result.get("video_understanding", {}).get("benchmark", {})
     units = benchmark.get("evidence_units", []) if isinstance(benchmark, dict) else []
+    cert_visual = "口播/字幕提及第三方认证背书；当前关键帧未必可核验认证标记。"
     # S5 若无有效时间，用认证出现的时间，保证 cert 单元与 S5 时间相交。
     s5_time = str(trust.get("benchmark_time_range") or "").strip()
-    if cert_time and (not s5_time or set(s5_time) <= set("0.s -")):
+    if cert_time and _is_empty_time_range(s5_time):
         s5_time = cert_time
         trust["benchmark_time_range"] = s5_time
     cert_id = "B_CERT_S5"
@@ -68,21 +75,35 @@ def reconcile_certification_ownership(result: dict[str, Any]) -> None:
             "information": "标杆展示第三方机构认证（KKM/Halal 等）作为信任背书。",
             "voiceover": cert_quote,
             "voiceover_zh": cert_zh,
-            "visual_fact": "口播/字幕提及第三方认证背书；当前关键帧未必可核验认证标记。",
+            "visual_fact": cert_visual,
             "subtitle_fact": "",
         }
     )
+    # evidence_id 始终追加 cert_id（安全）。
     trust["benchmark_evidence_ids"] = list(
         dict.fromkeys([*[i for i in trust.get("benchmark_evidence_ids", []) if "_NO_" not in str(i)], cert_id])
     )
-    if cert_quote:
-        trust["benchmark_quote"] = cert_quote
-        trust["benchmark_quote_zh"] = cert_zh
-    trust["benchmark_key_message"] = "标杆用第三方认证建立信任背书。"
-    if not str(trust.get("benchmark_summary") or "").strip() or "均未设计" in str(trust.get("benchmark_summary") or ""):
-        trust["benchmark_summary"] = "标杆展示第三方认证作为信任背书。"
-    trust["benchmark_visual_evidence"] = ["口播/字幕提及第三方认证背书；当前关键帧未必可核验认证标记。"]
-    trust["benchmark_support_status"] = "voice_only"
+    # 若 S5 已有独立（非认证、非占位）背书内容，认证并入为附加背书，不覆写原内容；否则用认证填充 S5。
+    existing_summary = str(trust.get("benchmark_summary") or "").strip()
+    existing_quote = str(trust.get("benchmark_quote") or "").strip()
+    has_independent_s5 = (
+        bool(existing_summary) and "均未设计" not in existing_summary and not re.search(cert_re, existing_summary, flags=re.IGNORECASE)
+    ) or (bool(existing_quote) and not re.search(cert_re, existing_quote, flags=re.IGNORECASE))
+    if has_independent_s5:
+        if "认证" not in existing_summary and "背书" not in existing_summary:
+            trust["benchmark_summary"] = (existing_summary + "；并展示第三方认证作为附加背书。").strip("；")
+        trust["benchmark_visual_evidence"] = list(
+            dict.fromkeys([*[str(v) for v in trust.get("benchmark_visual_evidence", []) if str(v).strip()], cert_visual])
+        )
+    else:
+        if cert_quote:
+            trust["benchmark_quote"] = cert_quote
+            trust["benchmark_quote_zh"] = cert_zh
+        trust["benchmark_key_message"] = "标杆用第三方认证建立信任背书。"
+        if not existing_summary or "均未设计" in existing_summary:
+            trust["benchmark_summary"] = "标杆展示第三方认证作为信任背书。"
+        trust["benchmark_visual_evidence"] = [cert_visual]
+        trust["benchmark_support_status"] = "voice_only"
 
     # 指向认证内容的 evidence_unit id（含刚建的 B_CERT_S5），用于从非 S5 阶段剥离引用。
     cert_unit_ids = {

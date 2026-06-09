@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -85,7 +86,39 @@ def main() -> int:
     batch_dir.mkdir(parents=True, exist_ok=True)
     status_path = batch_dir / "status.json"
 
-    status: dict = {"started": now(), "concurrency": args.concurrency, "jobs": {}}
+    # 防重复启动：已有存活 runner 时拒绝，避免两个 runner 跑同一 output-dir 互相覆写。
+    lock_path = batch_dir / "runner.lock"
+    if lock_path.is_file():
+        old = lock_path.read_text(encoding="utf-8").strip()
+        if old.isdigit() and _pid_alive(int(old)):
+            print(f"[batch] 已有 runner 在跑 (pid {old})，拒绝重复启动；如确认其已死可删 {lock_path}。")
+            return 1
+    lock_path.write_text(str(os.getpid()), encoding="utf-8")
+    try:
+        return _run_jobs(jobs, common_args, runs_dir, status_path, args.concurrency)
+    finally:
+        lock_path.unlink(missing_ok=True)
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # 进程存在但无权发信号 = 存活
+
+
+def _run_jobs(
+    jobs: list[dict],
+    common_args: list[str],
+    runs_dir: Path,
+    status_path: Path,
+    concurrency: int,
+) -> int:
+    batch_dir = status_path.parent
+    status: dict = {"started": now(), "concurrency": concurrency, "jobs": {}}
     for job in jobs:
         out = job_output_dir(job, runs_dir)
         done = (out / "analysis_result.json").is_file()
@@ -108,7 +141,7 @@ def main() -> int:
         running.append((job, proc, log_file))
 
     while idx < len(pending) or running:
-        while idx < len(pending) and len(running) < max(1, args.concurrency):
+        while idx < len(pending) and len(running) < max(1, concurrency):
             launch(pending[idx])
             idx += 1
         time.sleep(5)
