@@ -39,6 +39,15 @@
 
 结论：`creator_has_usage_demo` 等靠关键词巧合，在③同品类对、①无重叠品类对、但②**碰巧共享关键词的品类误触发**。重构用这 3 个样本当回归集验证。
 
+**子项：第三方背书检测改结构化标记（regex 做不了，规格已定）。**
+现有两个 regex 消费者都该换成模型标记：`claims_my.py` 认证归属检测、`repair.py:has_real_endorsement`。
+regex 无法表达"机构的数据是否在证明本产品价值"这种关系判断。改法：模型逐 stage/role 输出
+`has_institutional_endorsement`（bool，按下方定义判），代码两处都读它、regex 退役。
+**背书定义（已写入 commercial-judgement-framework S5 / prompt / QA Q16）**：
+第三方背书 = ① 机构类型（监管认证 / 行业协会 / 评测中心实验室 / 高校研究 / 调研咨询 /
+疾病防治中心）+ ② 关联性门槛（该机构的实验/数据/研究在**证明本产品价值**）同时成立；
+仅提机构名字、赞助、合作 logo 而无证明本产品价值的数据 ≠ 背书；自述功效 ≠ 背书。
+
 ### 2. S4 severity 不稳（中，随 #1 解决）
 现状：5 次重复 small/medium 跳变，根因为 #1 那套预存 S4 sensory 规则 × 模型方差。
 注意：在 #1 完成前 QA-RULES §10 的 S4 稳定性预期不成立——此不稳是预存 WIP 引入，非分析链改进引入。
