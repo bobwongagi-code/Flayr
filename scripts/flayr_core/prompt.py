@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -24,10 +25,23 @@ from .artifacts import (
     get_stage_frame_entries,
     sample_evenly,
 )
+from .shot_track import render_shot_track_markdown
+from .subtitle_track import render_subtitle_track_markdown
 from .utils import read_optional_text
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def read_track_markdown(track_path: Path, renderer: Any, disabled_hint: str) -> str:
+    """读取预处理轨 json 并渲染成 markdown；文件不存在或损坏时返回提示（未启用/未生成）。"""
+    if not track_path.is_file():
+        return disabled_hint
+    try:
+        track = json.loads(track_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return disabled_hint
+    return renderer(track)
 
 
 def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
@@ -91,7 +105,7 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
         "4. 有有效口播时，阶段核心信息以口播实际传递的信息为主，再匹配支持它的画面；无有效口播时，以画面和字幕为核心。每个阶段写 evidence_ids、visual_evidence 与 support_status。",
         "3a. 阶段引用的 evidence_unit 时间必须与该阶段时间相交；若某阶段没有独立内容，也应建立该时段的“未发现对应内容”事实单元，不能挪用其他阶段证据。",
         "3b. `transcript.srt` 的时间戳是口播归因的权威依据；口播句不在阶段时间内时，必须调整阶段边界或停止引用该口播。",
-        "4. 同一关键信息只能归属于一个主要阶段。KKM/认证/审批不是 Hook；若与产品卖点一起出现，归入 S2 作为信任支撑；只有独立证据段落才归入 S5。口播提到但画面未显示时，必须标明口播声称、画面未验证。",
+        "4. 同一关键信息只能归属于一个主要阶段。第三方机构背书（监管认证 KKM/Halal/SIRIM、行业协会、评测中心/实验室、高校研究、调研咨询、疾病防治中心等类型）功能是外部背书，按功能归入 S5 信任放大，不归 S2、更不是 Hook。判定背书的关键门槛：该机构的数据/实验/研究要在证明本产品价值才算背书；仅提到机构名字、赞助或合作 logo、而无证明本产品价值的数据，不算背书、也不归 S5。自述功效是卖点不算背书。口播提到但画面未显示时，必须标明口播声称、画面未验证。",
         "5. 每个阶段从原始转写中摘录对应本地语言口播到 benchmark_quote/creator_quote，并附中文翻译；无明确口播则留空；不得将画面未显示的信息写成画面证据。",
         "6. 提升点输出 GMV 杠杆最高的 1-5 条，按优先级排序，不按阶段顺序凑数；CTA 与 Hook 的重大差距优先；必须具体到时间段、画面、话术或节奏。",
         "7. 每个提升点输出 base_frame_suitability。达人全片确有可改造真实基底时写 usable 与 best_base_frame_time；没有目标所需的人物/产品/场景时写 no_suitable_frame，时间留空并要求补拍/补素材。",
@@ -147,6 +161,22 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
                 "### 中文翻译",
                 "",
                 read_optional_text(role_dir / "transcript.zh.txt"),
+                "",
+                "### 权威字幕轨（OCR 识别，卖点/价格/年龄段叠字以此为准，胜过画面认字）",
+                "",
+                read_track_markdown(
+                    role_dir / "subtitle_track.json",
+                    render_subtitle_track_markdown,
+                    "（未启用 OCR 字幕轨；字幕以画面识别为准）",
+                ),
+                "",
+                "### 镜头切分轨（精确镜头边界，定阶段起止时参考它，别切在镜头中间）",
+                "",
+                read_track_markdown(
+                    role_dir / "shot_track.json",
+                    render_shot_track_markdown,
+                    "（未生成镜头轨）",
+                ),
                 "",
             ]
         )

@@ -127,6 +127,7 @@ python3 scripts/flayr.py \
 | `--llm-include-images` | 启用 LLM 分析（触发两阶段 omni 调用） |
 | `--whisper-model` | Whisper 模型文件路径 |
 | `--skip-whisper` | 跳过转写（用于调试） |
+| `--ocr-mode auto/on/off` | 字幕 OCR 轨。默认 `auto`：检测到 DashScope 配置和 key 且非 dry-run 时自动开启；`off` 可关闭 |
 
 ### 提案样片 AI 后端（可选）
 

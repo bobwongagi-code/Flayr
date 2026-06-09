@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -102,6 +103,36 @@ def merge_analysis_result(analysis: dict[str, Any], result_path: Path) -> None:
 # LLM 调用 + 校验主入口
 # ---------------------------------------------------------------------------
 
+def fetch_json_completion(
+    args: argparse.Namespace,
+    api_key: str,
+    payload_path: Path,
+    raw_path: Path,
+    max_attempts: int = 3,
+) -> str:
+    """调用 LLM 并确保返回内容是可解析 JSON；静默截断时整体重取。
+
+    DashScope 大响应偶发在传输途中被截断（无错误、finish_reason=None、body 不完整），
+    导致 JSON 残缺。这类截断 repair 无效（重发也会截断），唯一可靠解是重取整次调用。
+    重试 max_attempts 次仍不完整，则返回最后一次内容，交由下游 repair 兜底。
+    """
+    last_text = ""
+    for attempt in range(max_attempts):
+        raw_text = call_llm_api(args.llm_api_url, api_key, payload_path, raw_path)
+        raw = json.loads(raw_text)
+        last_text = extract_chat_completion_text(raw)
+        try:
+            parse_json_text(last_text)
+            return last_text
+        except SystemExit:
+            # max_tokens 截断（finish_reason=length）重发也会在同处截断，直接交给 repair，不徒劳重取。
+            if str(raw.get("choices", [{}])[0].get("finish_reason")) == "length":
+                break
+            if attempt + 1 >= max_attempts:
+                break
+    return last_text
+
+
 def run_large_model_analysis(
     args: argparse.Namespace,
     analysis: dict[str, Any],
@@ -135,10 +166,7 @@ def run_large_model_analysis(
         return None
 
     raw_path = run_dir / "llm_response.json"
-    raw_text = call_llm_api(args.llm_api_url, api_key, payload_path, raw_path)
-    raw_path.write_text(raw_text, encoding="utf-8")
-
-    result_text = extract_chat_completion_text(json.loads(raw_text))
+    result_text = fetch_json_completion(args, api_key, payload_path, raw_path)
     result = parse_and_validate_llm_result(
         args=args,
         api_key=api_key,
@@ -234,7 +262,12 @@ def maybe_refine_low_confidence_stages(
     """
     if not locked_video_understanding:
         return result
-    stage_codes = extract_low_confidence_stages(raw_result)
+    # 模型自报 ∪ 代码侧确定性检测（兜底模型漏报），最多 2 个，模型自报优先占位。
+    stage_codes = []
+    for code in [*extract_low_confidence_stages(raw_result), *detect_low_confidence_stages(result)]:
+        if code not in stage_codes:
+            stage_codes.append(code)
+    stage_codes = stage_codes[:2]
     if not stage_codes:
         return result
 
@@ -300,6 +333,50 @@ def extract_low_confidence_stages(raw_result: dict[str, Any]) -> list[str]:
             if code in {"S1", "S2", "S3", "S4", "S5", "S6"} and code not in codes:
                 codes.append(code)
     return codes[:2]
+
+
+# 占位证据单元（_NO_STAGE_/_NO_USAGE/_NO_CTA 等）和"证据不足"提示，是后处理写入的
+# 客观"素材不足"标记，不依赖模型自觉，可作为确定性回看触发信号。
+_PLACEHOLDER_EVIDENCE_RE = re.compile(r"_NO_|NO_STAGE|NO_USAGE|NO_CTA")
+_EVIDENCE_CAUTION_RE = re.compile(r"证据不足|待复核|需人工复核|未识别|未发现可|未验证|画面证据不足")
+
+
+def detect_low_confidence_stages(result: dict[str, Any]) -> list[str]:
+    """代码侧确定性兜底：用客观素材不足信号识别该回看的阶段，补模型自报的漏报。
+
+    判据（针对达人侧——分析主体）：
+    - 引用的是占位 evidence_unit（_NO_*），或 support_status=visual_only 且无有效口播/带待复核提示；
+    - 且 severity ∈ {large, medium}：只有"薄证据上的高后果判断"才值得花一次回看。
+    large 优先，最多 2 个，与现有 Phase C 约束一致。
+    """
+    creator_units = {
+        str(unit.get("id")): unit
+        for unit in result.get("video_understanding", {}).get("creator", {}).get("evidence_units", [])
+        if isinstance(unit, dict)
+    }
+    large: list[str] = []
+    medium: list[str] = []
+    for stage in result.get("stage_analysis", []):
+        if not isinstance(stage, dict):
+            continue
+        code = stage_code(stage.get("stage"))
+        severity = str(stage.get("severity") or "").strip().lower()
+        if not code or severity not in {"large", "medium"}:
+            continue
+        ids = [str(value) for value in stage.get("creator_evidence_ids", [])]
+        has_placeholder = any(_PLACEHOLDER_EVIDENCE_RE.search(item) for item in ids)
+        unit_visual = " ".join(str(creator_units.get(item, {}).get("visual_fact", "")) for item in ids)
+        stage_visual = " ".join(str(value) for value in stage.get("creator_visual_evidence", []))
+        has_caution = bool(_EVIDENCE_CAUTION_RE.search(unit_visual + " " + stage_visual))
+        visual_only = str(stage.get("creator_support_status") or "") == "visual_only"
+        no_voice = not str(stage.get("creator_quote") or "").strip()
+        if has_placeholder or (visual_only and (has_caution or no_voice)):
+            (large if severity == "large" else medium).append(code)
+    ordered: list[str] = []
+    for code in [*large, *medium]:
+        if code not in ordered:
+            ordered.append(code)
+    return ordered[:2]
 
 
 def payload_has_video(payload: dict[str, Any]) -> bool:
@@ -411,9 +488,7 @@ def run_video_fact_extraction(
         write_json(request_path, payload)
         if args.llm_dry_run:
             continue
-        raw_text = call_llm_api(args.llm_api_url, api_key, request_path, response_path)
-        response_path.write_text(raw_text, encoding="utf-8")
-        result_text = extract_chat_completion_text(json.loads(raw_text))
+        result_text = fetch_json_completion(args, api_key, request_path, response_path)
         fact_result = normalize_video_fact_result(role, parse_json_text(result_text), analysis)
         facts[role] = fact_result
         write_json(result_path, fact_result)

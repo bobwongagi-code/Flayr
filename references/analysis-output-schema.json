@@ -22,7 +22,7 @@
     "total_screen_time_sec": 0.0,
     "video_duration_sec": 0.0,
     "ratio": 0.0,
-    "estimation_note": "统计或估算依据。"
+    "estimation_note": "由代码从达人 evidence_units 的 product_visible/product_coverage 标记确定性累加得出；模型无需自行估算占比，只需逐段标好产品是否出镜。"
   },
   "loop_closure": {
     "pain_resolved_in_s4": false,
@@ -44,7 +44,9 @@
           "voiceover_zh": "口播中文翻译；没有则留空。",
           "visual_fact": "画面中实际可见事实，不推断认证、功效或身份。",
           "subtitle_fact": "画面中实际可读字幕；没有则留空。",
-          "audio_fact": "该时段的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。"
+          "audio_fact": "该时段的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。",
+          "product_visible": true,
+          "product_coverage": "该时段产品在画面中的视觉占比：none｜low｜medium｜high。看不到产品写 none。"
         }
       ]
     },
@@ -60,7 +62,9 @@
           "voiceover_zh": "口播中文翻译；没有则留空。",
           "visual_fact": "画面中实际可见事实，不推断。",
           "subtitle_fact": "画面中实际可读字幕；没有则留空。",
-          "audio_fact": "该时段的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。"
+          "audio_fact": "该时段的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。",
+          "product_visible": true,
+          "product_coverage": "该时段产品在画面中的视觉占比：none｜low｜medium｜high。看不到产品写 none。"
         }
       ]
     }
@@ -126,11 +130,11 @@
       "creator_time_range": "达人视频中要修改的具体时间段",
       "benchmark_time_range": "标杆视频中可参考的具体时间段",
       "problem": "当前问题，具体到秒、画面、话术或节奏。",
-      "benchmark_reference": "爆款对应做法。",
+      "benchmark_reference": "爆款对应做法及其功能意图，例如用痛点停留、用认证建立信任、用购物车指令推动下单；不要要求达人机械照搬。",
       "benchmark_evidence_ids": [
         "支持该建议的标杆 evidence_unit ID；不得用其他阶段片段代替。"
       ],
-      "suggestion": "具体改法，可以直接交给达人执行；不要臆造品牌、价格、优惠、型号或参数。",
+      "suggestion": "具体改法，可以直接交给达人执行；必须基于达人现有拍法、产品卖点权重和标杆功能意图做本地化转译，不得机械照搬标杆话术或动作；不要臆造品牌、价格、优惠、型号或参数。",
       "actions": [
         "具体改造动作，分点输出。"
       ],
@@ -138,7 +142,7 @@
       "evidence": [
         "支持该提升点的时间段、画面或口播证据。"
       ],
-      "creator_script": "给达人直接看的本地语言执行话术，例如马来语/泰语/印尼语。",
+      "creator_script": "给达人直接看的本地语言原创执行话术，例如马来语/泰语/印尼语；应贴合达人语气、目标市场和产品卖点，不得复制或轻微改写标杆原句。",
       "creator_script_zh": "creator_script 的中文翻译，给中国运营理解。",
       "base_frame_suitability": "usable | no_suitable_frame",
       "best_base_frame_time": "达人全片中可作为 AI 改造基底的真实画面时间点，例如 18.0s；没有合适素材时必须留空。",

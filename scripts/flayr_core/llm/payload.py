@@ -104,20 +104,28 @@ def select_llm_visual_inputs(analysis: dict[str, Any], image_limit: int) -> list
 
 
 def get_llm_frame_candidates(info: dict[str, Any], limit: int) -> list[dict[str, Any]]:
-    """从一个视频的全片帧 + 加密 focus 帧中选候选帧，去重后返回。"""
-    candidates: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    """从一个视频的全片帧 + 加密 focus 帧中选候选帧。
+
+    合并后按时间戳排序、按秒去重：
+    - 保证喂给模型的帧序列时间轴单调递增，不会出现"中段帧后又跳回首段"的乱序；
+    - 整数秒上 1fps 全片帧与 2fps 首尾帧会撞车（同一画面），按秒去重避免重复浪费注意力。
+    撞车时让 focus 帧覆盖 timeline 帧，因为 focus 帧带 hook/cta 标签、信息更具体。
+    """
     focus_limit = 2 if limit >= 6 else 0
     timeline_limit = max(1, limit - focus_limit)
     timeline_entries = sample_evenly(get_frame_entries(info), timeline_limit)
     focus_entries = sample_evenly(get_focus_frame_entries(info), focus_limit)
-    for entry in timeline_entries + focus_entries:
-        path = str(entry.get("path") or "")
-        if not path or path in seen:
+    by_second: dict[float, dict[str, Any]] = {}
+    # 先放 timeline 占位，再用 focus 覆盖同秒条目。
+    for entry in timeline_entries:
+        if not str(entry.get("path") or ""):
             continue
-        seen.add(path)
-        candidates.append(entry)
-    return candidates
+        by_second.setdefault(round(float(entry.get("timestamp_seconds") or 0.0), 1), entry)
+    for entry in focus_entries:
+        if not str(entry.get("path") or ""):
+            continue
+        by_second[round(float(entry.get("timestamp_seconds") or 0.0), 1)] = entry
+    return sorted(by_second.values(), key=lambda item: float(item.get("timestamp_seconds") or 0.0))
 
 
 def read_text_if_exists(path: Path) -> str:
@@ -213,6 +221,8 @@ def build_video_fact_payload(
                             "visual_fact": "该时刻画面中实际可见的事实：主体、动作、表情变化、字幕叠字、特效。",
                             "subtitle_fact": "可读字幕；没有则留空。",
                             "audio_fact": "该时刻的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。",
+                            "product_visible": True,
+                            "product_coverage": "该时段产品在画面里的视觉占比：none｜low｜medium｜high。看不到产品写 none。",
                         }
                     ],
                 },
@@ -253,6 +263,9 @@ def build_video_fact_payload(
         "在变化点处切分 evidence_units，输出 4 到 8 条，沿时间线排列，id 必须使用指定前缀，"
         "time_range 用真实时间（如 2.5s - 4.0s）。"
         "每条都要据实填 visual_fact（画面/表情/字幕/特效）和 audio_fact（BGM/语气/音效）；"
+        "每条还要标 product_visible（该时段画面里能否看到产品本体，true/false）与 product_coverage"
+        "（产品视觉占比 none｜low｜medium｜high，看不到写 none）：这两项用于确定性统计产品出镜，"
+        "据画面如实标，产品被手遮住或只露局部按真实可见程度给 low；"
         "voiceover 必须逐字来自当前视频 transcript.srt，画面看不清的时段在 visual_fact 写画面证据不足待复核；"
         "无 BGM 或无明显音效时 audio_fact 写无，不要臆造。"
         "不得臆造牙齿前后对比、用户评论、证书、检测报告、认证、价格、优惠或功效。"
@@ -638,6 +651,10 @@ def build_llm_payload(
                     "每个阶段都应从转写中摘录对应本地语言口播到 benchmark_quote/creator_quote，并附中文翻译；没有明确口播时留空。"
                     "每个阶段和提升点都必须写 evidence，引用时间段、画面或口播证据。"
                     "提升点按 GMV 杠杆排序，不按 S1-S6 顺序凑数：CTA 与 Hook 的大差距优先于中等信息传递差距。"
+                    "每个提升点必须先抽象标杆功能意图，再结合产品决策权重和达人现有拍法生成原创可执行建议；不得把标杆卖点、原句或动作机械搬给达人。"
+                    "涉及卖点时，必须使用第 0 步商业权重判断理性/感性哪个更能驱动该品类，而不是硬凑两者或照搬标杆。"
+                    "儿童牙膏等两极产品逻辑品类：若达人已讲清按压、用量、减少浪费等功能痛点，标杆香味/口味/调性只能作辅助体验，不得自动排到功能卖点前，不得作为 Top 1 提升点；不得建议新增孩子演员、品尝动作、闻香镜头或“孩子一定喜欢”等不可验证表达。"
+                    "suggestion 必须优先在达人已有素材和拍摄方式内改造；只有 no_suitable_frame 时才建议补拍或补素材。"
                     "达人建议话术必须使用达人口播语言，creator_script_zh 只放中文翻译。"
                     "如果达人没有有效口播或语言识别不可靠，则根据标杆视频语言/目标市场语言撰写全新的本地语言建议话术，不得把音乐、噪音或无关字幕当作话术。"
                     "达人执行话术必须是针对达人素材重新设计的原创表达，不得抄写或轻微改写标杆口播。"
@@ -711,6 +728,7 @@ def build_llm_repair_payload(
                     "提供了 transcript.srt 时，以其时间戳重新校对口播对应阶段；认证与产品属性连续表达时只归入 S2。"
                     "一条事实只归属一个主要阶段；KKM 等认证信息不能写入 Hook，与产品引出同段出现时仅归入 S2；口播提及但画面不可见时标记 voice_only。"
                     "提升点必须保留 benchmark_evidence_ids、base_frame_suitability、best_base_frame_time、base_frame_evidence_id、base_frame_reason 和 aigc_prompt；无可用达人素材时写 no_suitable_frame 且时间与 base_frame_evidence_id 留空。aigc_image_path 留空。"
+                    "修复 improvements 时也必须遵循达人框架约束、卖点适配权重和标杆功能意图转译，不得把 benchmark_reference 直接改写成 suggestion。"
                     "健康品类建议不得声称调节激素、改善月经、治疗症状或虚构优惠。建议话术必须重新设计，不得复制标杆原句。"
                     "输出必须精炼，每个描述字段最多一句，improvements 按 GMV 杠杆排序保留 1-5 条；不要为凑数编造。"
                     "任何列表最多 3 条；不要枚举或重复不存在的音效、镜头或功能，缺失证据只写一句概括。"

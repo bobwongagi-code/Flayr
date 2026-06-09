@@ -2,7 +2,8 @@
 
 ⚠️ 仅适用于 MY 市场。本模块所有函数都围绕 KKM / KKMA / kelulusan / "认证" 这些
    马来西亚卫生部审批与一般认证关键词处理：
-     - 把认证主张统一归到 S2 产品引出阶段
+     - 把第三方认证主张统一归到 S5 信任放大阶段（认证功能是外部背书，按功能归 S5，
+       而非按出现位置归 S2；自述功效不算认证）
      - 删除阶段文本中未被 evidence_unit 支持的认证 / 评论 / 证书表述
      - 对应文案降级或替换为中性表达
 
@@ -19,38 +20,104 @@ import re
 from typing import Any
 
 
+def _is_empty_time_range(text: str) -> bool:
+    """时间区间是否为空/全零（如 ""、"0.0s - 0.0s"）；用于判断 S5 是否需借用认证时间。"""
+    numbers = re.findall(r"\d+(?:\.\d+)?", str(text or ""))
+    return not numbers or all(float(number) == 0 for number in numbers)
+
+
 def reconcile_certification_ownership(result: dict[str, Any]) -> None:
-    """把 KKM/认证主张统一归到 S2（产品引出），并从其他阶段移除重复出现。"""
+    """把第三方认证主张统一归到 S5（信任放大），并从其他阶段移除重复出现。
+
+    认证功能是外部背书，按功能归 S5，而非按出现位置归 S2。
+    """
     stages = result.get("stage_analysis", [])
-    if len(stages) < 2:
+    if len(stages) < 5:
         return
-    product_intro = stages[1]
-    quote = str(product_intro.get("benchmark_quote") or "")
-    if not re.search(r"KKM|KKMA|认证|kelulusan", quote, flags=re.IGNORECASE):
+    cert_re = r"KKM|KKMA|认证|kelulusan"
+    trust = stages[4]
+
+    # 认证常与产品引出同框出现（落在 S2 时段），但功能是外部背书 → 按功能归 S5。
+    # 在任意标杆阶段找认证 quote，作为 S5 背书内容来源（不只读 S5，否则搬不动 S2 里的认证）。
+    cert_quote, cert_zh, cert_time = "", "", ""
+    for stage in stages:
+        candidate = str(stage.get("benchmark_quote") or "")
+        if re.search(cert_re, candidate, flags=re.IGNORECASE):
+            cert_quote = candidate
+            cert_zh = str(stage.get("benchmark_quote_zh") or "")
+            cert_time = str(stage.get("benchmark_time_range") or "")
+            break
+    has_cert_anywhere = bool(cert_quote) or any(
+        re.search(
+            cert_re,
+            json.dumps({k: v for k, v in stage.items() if k.startswith("benchmark")}, ensure_ascii=False),
+            flags=re.IGNORECASE,
+        )
+        for stage in stages
+    )
+    if not has_cert_anywhere:
         return
 
     benchmark = result.get("video_understanding", {}).get("benchmark", {})
     units = benchmark.get("evidence_units", []) if isinstance(benchmark, dict) else []
-    cert_id = "B_CERT_S2"
-    if not any(str(unit.get("id")) == cert_id for unit in units if isinstance(unit, dict)):
-        units.append(
-            {
-                "id": cert_id,
-                "time_range": str(product_intro.get("benchmark_time_range") or ""),
-                "information": str(product_intro.get("benchmark_key_message") or "口播说明产品认证信息。"),
-                "voiceover": quote,
-                "voiceover_zh": str(product_intro.get("benchmark_quote_zh") or ""),
-                "visual_fact": "口播提及认证信息；当前关键帧未见可核验的认证标记。",
-                "subtitle_fact": "",
-            }
+    cert_visual = "口播/字幕提及第三方认证背书；当前关键帧未必可核验认证标记。"
+    # S5 若无有效时间，用认证出现的时间，保证 cert 单元与 S5 时间相交。
+    s5_time = str(trust.get("benchmark_time_range") or "").strip()
+    if cert_time and _is_empty_time_range(s5_time):
+        s5_time = cert_time
+        trust["benchmark_time_range"] = s5_time
+    cert_id = "B_CERT_S5"
+    units[:] = [unit for unit in units if str(unit.get("id")) != cert_id]
+    units.append(
+        {
+            "id": cert_id,
+            "time_range": s5_time or cert_time,
+            "information": "标杆展示第三方机构认证（KKM/Halal 等）作为信任背书。",
+            "voiceover": cert_quote,
+            "voiceover_zh": cert_zh,
+            "visual_fact": cert_visual,
+            "subtitle_fact": "",
+        }
+    )
+    # evidence_id 始终追加 cert_id（安全）。
+    trust["benchmark_evidence_ids"] = list(
+        dict.fromkeys([*[i for i in trust.get("benchmark_evidence_ids", []) if "_NO_" not in str(i)], cert_id])
+    )
+    # 若 S5 已有独立（非认证、非占位）背书内容，认证并入为附加背书，不覆写原内容；否则用认证填充 S5。
+    existing_summary = str(trust.get("benchmark_summary") or "").strip()
+    existing_quote = str(trust.get("benchmark_quote") or "").strip()
+    has_independent_s5 = (
+        bool(existing_summary) and "均未设计" not in existing_summary and not re.search(cert_re, existing_summary, flags=re.IGNORECASE)
+    ) or (bool(existing_quote) and not re.search(cert_re, existing_quote, flags=re.IGNORECASE))
+    if has_independent_s5:
+        if "认证" not in existing_summary and "背书" not in existing_summary:
+            trust["benchmark_summary"] = (existing_summary + "；并展示第三方认证作为附加背书。").strip("；")
+        trust["benchmark_visual_evidence"] = list(
+            dict.fromkeys([*[str(v) for v in trust.get("benchmark_visual_evidence", []) if str(v).strip()], cert_visual])
         )
-    product_intro["benchmark_evidence_ids"] = list(dict.fromkeys([*product_intro.get("benchmark_evidence_ids", []), cert_id]))
-    product_intro["benchmark_visual_evidence"] = ["口播提及认证信息；当前关键帧未见可核验的认证标记。"]
-    product_intro["benchmark_support_status"] = "voice_only"
+    else:
+        if cert_quote:
+            trust["benchmark_quote"] = cert_quote
+            trust["benchmark_quote_zh"] = cert_zh
+        trust["benchmark_key_message"] = "标杆用第三方认证建立信任背书。"
+        if not existing_summary or "均未设计" in existing_summary:
+            trust["benchmark_summary"] = "标杆展示第三方认证作为信任背书。"
+        trust["benchmark_visual_evidence"] = [cert_visual]
+        trust["benchmark_support_status"] = "voice_only"
 
+    # 指向认证内容的 evidence_unit id（含刚建的 B_CERT_S5），用于从非 S5 阶段剥离引用。
+    cert_unit_ids = {
+        str(unit.get("id"))
+        for unit in units
+        if isinstance(unit, dict)
+        and re.search(cert_re, json.dumps(unit, ensure_ascii=False), flags=re.IGNORECASE)
+    }
     for index, stage in enumerate(stages):
-        if index == 1:
+        if index == 4:
             continue
+        stage["benchmark_evidence_ids"] = [
+            i for i in stage.get("benchmark_evidence_ids", []) if str(i) not in cert_unit_ids
+        ]
         for key in (
             "benchmark_key_message",
             "benchmark_summary",

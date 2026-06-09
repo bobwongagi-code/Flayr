@@ -244,7 +244,7 @@ def validate_transcript_attribution(result: dict[str, Any], analysis: dict[str, 
 
 
 def validate_stage_ownership(result: dict[str, Any]) -> None:
-    """KKM/认证只能归 S2 或独立 S5；S1 Hook 不得携带认证；不得跨阶段重复。
+    """第三方认证（KKM/Halal 等）只能归 S5 信任放大；S1 Hook 不得携带认证；不得跨阶段重复。
 
     TODO: 本函数含 MY 市场 KKM/kelulusan 硬编码，未来扩市场时应抽到 claims_xx.py 的 validate 区。
     """
@@ -253,7 +253,7 @@ def validate_stage_ownership(result: dict[str, Any]) -> None:
         return
     hook_text = json.dumps(stages[0], ensure_ascii=False)
     if re.search(r"KKM|KKMA|认证|kelulusan", hook_text, flags=re.IGNORECASE):
-        raise SystemExit("S1 Hook 不得承载 KKM/认证信息；将与产品引出同段出现的认证口播只归入 S2，并标明画面是否验证。")
+        raise SystemExit("S1 Hook 不得承载 KKM/认证信息；第三方认证是外部背书，按功能归入 S5 信任放大，并标明画面是否验证。")
     certification_stages = [
         str(stage.get("stage") or f"S{index}")
         for index, stage in enumerate(stages, start=1)
@@ -275,7 +275,5 @@ def validate_stage_ownership(result: dict[str, Any]) -> None:
             "标杆认证信息不得重复归入多个阶段；请选择其主要作用阶段一次呈现。"
             f"当前重复阶段：{', '.join(certification_stages)}。"
         )
-    if certification_stages and not (
-        certification_stages[0].startswith("S2") or certification_stages[0].startswith("S5")
-    ):
-        raise SystemExit("认证信息只能归入 S2 产品引出或独立的 S5 信任放大，不得归入其他阶段。")
+    if certification_stages and not certification_stages[0].startswith("S5"):
+        raise SystemExit("第三方认证是外部背书，只能归入 S5 信任放大，不得归入 S2 或其他阶段。")

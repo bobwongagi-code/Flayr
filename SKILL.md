@@ -105,6 +105,8 @@ For `whisper-cli` or `whisper-cpp`, pass `--whisper-model` when the default `mod
 For Qwen / 千问 on this Mac, use the DashScope OpenAI-compatible endpoint and the VidLingo Keychain item:
 `--llm-api-url https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions --llm-api-key-keychain-service VidLingo.Qwen`.
 
+Subtitle OCR runs in `--ocr-mode auto` by default: enable it when using DashScope/Qwen config and an API key is available, and disable it with `--no-ocr` for fast local debugging. OCR improves on-screen subtitle grounding and is low cost, but it adds per-frame API latency.
+
 Proposal AI demo clips are optional and off by default. Use `--proposal-video-backend dashscope-i2v`
 to generate Wan image-to-video samples from local creator frames. Use `--proposal-video-backend dashscope-s2v`
 only when public HTTP(S) face image and line audio URLs are available; `wan2.2-s2v` cannot consume local files directly.

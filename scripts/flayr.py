@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -122,10 +123,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip transcription even when Whisper exists.",
     )
     parser.add_argument(
+        "--reuse-preprocessing",
+        action="store_true",
+        help=(
+            "复用 --output-dir 中已有的预处理（抽帧/转写/镜头轨/字幕轨），跳过重抽。"
+            "用于实验迭代（同视频改 prompt/代码重跑）和 LLM 失败后补跑，大幅省时。"
+        ),
+    )
+    parser.add_argument(
         "--whisper-model",
         type=Path,
-        default=Path("/Users/wangbo5/Library/Application Support/VidLingo/Models/ggml-large-v3-q5_0.bin"),
-        help="Model path for whisper-cli or whisper-cpp. 默认本机的 VidLingo large-v3-q5_0 模型；部署给别人时改成相对路径或 env 变量。",
+        default=Path("/Users/wangbo5/Library/Application Support/VidLingo/Models/ggml-large-v3-turbo-q5_0.bin"),
+        help="Model path for whisper-cli or whisper-cpp. 默认本机的 VidLingo large-v3-turbo 模型；部署给别人时改成相对路径或 env 变量。",
+    )
+    parser.add_argument(
+        "--whisper-model-th",
+        type=Path,
+        default=Path("/Users/wangbo5/Library/Application Support/VidLingo/Models/ggml-th-large-v3-q5_0.bin"),
+        help="泰语专用 whisper 模型路径。检测到泰语或显式 -l th 时用它转写；文件缺失时回退到 --whisper-model。",
     )
     parser.add_argument(
         "--whisper-language",
@@ -186,14 +201,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional model for transcript translation. Defaults to --llm-model.",
     )
     parser.add_argument(
+        "--ocr-mode",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help=(
+            "Subtitle OCR mode. auto enables DashScope qwen-vl-ocr when a DashScope API key "
+            "is available and this is not --llm-dry-run; on forces OCR; off disables OCR."
+        ),
+    )
+    parser.add_argument(
         "--with-ocr",
         action="store_true",
-        help=(
-            "Run subtitle OCR (DashScope qwen-vl-ocr) on sampled frames to build an "
-            "authoritative subtitle track. Reuses the analysis LLM key (--llm-api-key-*), "
-            "which must be a DashScope key (endpoint is hardcoded to DashScope). "
-            "Adds API cost (~18 calls/video). Default off."
-        ),
+        help="Backward-compatible alias for --ocr-mode on.",
+    )
+    parser.add_argument(
+        "--no-ocr",
+        action="store_true",
+        help="Backward-compatible alias for --ocr-mode off.",
     )
     parser.add_argument(
         "--with-voice-clone",
@@ -275,13 +299,24 @@ def create_run_dir(args: argparse.Namespace) -> Path:
 def check_dependencies(args: argparse.Namespace) -> dict[str, Any]:
     whisper_command = first_available(("whisper", "whisper-cpp", "whisper-cli"))
     whisper_model = validate_optional_file(args.whisper_model, "--whisper-model")
+    # 泰语模型软解析：文件缺失时存 None，由 run_whisper 回退到通用模型，不在启动期硬崩。
+    whisper_model_th = resolve_optional_model(args.whisper_model_th)
     return {
         "ffmpeg": shutil.which("ffmpeg"),
         "ffprobe": shutil.which("ffprobe"),
         "whisper": whisper_command,
         "whisper_model": str(whisper_model) if whisper_model else None,
+        "whisper_model_th": str(whisper_model_th) if whisper_model_th else None,
         "whisper_language": args.whisper_language,
     }
+
+
+def resolve_optional_model(path: Path | None) -> Path | None:
+    """解析可选模型路径：存在则返回绝对路径，否则返回 None（用于优雅降级，不抛错）。"""
+    if not path:
+        return None
+    resolved = path.expanduser().resolve()
+    return resolved if resolved.is_file() else None
 
 
 def first_available(commands: tuple[str, ...]) -> str | None:
@@ -357,6 +392,22 @@ def validate_optional_file(path: Path | None, label: str) -> Path | None:
     return resolved
 
 
+def load_existing_video_result(role_dir: Path) -> dict[str, Any] | None:
+    """复用上次预处理：读 _preprocess.json，校验关键产物仍在则返回，否则 None 触发重抽。"""
+    cache = role_dir / "_preprocess.json"
+    if not cache.is_file():
+        return None
+    try:
+        info = json.loads(cache.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    frames_dir = Path(str(info.get("frames_dir") or ""))
+    transcript = Path(str(info.get("transcript_path") or ""))
+    if not frames_dir.is_dir() or not transcript.is_file():
+        return None
+    return info
+
+
 def process_video(
     role: str,
     video_path: Path,
@@ -365,6 +416,11 @@ def process_video(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     role_dir = run_dir / role
+    if getattr(args, "reuse_preprocessing", False):
+        cached = load_existing_video_result(role_dir)
+        if cached is not None:
+            print(f"[reuse] {role}: 复用已有预处理（跳过抽帧/转写/OCR）")
+            return cached
     frames_dir = role_dir / "frames"
     focus_frames_dir = role_dir / "focus_frames"
     role_dir.mkdir(parents=True, exist_ok=True)
@@ -432,17 +488,48 @@ def process_video(
     result["shot_track_status"] = shot_track.get("status")
     result["shot_track_path"] = str(role_dir / "shot_track.json") if shot_track.get("shots") else None
 
-    # 字幕轨：读光 OCR，有 API 成本，靠 --with-ocr 显式开启（默认关）。
-    result["subtitle_track_status"] = "disabled_by_flag"
+    # 字幕轨：读光 OCR。默认 auto：有 DashScope key 且非 dry-run 时自动开启；
+    # 没 key/调试时降级为 disabled，不影响主流程。
+    result["subtitle_track_status"] = "disabled_by_policy"
     result["subtitle_track_path"] = None
-    if getattr(args, "with_ocr", False):
-        api_key = read_llm_api_key(args).strip()
-        subtitle_track = build_subtitle_track(role_dir, result, api_key)
+    should_ocr, ocr_key = resolve_ocr_policy(args)
+    if should_ocr:
+        subtitle_track = build_subtitle_track(role_dir, result, ocr_key)
         result["subtitle_track_status"] = subtitle_track.get("status")
         if subtitle_track.get("segments"):
             result["subtitle_track_path"] = str(role_dir / "subtitle_track.json")
+    elif ocr_key:
+        result["subtitle_track_status"] = "disabled_by_policy"
+    else:
+        result["subtitle_track_status"] = "disabled_no_dashscope_key"
 
+    # 落盘预处理结果，供 --reuse-preprocessing 下次复用（即使本次 LLM 阶段后续失败也已写）。
+    write_json(role_dir / "_preprocess.json", result)
     return result
+
+
+def resolve_ocr_policy(args: argparse.Namespace) -> tuple[bool, str]:
+    if getattr(args, "no_ocr", False):
+        return False, ""
+    if getattr(args, "with_ocr", False):
+        mode = "on"
+    else:
+        mode = getattr(args, "ocr_mode", "auto")
+    if mode == "off" or getattr(args, "llm_dry_run", False):
+        return False, ""
+    api_key = read_llm_api_key(args).strip()
+    if mode == "on":
+        return bool(api_key), api_key
+    return bool(api_key and looks_like_dashscope_config(args)), api_key
+
+
+def looks_like_dashscope_config(args: argparse.Namespace) -> bool:
+    values = [
+        str(getattr(args, "llm_api_url", "") or "").lower(),
+        str(getattr(args, "llm_api_key_keychain_service", "") or "").lower(),
+        str(getattr(args, "llm_model", "") or "").lower(),
+    ]
+    return any("dashscope" in value or "qwen" in value for value in values)
 
 
 def build_analysis(
