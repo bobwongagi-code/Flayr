@@ -14,12 +14,17 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
 
 from ..utils import run_command
+
+LLM_READ_TIMEOUT_SECONDS = 600
+LLM_CURL_MAX_TIME_SECONDS = 900
+LLM_CURL_RETRIES = 2
 
 
 def read_llm_api_key(args: argparse.Namespace) -> str:
@@ -63,7 +68,7 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=180) as response:
+        with urllib.request.urlopen(request, timeout=LLM_READ_TIMEOUT_SECONDS) as response:
             return response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace")
@@ -76,6 +81,10 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
         "curl",
         "-sS",
         "--fail-with-body",
+        "--connect-timeout",
+        "30",
+        "--max-time",
+        str(LLM_CURL_MAX_TIME_SECONDS),
         "-H",
         f"Authorization: Bearer {api_key}",
         "-H",
@@ -86,11 +95,41 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
         "-o",
         str(raw_path),
     ]
-    completed = run_command(curl_command)
-    if completed.returncode != 0:
-        error_text = completed.stderr.strip() or completed.stdout.strip()
-        raise SystemExit(f"LLM request failed via curl: {error_text}")
+    last_error = ""
+    for attempt in range(LLM_CURL_RETRIES + 1):
+        completed = run_command(curl_command)
+        if completed.returncode == 0:
+            return raw_path.read_text(encoding="utf-8")
+        last_error = completed.stderr.strip() or completed.stdout.strip()
+        if raw_path.exists():
+            body = raw_path.read_text(encoding="utf-8", errors="replace").strip()
+            if body:
+                last_error = f"{last_error}\n{body}" if last_error else body
+        if attempt >= LLM_CURL_RETRIES or not is_transient_curl_error(last_error):
+            break
+        time.sleep(5 * (attempt + 1))
+    if last_error:
+        raise SystemExit(f"LLM request failed via curl: {last_error}")
     return raw_path.read_text(encoding="utf-8")
+
+
+def is_transient_curl_error(error_text: str) -> bool:
+    """Return true for network failures worth retrying once or twice."""
+    lowered = error_text.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "timed out",
+            "operation timed out",
+            "recv failure",
+            "empty reply",
+            "connection reset",
+            "http/2 stream",
+            "internal_server_error",
+            "requested url returned error: 500",
+            "backend response failed",
+        )
+    )
 
 
 def extract_chat_completion_text(response: dict[str, Any]) -> str:

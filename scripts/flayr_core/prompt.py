@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -24,10 +25,23 @@ from .artifacts import (
     get_stage_frame_entries,
     sample_evenly,
 )
+from .shot_track import render_shot_track_markdown
+from .subtitle_track import render_subtitle_track_markdown
 from .utils import read_optional_text
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def read_track_markdown(track_path: Path, renderer: Any, disabled_hint: str) -> str:
+    """读取预处理轨 json 并渲染成 markdown；文件不存在或损坏时返回提示（未启用/未生成）。"""
+    if not track_path.is_file():
+        return disabled_hint
+    try:
+        track = json.loads(track_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return disabled_hint
+    return renderer(track)
 
 
 def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
@@ -147,6 +161,22 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
                 "### 中文翻译",
                 "",
                 read_optional_text(role_dir / "transcript.zh.txt"),
+                "",
+                "### 权威字幕轨（OCR 识别，卖点/价格/年龄段叠字以此为准，胜过画面认字）",
+                "",
+                read_track_markdown(
+                    role_dir / "subtitle_track.json",
+                    render_subtitle_track_markdown,
+                    "（未启用 OCR 字幕轨；字幕以画面识别为准）",
+                ),
+                "",
+                "### 镜头切分轨（精确镜头边界，定阶段起止时参考它，别切在镜头中间）",
+                "",
+                read_track_markdown(
+                    role_dir / "shot_track.json",
+                    render_shot_track_markdown,
+                    "（未生成镜头轨）",
+                ),
                 "",
             ]
         )

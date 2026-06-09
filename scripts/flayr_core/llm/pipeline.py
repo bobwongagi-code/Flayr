@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -234,7 +235,12 @@ def maybe_refine_low_confidence_stages(
     """
     if not locked_video_understanding:
         return result
-    stage_codes = extract_low_confidence_stages(raw_result)
+    # 模型自报 ∪ 代码侧确定性检测（兜底模型漏报），最多 2 个，模型自报优先占位。
+    stage_codes = []
+    for code in [*extract_low_confidence_stages(raw_result), *detect_low_confidence_stages(result)]:
+        if code not in stage_codes:
+            stage_codes.append(code)
+    stage_codes = stage_codes[:2]
     if not stage_codes:
         return result
 
@@ -300,6 +306,50 @@ def extract_low_confidence_stages(raw_result: dict[str, Any]) -> list[str]:
             if code in {"S1", "S2", "S3", "S4", "S5", "S6"} and code not in codes:
                 codes.append(code)
     return codes[:2]
+
+
+# 占位证据单元（_NO_STAGE_/_NO_USAGE/_NO_CTA 等）和"证据不足"提示，是后处理写入的
+# 客观"素材不足"标记，不依赖模型自觉，可作为确定性回看触发信号。
+_PLACEHOLDER_EVIDENCE_RE = re.compile(r"_NO_|NO_STAGE|NO_USAGE|NO_CTA")
+_EVIDENCE_CAUTION_RE = re.compile(r"证据不足|待复核|需人工复核|未识别|未发现可|未验证|画面证据不足")
+
+
+def detect_low_confidence_stages(result: dict[str, Any]) -> list[str]:
+    """代码侧确定性兜底：用客观素材不足信号识别该回看的阶段，补模型自报的漏报。
+
+    判据（针对达人侧——分析主体）：
+    - 引用的是占位 evidence_unit（_NO_*），或 support_status=visual_only 且无有效口播/带待复核提示；
+    - 且 severity ∈ {large, medium}：只有"薄证据上的高后果判断"才值得花一次回看。
+    large 优先，最多 2 个，与现有 Phase C 约束一致。
+    """
+    creator_units = {
+        str(unit.get("id")): unit
+        for unit in result.get("video_understanding", {}).get("creator", {}).get("evidence_units", [])
+        if isinstance(unit, dict)
+    }
+    large: list[str] = []
+    medium: list[str] = []
+    for stage in result.get("stage_analysis", []):
+        if not isinstance(stage, dict):
+            continue
+        code = stage_code(stage.get("stage"))
+        severity = str(stage.get("severity") or "").strip().lower()
+        if not code or severity not in {"large", "medium"}:
+            continue
+        ids = [str(value) for value in stage.get("creator_evidence_ids", [])]
+        has_placeholder = any(_PLACEHOLDER_EVIDENCE_RE.search(item) for item in ids)
+        unit_visual = " ".join(str(creator_units.get(item, {}).get("visual_fact", "")) for item in ids)
+        stage_visual = " ".join(str(value) for value in stage.get("creator_visual_evidence", []))
+        has_caution = bool(_EVIDENCE_CAUTION_RE.search(unit_visual + " " + stage_visual))
+        visual_only = str(stage.get("creator_support_status") or "") == "visual_only"
+        no_voice = not str(stage.get("creator_quote") or "").strip()
+        if has_placeholder or (visual_only and (has_caution or no_voice)):
+            (large if severity == "large" else medium).append(code)
+    ordered: list[str] = []
+    for code in [*large, *medium]:
+        if code not in ordered:
+            ordered.append(code)
+    return ordered[:2]
 
 
 def payload_has_video(payload: dict[str, Any]) -> bool:

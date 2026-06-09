@@ -166,22 +166,39 @@ def stabilize_stage_severity(result: dict[str, Any]) -> None:
             )
 
         if stage_id == "S4" and sensory_effect_gap(text, creator_text, benchmark_text):
-            stage["severity"] = "large"
-            stage["gap"] = "标杆用闻香/口味等感官效果让家长相信孩子会喜欢，达人缺少对应效果验证，直接削弱购买意愿。"
-            stage["gap_summary"] = ["儿童牙膏的香味/口味是核心效果证据，达人未展示，S4 按 large 处理。"]
+            if creator_has_functional_effect(creator_text):
+                set_stage_small(
+                    stage,
+                    "达人已用按压用量/减少浪费等功能结果完成效果验证；标杆的香味/口味展示只能作为辅助体验，不覆盖达人核心卖点优势。",
+                    "功能效果已完成，感官体验缺口不判为中大差距。",
+                )
+            else:
+                stage["severity"] = "medium"
+                stage["gap"] = "标杆用闻香/口味等感官体验增强孩子愿意使用的想象，达人缺少对应体验验证，会削弱但不直接决定购买意愿。"
+                stage["gap_summary"] = ["感官体验展示不足，但不是压过功能卖点的硬伤。"]
 
-        if stage_id == "S2" and creator_has_product_intro(creator_text) and benchmark_has_product_intro(benchmark_text):
+        if stage_id == "S4" and creator_has_functional_effect(creator_text) and creator_effect_not_worse(text):
             set_stage_small(
                 stage,
-                "双方都完成产品引出，差异主要是切入角度不同：达人讲防浪费痛点，标杆讲口味/香味吸引。",
-                "S2 功能已完成，侧重点差异不判为中大差距。",
+                "达人已用功能结果完成效果验证，且该阶段不弱于标杆；香味/口味只能作为辅助体验，不判中大差距。",
+                "达人 S4 不弱于标杆，差距等级按 small 处理。",
             )
 
-        if stage_id == "S5" and creator_has_trust_claim(creator_text) and benchmark_missing_stage(benchmark_text):
+        if stage_id == "S4" and creator_has_functional_effect(creator_text) and mentions_sensory_gap(text):
             set_stage_small(
                 stage,
-                "达人提供了可听到或可看到的功能/数据型信任信息，标杆未设计独立信任环节。",
-                "达人在 S5 不弱于标杆，差距等级按 small 处理。",
+                "达人已用按压用量/减少浪费等功能结果完成效果验证；儿童牙膏的香味/孩子喜欢只能作为辅助体验，不压过核心功能卖点。",
+                "功能效果已完成，感官体验不判中大差距。",
+            )
+
+        # S2 不再无条件兜底 small：双方都完成产品引出不代表卖点质量相当，
+        # 需由 LLM 按品类消费者决策优先级判断卖点选择是否偏离。
+
+        if stage_id == "S5" and not has_real_endorsement(creator_text) and not has_real_endorsement(benchmark_text):
+            set_stage_small(
+                stage,
+                "双方均未提供第三方背书（认证/检测/测评/口碑/权威），S5 信任放大环节均未涉及；自述功效属卖点，不计为背书。",
+                "双方均未涉及 S5，差距按 small 处理。",
             )
 
         if stage_id == "S6" and creator_global_has_cta and not benchmark_global_has_cta:
@@ -303,16 +320,23 @@ def creator_not_worse(text: str) -> bool:
     return bool(re.search("|".join(positive_patterns), text, flags=re.IGNORECASE))
 
 
-def creator_has_product_intro(text: str) -> bool:
-    return bool(re.search(r"浪费|不浪费|泵|pump|pam|孩子|儿童|牙膏|product|解决|痛点", text, flags=re.IGNORECASE))
+def creator_effect_not_worse(text: str) -> bool:
+    positive_patterns = (
+        r"达人[^。；;]{0,40}(说服力强|更能说服|更强|更有效|优于)",
+        r"核心价值[^。；;]{0,24}(有效|清晰)",
+        r"标杆[^。；;]{0,40}(帮助不大|商业价值较低|仅展示|仅停留)",
+        r"直接命中[^。；;]{0,24}痛点",
+    )
+    return bool(re.search("|".join(positive_patterns), text, flags=re.IGNORECASE))
 
-
-def benchmark_has_product_intro(text: str) -> bool:
-    return bool(re.search(r"牙膏|水果味|口味|香|坏牙|防蛀|brand|product|儿童", text, flags=re.IGNORECASE))
 
 
 def creator_has_usage_demo(text: str) -> bool:
     return bool(re.search(r"按压|pump|pam|泵|刷牙|brush|一次|用量|挤|操作|演示|不浪费|membazir|guna", text, flags=re.IGNORECASE))
+
+
+def creator_has_functional_effect(text: str) -> bool:
+    return bool(re.search(r"浪费|不浪费|membazir|bazir|按压|pump|pam|泵|一次|用量|省|方便|cukup|senang", text, flags=re.IGNORECASE))
 
 
 def mentions_sensory_gap(text: str) -> bool:
@@ -327,16 +351,39 @@ def sensory_effect_gap(text: str, creator_text: str, benchmark_text: str) -> boo
     return benchmark_has_sensory and not creator_has_sensory and gap_mentions_missing and mentions_sensory_gap(combined)
 
 
-def creator_has_trust_claim(text: str) -> bool:
-    return bool(re.search(r"12\s*(小时|小時|jam|hrs)|防蛀|anti.?cavity|适合|2-12|数据|功能", text, flags=re.IGNORECASE))
+# 背书类型词（跨品类稳定）：监管认证 / 检测临床 / 测评口碑 / 权威推荐。
+# 刻意不含任何具体功效卖点——自述功效（如 12hrs 防蛀）是卖点不是背书，
+# 误把它当背书正是 stabilize 过拟合单一品类的根源。
+_ENDORSEMENT_PATTERN = (
+    r"认证|认可|检测报告|检验|临床|clinical|lab[\s-]?tested|certified|"
+    r"KKM|kelulusan|sijil|BPOM|halal|FDA|SNI|GMP|"
+    r"测评|评测|review|ulasan|口碑|testimoni|好评|回购|销量|畅销|"
+    r"医生|牙医|皮肤科|药剂师|专家|expert|dermatologist|doktor|权威|官方推荐|机构"
+)
+_ENDORSEMENT_RE = re.compile(_ENDORSEMENT_PATTERN, re.IGNORECASE)
+# 否定语境：把"无/没有/缺乏/未/tanpa/tiada/no + (第三方/独立/权威等) + 背书词"整段抹掉，
+# 避免"无第三方认证"被读成"有认证"。这是纯正则能力的边界，详见函数注释。
+_NEG_ENDORSEMENT_RE = re.compile(
+    r"(?:无|沒有|没有|没|缺乏|缺少|未[见有]?|不具备|非|tanpa|tiada|tidak\s*ada|bukan|without|lack[a-z ]*|\bno\b)"
+    # 否定后连续抹掉一串背书词（含限定词与连接符），处理"无第三方认证""tiada kelulusan KKM"这类多词连用
+    r"(?:\s*(?:第三方|独立|官方|权威|真正的?|实质性?|任何)?\s*(?:" + _ENDORSEMENT_PATTERN + r")[\s,，、和及]*)+",
+    re.IGNORECASE,
+)
+
+
+def has_real_endorsement(text: str) -> bool:
+    """是否含真背书（外部支撑），跨品类通用：监管认证 / 检测临床 / 测评口碑 / 权威推荐。
+
+    先抹掉否定语境再匹配，处理"无第三方认证"这类假阳性。
+    注意：这是纯正则能稳定到的上限——彻底泛化（语义级"卖点 vs 背书"判断）应改为
+    让模型输出结构化标记（同 product_visible 的做法），由代码消费。
+    """
+    cleaned = _NEG_ENDORSEMENT_RE.sub("", str(text or ""))
+    return bool(_ENDORSEMENT_RE.search(cleaned))
 
 
 def creator_has_cta(text: str) -> bool:
     return bool(re.search(r"买|购买|下单|小黄车|黄色|购物车|beg|kuning|grab|beli|direct|link|cart", text, flags=re.IGNORECASE))
-
-
-def benchmark_missing_stage(text: str) -> bool:
-    return bool(re.search(r"均未设计|未设计|未发现|缺失|没有明确|无明显CTA|无独立", text, flags=re.IGNORECASE))
 
 
 def set_stage_small(stage: dict[str, Any], gap: str | None = None, summary: str | None = None) -> None:
@@ -507,6 +554,13 @@ def ground_improvement_evidence(result: dict[str, Any]) -> None:
 
 
 def improvement_reference_stage(item: dict[str, Any], stages: list[Any]) -> dict[str, Any] | None:
+    target_match = re.search(r"\b(S[1-6])\b", str(item.get("target_stage") or ""), flags=re.IGNORECASE)
+    target_code = target_match.group(1).upper() if target_match else ""
+    if target_code:
+        target_index = int(target_code[1]) - 1
+        if 0 <= target_index < len(stages) and isinstance(stages[target_index], dict):
+            return stages[target_index]
+
     title = str(item.get("title") or "").lower()
     text = " ".join(str(item.get(key) or "") for key in ("title", "problem", "suggestion")).lower()
     keyword_stages = (
@@ -671,6 +725,56 @@ def downgrade_unverified_sensitive_claims(result: dict[str, Any]) -> None:
             note = "口播提及年龄或口腔护理相关主张；当前关键帧未核验包装信息。"
             facts = [str(value) for value in stage.get(f"{role}_visual_evidence", []) if str(value).strip()]
             stage[f"{role}_visual_evidence"] = list(dict.fromkeys([note, *facts]))
+
+# endregion
+
+
+# region derive --------------------------------------------------------------
+
+def derive_product_visibility(result: dict[str, Any], analysis: dict[str, Any]) -> None:
+    """从达人 evidence_units 的产品出镜标记确定性累加 product_visibility，覆盖模型估值。
+
+    口径：
+    - 只统计达人(creator)视频——product_visibility 描述的就是被改进的达人片段。
+    - product_visible=True 或 product_coverage∈{low,medium,high} 视为该时段产品在画面内。
+    - total_screen = 各出镜时段时长之和（evidence_units 沿时间线非重叠，直接累加并截到时长内）。
+    - ratio = total_screen / 视频时长，与 validate_product_visibility 校验口径一致。
+    优雅降级：缺时长或一个出镜标记都没有时不覆盖，沿用模型估算值，避免误判为产品全程缺席。
+    """
+    creator = result.get("video_understanding", {}).get("creator", {})
+    units = creator.get("evidence_units", []) if isinstance(creator, dict) else []
+    raw_duration = analysis.get("videos", {}).get("creator", {}).get("duration_seconds")
+    duration = float(raw_duration) if isinstance(raw_duration, (int, float)) and raw_duration else 0.0
+    if duration <= 0:
+        return
+
+    visible_spans: list[tuple[float, float]] = []
+    for unit in units if isinstance(units, list) else []:
+        if not isinstance(unit, dict) or not unit_product_visible(unit):
+            continue
+        start, end = parse_time_range_seconds(unit.get("time_range"), duration)
+        if end > start:
+            visible_spans.append((start, end))
+    if not visible_spans:
+        return
+
+    first_appearance = min(max(0.0, start) for start, _ in visible_spans)
+    total_screen = min(sum(end - start for start, end in visible_spans), duration)
+    result["product_visibility"] = {
+        "first_appearance_sec": round(min(first_appearance, duration), 2),
+        "total_screen_time_sec": round(total_screen, 2),
+        "video_duration_sec": round(duration, 2),
+        "ratio": round(total_screen / duration, 3),
+        "estimation_note": (
+            f"由达人 {len(visible_spans)} 个标记产品出镜的 evidence_unit 时段累加确定性算得，非模型估算。"
+        ),
+    }
+
+
+def unit_product_visible(unit: dict[str, Any]) -> bool:
+    if bool(unit.get("product_visible")):
+        return True
+    return str(unit.get("product_coverage") or "").strip().lower() in {"low", "medium", "high"}
 
 # endregion
 

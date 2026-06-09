@@ -149,6 +149,17 @@ def normalize_choice(value: Any, allowed: set[str], fallback: str) -> str:
     return normalized if normalized in allowed else fallback
 
 
+def normalize_bool_flag(value: Any) -> bool:
+    """把模型可能输出的 true/"yes"/1/"是" 等统一成 bool。"""
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"true", "yes", "1", "是", "有"}
+
+
+def normalize_product_coverage(value: Any) -> str:
+    return normalize_choice(value, {"none", "low", "medium", "high"}, "none")
+
+
 def normalize_module_id(value: Any, index: int) -> str:
     normalized = str(value or "").strip().upper()
     if normalized == "UNKNOWN":
@@ -221,6 +232,8 @@ def normalize_video_understanding(value: Any) -> dict[str, Any]:
                     "voiceover_zh": str(unit.get("voiceover_zh") or "").strip(),
                     "visual_fact": str(unit.get("visual_fact") or "").strip(),
                     "subtitle_fact": str(unit.get("subtitle_fact") or "").strip(),
+                    "product_visible": normalize_bool_flag(unit.get("product_visible")),
+                    "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
                 }
                 for index, unit in enumerate(units, start=1)
                 if isinstance(unit, dict)
@@ -451,6 +464,8 @@ def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dic
                 "visual_fact": str(unit.get("visual_fact") or "").strip(),
                 "subtitle_fact": str(unit.get("subtitle_fact") or "").strip(),
                 "audio_fact": str(unit.get("audio_fact") or "").strip(),
+                "product_visible": normalize_bool_flag(unit.get("product_visible")),
+                "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
             }
         )
     validate_single_video_facts(role, normalized, analysis)

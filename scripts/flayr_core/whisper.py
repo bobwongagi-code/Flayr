@@ -28,6 +28,13 @@ def run_whisper(
             result["errors"].append("language detection failed: falling back to -l auto")
     result["transcription_language"] = language
 
+    # 泰语走 VidLingo 专用泰语模型；语言检测仍用通用模型，仅转写阶段切换。
+    # 泰语模型缺失（whisper_model_th 为 None）时回退通用模型，保证主流程不断。
+    transcription_model = deps["whisper_model"]
+    if language == "th" and deps.get("whisper_model_th"):
+        transcription_model = deps["whisper_model_th"]
+    result["transcription_model_path"] = transcription_model
+
     if whisper_command == "whisper":
         command = [
             "whisper",
@@ -56,8 +63,8 @@ def run_whisper(
             "-f",
             str(audio_path),
         ]
-        if deps["whisper_model"]:
-            command[1:1] = ["-m", deps["whisper_model"]]
+        if transcription_model:
+            command[1:1] = ["-m", transcription_model]
         generated = output_prefix.with_suffix(".txt")
     else:
         command = [whisper_command, str(audio_path)]

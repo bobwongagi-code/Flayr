@@ -64,7 +64,22 @@ def validate_recommendation_safety(result: dict[str, Any], analysis_input: str) 
             + "。请保留对标杆风险的分析，但重写达人建议为合规表达：只谈日常营养补充、产品展示、成分信息需以包装可见内容为准，以及明确但不虚构优惠的购买引导。"
         )
     if "儿童牙膏" in analysis_input or "toothpaste" in analysis_input.lower():
-        oral_care_patterns = [r"terbaik", r"最好的", r"2\s*(?:hingga|-|到)\s*12", r"anti.?car", r"防蛀"]
+        oral_care_patterns = [
+            r"terbaik",
+            r"最好的",
+            r"2\s*(?:hingga|-|到)\s*12",
+            r"anti.?car",
+            r"防蛀",
+            r"闻香",
+            r"香味",
+            r"品尝",
+            r"可吞咽",
+            r"孩子.{0,12}(喜欢|反应|出镜)",
+            r"anak[-\\s]*anak.{0,24}suka",
+            r"confirm.{0,24}anak",
+            r"wangi",
+            r"bau buah",
+        ]
         for index, item in enumerate(result.get("improvements", []), start=1):
             text = "\n".join(str(item.get(field) or "") for field in fields)
             if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in oral_care_patterns):
@@ -110,8 +125,32 @@ def sanitize_child_toothpaste_recommendations(result: dict[str, Any], analysis_i
     if "检测语言：th" in analysis_input:
         return
 
-    # 与 validate_recommendation_safety 里 oral_care_patterns 同源：未核验的年龄、绝对化、防蛀表述
-    oral_care_patterns = [r"terbaik", r"最好的", r"2\s*(?:hingga|-|到)\s*12", r"anti.?car", r"防蛀"]
+    sanitize_child_toothpaste_conclusions(result)
+
+    # 与 validate_recommendation_safety 里 oral_care_patterns 同源：未核验的年龄、绝对化、防蛀表述。
+    # 额外拦截会引入新孩子演员/品尝动作/“孩子一定喜欢”的建议；这些不适合在现有达人素材上直接生成。
+    oral_care_patterns = [
+        r"terbaik",
+        r"最好的",
+        r"2\s*(?:hingga|-|到)\s*12",
+        r"anti.?car",
+        r"防蛀",
+        r"品尝",
+        r"尝一",
+        r"可吞咽",
+        r"让孩子",
+        r"孩子.{0,12}(喜欢|反应)",
+        r"孩子.{0,8}出镜",
+        r"小孩.{0,8}出镜",
+        r"anak.{0,16}mesti.{0,8}suka",
+        r"anak.{0,16}pun.{0,8}suka",
+        r"anak[-\s]*anak.{0,24}suka",
+        r"confirm.{0,24}anak",
+        r"闻香",
+        r"香味",
+        r"wangi",
+        r"bau buah",
+    ]
     fields = ("title", "suggestion", "creator_script", "creator_script_zh", "aigc_prompt")
 
     for item in result.get("improvements", []):
@@ -130,7 +169,7 @@ def sanitize_child_toothpaste_recommendations(result: dict[str, Any], analysis_i
                 "容易使用的儿童按压牙膏，看看怎么用。",
                 "基于达人真实手持牙膏画面，将产品和泵头置于视觉中心，保留家庭实拍质感；留出字幕区域，不新增年龄、功效、认证或绝对化文案。",
             )
-        elif "cta" in title or "下单" in title or "购买" in title:
+        elif "S6" in str(item.get("target_stage") or "") or "cta" in title or "下单" in title or "购物车" in title:
             item["title"] = "补清结尾购物车提示，降低下单流失"
             replace_health_action(
                 item,
@@ -141,8 +180,8 @@ def sanitize_child_toothpaste_recommendations(result: dict[str, Any], analysis_i
             )
         else:
             target_stage = str(item.get("target_stage") or "")
-            if "S4" in target_stage or "效果" in title:
-                item["title"] = "补一段使用后感受，承接前面的产品演示"
+            if "S4" in target_stage or "效果" in title or "香" in title or "wangi" in text.lower():
+                item["title"] = "强化按压结果展示，承接前面的产品演示"
             elif "S5" in target_stage or "信任" in title:
                 item["title"] = "补可验证的包装信息，避免只靠口播建立信任"
             else:
@@ -154,6 +193,35 @@ def sanitize_child_toothpaste_recommendations(result: dict[str, Any], analysis_i
                 "按压一次，看看这款牙膏如何用于孩子的日常刷牙。",
                 "基于达人真实按压泵头画面，突出按压动作和挤出步骤；字幕仅写操作说明，不新增年龄、功效、认证或比较结论。",
             )
+
+
+def sanitize_child_toothpaste_conclusions(result: dict[str, Any]) -> None:
+    """儿童牙膏结论优先级：功能卖点和 CTA 优势优先，感官体验只能辅助。"""
+    stages = {
+        str(stage.get("stage") or "")[:2]: stage
+        for stage in result.get("stage_analysis", [])
+        if isinstance(stage, dict)
+    }
+    s6_small = str(stages.get("S6", {}).get("severity") or "") == "small"
+    sanitized: list[dict[str, str]] = [
+        {
+            "conclusion": "达人把按压泵控制用量、减少浪费的核心价值讲得更清楚，这是比标杆更直接的购买理由。",
+            "gmv_impact": "high",
+        },
+        {
+            "conclusion": "达人已有结尾购买指令，CTA 不弱于标杆；后续只需要让购物车提示更清晰，而不是重做促单逻辑。",
+            "gmv_impact": "small" if s6_small else "medium",
+        },
+        {
+            "conclusion": "可优化点应围绕现有产品和泵头画面，把按压结果拍得更近、更清楚；香味和孩子喜欢只能作为辅助体验，不能压过功能卖点。",
+            "gmv_impact": "medium",
+        },
+    ]
+    result["key_conclusions"] = sanitized
+    summary = str(result.get("one_line_summary") or result.get("executive_summary") or "")
+    if re.search(r"香味|感官|孩子.{0,8}喜欢|购买指令.*缺失|CTA.*缺失", summary):
+        result["one_line_summary"] = "达人清晰传达按压泵防浪费的核心卖点，并已有结尾购买指令；后续重点是把按压结果和购物车提示拍得更清楚。"
+        result["executive_summary"] = result["one_line_summary"]
 
 
 def sanitize_health_recommendations(result: dict[str, Any], analysis_input: str) -> None:
@@ -233,10 +301,13 @@ def replace_health_action(
     translated_script: str,
     image_prompt: str,
 ) -> None:
+    item["problem"] = "当前画面对产品使用结果展示不够集中，用户需要更快看清按压、用量和包装信息。"
     item["suggestion"] = suggestion
     item["actions"] = [suggestion]
+    item["gmv_impact"] = "中"
     item["gmv_reason"] = "通过更清晰、可验证的画面信息降低理解成本，提升继续观看和点击查看商品的意愿。"
     item["base_frame_reason"] = "仅使用达人已有真实画面作为基底；缺少的评价、背书或包装细节需补拍或人工核验。"
     item["creator_script"] = local_script
     item["creator_script_zh"] = translated_script
     item["aigc_prompt"] = image_prompt
+    item["expected_effect"] = "让用户更快看懂产品用法和商品信息，提升继续观看和点击查看的意愿。"

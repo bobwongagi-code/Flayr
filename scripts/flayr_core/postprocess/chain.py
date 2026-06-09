@@ -32,6 +32,7 @@ from .repair import (
     align_timed_cta_from_transcript,
     bind_timed_transcript_quotes,
     deduplicate_stage_quotes,
+    derive_product_visibility,
     downgrade_unverified_sensitive_claims,
     fill_missing_evidence_references,
     ground_stage_visual_evidence,
@@ -62,5 +63,6 @@ def apply_postprocess_chain(normalized: dict[str, Any], analysis: dict[str, Any]
     deduplicate_stage_quotes(normalized)                                     # repair      跨阶段去重 quote 子句
     materialize_spoken_stage_evidence(normalized)                            # repair      有口播无时段证据时补 stage 占位
     fill_missing_evidence_references(normalized)                             # repair      引用错位时补占位或就近匹配
+    derive_product_visibility(normalized, analysis)                          # repair      达人产品出镜标记确定性累加 product_visibility
     stabilize_stage_severity(normalized)                                      # repair      severity 阶段归属漂移校准
     stabilize_improvement_priorities(normalized)                              # repair      Top 改进跟随最终商业判断
