@@ -47,18 +47,19 @@ from .utils import (
 # region align ---------------------------------------------------------------
 
 def align_clear_commerce_evidence(result: dict[str, Any]) -> None:
-    """按关键词把 benchmark 的高确定性事实归到对应阶段（KKM→S2, feedback→S4 等）。"""
+    """按关键词把 benchmark 的高确定性事实归到对应阶段（成分→S2, feedback→S4, KKM 认证→S5 等）。"""
     stages = result.get("stage_analysis", [])
     units = result.get("video_understanding", {}).get("benchmark", {}).get("evidence_units", [])
     if len(stages) != len(STAGES) or not isinstance(units, list):
         return
     assignments = {
-        1: find_evidence_unit(units, r"KKM|KKMA|kelulusan|认证"),
-        3: find_evidence_unit(units, r"feedback|testimoni|评论|反馈|testimonial"),
-        4: find_evidence_unit(
+        # 成分/卖点信息归产品引出 S2；第三方认证按功能归信任放大 S5（不归 S2）。
+        1: find_evidence_unit(
             [unit for unit in units if not re.search(r"KKM|KKMA|kelulusan|认证", json.dumps(unit, ensure_ascii=False), flags=re.IGNORECASE)],
             r"vitamin|collagen|成分",
         ),
+        3: find_evidence_unit(units, r"feedback|testimoni|评论|反馈|testimonial"),
+        4: find_evidence_unit(units, r"KKM|KKMA|kelulusan|认证"),
         5: find_evidence_unit(units, r"beli|bagun|troli|cart|dekat sini|下单|购买"),
     }
     for index, unit in assignments.items():
