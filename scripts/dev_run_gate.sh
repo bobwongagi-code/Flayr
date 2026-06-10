@@ -3,6 +3,9 @@
 # 用法：nohup scripts/dev_run_gate.sh >/dev/null 2>&1 &
 #       tail -f runs/_gate/status.log
 set -u
+# 自我保护：切断 stdin。后台作业的子进程（如 ffmpeg）读终端 stdin 会触发 SIGTTIN
+# 把整个进程组挂起（2026-06-10 实证：kakwan payload 构建卡死 30 分钟）。
+exec </dev/null
 cd "$(dirname "$0")/.."
 mkdir -p runs/_gate
 LOG=runs/_gate/status.log

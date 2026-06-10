@@ -321,13 +321,13 @@ def main() -> None:
         "size_mb": round(size_mb, 2),
         "postprocess": "_process_llm_result",
     }
-    print(f"[payload] text={t} image={i} audio={a} | {size_mb:.2f} MB")
+    print(f"[payload] text={t} image={i} audio={a} | {size_mb:.2f} MB", flush=True)
 
     # 硬校验：Phase B 必须挂上音频
     if a == 0:
-        print("❌ 音频段数为 0 —— Phase B 感官素材未生效，停止。")
+        print("❌ 音频段数为 0 —— Phase B 感官素材未生效，停止。", flush=True)
         sys.exit(1)
-    print(f"✅ 感官素材已挂载：{i} 帧 + {a} 段音频")
+    print(f"✅ 感官素材已挂载：{i} 帧 + {a} 段音频", flush=True)
 
     write_json(run / "dev_stage2_request.json", payload)
     if args.dry:
