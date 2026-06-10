@@ -293,6 +293,11 @@ def main() -> None:
     ap.add_argument("--repeat", type=int, default=1, help="重复调用次数，用于 severity 稳定性验收")
     ap.add_argument("--retries", type=int, default=2, help="每次调用失败后的重试次数")
     ap.add_argument("--reuse-existing", action="store_true", help="复用 dev_stage2_result_XX.json，不重新调 LLM")
+    ap.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="断点续跑：raw 结果已存在且可处理的 index 直接复用，缺的才调 LLM（中断重跑零浪费）",
+    )
     args = ap.parse_args()
 
     run = Path(args.run_dir)
@@ -344,6 +349,17 @@ def main() -> None:
             process_existing_once(run, idx, analysis, analysis_input, facts)
             for idx in range(1, args.repeat + 1)
         ]
+    elif args.skip_existing:
+        records = []
+        for idx in range(1, args.repeat + 1):
+            raw_result_path = run / f"dev_stage2_result_raw_{idx:02d}.json"
+            if raw_result_path.exists():
+                record = process_existing_once(run, idx, analysis, analysis_input, facts)
+                if record.get("ok"):
+                    print(f"[skip] 第 {idx} 次已有 raw 结果，复用。", flush=True)
+                    records.append(record)
+                    continue
+            records.append(call_once(run, api_key, idx, args.retries, analysis, analysis_input, facts))
     else:
         records = [
             call_once(run, api_key, idx, args.retries, analysis, analysis_input, facts)
