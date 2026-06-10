@@ -46,7 +46,8 @@
           "subtitle_fact": "画面中实际可读字幕；没有则留空。",
           "audio_fact": "该时段的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。",
           "product_visible": true,
-          "product_coverage": "该时段产品在画面中的视觉占比：none｜low｜medium｜high。看不到产品写 none。"
+          "product_coverage": "该时段产品在画面中的视觉占比：none｜low｜medium｜high。看不到产品写 none。",
+          "third_party_endorsement": "true|false：机构类型（监管认证/行业协会/评测实验室/高校研究/调研咨询/疾病防治中心）+ 其数据或结论在证明本产品价值，同时成立才 true；仅提机构名/赞助 logo/自述功效/用户评论为 false。定义与判例见 ARCHITECTURE.md §0.5。"
         }
       ]
     },
@@ -64,7 +65,8 @@
           "subtitle_fact": "画面中实际可读字幕；没有则留空。",
           "audio_fact": "该时段的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。",
           "product_visible": true,
-          "product_coverage": "该时段产品在画面中的视觉占比：none｜low｜medium｜high。看不到产品写 none。"
+          "product_coverage": "该时段产品在画面中的视觉占比：none｜low｜medium｜high。看不到产品写 none。",
+          "third_party_endorsement": "true|false：机构类型（监管认证/行业协会/评测实验室/高校研究/调研咨询/疾病防治中心）+ 其数据或结论在证明本产品价值，同时成立才 true；仅提机构名/赞助 logo/自述功效/用户评论为 false。定义与判例见 ARCHITECTURE.md §0.5。"
         }
       ]
     }

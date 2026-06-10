@@ -234,6 +234,7 @@ def normalize_video_understanding(value: Any) -> dict[str, Any]:
                     "subtitle_fact": str(unit.get("subtitle_fact") or "").strip(),
                     "product_visible": normalize_bool_flag(unit.get("product_visible")),
                     "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
+                    "third_party_endorsement": normalize_bool_flag(unit.get("third_party_endorsement")),
                 }
                 for index, unit in enumerate(units, start=1)
                 if isinstance(unit, dict)
@@ -466,6 +467,7 @@ def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dic
                 "audio_fact": str(unit.get("audio_fact") or "").strip(),
                 "product_visible": normalize_bool_flag(unit.get("product_visible")),
                 "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
+                "third_party_endorsement": normalize_bool_flag(unit.get("third_party_endorsement")),
             }
         )
     validate_single_video_facts(role, normalized, analysis)

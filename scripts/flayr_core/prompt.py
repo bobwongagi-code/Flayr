@@ -22,7 +22,6 @@ from .artifacts import (
     format_seconds,
     get_focus_frame_entries,
     get_frame_entries,
-    get_stage_frame_entries,
     sample_evenly,
 )
 from .shot_track import render_shot_track_markdown
@@ -243,20 +242,3 @@ def render_timeline_frame_markdown(info: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def render_stage_frame_markdown(info: dict[str, Any]) -> str:
-    """阶段代表帧列表。
-
-    TODO: 当前 write_analysis_input 没有调用此函数（dead code 候选）。
-          按用户拆分约束 #7 "按当前实际行为归类，不顺手删"，搬家时保留。
-          若后续确认无用应整体删除（含 artifacts.get_stage_frame_entries 是否也只服务这一处）。
-    """
-    entries = get_stage_frame_entries(info)
-    if not entries:
-        return "（无）"
-    lines = []
-    for item in entries:
-        timestamp = format_seconds(item.get("timestamp_seconds"))
-        stage = item.get("stage") or item.get("label") or "stage"
-        path = item.get("path") or ""
-        lines.append(f"- {stage} @ {timestamp}: {path}")
-    return "\n".join(lines)

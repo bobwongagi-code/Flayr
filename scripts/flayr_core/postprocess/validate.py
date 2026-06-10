@@ -112,6 +112,79 @@ def validate_quality_contract(result: dict[str, Any], analysis: dict[str, Any]) 
     validate_module_ids(result)
     validate_stage_time_coherence(result)
     validate_product_visibility(result, analysis)
+    validate_narrative_evidence_consistency(result)
+
+
+# Q19 用：S6 口播/字幕中的购买指令信号，与 repair.align_timed_cta 的关键词口径一致。
+_CTA_SIGNAL_RE = re.compile(
+    r"\b(beli|troli|klik|cart|checkout|order|link|direct)\b|购买|下单|购物车|点击|check\s*out|bag\s+kuning|beg\s+kuning",
+    re.IGNORECASE,
+)
+_NO_CTA_CLAIM_RE = re.compile(
+    r"无\s*CTA|没有(明确的?)?(CTA|购买指令|行动指令|购买路径)|缺乏?(明确的?)?(CTA|购买指令|行动指令)"
+    r"|CTA\s*缺失|未(给出|提供|出现)(明确的?)?(CTA|购买指令)|CTA\s*前(就)?结束",
+    re.IGNORECASE,
+)
+_HAS_CTA_CLAIM_RE = re.compile(
+    r"明确(的)?(告知|提及|给出|引导|购买指令|行动指令|CTA)|清晰的?购买(路径|指令)",
+    re.IGNORECASE,
+)
+
+
+def validate_narrative_evidence_consistency(result: dict[str, Any]) -> None:
+    """Q19：S6 叙事文本与口播证据矛盾时写警告，不阻断。
+
+    实证（2026-06-10，双向）：are_xie S6 假阴性（达人口播近半是购买指令，叙事却写
+    "在有效 CTA 前结束"）；kakwan S6 假阳性（达人无任何购买指令，Phase C 叙事却写
+    "明确告知链接在购物车"）。quote 有 validate_transcript_attribution 管，叙事文本在此兜底。
+    """
+    stages = result.get("stage_analysis", [])
+    if len(stages) < 6:
+        return
+    cta = stages[5]
+    understanding = result.get("video_understanding", {})
+    narrative = "。".join(
+        [
+            str(cta.get("gap") or ""),
+            "。".join(str(item) for item in cta.get("gap_summary") or []),
+            str(cta.get("creator_summary") or ""),
+            str(cta.get("creator_key_message") or ""),
+            str(cta.get("benchmark_summary") or ""),
+            str(cta.get("benchmark_key_message") or ""),
+        ]
+    )
+    warnings: list[str] = []
+    for role, subject in (("creator", "达人"), ("benchmark", "标杆")):
+        # 证据面：阶段 quote/画面 + 所引用 evidence_unit 的口播/字幕/信息。
+        references = {str(value) for value in cta.get(f"{role}_evidence_ids", [])}
+        unit_texts = [
+            f"{unit.get('voiceover') or ''} {unit.get('subtitle_fact') or ''} {unit.get('information') or ''}"
+            for unit in understanding.get(role, {}).get("evidence_units", [])
+            if isinstance(unit, dict) and str(unit.get("id")) in references
+        ]
+        evidence = " ".join(
+            [
+                str(cta.get(f"{role}_quote") or ""),
+                " ".join(str(value) for value in cta.get(f"{role}_visual_evidence") or []),
+                *unit_texts,
+            ]
+        )
+        has_signal = bool(_CTA_SIGNAL_RE.search(evidence))
+        # 只看主语含该 role 的子句，避免"标杆有/达人无"互相误伤。
+        for clause in re.split(r"[。；;.!?]", narrative):
+            if subject not in clause:
+                continue
+            if _NO_CTA_CLAIM_RE.search(clause) and has_signal:
+                warnings.append(
+                    f"[Q19] S6 叙事称{subject}缺少 CTA，但其证据含明确购买指令，叙事与证据矛盾，需人工复核。"
+                )
+                break
+            if _HAS_CTA_CLAIM_RE.search(clause) and not has_signal:
+                warnings.append(
+                    f"[Q19] S6 叙事称{subject}有明确 CTA/购买引导，但其证据未见购买指令，疑似脑补，需人工复核。"
+                )
+                break
+    append_qa_warnings(result, warnings)
 
 
 def validate_module_ids(result: dict[str, Any]) -> None:
