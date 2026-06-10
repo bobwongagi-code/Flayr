@@ -204,12 +204,15 @@ def validate_narrative_evidence_consistency(result: dict[str, Any]) -> None:
         for clause_subject, clause in _subject_clauses(narrative):
             if clause_subject != subject:
                 continue
-            if _NO_CTA_CLAIM_RE.search(clause) and has_signal:
-                warnings.append(
-                    f"[Q19] S6 叙事称{subject}缺少 CTA，但其证据含明确购买指令，叙事与证据矛盾，需人工复核。"
-                )
-                break
-            if _HAS_CTA_CLAIM_RE.search(clause) and not has_signal:
+            # 同一子句两种声称互斥：否定声称（"缺乏明确的购买指令"）内含肯定词组，
+            # 必须先判否定、命中即不再判肯定，否则否定子句会误触发"疑似脑补"分支。
+            if _NO_CTA_CLAIM_RE.search(clause):
+                if has_signal:
+                    warnings.append(
+                        f"[Q19] S6 叙事称{subject}缺少 CTA，但其证据含明确购买指令，叙事与证据矛盾，需人工复核。"
+                    )
+                    break
+            elif _HAS_CTA_CLAIM_RE.search(clause) and not has_signal:
                 warnings.append(
                     f"[Q19] S6 叙事称{subject}有明确 CTA/购买引导，但其证据未见购买指令，疑似脑补，需人工复核。"
                 )
