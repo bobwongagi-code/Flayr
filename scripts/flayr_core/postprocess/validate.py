@@ -129,6 +129,36 @@ _HAS_CTA_CLAIM_RE = re.compile(
     r"明确(的)?(告知|提及|给出|引导|购买指令|行动指令|CTA)|清晰的?购买(路径|指令)",
     re.IGNORECASE,
 )
+# 比较性指代（"标杆那种""不弱于标杆""像达人"）不是主语，识别主语前先剥掉。
+_ROLE_REF_RE = re.compile(r"(像|如|与|和|比|于|借鉴|参考|对比)(达人|标杆)|(达人|标杆)(那种|那样|的|般|式)")
+
+
+def _subject_clauses(narrative: str) -> list[tuple[str, str]]:
+    """把叙事拆成（主语, 子句）对：句内按逗号细分，无主语段继承句内最近主语。
+
+    实证驱动的两种 gap 形态：①"标杆X，达人Y"对比句（逗号分隔、各自主语，整句归一个
+    主语会互串）；②"达人…，但明确告知…"（主语只在首段、后段继承）。
+    """
+    pairs: list[tuple[str, str]] = []
+    for sentence in re.split(r"[。；;!?\n]", narrative):
+        current = ""
+        for segment in re.split(r"[，,]", sentence):
+            stripped = _ROLE_REF_RE.sub("", segment)
+            has_creator = "达人" in stripped
+            has_benchmark = "标杆" in stripped
+            if has_creator and has_benchmark:
+                # 罕见的段内双主语：两边都查，且不向后继承
+                pairs.append(("达人", segment))
+                pairs.append(("标杆", segment))
+                current = ""
+                continue
+            if has_creator:
+                current = "达人"
+            elif has_benchmark:
+                current = "标杆"
+            if current:
+                pairs.append((current, segment))
+    return pairs
 
 
 def validate_narrative_evidence_consistency(result: dict[str, Any]) -> None:
@@ -170,9 +200,9 @@ def validate_narrative_evidence_consistency(result: dict[str, Any]) -> None:
             ]
         )
         has_signal = bool(_CTA_SIGNAL_RE.search(evidence))
-        # 只看主语含该 role 的子句，避免"标杆有/达人无"互相误伤。
-        for clause in re.split(r"[。；;.!?]", narrative):
-            if subject not in clause:
+        # 只看主语归属该 role 的子句（句内逗号细分+主语继承），避免"标杆有/达人无"互相误伤。
+        for clause_subject, clause in _subject_clauses(narrative):
+            if clause_subject != subject:
                 continue
             if _NO_CTA_CLAIM_RE.search(clause) and has_signal:
                 warnings.append(

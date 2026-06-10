@@ -86,6 +86,30 @@ r4 = mk("标杆明确给出购买指令，达人缺乏明确的购买指令", "(
 validate_narrative_evidence_consistency(r4)
 check("Q19 双主语不互串", not r4.get("qa_warnings"), str(r4.get("qa_warnings"))[:80])
 
+# are_xie 真实形态："标杆那种"是比较指代非主语，不得切换主语归属
+r5 = mk(
+    "达人视频在有效 CTA 前结束，且缺乏标杆那种强烈的行动指令和紧迫感营造",
+    "Pastikan beli dekat bag kuning. Check out sekarang.",
+    "Kalau nak beli, order dekat bag kuning",
+)
+validate_narrative_evidence_consistency(r5)
+r5_warnings = r5.get("qa_warnings") or []
+check(
+    "Q19 比较指代不切换主语（are_xie 真实 gap）",
+    len(r5_warnings) == 1 and "达人" in r5_warnings[0],
+    str(r5_warnings)[:90],
+)
+
+# kakwan 真实形态：主语只在首段，后段逗号继承
+r6 = mk("达人虽未使用黄袋这一特定术语，但明确告知用户链接在购物车里，提供了清晰的购买路径，与标杆的引导效果一致", "dia punya review pun ada dekat background ni")
+validate_narrative_evidence_consistency(r6)
+r6_warnings = r6.get("qa_warnings") or []
+check(
+    "Q19 主语继承（kakwan 真实多逗号 gap）",
+    len(r6_warnings) == 1 and "达人" in r6_warnings[0] and "脑补" in r6_warnings[0],
+    str(r6_warnings)[:90],
+)
+
 # 4. endorsement tag 两条归一化路径透传
 from flayr_core.llm.parse import normalize_video_understanding  # noqa: E402
 
