@@ -28,7 +28,7 @@
 | S3 | small | small ✓ | 双方均未展示吞服动作，成分罗列符合品类特性 |
 | S4 | large | large ✓ | 缺用户反馈/效果具象化承诺 |
 | S5 | **large** | medium ✗ | 标杆有 KKM 政府认证（位置靠前，但功能即 S5 背书——"看功能不看位置"）vs 达人零背书。认证→S5 修正后应自愈，回归验证点 |
-| S6 | medium（**归因必须重写**） | medium，归因✗ | 系统称"视频在有效 CTA 前结束"是事实错误：转写 23-40 行近半为 CTA（bag kuning×3、direct HQ×4、beli×4、check out sekarang、jangan tunggu）。正确归因：CTA 过度硬推 + S1-S4 卖点链断裂导致 CTA 无效；标杆是 S1-S5 讲顺后顺水推舟 |
+| S6 | small（2026-06-11 复议：原 medium，门禁中模型 5/5 稳定判 small，用户采纳） | medium，归因✗ | **归因错误记录保留**：系统当时称"视频在有效 CTA 前结束"是事实错误（转写 23-40 行近半为 CTA：bag kuning×3、direct HQ×4、beli×4、check out、jangan tunggu），已由 Q19 防护。severity 本身复议为 small；"CTA 过度硬推 + 上游卖点链断裂"作为内容洞察保留 |
 
 ### kakwanreview（一次性马桶刷，ms）
 

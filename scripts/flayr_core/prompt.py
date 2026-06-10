@@ -115,6 +115,7 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
         "12. 健康品类不得建议疾病治疗、激素/月经调节、排出血块或保证效果等高风险话术；如标杆包含此类表达，应指出合规风险并给低风险替代。",
         "13. 必须输出 holistic_assessment（每维独立评估，禁止复制）、key_conclusions（1-5 条消费者视角关键结论）、product_visibility、loop_closure；产品可见度无法精确统计时要标明估算依据。",
         "14. severity 必须差异化：按 ANALYSIS-PROMPT.md 的标尺判断，large/medium/small 至少要出现 2 种。达人做到位或持平的阶段给 small，不能全给 medium。gap_summary 写'无明显差距'时 severity 必须是 small。",
+        "14a. 每阶段 task_completion 只能输出 complete、partial、missing 三选一，评估的是达人侧该阶段功能完成度（完成/部分完成/未做）。禁止 both_complete、completed、双侧组合词或任何自由文本；标杆侧完成情况写在 benchmark_summary，不写进此字段。",
         "15. JSON 输出保持简洁：每个视频列出 3~6 个关键 evidence_units；任何差距、证据或动作列表最多 3 条；每个描述字段最多一句；禁止重复列举未出现的音效、镜头或功能。",
         "16. 输出前按 QA-RULES.md 自检：证据引用必须存在且与阶段时间相交，module_id 必须来自 structure_library_full.md，product_visibility 数值必须自洽。",
         "17. 如果需要写回系统，请只输出符合 references/analysis-output-schema.json 的 JSON。",

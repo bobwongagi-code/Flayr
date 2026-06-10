@@ -149,6 +149,51 @@ def normalize_choice(value: Any, allowed: set[str], fallback: str) -> str:
     return normalized if normalized in allowed else fallback
 
 
+def normalize_task_completion(value: Any) -> str:
+    """把 task_completion 归一为 complete|partial|missing（达人侧功能完成度）。
+
+    2026-06-11 门禁 T5 发现：模型原始输出是自由文本（'both_complete'/'completed'/
+    'benchmark_complete_creator_partial'/'双方均完成了任务'…），旧 normalize_choice 的
+    fallback 把一切压成 partial——语义直接错（both_complete 应为 complete）。
+    本函数是过渡 shim：prompt 已强制枚举（治本），shim 兜历史漂移；映射规则覆盖
+    门禁实测的全部观察值。语义锚定达人侧：双侧编码取 creator 段。
+    """
+    text = str(value or "").strip().lower()
+    if text in {"complete", "partial", "missing"}:
+        return text
+    # 英文双侧编码：取 creator 侧状态
+    match = re.search(r"creator[_\s]*(completed?|partial|incomplete|missing|only|superior|better|stronger|weaker)", text)
+    if match:
+        word = match.group(1)
+        if word in {"complete", "completed", "only", "superior", "better", "stronger"}:
+            return "complete"
+        if word == "missing":
+            return "missing"
+        return "partial"
+    # 只提 benchmark 强（隐含达人弱）
+    if re.search(r"benchmark[_\s]*(superior|better|stronger)", text):
+        return "partial"
+    # 中文达人侧
+    if "达人" in text:
+        creator_part = text.split("达人", 1)[1]
+        # "达人未完成/未涉及…"直接开头 = 功能未达成 → missing（"未能充分"类弱否定除外）；
+        # "达人完成了X，但未完成Y" 后文才出现否定 = partial。
+        if re.match(r"\s*未(?!能)", creator_part) or re.search(r"未涉及|未设计|没有(做|设计|涉及)|未做", creator_part):
+            return "missing"
+        if re.search(r"未完成|部分|基本完成|不完整|不足|仅", creator_part):
+            return "partial"
+        if re.search(r"完成|做到", creator_part):
+            return "complete"
+    # 单值/双方（"均(清晰/出色…)完成"允许间插修饰词，但"均未完成"归 missing 在前已拦）
+    if re.search(r"both[_\s]*missing|均未(完成|涉及|设计)|missing|absent|none|未涉及|未设计", text):
+        return "missing"
+    if re.search(r"both[_\s]*(completed?|done|full)|^(completed?|full|done|finished|good|well|ok)$|(双方)?均(?!未).{0,6}完成|完成出色|出色完成", text):
+        return "complete"
+    if re.search(r"partial|incomplete|部分|基本完成|不完整|不足|weak", text):
+        return "partial"
+    return "partial"
+
+
 def normalize_bool_flag(value: Any) -> bool:
     """把模型可能输出的 true/"yes"/1/"是" 等统一成 bool。"""
     if isinstance(value, bool):
@@ -355,7 +400,7 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 "benchmark_module_id": normalize_module_id(item.get("benchmark_module_id"), index + 1),
                 "module_fit": normalize_choice(item.get("module_fit"), {"fit", "degraded", "unfit", "unknown"}, "unknown"),
                 "module_fit_reason": str(item.get("module_fit_reason") or "").strip(),
-                "task_completion": normalize_choice(item.get("task_completion"), {"complete", "partial", "missing"}, "partial"),
+                "task_completion": normalize_task_completion(item.get("task_completion")),
                 "gap_type": normalize_choice(item.get("gap_type"), {"structural", "execution", "resource"}, "structural"),
                 "gap_summary": normalize_evidence(item.get("gap_summary")),
                 "voice_performance": normalize_voice_performance(item.get("voice_performance")),

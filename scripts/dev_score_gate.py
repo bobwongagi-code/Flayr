@@ -28,7 +28,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # 人类真相源：references/ground-truth-labels.md（2026-06-10 用户定标）。此处为机器副本。
 LABELS: dict[str, dict[str, str]] = {
-    "sample-are_xie": {"S1": "large", "S2": "medium", "S3": "small", "S4": "large", "S5": "large", "S6": "medium"},
+    # are_xie S6：2026-06-11 用户复议 medium→small（门禁中模型 5/5 稳定判 small，采纳）
+    "sample-are_xie": {"S1": "large", "S2": "medium", "S3": "small", "S4": "large", "S5": "large", "S6": "small"},
     "sample-kakwanreview": {"S1": "large", "S2": "medium", "S3": "medium", "S4": "small", "S5": "small", "S6": "large"},
     "sample-tashadiyana": {"S1": "medium", "S2": "small", "S3": "small", "S4": "large", "S5": "small", "S6": "small"},
 }
