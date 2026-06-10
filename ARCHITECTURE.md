@@ -4,6 +4,78 @@
 
 ---
 
+## 0. 契约（spec §0）
+
+> 本节是系统的**唯一真相源契约**（2026-06-10 落定）：只描述实际存在的东西，不写愿景。
+> 各文档（framework / ANALYSIS-PROMPT / QA-RULES）对本节内容只引用不复制；冲突时以本节为准。
+> 任何"要不要加 X"的提案先对照本节自查，避免基于过时结构或臆想决策。
+
+### 0.1 素材包清单（每条视频，`process_video` 产出）
+
+| 产物 | 生成者 | 可选 | 失败降级 |
+|---|---|---|---|
+| `frames/`（全片 1fps） | ffmpeg | 必需 | 缺 ffmpeg 时记 error，主流程继续 |
+| `focus_frames/`（首尾 5s 各 2fps，Hook/CTA） | ffmpeg | 必需 | 同上 |
+| `audio.wav`（混音，**不分轨**——人声分离已评估不采纳） | ffmpeg | 必需 | 同上 |
+| `transcript.txt / .srt / .zh.txt` | whisper-cli（泰语自动切 th 专用模型，缺则回退通用） | 必需 | 占位文本，主流程继续 |
+| `shot_track.json`（自适应镜头边界） | ffmpeg 场景检测 | 默认开（零成本） | 状态标记，缺失显示占位 |
+| `subtitle_track.json`（OCR 权威字幕轨） | qwen-vl-ocr，auto 策略（有 DashScope key 即开） | 可选 | 状态标记，缺失显示占位 |
+| `_preprocess.json`（复用缓存） | flayr.py | 自动 | `--reuse-preprocessing` 命中即跳过重抽 |
+
+### 0.2 两阶段架构 + Phase C
+
+- **阶段一（事实）**：omni 每视频一次，吃原生视频（fps3 重编码+完整音轨），产出 `video_facts_{role}.json` 的
+  `evidence_units[]`。事实一旦产出即**锁定**（阶段二/Phase C 不得增删改）。
+- **阶段二（判断）**：锁定 facts + analysis_input.md（产品信息/三层指引/结构库/QA/schema + 字幕轨/镜头轨）
+  单次调用完成 S1-S6 对比、improvements、key_conclusions。
+- **Phase C（回看）**：模型自报 ∪ 代码确定性检测（占位证据/visual_only + medium/large），≤2 阶段、
+  仅一次；切对应阶段原生片段（含音轨）重判，整对象替换后重跑后处理链。规范见 0.6。
+- **后处理链**：validate（阻断→repair 重试）/ repair（确定性修补）/ qa_warnings（软警告）。
+
+### 0.3 字段唯一真相源
+
+`references/analysis-output-schema.json`。evidence_unit 含多模态事实字段 + 结构化标记
+（`product_visible` / `product_coverage` / `third_party_endorsement`）；标记由模型按定义判，
+代码只做确定性消费（占比累加、归属搬运、severity 一致性），不得用正则重新推断语义。
+
+### 0.4 stabilize 终态宪法
+
+> **stabilize 只做一致性修复（severity ↔ task_completion ↔ gap 文本矛盾收敛）和归属搬运；
+> 一切品类/商业判断归模型（prompt 框架），代码不再做。**
+
+推论：`task_completion=partial` 档代码不替模型定级、只查矛盾；禁止新增"partial→medium"类映射。
+现存品类正则按 TODO #1 处置清单处理，删除前必须通过生死测量门禁（预注册阈值）。
+
+### 0.5 第三方背书定义（`third_party_endorsement` 的判定规格）
+
+机构类型 + 关联性门槛**同时成立**才为 true：
+- 机构类型：监管/认证机构（KKM、Halal、SIRIM、TISI…）、行业协会、第三方评测中心/实验室、
+  高校与研究机构、三方调研咨询公司、疾病·医院·防治中心。
+- 关联性门槛：该机构的实验/数据/研究**在证明本产品价值**。
+
+判例：大学检测报告证明本品杀菌率 → true；画面出现 KKM 认证标号 → true；
+仅提机构名/赞助商/合作 logo（无证明本品价值的数据） → false；达人自称"用了三年" → false（自述）；
+用户评论截图 → false（社会证明，属 S5 信任内容但非机构背书）。
+
+### 0.6 Phase C 输入/输出规范
+
+- 输入：目标阶段的标杆+达人原生切片（fps3、480px、含音轨），时间窗 = 阶段 time_range **±2s 缓冲**；
+  prompt 必须告知"切片边界可能有误差，按功能归属判断，勿把相邻阶段内容算进本阶段"。
+- 输出：完整 stage 对象整体替换；引用口播必须能对上切片音频/转写，听不清标 voice_only 并写明，
+  **禁止推断补全未听清的话术**（kakwan S6 幻觉教训）；回看 prompt 不得含方向性压力
+  （如"持平必须给 small"——已删）。
+- 合并后重跑全套校验；facts 不可改。
+
+### 0.7 验收与回归原则
+
+- 回归集 = **输入视频 + `references/ground-truth-labels.md` 人工标签**；绝不 diff runs/ 存档输出。
+- stabilize 重构的验收：4 样本（3 新 + 牙膏）× 预注册阈值（开跑前写死）× 标签一致率。
+  QA-RULES §10 旧 PASS 定义围绕旧 stabilize + 单一牙膏 run 校准，重构后须按此重写。
+- 框架判例五条（省钱前提 / CTA 过度=硬推 / S1-S6 位置先验 / 弱 CTA≠有效 / 镜头语言）
+  见 `references/ground-truth-labels.md` 末节，已写入对应指引文档。
+
+---
+
 ## 1. 产品阶段
 
 ### 当前阶段：Insight / Report MVP

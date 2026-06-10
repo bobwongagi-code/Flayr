@@ -223,6 +223,7 @@ def build_video_fact_payload(
                             "audio_fact": "该时刻的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。",
                             "product_visible": True,
                             "product_coverage": "该时段产品在画面里的视觉占比：none｜low｜medium｜high。看不到产品写 none。",
+                            "third_party_endorsement": False,
                         }
                     ],
                 },
@@ -266,6 +267,10 @@ def build_video_fact_payload(
         "每条还要标 product_visible（该时段画面里能否看到产品本体，true/false）与 product_coverage"
         "（产品视觉占比 none｜low｜medium｜high，看不到写 none）：这两项用于确定性统计产品出镜，"
         "据画面如实标，产品被手遮住或只露局部按真实可见程度给 low；"
+        "再标 third_party_endorsement（true/false）：该时段内容是否构成第三方机构背书——"
+        "机构类型（监管认证如 KKM/Halal/SIRIM、行业协会、评测中心/实验室、高校研究、调研咨询、"
+        "疾病防治中心）且其数据/实验/结论在证明本产品价值，两者同时成立才 true；"
+        "仅出现机构名字、赞助或合作 logo、达人自述功效、普通用户评论，都是 false；"
         "voiceover 必须逐字来自当前视频 transcript.srt，画面看不清的时段在 visual_fact 写画面证据不足待复核；"
         "无 BGM 或无明显音效时 audio_fact 写无，不要臆造。"
         "不得臆造牙齿前后对比、用户评论、证书、检测报告、认证、价格、优惠或功效。"
@@ -436,6 +441,7 @@ def build_stage_review_payload(
                 [
                     "# Phase C 低置信阶段回看",
                     "你将看到低置信阶段对应的原生视频切片（含画面和声音）。",
+                    "切片边界可能有 ±2 秒误差，可能混入相邻阶段内容；判断按功能归属，不要把相邻阶段内容算进本阶段。",
                     "只重判 target_stages 中列出的阶段；不要改写 video_understanding，不要新增 evidence_unit。",
                     "必须先在 gap 字段写清判断依据（达人做了什么→标杆做了什么→对购买意愿影响），再给 severity。",
                     "只输出严格 JSON，不要 Markdown。",
@@ -507,7 +513,11 @@ def build_stage_review_payload(
                     "本轮只能基于用户给出的 facts 和原生视频切片，重判指定 S1-S6 阶段。"
                     "不得新增、删除或改写 evidence_units；可修正该阶段的 gap、severity、support_status、summary、quote 和 evidence 引用。"
                     "severity 仍按购买意愿影响定级：large=直接影响购买意愿的硬伤；medium=削弱说服力但不致命；small=细节瑕疵或达人持平/更优。"
-                    "回看后如果达人持平或更优，必须给 small。不要继续要求更多素材。"
+                    # 接地约束：禁止从含糊音频脑补话术（kakwan S6 幻觉教训）；不预设判断方向。
+                    "判断只能基于切片中真实听到/看到的内容：引用口播必须能对上切片音频，"
+                    "听不清就写听不清并标 voice_only，禁止推断或补全未听清的话术。"
+                    "达人持平或更优时如实给 small，达人明显缺失时如实给 large，不预设任何方向。"
+                    "不要继续要求更多素材。"
                 ),
             },
             {"role": "user", "content": content},
@@ -533,8 +543,9 @@ def build_stage_review_video_inputs(
                 continue
             time_range = str(stage.get(f"{role}_time_range") or stage.get("time_range") or "")
             start, end = parse_time_range_seconds(time_range, info.get("duration_seconds"))
-            padded_start = max(0.0, start - 0.5)
-            padded_end = min(float(info.get("duration_seconds") or end), end + 0.5)
+            # ±2s 缓冲：阶段 time_range 是模型估计，边界偏差常见；prompt 已告知按功能归属判断。
+            padded_start = max(0.0, start - 2.0)
+            padded_end = min(float(info.get("duration_seconds") or end), end + 2.0)
             data_url = video_to_data_url(
                 video_path,
                 fps=3.0,

@@ -382,6 +382,22 @@ PY
 
 期望输出：`2`。
 
+### Q19 S6 叙事文本与口播证据一致性
+
+规则：
+
+- S6 叙事（gap/gap_summary/summary/key_message）声称某方"缺少 CTA"，但该方证据
+  （quote/visual_evidence/所引 evidence_unit）含明确购买指令 → 警告（假阴性，实证 are_xie S6）。
+- 叙事声称某方"明确告知/清晰购买路径"，但其证据未见购买指令 → 警告（假阳性/疑似脑补，
+  实证 kakwan S6 Phase C 幻觉）。
+- 子句级主语匹配（达人/标杆），避免"标杆有、达人无"互相误伤。
+
+处理：已警告（不阻断）。
+
+实现位置：
+
+- `scripts/flayr_core/postprocess/validate.py::validate_narrative_evidence_consistency`
+
 ---
 
 ## 8. 当前缺口
