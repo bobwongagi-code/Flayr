@@ -47,6 +47,11 @@ def _select_archetype(profile: dict[str, Any] | None) -> str | None:
         return None
     if profile.get("decision_threshold") == "impulse":
         return "impulse_low_price"
+    # 框架"客单越低 CTA 权重越高"：低客单+功能性日用品按冲动品原型处理——
+    # round3 实测模型对马桶刷的 decision_threshold 在 considered/impulse 间摆（4:1），
+    # 而 price_tier=low 稳定，政策锚定在稳的事实上。
+    if profile.get("price_tier") == "low" and profile.get("drive_type") == "functional":
+        return "impulse_low_price"
     if profile.get("drive_type") in {"emotional", "mixed"}:
         return "high_decision_sensory"
     return "high_decision_rational"
@@ -55,6 +60,20 @@ def _select_archetype(profile: dict[str, Any] | None) -> str | None:
 def _side_text(stage: dict[str, Any], side: str) -> str:
     keys = [f"{side}_summary", f"{side}_key_message", f"{side}_quote_zh", f"{side}_quote"]
     return " ".join(str(stage.get(k) or "") for k in keys)
+
+
+def _painpoint_tokens(painpoints: list[str]) -> list[str]:
+    """痛点词条分词：模型常输出 'kebersihan (卫生)' 复合串，整串匹配永不命中。
+
+    按括号/分隔符拆成独立 token（马来语短语 + 中文词各自成条），过滤过短噪声。
+    """
+    tokens: list[str] = []
+    for entry in painpoints:
+        for part in re.split(r"[()（）/、,，;；|]", str(entry)):
+            part = part.strip()
+            if len(part) >= 2:
+                tokens.append(part)
+    return tokens
 
 
 def _hits(text: str, words: list[str]) -> bool:
@@ -131,7 +150,7 @@ def derive_severity_from_facts(result: dict[str, Any]) -> None:
     profile = result.get("category_profile") if isinstance(result.get("category_profile"), dict) else None
     archetype = _select_archetype(profile)
     weights = ARCHETYPE_W.get(archetype) if archetype else None
-    painpoints = [str(p) for p in (profile or {}).get("painpoints") or [] if str(p).strip()]
+    painpoints = _painpoint_tokens([str(p) for p in (profile or {}).get("painpoints") or [] if str(p).strip()])
 
     for stage in stages:
         if not isinstance(stage, dict):
