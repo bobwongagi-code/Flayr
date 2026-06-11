@@ -130,7 +130,7 @@
     "decision_threshold": "impulse | considered。冲动可买 / 需被说服。",
     "drive_type": "emotional | functional | mixed。购买驱动类型。",
     "painpoints": [
-      "该品类目标消费者最在意的决策因素关键词，3-8 个，含本地语。只报品类事实与世界知识，不做权重判断。"
+      "该品类目标消费者最在意的决策因素关键词；每个痛点同时给中文和本地语两种表述放进同一数组（共 6-16 个词条），供系统跨语言匹配。只报品类事实与世界知识，不做权重判断。"
     ]
   },
   "improvements": [

@@ -413,7 +413,7 @@ GMV 影响权重（从高到低）：
     "price_tier": "low",
     "decision_threshold": "impulse",
     "drive_type": "functional",
-    "painpoints": ["脏", "卫生", "掉毛", "干净", "kotor"]
+    "painpoints": ["脏", "卫生", "掉毛", "干净", "kotor", "bersih", "bulu gugur"]
   },
 
   "loop_closure": {
