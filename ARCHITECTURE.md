@@ -38,13 +38,26 @@
 （`product_visible` / `product_coverage` / `third_party_endorsement`）；标记由模型按定义判，
 代码只做确定性消费（占比累加、归属搬运、severity 一致性），不得用正则重新推断语义。
 
-### 0.4 stabilize 终态宪法
+### 0.4 severity 判定宪法（2026-06-11 修订，4d 架构）
 
-> **stabilize 只做一致性修复（severity ↔ task_completion ↔ gap 文本矛盾收敛）和归属搬运；
-> 一切品类/商业判断归模型（prompt 框架），代码不再做。**
+> **模型供事实，代码定政策。** 模型逐阶段输出稳定事实：两侧独立执行分
+> （creator/benchmark_execution，0=不执行/0.5=敷衍或无法有效接收/1=合格/2=出色，
+> 先打分再对比）、painpoint_relevance（痛点命中四值枚举）、category_profile（品类画像）；
+> severity 由 `postprocess/derive.py` 确定性推导：E = 标杆执行分 − 达人执行分，
+> S = E × W（品类原型×阶段权重表）× C（痛点命中系数，S6 促单与痛点正交不参与调制），
+> 含 S5 背书门槛 / S4 演示差分 / S1 痛点差分三个事实覆盖与 S1/S6 缺失红线、
+> 极性红线（达人持平或更优 → small），逐阶段写 severity_derivation 算法溯源。
+> 权重表数值随对比数据 + 人工裁决积累，对存量 facts 零 LLM 成本离线重拟合。
 
-推论：`task_completion=partial` 档代码不替模型定级、只查矛盾；禁止新增"partial→medium"类映射。
-现存品类正则按 TODO #1 处置清单处理，删除前必须通过生死测量门禁（预注册阈值）。
+修订背景：原宪法"商业判断归模型（prompt 框架）"经 r1-r2 两轮实测不成立（prompt 调 severity
+不收敛，11/18→9/18 修一伤二）；r4 实弹 15/18 + severe 0 过 T4 预注册线，同批模型直判
+12/18 + severe 2（划算感误归背书、极性 bug 第四轮复发，均被推导层机械纠正）。
+
+stabilize 残余职责：一致性修复（severity↔task_completion↔gap 文本矛盾收敛）、归属搬运、
+以及执行分缺失时（旧数据/降级路径）的薄兜底。推导失败必须优雅降级保留模型 severity，
+绝不拖垮主流程。S3/S4 牙膏品类正则已按 TODO #1 处置清单删除（门禁过线后执行）。
+推论：`task_completion=partial` 档代码不替模型定级；禁止新增"partial→medium"类映射；
+禁止再用 prompt 判例校准 severity（校准动作 = 调权重表 + 离线重放）。
 
 ### 0.5 第三方背书定义（`third_party_endorsement` 的判定规格）
 

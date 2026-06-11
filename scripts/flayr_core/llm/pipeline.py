@@ -34,6 +34,7 @@ from .payload import (
     select_role_visual_inputs,
 )
 from ..postprocess import apply_postprocess_chain
+from ..postprocess.derive import critical_severity_stages
 from ..postprocess.health_rewrite import (
     sanitize_child_toothpaste_recommendations,
     sanitize_health_recommendations,
@@ -262,12 +263,18 @@ def maybe_refine_low_confidence_stages(
     """
     if not locked_video_understanding:
         return result
-    # 模型自报 ∪ 代码侧确定性检测（兜底模型漏报），最多 2 个，模型自报优先占位。
-    stage_codes = []
-    for code in [*extract_low_confidence_stages(raw_result), *detect_low_confidence_stages(result)]:
-        if code not in stage_codes:
-            stage_codes.append(code)
-    stage_codes = stage_codes[:2]
+    # 候选 = 模型自报 ∪ 素材不足确定性检测 ∪ 推导临界分值（S 压阈值线邻域，4d 后可行）。
+    # 按优先级取 2：P1 链路致命节点 S1/S6（判错代价最高）→ P2 高杠杆验证节点 S4 → P3 其他。
+    candidates: list[str] = []
+    for code in [
+        *extract_low_confidence_stages(raw_result),
+        *detect_low_confidence_stages(result),
+        *critical_severity_stages(result),
+    ]:
+        if code not in candidates:
+            candidates.append(code)
+    _priority = {"S1": 0, "S6": 0, "S4": 1}
+    stage_codes = sorted(candidates, key=lambda c: (_priority.get(c, 2), candidates.index(c)))[:2]
     if not stage_codes:
         return result
 

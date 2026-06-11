@@ -138,11 +138,13 @@ def align_timed_cta_from_transcript(result: dict[str, Any], analysis: dict[str, 
 # region stabilize -----------------------------------------------------------
 
 def stabilize_stage_severity(result: dict[str, Any]) -> None:
-    """校准容易跨阶段漂移的 severity。
+    """校准容易跨阶段漂移的 severity（4d 后为兜底层）。
 
-    只处理高确定性的规则：
-    - S3 只回答"能不能看懂怎么用"，闻香/口味等感官体验差距归 S4；
-    - 达人某阶段持平或优于标杆时，severity 不应超过 small；
+    2026-06-11 按 TODO #1 处置清单执行去过拟合：S3/S4 牙膏三件套（按压/闻香/功能效果正则）
+    已删——kakwan S3 误触发实锤 + round4 验证 derive 用执行分正确处理同品类（tasha S4 large 3/5）。
+    保留的规则只在 derive 跳过时（执行分缺失的旧数据/降级路径）作为最终值生效：
+    - 达人持平或优于标杆时，severity 不应超过 small（极性兜底，文本正则版）；
+    - S5 双方均无真背书 → 均未涉及（与 derive S5 门槛同源）；
     - 标杆没有 CTA 而达人有购买指令时，S6 不应被"不够强促销"惩罚。
     """
     creator_global_has_cta = role_has_positive_cta(result, "creator")
@@ -157,41 +159,9 @@ def stabilize_stage_severity(result: dict[str, Any]) -> None:
         if creator_not_worse(text):
             set_stage_small(stage)
 
-        if stage_id == "S3" and creator_has_usage_demo(creator_text) and (
-            stage.get("severity") == "small" or mentions_sensory_gap(text + benchmark_text)
-        ):
-            set_stage_small(
-                stage,
-                "达人和标杆都让用户看懂用法；闻香、口味等感官体验差距归 S4，不构成 S3 降低购买意愿的硬伤。",
-                "达人已完成按压/用量说明，S3 仅保留细节差距。",
-            )
-
-        if stage_id == "S4" and sensory_effect_gap(text, creator_text, benchmark_text):
-            if creator_has_functional_effect(creator_text):
-                set_stage_small(
-                    stage,
-                    "达人已用按压用量/减少浪费等功能结果完成效果验证；标杆的香味/口味展示只能作为辅助体验，不覆盖达人核心卖点优势。",
-                    "功能效果已完成，感官体验缺口不判为中大差距。",
-                )
-            else:
-                stage["severity"] = "medium"
-                stage["gap"] = "标杆用闻香/口味等感官体验增强孩子愿意使用的想象，达人缺少对应体验验证，会削弱但不直接决定购买意愿。"
-                stage["gap_summary"] = ["感官体验展示不足，但不是压过功能卖点的硬伤。"]
-
-        if stage_id == "S4" and creator_has_functional_effect(creator_text) and creator_effect_not_worse(text):
-            set_stage_small(
-                stage,
-                "达人已用功能结果完成效果验证，且该阶段不弱于标杆；香味/口味只能作为辅助体验，不判中大差距。",
-                "达人 S4 不弱于标杆，差距等级按 small 处理。",
-            )
-
-        if stage_id == "S4" and creator_has_functional_effect(creator_text) and mentions_sensory_gap(text):
-            set_stage_small(
-                stage,
-                "达人已用按压用量/减少浪费等功能结果完成效果验证；儿童牙膏的香味/孩子喜欢只能作为辅助体验，不压过核心功能卖点。",
-                "功能效果已完成，感官体验不判中大差距。",
-            )
-
+        # S3/S4 牙膏三件套已删（2026-06-11，TODO #1 处置清单）：按压/闻香/功能效果正则
+        # 是对单一牙膏样本长出的过拟合，kakwan"按压按钮"误触发实锤；该判断现由
+        # derive.py 的执行分 + S4 演示差分承担（round4 tasha S4 实证）。
         # S2 不再无条件兜底 small：双方都完成产品引出不代表卖点质量相当，
         # 需由 LLM 按品类消费者决策优先级判断卖点选择是否偏离。
 
@@ -321,35 +291,8 @@ def creator_not_worse(text: str) -> bool:
     return bool(re.search("|".join(positive_patterns), text, flags=re.IGNORECASE))
 
 
-def creator_effect_not_worse(text: str) -> bool:
-    positive_patterns = (
-        r"达人[^。；;]{0,40}(说服力强|更能说服|更强|更有效|优于)",
-        r"核心价值[^。；;]{0,24}(有效|清晰)",
-        r"标杆[^。；;]{0,40}(帮助不大|商业价值较低|仅展示|仅停留)",
-        r"直接命中[^。；;]{0,24}痛点",
-    )
-    return bool(re.search("|".join(positive_patterns), text, flags=re.IGNORECASE))
-
-
-
-def creator_has_usage_demo(text: str) -> bool:
-    return bool(re.search(r"按压|pump|pam|泵|刷牙|brush|一次|用量|挤|操作|演示|不浪费|membazir|guna", text, flags=re.IGNORECASE))
-
-
-def creator_has_functional_effect(text: str) -> bool:
-    return bool(re.search(r"浪费|不浪费|membazir|bazir|按压|pump|pam|泵|一次|用量|省|方便|cukup|senang", text, flags=re.IGNORECASE))
-
-
-def mentions_sensory_gap(text: str) -> bool:
-    return bool(re.search(r"闻|香|气味|口味|水果味|wangi|bau|感官|体验|嗅", text, flags=re.IGNORECASE))
-
-
-def sensory_effect_gap(text: str, creator_text: str, benchmark_text: str) -> bool:
-    combined = text + benchmark_text
-    creator_has_sensory = mentions_sensory_gap(creator_text)
-    benchmark_has_sensory = mentions_sensory_gap(benchmark_text)
-    gap_mentions_missing = bool(re.search(r"缺失|没有|未展示|仅停留|削弱|大打折扣|无法", text, flags=re.IGNORECASE))
-    return benchmark_has_sensory and not creator_has_sensory and gap_mentions_missing and mentions_sensory_gap(combined)
+# creator_effect_not_worse / creator_has_usage_demo / creator_has_functional_effect /
+# mentions_sensory_gap / sensory_effect_gap 已随牙膏特例一并删除（2026-06-11，TODO #1）。
 
 
 # 背书类型词（跨品类稳定）：监管认证 / 检测临床 / 测评口碑 / 权威推荐。

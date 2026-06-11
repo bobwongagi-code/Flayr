@@ -151,6 +151,31 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
             "painpoint_relevance": relevance, "S": score, "reason": reason}
 
 
+CRITICAL_BAND = 0.2
+
+
+def critical_severity_stages(result: dict[str, Any]) -> list[str]:
+    """临界分值触发（Phase C P3）：推导分 S 落在 small/medium 或 medium/large 阈值邻域的阶段。
+
+    S 确定性化后才可行（4d 红利）：边界 case 不靠拟合阈值解决，靠回看原生素材
+    复核事实再重推导（实证：tasha S1 连续两轮 S=1.2 恰好压线）。
+    须在 derive_severity_from_facts 之后调用（依赖 severity_derivation 溯源）。
+    """
+    out: list[str] = []
+    for stage in result.get("stage_analysis", []):
+        if not isinstance(stage, dict):
+            continue
+        trace = stage.get("severity_derivation") or {}
+        score = trace.get("S")
+        if trace.get("status") != "derived" or not isinstance(score, (int, float)):
+            continue
+        if abs(score - TH_SMALL) <= CRITICAL_BAND or abs(score - TH_MEDIUM) <= CRITICAL_BAND:
+            match = _STAGE_RE.match(str(stage.get("stage") or ""))
+            if match:
+                out.append(match.group(1))
+    return out
+
+
 def derive_severity_from_facts(result: dict[str, Any]) -> None:
     """4d 主入口：用执行分 + 品类权重表确定性推导各阶段 severity，覆盖模型直出值。
 
