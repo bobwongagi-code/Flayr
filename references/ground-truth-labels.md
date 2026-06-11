@@ -38,7 +38,7 @@
 | S2 | medium | medium ✓ | 缺"传统刷子掉毛"痛点对比 |
 | S3 | **medium** | small ✗（牙膏规则强压） | 镜头语言差距：达人画面歪斜、马桶只见一边、最后 1 秒才放回；标杆全貌完整、弹出过程充分。**过拟合危害=判定错误的实锤** |
 | S4 | small | small ✓ | 双方均展示冲净效果 |
-| S5 | small | small ✓ | 低客单价日用品背书必要性低，双方均未涉及 |
+| S5 | small | small ✓ | 低客单价日用品背书必要性低，双方均未涉及。**2026-06-11 裁决**：标杆"6+6 刷头/3 个月/划算"是卖点信息归 S2 卖点链，不归 S5（门禁中模型据旧框架"给理由归S5"判 m/l，框架已收窄为信任类理由）|
 | S6 | **large** | small ✗（Phase C 幻觉） | 标杆有干净 CTA（"Kalau nak beli, boleh order dekat bag kuning tu" + 价格反差铺垫）；达人无任何明确 CTA。达人结尾实为 "Dia punya review pun ada dekat background ni"（用户原生重听确认；whisper 曾转糊为 rintik / beg kau ni，Phase C 据此幻觉出"明确告知链接在购物车"）。CTA 缺失即 severity 标尺 large 的字面例子 |
 
 ### tashadiyana（儿童泡沫牙膏，ms）
