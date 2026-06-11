@@ -145,9 +145,11 @@ def derive(stage_id: str, stage: dict, cat: dict) -> dict:
         if completion == "missing":
             e, reason = 2, "达人侧 missing"
         elif completion == "partial":
-            # 敷衍档 E=1.5（用户 2026-06-11 裁决：形式上有但敷衍/几乎无效，介于"做了"与"缺失"之间）
+            # 敷衍档（用户 2026-06-11 裁决）：单侧执行分标尺 0=不执行/0.5=敷衍/1=合格/2=好，
+            # E=标杆执行分−达人执行分。敷衍 CTA：达人≈0.5、标杆≈2 → E=1.5。
+            # 管线落地后两侧执行分由阶段 1 独立打出（不交叉对比），E 由代码相减。
             if stage_id == "S6" and _WEAK_CTA_RE.search(f"{gap_text} {creator_text}"):
-                e, reason = 1.5, "弱 CTA 敷衍档（形式上有但几乎无效）"
+                e, reason = 1.5, "弱 CTA 敷衍档（达人执行分≈0.5 vs 标杆≈2）"
             else:
                 e, reason = 1, "达人侧 partial"
         else:
