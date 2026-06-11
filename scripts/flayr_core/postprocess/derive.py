@@ -124,8 +124,13 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
                 "reason": reason + "；达人持平或更优（亮点，零差距红线）"}
 
     w = (weights or {}).get(stage_id, 1.0)
-    # 痛点命中系数：差距落在核心决策因素上 → 放大；与痛点无关 → 衰减；事实完全缺失 → 中性
-    if relevance in {"benchmark_only", "both"}:
+    # 痛点命中系数：差距落在核心决策因素上 → 放大；与痛点无关 → 衰减；事实完全缺失 → 中性。
+    # 只作用于卖点链相关阶段（S1 钩子选题 + S2-S5）：S6 促单功能与产品痛点正交
+    # （CTA 差距永远不会"命中痛点"，按 0.8 惩罚是范畴错误——round4 kakwan S6 实证），
+    # 促单的消费者侧权重已由客单价编入 W（冲动品 1.8）。
+    if stage_id == "S6":
+        c_factor = 1.0
+    elif relevance in {"benchmark_only", "both"}:
         c_factor = 1.2
     elif relevance in {"creator_only", "none"}:
         c_factor = 0.8
