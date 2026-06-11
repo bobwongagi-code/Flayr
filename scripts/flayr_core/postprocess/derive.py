@@ -103,12 +103,19 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
     e = max(0.0, float(bench_exec) - float(creator_exec))
     reason = f"E = 标杆执行分 {bench_exec} − 达人执行分 {creator_exec}"
 
+    # 痛点命中：优先用模型事实枚举（round3 实证词法匹配跨语言/跨粒度不可靠），缺失退回词法兜底
+    relevance = stage.get("painpoint_relevance")
+    if relevance is None and painpoints:
+        lever_text = f"{stage.get('gap_summary') or ''} {stage.get('gap') or ''} {bench_text}"
+        if _hits(lever_text, painpoints):
+            relevance = "both" if _hits(creator_text, painpoints) else "benchmark_only"
+
     # 事实覆盖层（取 E 下限）：观察事实 > 打分漂移
     b_vis = " ".join(str(v) for v in stage.get("benchmark_visual_evidence") or [])
     c_vis = " ".join(str(v) for v in stage.get("creator_visual_evidence") or [])
     if stage_id == "S4" and e > 0 and _DEMO_RE.search(b_vis) and not _DEMO_RE.search(c_vis):
         e, reason = max(e, 2.0), reason + "；S4 标杆动作演示 vs 达人口头宣称（验证=让用户看到）"
-    elif stage_id == "S1" and e > 0 and painpoints and _hits(bench_text, painpoints) and not _hits(creator_text, painpoints):
+    elif stage_id == "S1" and e > 0 and relevance == "benchmark_only":
         e, reason = max(e, 2.0), reason + "；S1 标杆钩子命中品类痛点、达人未命中"
 
     # 极性红线：达人持平或更优 → small（达人优势记亮点，绝不是差距）
@@ -117,10 +124,11 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
                 "reason": reason + "；达人持平或更优（亮点，零差距红线）"}
 
     w = (weights or {}).get(stage_id, 1.0)
-    # 痛点命中系数：无品类画像时取中性 1.0，不放大也不衰减
-    if painpoints:
-        lever_text = f"{stage.get('gap_summary') or ''} {stage.get('gap') or ''} {bench_text}"
-        c_factor = 1.2 if _hits(lever_text, painpoints) else 0.8
+    # 痛点命中系数：差距落在核心决策因素上 → 放大；与痛点无关 → 衰减；事实完全缺失 → 中性
+    if relevance in {"benchmark_only", "both"}:
+        c_factor = 1.2
+    elif relevance in {"creator_only", "none"}:
+        c_factor = 0.8
     else:
         c_factor = 1.0
     score = round(e * w * c_factor, 2)
@@ -135,7 +143,7 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
     else:
         severity = "small"
     return {"status": "derived", "severity": severity, "E": e, "W": w, "C": c_factor,
-            "S": score, "reason": reason}
+            "painpoint_relevance": relevance, "S": score, "reason": reason}
 
 
 def derive_severity_from_facts(result: dict[str, Any]) -> None:

@@ -224,6 +224,12 @@ def normalize_execution_score(value: Any) -> float | None:
     return None
 
 
+def normalize_painpoint_relevance(value: Any) -> str | None:
+    """痛点命中归一（4d）：四值枚举；缺失/不合法返回 None → derive 退回词法匹配兜底。"""
+    text = str(value or "").strip().lower()
+    return text if text in {"benchmark_only", "creator_only", "both", "none"} else None
+
+
 def normalize_category_profile(value: Any) -> dict[str, Any] | None:
     """品类画像归一（4d）：模型只报事实与世界知识，权重政策在代码（postprocess/derive.py）。"""
     if not isinstance(value, dict):
@@ -468,6 +474,8 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 # 4d：两侧独立执行分（0/0.5/1/2），缺失为 None → derive 优雅跳过
                 "creator_execution": normalize_execution_score(item.get("creator_execution")),
                 "benchmark_execution": normalize_execution_score(item.get("benchmark_execution")),
+                # 4d：痛点命中事实（替代词法匹配定 C 系数），缺失为 None → derive 词法兜底
+                "painpoint_relevance": normalize_painpoint_relevance(item.get("painpoint_relevance")),
             }
         )
 

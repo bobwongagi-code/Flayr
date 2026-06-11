@@ -264,6 +264,9 @@ def build_video_fact_payload(
         "在变化点处切分 evidence_units，输出 4 到 8 条，沿时间线排列，id 必须使用指定前缀，"
         "time_range 用真实时间（如 2.5s - 4.0s）。"
         "每条都要据实填 visual_fact（画面/表情/字幕/特效）和 audio_fact（BGM/语气/音效）；"
+        "visual_fact 中同时记录镜头语言/取景完整性的客观事实——画面是否歪斜、动作主体是否只见局部"
+        "（如演示对象只拍到一半）、关键动作是否在画面内完成；按画面如实记，不做评价，"
+        "这是使用过程执行性差距的有效信号；"
         "每条还要标 product_visible（该时段画面里能否看到产品本体，true/false）与 product_coverage"
         "（产品视觉占比 none｜low｜medium｜high，看不到写 none）：这两项用于确定性统计产品出镜，"
         "据画面如实标，产品被手遮住或只露局部按真实可见程度给 low；"
@@ -365,9 +368,10 @@ def build_llm_comparison_payload(
             "## 输出要求",
             "只输出严格 JSON，不要 Markdown。字段必须使用 references/analysis-output-schema.json 的字段名。",
             "必须输出：one_line_verdict, one_line_summary, executive_summary, holistic_assessment（每维独立）, key_conclusions（1-5 条消费者视角）, product_visibility, category_profile, loop_closure, video_understanding, stage_analysis[6], improvements（1-5 条，按 GMV 杠杆排序）。",
-            "stage_analysis 每项必须含：stage, time_range, benchmark_time_range, creator_time_range, core_question, creator_module_id, benchmark_module_id, module_fit, module_fit_reason, task_completion, gap_type, gap_summary, voice_performance, benchmark_summary, benchmark_key_message, benchmark_evidence_ids, benchmark_visual_evidence, benchmark_support_status, benchmark_quote, benchmark_quote_zh, creator_summary, creator_key_message, creator_evidence_ids, creator_visual_evidence, creator_support_status, creator_quote, creator_quote_zh, gap, evidence, severity, creator_execution, benchmark_execution。",
+            "stage_analysis 每项必须含：stage, time_range, benchmark_time_range, creator_time_range, core_question, creator_module_id, benchmark_module_id, module_fit, module_fit_reason, task_completion, gap_type, gap_summary, voice_performance, benchmark_summary, benchmark_key_message, benchmark_evidence_ids, benchmark_visual_evidence, benchmark_support_status, benchmark_quote, benchmark_quote_zh, creator_summary, creator_key_message, creator_evidence_ids, creator_visual_evidence, creator_support_status, creator_quote, creator_quote_zh, gap, evidence, severity, creator_execution, benchmark_execution, painpoint_relevance。",
             "task_completion 只能取 complete、partial、missing 三选一（达人侧该阶段功能完成度），禁止 both_complete、no_gap 等任何其他词；标杆侧完成情况写在 benchmark_summary。",
-            "creator_execution 与 benchmark_execution 取值只能是 0、0.5、1、2 四个数字：0=未执行该阶段功能，0.5=形式上有但敷衍、几乎无效（如一句轻带的 CTA），1=执行合格，2=执行出色（可视化演示/铺垫到位/感染力强）。两侧按该阶段功能定义各自独立打分，先打分再对比，禁止因对比结果回调任何一侧分数。",
+            "creator_execution 与 benchmark_execution 取值只能是 0、0.5、1、2 四个数字：0=未执行该阶段功能；0.5=做了但对该阶段核心功能基本无效——敷衍、平庸无感、几乎不起作用（如一句轻带的 CTA、平铺直叙毫无抓力的开场、仅口头承诺没有任何验证支撑）；1=执行合格（功能完成且对观众有效）；2=执行出色（可视化演示/铺垫到位/感染力强）。两侧按该阶段功能定义各自独立打分，先打分再对比，禁止因对比结果回调任何一侧分数。",
+            "painpoint_relevance 只能取 benchmark_only、creator_only、both、none 四选一：该阶段双方内容是否命中 category_profile.painpoints 中的核心决策因素——只有标杆命中/只有达人命中/双方都命中/双方都未命中。按内容功能判断（讲没讲到、演没演到核心痛点），不要求字面用词一致。",
             "category_profile 必须含：category_name（品类名）, price_tier（low|mid|high 客单价档）, decision_threshold（impulse|considered）, drive_type（emotional|functional|mixed）, painpoints（该品类目标消费者最在意的决策因素关键词，每个痛点同时给中文和本地语两种表述放进同一数组，共 6-16 个词条）。只报品类事实与世界知识，不做权重判断。",
             "improvements 每项必须含：title,target_stage,gmv_impact,gap_type,time_range,creator_time_range,benchmark_time_range,problem,benchmark_reference,benchmark_evidence_ids,suggestion,actions,gmv_reason,evidence,creator_script,creator_script_zh,base_frame_suitability,best_base_frame_time,base_frame_evidence_id,base_frame_reason,aigc_prompt,aigc_image_path,expected_effect,priority。",
             "可额外输出 top-level low_confidence_stages，数组元素只能是 S1-S6；只有当该阶段现有帧/音频不足以支撑 severity 时才填写，最多 2 个。",

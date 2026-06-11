@@ -113,10 +113,11 @@
 4. **执行结论**：任务完成度如何（明确判断，不模糊）。对应 JSON 字段 `task_completion` **只能取 complete / partial / missing 三选一**，评估**达人侧**该阶段功能完成度；标杆侧完成情况写入 benchmark_summary，不编码进此字段
 4a. **两侧独立执行分**：对应 JSON 字段 `creator_execution` / `benchmark_execution`，**取值只能是 0、0.5、1、2 四个数字**：
    - **0 = 未执行**该阶段功能
-   - **0.5 = 敷衍**：形式上有但几乎无效（如一句轻带、不注意听不到的 CTA）
-   - **1 = 合格**：功能完成
+   - **0.5 = 基本无效**：做了但对该阶段核心功能基本不起作用——敷衍、平庸无感（如一句轻带、不注意听不到的 CTA；平铺直叙毫无抓力的开场；仅口头承诺、没有任何验证支撑）
+   - **1 = 合格**：功能完成且对观众有效
    - **2 = 出色**：功能完成且执行强（可视化演示、铺垫到位、感染力强）
    纪律：两侧**各自按该阶段功能定义独立打分，先打分、再对比**，禁止因对比结果回调任何一侧的分数。差距等级由系统从两侧执行分确定性推导，这两个字段是推导的事实输入。
+4b. **痛点命中**：对应 JSON 字段 `painpoint_relevance`，**只能取 benchmark_only / creator_only / both / none**——该阶段双方内容是否命中 `category_profile.painpoints` 的核心决策因素。按内容功能判断（讲没讲到、演没演到核心痛点），不要求字面用词一致。
 5. **口播表现力**：语速是否匹配内容节奏？语气是否有感染力？关键停顿是否在卖点/价格/CTA 前出现？情绪饱满度如何？
 6. **关键帧证据**：1-3 个支撑结论的画面/口播（标注时间点）
 7. **流失风险点**：目标观众可能在这一段流失的原因
@@ -404,7 +405,8 @@ GMV 影响权重（从高到低）：
       "evidence": ["至少 1 条，引用时间段、画面证据或口播证据。"],
       "severity": "large",
       "creator_execution": 0.5,
-      "benchmark_execution": 2
+      "benchmark_execution": 2,
+      "painpoint_relevance": "benchmark_only"
     }
   ],
 
@@ -481,7 +483,8 @@ GMV 影响权重（从高到低）：
 | `stage_analysis[].creator_evidence_ids` / `benchmark_evidence_ids` | 该阶段引用的 evidence_unit ID 列表 | 报告帧选取、证据展示 |
 | `stage_analysis[].creator_quote` / `benchmark_quote` | 阶段本地语言口播原句 | 报告口播展示 |
 | `stage_analysis[].creator_support_status` / `benchmark_support_status` | `supported` / `voice_only` / `visual_only` / `conflict` | 报告证据支撑标记 |
-| `stage_analysis[].creator_execution` / `benchmark_execution` | 两侧独立执行分：`0`（未执行）/ `0.5`（敷衍）/ `1`（合格）/ `2`（出色），先打分再对比 | `postprocess/derive.py` 确定性推导 severity 的事实输入 |
+| `stage_analysis[].creator_execution` / `benchmark_execution` | 两侧独立执行分：`0`（未执行）/ `0.5`（基本无效）/ `1`（合格有效）/ `2`（出色），先打分再对比 | `postprocess/derive.py` 确定性推导 severity 的事实输入 |
+| `stage_analysis[].painpoint_relevance` | 痛点命中：`benchmark_only` / `creator_only` / `both` / `none`，按内容功能判断 | `postprocess/derive.py` 痛点命中系数（替代词法匹配） |
 | `category_profile` | 品类画像：客单价档 / 决策门槛 / 驱动类型 / 痛点关键词（只报事实，权重政策在代码） | `postprocess/derive.py` 选权重表原型 + 痛点命中系数 |
 | `loop_closure` | S1 闭环校验结果 | 报告衔接校验区 |
 | `improvements[].priority` | 整数，按 GMV 杠杆排序，1 为最优先 | 报告提升点排序 |
