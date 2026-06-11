@@ -111,6 +111,12 @@
    - 是否触发了降级规则
    - 是否出现了"该品类排除模块"的误用
 4. **执行结论**：任务完成度如何（明确判断，不模糊）。对应 JSON 字段 `task_completion` **只能取 complete / partial / missing 三选一**，评估**达人侧**该阶段功能完成度；标杆侧完成情况写入 benchmark_summary，不编码进此字段
+4a. **两侧独立执行分**：对应 JSON 字段 `creator_execution` / `benchmark_execution`，**取值只能是 0、0.5、1、2 四个数字**：
+   - **0 = 未执行**该阶段功能
+   - **0.5 = 敷衍**：形式上有但几乎无效（如一句轻带、不注意听不到的 CTA）
+   - **1 = 合格**：功能完成
+   - **2 = 出色**：功能完成且执行强（可视化演示、铺垫到位、感染力强）
+   纪律：两侧**各自按该阶段功能定义独立打分，先打分、再对比**，禁止因对比结果回调任何一侧的分数。差距等级由系统从两侧执行分确定性推导，这两个字段是推导的事实输入。
 5. **口播表现力**：语速是否匹配内容节奏？语气是否有感染力？关键停顿是否在卖点/价格/CTA 前出现？情绪饱满度如何？
 6. **关键帧证据**：1-3 个支撑结论的画面/口播（标注时间点）
 7. **流失风险点**：目标观众可能在这一段流失的原因
@@ -128,6 +134,9 @@
 ⚠️ **severity 衡量的是达人侧短板，不是双方差异的绝对值。** 达人持平或更优时（包括显著更优、标杆完全缺失该环节），severity 必须给 small，达人优势记入亮点；"差距巨大但方向是达人领先"绝不是 large。"无明显差距"对应的就是 small，不是 medium。
 
 ⚠️ **severity = medium 但 gap_summary 写"无明显差距"是自相矛盾。** gap_summary 说差距小/无，severity 就必须是 small。
+
+> 系统侧说明：最终差距等级由系统从两侧执行分 + 品类权重表**确定性推导**（postprocess/derive.py），
+> 模型输出的 severity 作为参考判断与降级回退保留。模型的首要职责是把执行分和证据事实打准。
 
 ##### 低置信阶段声明（Phase C）
 
@@ -393,9 +402,19 @@ GMV 影响权重（从高到低）：
       "creator_quote_zh": "口播中文翻译。",
       "gap": "达人和爆款的具体差距，必须指向画面、话术或节奏。",
       "evidence": ["至少 1 条，引用时间段、画面证据或口播证据。"],
-      "severity": "large"
+      "severity": "large",
+      "creator_execution": 0.5,
+      "benchmark_execution": 2
     }
   ],
+
+  "category_profile": {
+    "category_name": "一次性马桶刷",
+    "price_tier": "low",
+    "decision_threshold": "impulse",
+    "drive_type": "functional",
+    "painpoints": ["脏", "卫生", "掉毛", "干净", "kotor"]
+  },
 
   "loop_closure": {
     "pain_resolved_in_s4": true,
@@ -462,6 +481,8 @@ GMV 影响权重（从高到低）：
 | `stage_analysis[].creator_evidence_ids` / `benchmark_evidence_ids` | 该阶段引用的 evidence_unit ID 列表 | 报告帧选取、证据展示 |
 | `stage_analysis[].creator_quote` / `benchmark_quote` | 阶段本地语言口播原句 | 报告口播展示 |
 | `stage_analysis[].creator_support_status` / `benchmark_support_status` | `supported` / `voice_only` / `visual_only` / `conflict` | 报告证据支撑标记 |
+| `stage_analysis[].creator_execution` / `benchmark_execution` | 两侧独立执行分：`0`（未执行）/ `0.5`（敷衍）/ `1`（合格）/ `2`（出色），先打分再对比 | `postprocess/derive.py` 确定性推导 severity 的事实输入 |
+| `category_profile` | 品类画像：客单价档 / 决策门槛 / 驱动类型 / 痛点关键词（只报事实，权重政策在代码） | `postprocess/derive.py` 选权重表原型 + 痛点命中系数 |
 | `loop_closure` | S1 闭环校验结果 | 报告衔接校验区 |
 | `improvements[].priority` | 整数，按 GMV 杠杆排序，1 为最优先 | 报告提升点排序 |
 | `improvements[].suggestion` | 遵循达人框架约束、卖点适配权重、标杆功能意图转译后的具体改法 | 报告提升点建议 |

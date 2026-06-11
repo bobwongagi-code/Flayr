@@ -116,6 +116,8 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
         "13. 必须输出 holistic_assessment（每维独立评估，禁止复制）、key_conclusions（1-5 条消费者视角关键结论）、product_visibility、loop_closure；产品可见度无法精确统计时要标明估算依据。",
         "14. severity 必须差异化：按 ANALYSIS-PROMPT.md 的标尺判断，large/medium/small 至少要出现 2 种。达人做到位或持平的阶段给 small，不能全给 medium。gap_summary 写'无明显差距'时 severity 必须是 small。",
         "14a. 每阶段 task_completion 只能输出 complete、partial、missing 三选一，评估的是达人侧该阶段功能完成度（完成/部分完成/未做）。禁止 both_complete、completed、双侧组合词或任何自由文本；标杆侧完成情况写在 benchmark_summary，不写进此字段。",
+        "14b. 每阶段必须输出 creator_execution 和 benchmark_execution 两个独立执行分，取值只能是 0、0.5、1、2 四个数字：0=未执行该阶段功能；0.5=形式上有但敷衍、几乎无效（如一句轻带的 CTA）；1=执行合格；2=执行出色。两侧各自按该阶段功能定义独立打分，先打分再对比，禁止因对比结果回调分数；这是系统推导差距等级的事实输入。",
+        "14c. 顶层输出 category_profile 品类画像：category_name（品类名）、price_tier（low/mid/high 客单价档）、decision_threshold（impulse 冲动可买 / considered 需被说服）、drive_type（emotional/functional/mixed 驱动类型）、painpoints（该品类目标消费者最在意的决策因素关键词 3-8 个，含本地语）。只报品类事实与世界知识，不做权重判断。",
         "15. JSON 输出保持简洁：每个视频列出 3~6 个关键 evidence_units；任何差距、证据或动作列表最多 3 条；每个描述字段最多一句；禁止重复列举未出现的音效、镜头或功能。",
         "16. 输出前按 QA-RULES.md 自检：证据引用必须存在且与阶段时间相交，module_id 必须来自 structure_library_full.md，product_visibility 数值必须自洽。",
         "17. 如果需要写回系统，请只输出符合 references/analysis-output-schema.json 的 JSON。",

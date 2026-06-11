@@ -119,9 +119,20 @@
       "evidence": [
         "必须至少 1 条，引用时间段、画面证据或口播证据。"
       ],
-      "severity": "large | medium | small"
+      "severity": "large | medium | small",
+      "creator_execution": "0 | 0.5 | 1 | 2。达人侧独立执行分：0=未执行该阶段功能，0.5=形式上有但敷衍几乎无效，1=合格，2=出色。先独立打分再对比，禁止因对比回调。",
+      "benchmark_execution": "0 | 0.5 | 1 | 2。标杆侧独立执行分，标尺同上。两个执行分是系统确定性推导差距等级的事实输入。"
     }
   ],
+  "category_profile": {
+    "category_name": "品类名，如：一次性马桶刷。",
+    "price_tier": "low | mid | high。客单价档。",
+    "decision_threshold": "impulse | considered。冲动可买 / 需被说服。",
+    "drive_type": "emotional | functional | mixed。购买驱动类型。",
+    "painpoints": [
+      "该品类目标消费者最在意的决策因素关键词，3-8 个，含本地语。只报品类事实与世界知识，不做权重判断。"
+    ]
+  },
   "improvements": [
     {
       "title": "一句大白话标题",
