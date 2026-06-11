@@ -423,7 +423,12 @@ def apply_stage_review_updates(
     merged_stages = []
     for stage in merged.get("stage_analysis", []):
         code = stage_code(stage.get("stage"))
-        merged_stages.append(updates_by_code.get(code, stage))
+        if code in updates_by_code:
+            # 字段级合并而非整字典替换：回看若漏掉执行分等新字段，保留原值，
+            # 否则 derive 对复核阶段反而退化为模型直判（code review #1）。
+            merged_stages.append({**stage, **updates_by_code[code]})
+        else:
+            merged_stages.append(stage)
     merged["stage_analysis"] = merged_stages
     return _process_llm_result(merged, analysis, analysis_input, locked_video_understanding)
 

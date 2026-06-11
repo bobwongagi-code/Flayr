@@ -71,7 +71,8 @@ def _painpoint_tokens(painpoints: list[str]) -> list[str]:
     for entry in painpoints:
         for part in re.split(r"[()（）/、,，;；|]", str(entry)):
             part = part.strip()
-            if len(part) >= 2:
+            # 拉丁词须 ≥2 字符防噪声；单个汉字是合法痛点词（脏/痛/香），不过滤（code review #6）
+            if len(part) >= 2 or (len(part) == 1 and "一" <= part <= "鿿"):
                 tokens.append(part)
     return tokens
 
@@ -203,6 +204,7 @@ def derive_severity_from_facts(result: dict[str, Any]) -> None:
         if archetype:
             trace.setdefault("archetype", archetype)
         if trace.get("status") == "derived":
-            trace["model_severity"] = stage.get("severity")
+            # 优先用归一时定格的模型直判快照；stage["severity"] 此刻已被 stabilize 改写过
+            trace["model_severity"] = stage.get("model_severity") or stage.get("severity")
             stage["severity"] = trace["severity"]
         stage["severity_derivation"] = trace

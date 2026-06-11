@@ -377,7 +377,7 @@ def build_llm_comparison_payload(
             "category_profile 必须含：category_name（品类名）, price_tier（low|mid|high 客单价档）, decision_threshold（impulse|considered）, drive_type（emotional|functional|mixed）, painpoints（该品类目标消费者最在意的决策因素关键词，每个痛点同时给中文和本地语两种表述放进同一数组，共 6-16 个词条）。只报品类事实与世界知识，不做权重判断。",
             "improvements 每项必须含：title,target_stage,gmv_impact,gap_type,time_range,creator_time_range,benchmark_time_range,problem,benchmark_reference,benchmark_evidence_ids,suggestion,actions,gmv_reason,evidence,creator_script,creator_script_zh,base_frame_suitability,best_base_frame_time,base_frame_evidence_id,base_frame_reason,aigc_prompt,aigc_image_path,expected_effect,priority。",
             "可额外输出 top-level low_confidence_stages，数组元素只能是 S1-S6；只有当该阶段现有帧/音频不足以支撑 severity 时才填写，最多 2 个。",
-            "除 stage_analysis、improvements、video_understanding.evidence_units 和 low_confidence_stages 外，所有数组最多 1 条。所有描述字段最多一句且不超过 40 个汉字。video_understanding 必须原样使用事实清单，不得新增、改写或跨视频移动 evidence_units。",
+            "除 stage_analysis、improvements、video_understanding.evidence_units、low_confidence_stages 和 category_profile.painpoints 外，所有数组最多 1 条。所有描述字段最多一句且不超过 40 个汉字。video_understanding 必须原样使用事实清单，不得新增、改写或跨视频移动 evidence_units。",
         ]
     )
     payload = build_llm_payload(model, user_text, [])
@@ -453,6 +453,7 @@ def build_stage_review_payload(
                     "切片边界可能有 ±2 秒误差，可能混入相邻阶段内容；判断按功能归属，不要把相邻阶段内容算进本阶段。",
                     "只重判 target_stages 中列出的阶段；不要改写 video_understanding，不要新增 evidence_unit。",
                     "必须先在 gap 字段写清判断依据（达人做了什么→标杆做了什么→对购买意愿影响），再给 severity。",
+                    "回看后必须按主分析同一标尺重打 creator_execution 与 benchmark_execution（0=未执行；0.5=做了但基本无效/敷衍/无法有效接收；1=合格有效；2=出色。两侧独立打分，先打分再对比）和 painpoint_relevance——系统将据这些事实重推导差距等级；severity 仍需填写但仅作参考。",
                     "只输出严格 JSON，不要 Markdown。",
                     "输出格式：",
                     json.dumps(
@@ -494,6 +495,9 @@ def build_stage_review_payload(
                                     "gap": "达人做了什么→标杆做了什么→对购买意愿影响。",
                                     "evidence": ["引用时间段、画面或口播证据"],
                                     "severity": "large | medium | small",
+                                    "creator_execution": "0 | 0.5 | 1 | 2",
+                                    "benchmark_execution": "0 | 0.5 | 1 | 2",
+                                    "painpoint_relevance": "benchmark_only | creator_only | both | none",
                                 }
                             ],
                             "review_notes": ["为什么回看后这样判断"],
