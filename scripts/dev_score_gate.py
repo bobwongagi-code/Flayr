@@ -32,6 +32,15 @@ LABELS: dict[str, dict[str, str]] = {
     "sample-are_xie": {"S1": "large", "S2": "medium", "S3": "small", "S4": "large", "S5": "large", "S6": "small"},
     "sample-kakwanreview": {"S1": "large", "S2": "medium", "S3": "medium", "S4": "small", "S5": "small", "S6": "large"},
     "sample-tashadiyana": {"S1": "medium", "S2": "small", "S3": "small", "S4": "large", "S5": "small", "S6": "small"},
+    # Round5 样本外标签（2026-06-12 用户盲标；"不涉及"按 small 计；
+    # bluetoothwanju/skincare 的 S6 为存疑标签——whisper 泰语，用户自注不确定）
+    "sample-bluetoothwanju": {"S1": "small", "S2": "small", "S3": "medium", "S4": "medium", "S5": "small", "S6": "medium"},
+    "sample-skincare": {"S1": "small", "S2": "large", "S3": "large", "S4": "large", "S5": "small", "S6": "large"},
+    "sample-wukoubo-c0": {"S1": "medium", "S2": "large", "S3": "large", "S4": "large", "S5": "small", "S6": "small"},
+    "sample-wukoubo-c1": {"S1": "medium", "S2": "large", "S3": "large", "S4": "large", "S5": "small", "S6": "small"},
+    "sample-youkoubo-c0": {"S1": "large", "S2": "medium", "S3": "medium", "S4": "medium", "S5": "small", "S6": "small"},
+    "sample-youkoubo-c1": {"S1": "large", "S2": "large", "S3": "large", "S4": "large", "S5": "small", "S6": "large"},
+    "sample-youkoubo-c2": {"S1": "large", "S2": "large", "S3": "large", "S4": "large", "S5": "small", "S6": "large"},
 }
 STAGES = ["S1", "S2", "S3", "S4", "S5", "S6"]
 _THRIFT_RE = re.compile(r"省钱|划算|性价比|便宜|jimat|murah|affordable", re.IGNORECASE)

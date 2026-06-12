@@ -29,9 +29,9 @@ analysis = json.loads((run / "analysis.json").read_text(encoding="utf-8"))
 write_analysis_input(run, analysis)
 print(f"analysis_input regenerated: {run}")
 PY
-  echo "[$(date +%H:%M:%S)] repeats x5 for $name (skip-existing 断点续跑)" >> "$LOG"
+  echo "[$(date +%H:%M:%S)] repeats x${REPEAT:-5} for $name (skip-existing 断点续跑)" >> "$LOG"
   # dev_test_stage2 自带的 PASS 是牙膏校准的，exit 2 不算失败；门禁判定在 scorer。
-  python3 scripts/dev_test_stage2.py "$run" --repeat 5 --skip-existing >> "$LOG" 2>&1 || true
+  python3 scripts/dev_test_stage2.py "$run" --repeat "${REPEAT:-5}" --skip-existing >> "$LOG" 2>&1 || true
 done
 
 # 指定样本模式不跑全量打分（其余样本无新结果，scorer 口径会失真），分析由外部逐样本做
