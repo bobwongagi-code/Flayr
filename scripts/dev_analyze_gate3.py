@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from collections import Counter
 from pathlib import Path
 
@@ -40,7 +41,11 @@ def main() -> int:
     run = ROOT / "runs" / name
     labels = LABELS[name]
 
-    # 逐 repeat：归一 + 生产推导
+    # 逐 repeat：归一 + 生产推导（带 analysis 以启用晃动等预处理信号）
+    analysis = None
+    analysis_path = run / "analysis.json"
+    if analysis_path.is_file():
+        analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
     per_repeat: list[dict] = []
     for i in range(1, args.repeat + 1):
         raw = load_raw(run, i)
@@ -48,7 +53,7 @@ def main() -> int:
             per_repeat.append({})
             continue
         normalized = normalize_analysis_result(raw)
-        derive_severity_from_facts(normalized)
+        derive_severity_from_facts(normalized, analysis)
         per_repeat.append({"stages": stage_map(normalized), "profile": normalized.get("category_profile")})
 
     profiles = [r.get("profile") for r in per_repeat if r.get("profile")]

@@ -20,6 +20,7 @@ from flayr_core.prompt import write_analysis_input
 from flayr_core.proposal_clip import generate_proposal_clips
 from flayr_core.proposal_video import config_from_args
 from flayr_core.report import write_report
+from flayr_core.motion import compute_shake_metric
 from flayr_core.shot_track import build_shot_track
 from flayr_core.subtitle_track import build_subtitle_track
 from flayr_core.translation import sync_chinese_translation, translate_transcript_with_llm
@@ -482,6 +483,10 @@ def process_video(
     sync_chinese_translation(role_dir, result)
     if args.translate_with_llm:
         translate_transcript_with_llm(args, role, role_dir, result)
+
+    # 晃动信号：本地 ffmpeg vmafmotion 确定性指标（零成本）。severe 时 derive 对
+    # 视觉依赖阶段执行分封顶 0.5——晃动=无法有效接收（2026-06-12 用户判例）。
+    result["shake"] = compute_shake_metric(video_path)
 
     # 镜头轨：本地 ffmpeg 自适应切分，默认跑（无成本）。供 omni 拿精确镜头边界。
     shot_track = build_shot_track(role_dir, video_path, result.get("duration_seconds"))

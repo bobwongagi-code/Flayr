@@ -68,5 +68,5 @@ def apply_postprocess_chain(normalized: dict[str, Any], analysis: dict[str, Any]
     fill_missing_evidence_references(normalized)                             # repair      引用错位时补占位或就近匹配
     derive_product_visibility(normalized, analysis)                          # repair      达人产品出镜标记确定性累加 product_visibility
     stabilize_stage_severity(normalized)                                      # repair      severity 阶段归属漂移校准
-    derive_severity_from_facts(normalized)                                    # derive      4d 执行分+权重表确定性推导（成功则覆盖，缺事实保留上游结果）
+    derive_severity_from_facts(normalized, analysis)                          # derive      4d 执行分+权重表确定性推导（成功则覆盖，缺事实保留上游结果；含晃动封顶）
     stabilize_improvement_priorities(normalized)                              # repair      Top 改进跟随最终商业判断

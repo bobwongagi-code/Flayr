@@ -25,9 +25,9 @@ W_CANDIDATES = [0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0]
 TH_CANDIDATES = [2.2, 2.35, 2.5]
 
 
-def load_corpus() -> dict[str, list[dict]]:
-    """每样本读全部可用 raw 并归一（不推导），缓存为拟合语料。"""
-    corpus: dict[str, list[dict]] = {}
+def load_corpus() -> dict[str, tuple[list[dict], dict | None]]:
+    """每样本读全部可用 raw 并归一（不推导）+ analysis.json（晃动等信号），缓存为拟合语料。"""
+    corpus: dict[str, tuple[list[dict], dict | None]] = {}
     for name in LABELS:
         run = ROOT / "runs" / name
         normalized = []
@@ -38,20 +38,24 @@ def load_corpus() -> dict[str, list[dict]]:
                     normalized.append(normalize_analysis_result(raw))
                 except SystemExit:
                     continue
+        analysis = None
+        ap = run / "analysis.json"
+        if ap.is_file():
+            analysis = json.loads(ap.read_text(encoding="utf-8"))
         if normalized:
-            corpus[name] = normalized
+            corpus[name] = (normalized, analysis)
     return corpus
 
 
 def evaluate(corpus: dict[str, list[dict]]) -> tuple[int, int]:
     """当前 derive 全局参数下：(一致数, severe 数)。每次评估用深拷贝避免污染缓存。"""
     agree = severe = 0
-    for name, repeats in corpus.items():
+    for name, (repeats, analysis) in corpus.items():
         labels = LABELS[name]
         per_stage: dict[str, list[str]] = {s: [] for s in STAGES}
         for n in repeats:
             n2 = copy.deepcopy(n)
-            derive.derive_severity_from_facts(n2)
+            derive.derive_severity_from_facts(n2, analysis)
             smap = stage_map(n2)
             for sid in STAGES:
                 if sid in smap:

@@ -31,7 +31,8 @@ ARCHETYPE_W: dict[str, dict[str, float]] = {
     # 高决策门槛 + 功能理性（口服保健品/护肤等）：信任背书与效果验证是说服核心
     # 2026-06-12 任务5 首次重拟合（60 标签，dev_refit_weights.py，S1 锁框架红线不进搜索）：
     # 理性 S3 1.0→1.2、感官 S2/S3 1.0→1.6——中段呈现权重整体上调，36/60→40/60 severe 7→5
-    "high_decision_rational": {"S1": 1.5, "S2": 1.2, "S3": 1.2, "S4": 1.4, "S5": 1.6, "S6": 1.2},
+    # 2026-06-12 晃动信号上线后二次拟合：理性 S2/S3 1.2→1.4（45/60 severe 2）
+    "high_decision_rational": {"S1": 1.5, "S2": 1.4, "S3": 1.4, "S4": 1.4, "S5": 1.6, "S6": 1.2},
     # 低客单价冲动品（日用快消）：CTA 是转化口（客单越低 CTA 权重越高），背书必要性低
     "impulse_low_price": {"S1": 1.5, "S2": 1.2, "S3": 1.2, "S4": 1.0, "S5": 0.6, "S6": 1.8},
     # 高决策门槛 + 情绪/感官驱动（儿童用品等决策人分离品类）：感官效果可视化权重最高
@@ -84,13 +85,28 @@ def _hits(text: str, words: list[str]) -> bool:
     return any(w.lower() in lowered for w in words if w)
 
 
+# 晃动封顶作用域：视觉依赖阶段（S5 背书看视觉但有自己的门槛；S6 促单主要靠口播指令）
+_SHAKE_CAPPED_STAGES = {"S1", "S2", "S3", "S4"}
+
+
 def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] | None,
-                painpoints: list[str]) -> dict[str, Any]:
+                painpoints: list[str], shake: dict[str, bool] | None = None) -> dict[str, Any]:
     """推导单阶段 severity。返回 severity_derivation 溯源 dict（status=derived 时含新 severity）。"""
     creator_exec = stage.get("creator_execution")
     bench_exec = stage.get("benchmark_execution")
     if creator_exec is None or bench_exec is None:
         return {"status": "skipped", "reason": "执行分缺失，保留模型 severity"}
+
+    # 晃动确定性封顶（2026-06-12 用户判例：晃动=无法有效接收）：severe 侧在视觉依赖阶段
+    # 执行分封顶 0.5，只降不升、双侧对称。指标由 flayr_core.motion 在预处理算出（零 LLM）。
+    shake_notes = []
+    if shake and stage_id in _SHAKE_CAPPED_STAGES:
+        if shake.get("creator") and float(creator_exec) > 0.5:
+            creator_exec = 0.5
+            shake_notes.append("达人侧晃动实测 severe→执行分封顶 0.5")
+        if shake.get("benchmark") and float(bench_exec) > 0.5:
+            bench_exec = 0.5
+            shake_notes.append("标杆侧晃动实测 severe→执行分封顶 0.5")
 
     bench_text = _side_text(stage, "benchmark")
     creator_text = _side_text(stage, "creator")
@@ -105,6 +121,8 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
 
     e = max(0.0, float(bench_exec) - float(creator_exec))
     reason = f"E = 标杆执行分 {bench_exec} − 达人执行分 {creator_exec}"
+    if shake_notes:
+        reason += "；" + "；".join(shake_notes)
 
     # 痛点命中：优先用模型事实枚举（round3 实证词法匹配跨语言/跨粒度不可靠），缺失退回词法兜底
     relevance = stage.get("painpoint_relevance")
@@ -179,15 +197,24 @@ def critical_severity_stages(result: dict[str, Any]) -> list[str]:
     return out
 
 
-def derive_severity_from_facts(result: dict[str, Any]) -> None:
+def derive_severity_from_facts(result: dict[str, Any], analysis: dict[str, Any] | None = None) -> None:
     """4d 主入口：用执行分 + 品类权重表确定性推导各阶段 severity，覆盖模型直出值。
 
     每阶段把算法溯源写入 stage["severity_derivation"]（含被覆盖前的 model_severity）。
+    analysis 可选：提供时读取预处理的晃动信号（videos[role].shake）做执行分封顶。
     任何异常优雅降级：跳过该阶段并记录原因，绝不中断主流程。
     """
     stages = result.get("stage_analysis")
     if not isinstance(stages, list):
         return
+    shake = None
+    if isinstance(analysis, dict):
+        levels = {
+            side: (((analysis.get("videos") or {}).get(side) or {}).get("shake") or {}).get("level")
+            for side in ("creator", "benchmark")
+        }
+        if any(v == "severe" for v in levels.values()):
+            shake = {side: levels[side] == "severe" for side in levels}
     profile = result.get("category_profile") if isinstance(result.get("category_profile"), dict) else None
     archetype = _select_archetype(profile)
     weights = ARCHETYPE_W.get(archetype) if archetype else None
@@ -200,7 +227,7 @@ def derive_severity_from_facts(result: dict[str, Any]) -> None:
         if not match:
             continue
         try:
-            trace = _derive_one(match.group(1), stage, weights, painpoints)
+            trace = _derive_one(match.group(1), stage, weights, painpoints, shake)
         except Exception as exc:  # 架构不变量：推导绝不拖垮主流程
             trace = {"status": "error", "reason": f"推导异常已降级：{exc}"}
         if archetype:
