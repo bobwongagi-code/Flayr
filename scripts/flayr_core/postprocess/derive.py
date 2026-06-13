@@ -46,6 +46,30 @@ _STAGE_RE = re.compile(r"(S[1-6])")
 _DEMO_RE = re.compile(r"闻|嗅|按压|挤出|涂抹|擦拭|冲水|冲洗|冲净|脱落|掉入|掉进|排空|实测|对比|试用|测试|前后")
 
 
+def _reconcile_operator_tier(profile: dict[str, Any] | None, analysis: dict[str, Any] | None) -> None:
+    """运营档位优先（降级链）：运营给的 price_tier 覆盖模型世界知识判断。
+
+    price_tier 需要的是"该品牌型号的实际市场价位"——视频通常不报价、模型对本地品牌
+    价位无谱，运营（领域专家）最可靠。降级链：运营档位 > 模型判断（model_fallback）。
+    触发器（2026-06-13）：impulse+high 时 impulse_low_price 原型（背书权重 0.6）可能不适用，
+    告警人工复议——这是 price_tier 在当前架构唯一的非冗余价值点。
+    """
+    if not isinstance(profile, dict):
+        return
+    op = (analysis or {}).get("product") or {} if isinstance(analysis, dict) else {}
+    op_tier = str(op.get("tier") or "").strip().lower()
+    if op_tier in {"low", "mid", "high"}:
+        profile["price_tier"] = op_tier
+        profile["price_tier_source"] = "operator"
+        price = op.get("price")
+        if price and str(price) != "未填写":
+            profile["price"] = str(price)
+    if profile.get("decision_threshold") == "impulse" and profile.get("price_tier") == "high":
+        profile["archetype_warning"] = (
+            "impulse+high：impulse_low_price 原型(背书权重 0.6)可能不适用，建议人工复议"
+        )
+
+
 def _select_archetype(profile: dict[str, Any] | None) -> str | None:
     if not isinstance(profile, dict):
         return None
@@ -217,6 +241,7 @@ def derive_severity_from_facts(result: dict[str, Any], analysis: dict[str, Any] 
         if any(v == "severe" for v in levels.values()):
             shake = {side: levels[side] == "severe" for side in levels}
     profile = result.get("category_profile") if isinstance(result.get("category_profile"), dict) else None
+    _reconcile_operator_tier(profile, analysis)
     archetype = _select_archetype(profile)
     weights = ARCHETYPE_W.get(archetype) if archetype else None
     painpoints = _painpoint_tokens([str(p) for p in (profile or {}).get("painpoints") or [] if str(p).strip()])

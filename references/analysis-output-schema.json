@@ -127,7 +127,9 @@
   ],
   "category_profile": {
     "category_name": "品类名，如：一次性马桶刷。",
-    "price_tier": "low | mid | high。客单价档。",
+    "price_tier": "low | mid | high。客单价档（以 TikTok Shop 同品类为参照）。模型按世界知识判，作兜底；运营经 --product-tier 提供时由 postprocess 覆盖。",
+    "price_tier_source": "operator | model_fallback。price_tier 来源标记，postprocess 填。",
+    "price": "运营经 --product-price 提供的价格留痕（可审计 price_tier 判定依据），postprocess 填。",
     "decision_threshold": "impulse | considered。冲动可买 / 需被说服。",
     "drive_type": "emotional | functional | mixed。购买驱动类型。",
     "painpoints": [

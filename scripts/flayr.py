@@ -99,6 +99,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--product-category", default="", help="Product category from the structure-library category set.")
     parser.add_argument("--product-price", default="未填写", help="Product price.")
     parser.add_argument(
+        "--product-tier",
+        choices=("low", "mid", "high"),
+        default=None,
+        help="运营提供的客单价档（以 TikTok Shop 同品类为参照：low 走量/mid 主流/high 类目内溢价）。"
+        "提供则覆盖模型对 price_tier 的世界知识判断（运营领域知识更可靠）；不提供则用模型判断兜底。",
+    )
+    parser.add_argument(
         "--target-market",
         choices=("auto", "sea", "my"),
         default="auto",
@@ -561,6 +568,7 @@ def build_analysis(
             "name": args.product_name,
             "category": args.product_category,
             "price": args.product_price,
+            "tier": args.product_tier,  # 运营客单价档；None 时 derive 退回模型判断
             "target_market": args.target_market,
             "core_selling_points": args.core_selling_points,
             "target_user": args.target_user,

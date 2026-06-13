@@ -238,6 +238,9 @@ def normalize_category_profile(value: Any) -> dict[str, Any] | None:
     return {
         "category_name": str(value.get("category_name") or "").strip(),
         "price_tier": normalize_choice(value.get("price_tier"), {"low", "mid", "high"}, "mid"),
+        # 来源占位（model_fallback）：postprocess 若发现运营档位会改写为 operator 并填 price
+        "price_tier_source": "model_fallback",
+        "price": "",
         "decision_threshold": normalize_choice(value.get("decision_threshold"), {"impulse", "considered"}, "considered"),
         "drive_type": normalize_choice(value.get("drive_type"), {"emotional", "functional", "mixed"}, "functional"),
         "painpoints": painpoints,
