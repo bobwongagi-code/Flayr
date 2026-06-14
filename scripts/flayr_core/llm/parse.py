@@ -230,20 +230,6 @@ def normalize_painpoint_relevance(value: Any) -> str | None:
     return text if text in {"benchmark_only", "creator_only", "both", "none"} else None
 
 
-_S4_EFFECT_TYPES = {
-    "before_after", "closeup_contrast", "person_contrast",
-    "prop_contrast", "reference_object", "process_visualization", "none",
-}
-
-
-def normalize_s4_effect_type(value: Any) -> str | None:
-    """S4 效果呈现类型归一（类型选择层实验，2026-06-13）：模型判该侧 S4 用了哪种效果
-    呈现打法。none=没有独立效果呈现（只有使用动作/口播说效果，那属 S3 不算 S4）。
-    缺失/不合法返回 None → 不参与判断（降级）。"""
-    text = str(value or "").strip().lower()
-    return text if text in _S4_EFFECT_TYPES else None
-
-
 def normalize_category_profile(value: Any) -> dict[str, Any] | None:
     """品类画像归一（4d）：模型只报事实与世界知识，权重政策在代码（postprocess/derive.py）。"""
     if not isinstance(value, dict):
@@ -257,8 +243,6 @@ def normalize_category_profile(value: Any) -> dict[str, Any] | None:
         "price": "",
         "decision_threshold": normalize_choice(value.get("decision_threshold"), {"impulse", "considered"}, "considered"),
         "drive_type": normalize_choice(value.get("drive_type"), {"emotional", "functional", "mixed"}, "functional"),
-        # 效果可视化难度（类型选择层）：决定 S4 该用哪种效果呈现类型
-        "effect_visibility": normalize_choice(value.get("effect_visibility"), {"high", "medium", "low"}, "medium"),
         "painpoints": painpoints,
     }
 
@@ -498,9 +482,6 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 "benchmark_execution": normalize_execution_score(item.get("benchmark_execution")),
                 # 4d：痛点命中事实（替代词法匹配定 C 系数），缺失为 None → derive 词法兜底
                 "painpoint_relevance": normalize_painpoint_relevance(item.get("painpoint_relevance")),
-                # 类型选择层实验：S4 两侧用了哪种效果呈现类型（none=只有使用动作不算 S4）
-                "creator_s4_effect_type": normalize_s4_effect_type(item.get("creator_s4_effect_type")),
-                "benchmark_s4_effect_type": normalize_s4_effect_type(item.get("benchmark_s4_effect_type")),
             }
         )
 

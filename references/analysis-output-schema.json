@@ -122,9 +122,7 @@
       "severity": "large | medium | small",
       "creator_execution": "0 | 0.5 | 1 | 2。达人侧独立执行分：0=未执行该阶段功能；0.5=做了但对核心功能基本无效（敷衍、平庸无感，或画面晃动/模糊到无法有效接收）；1=合格（功能完成且有效；S2-S4 仅口头/文字、场景单一、缺效果对比的'呈现单薄'封顶 1）；2=出色（S2-S4 要求关键环节可视化+效果对比+场景丰富，过长全程记录不加分）。先独立打分再对比，禁止因对比回调。",
       "benchmark_execution": "0 | 0.5 | 1 | 2。标杆侧独立执行分，标尺同上。两个执行分是系统确定性推导差距等级的事实输入。",
-      "painpoint_relevance": "benchmark_only | creator_only | both | none。该阶段双方内容是否命中 category_profile.painpoints 的核心决策因素；按内容功能判断，不要求字面用词一致。系统据此定痛点命中系数。",
-      "creator_s4_effect_type": "仅 S4。达人侧效果呈现类型：before_after|closeup_contrast|person_contrast|prop_contrast|reference_object|process_visualization|none。none=只有使用动作/口播说效果、无'用了之后结果变化'的呈现（使用动作属 S3 不算 S4）。",
-      "benchmark_s4_effect_type": "仅 S4。标杆侧效果呈现类型，枚举同上。"
+      "painpoint_relevance": "benchmark_only | creator_only | both | none。该阶段双方内容是否命中 category_profile.painpoints 的核心决策因素；按内容功能判断，不要求字面用词一致。系统据此定痛点命中系数。"
     }
   ],
   "category_profile": {
@@ -134,7 +132,6 @@
     "price": "运营经 --product-price 提供的价格留痕（可审计 price_tier 判定依据），postprocess 填。",
     "decision_threshold": "impulse | considered。冲动可买 / 需被说服。",
     "drive_type": "emotional | functional | mixed。购买驱动类型。",
-    "effect_visibility": "high | medium | low。该品效果可视化难度：high=用了立刻看得见（清洁去污/美妆变妆）；medium=需时间或对比（散粉控油/护肤）；low=感受型不可见（保健/口味）。决定 S4 该用哪种效果呈现类型。",
     "painpoints": [
       "该品类目标消费者最在意的决策因素关键词；每个痛点同时给中文和本地语两种表述放进同一数组（共 6-16 个词条），供系统跨语言匹配。只报品类事实与世界知识，不做权重判断。"
     ]

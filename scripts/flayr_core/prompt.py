@@ -120,7 +120,6 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
         "14b1. 0.5 档同样适用于'内容存在但消费者无法有效接收'：看不清（虚焦/过曝/遮挡/一闪而过/画面晃动到观众抓不住重点）、听不清（吞字/被 BGM 压制）、读不完（字幕停留过短）——物理存在不等于有效传递。S5 背书孤证规则：仅口播提及背书而画面无佐证、或背书标志一闪而过无法辨认，执行分最高 0.5。",
         "14b3. 演示类阶段（S2-S4）呈现有效性锚点：2 分=关键环节可视化到位+效果突出有对比+场景丰富（过长全程记录不加分，标尺是关键环节覆盖非完整性）；仅口头描述/文字叠参数、场景单一、缺效果对比的'做了但呈现单薄'最高 1 分，不得与多场景可视化演示打平。",
         "14b2. 每阶段必须输出 painpoint_relevance（benchmark_only/creator_only/both/none 四选一）：该阶段双方内容是否命中 category_profile.painpoints 的核心决策因素，按内容功能判断（讲没讲到、演没演到核心痛点），不要求字面用词一致。",
-        "14b5. 【类型选择层实验】category_profile 加 effect_visibility（high/medium/low 效果可视化难度）。S4 两侧输出 creator_s4_effect_type / benchmark_s4_effect_type（before_after/closeup_contrast/person_contrast/prop_contrast/reference_object/process_visualization/none）。**铁律：S4 效果呈现=用了之后的结果变化；使用动作(涂抹/按压/操作)属 S3 不算 S4，口播说效果也不算——只有使用动作/光说没结果展示则 type=none。**",
         "14c. 顶层输出 category_profile 品类画像：category_name（品类名）、price_tier（low/mid/high 客单价档）、decision_threshold（impulse 冲动可买 / considered 需被说服）、drive_type（emotional/functional/mixed 驱动类型）、painpoints（该品类目标消费者最在意的决策因素关键词，每个痛点中文+本地语双语表述放同一数组，共 6-16 个词条）。只报品类事实与世界知识，不做权重判断。",
         "15. JSON 输出保持简洁：每个视频列出 3~6 个关键 evidence_units；任何差距、证据或动作列表最多 3 条；每个描述字段最多一句；禁止重复列举未出现的音效、镜头或功能。",
         "16. 输出前按 QA-RULES.md 自检：证据引用必须存在且与阶段时间相交，module_id 必须来自 structure_library_full.md，product_visibility 数值必须自洽。",
