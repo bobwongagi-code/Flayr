@@ -230,21 +230,6 @@ def normalize_painpoint_relevance(value: Any) -> str | None:
     return text if text in {"benchmark_only", "creator_only", "both", "none"} else None
 
 
-def normalize_s4_evidence(value: Any) -> dict[str, Any] | None:
-    """S4 效果呈现的视觉证据清点（2026-06-13 赋分降维）：模型只清点客观事实，
-    代码据此推 S4 单侧执行分。缺失/非 dict 返回 None → derive 退回模型直接给的执行分。
-    四个 IU 布尔 + proof_strength 枚举（只看画面，口播效果声明不计入——S3/S4 隔离）。"""
-    if not isinstance(value, dict):
-        return None
-    return {
-        "has_side_by_side": normalize_bool_flag(value.get("has_side_by_side")),
-        "has_macro_detail": normalize_bool_flag(value.get("has_macro_detail")),
-        "has_instrument_proof": normalize_bool_flag(value.get("has_instrument_proof")),
-        "has_process_reveal": normalize_bool_flag(value.get("has_process_reveal")),
-        "proof_strength": normalize_choice(value.get("proof_strength"), {"weak", "moderate", "strong"}, "moderate"),
-    }
-
-
 def normalize_category_profile(value: Any) -> dict[str, Any] | None:
     """品类画像归一（4d）：模型只报事实与世界知识，权重政策在代码（postprocess/derive.py）。"""
     if not isinstance(value, dict):
@@ -497,9 +482,6 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 "benchmark_execution": normalize_execution_score(item.get("benchmark_execution")),
                 # 4d：痛点命中事实（替代词法匹配定 C 系数），缺失为 None → derive 词法兜底
                 "painpoint_relevance": normalize_painpoint_relevance(item.get("painpoint_relevance")),
-                # S4 赋分降维：两侧视觉证据清点，derive 查表推 S4 执行分（缺失退回模型直接给）
-                "creator_s4_evidence": normalize_s4_evidence(item.get("creator_s4_evidence")),
-                "benchmark_s4_evidence": normalize_s4_evidence(item.get("benchmark_s4_evidence")),
             }
         )
 
