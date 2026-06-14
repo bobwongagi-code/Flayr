@@ -142,12 +142,43 @@ def _hits(text: str, words: list[str]) -> bool:
 # 晃动封顶作用域：视觉依赖阶段（S5 背书看视觉但有自己的门槛；S6 促单主要靠口播指令）
 _SHAKE_CAPPED_STAGES = {"S1", "S2", "S3", "S4"}
 
+# S4 赋分降维查表（2026-06-13）：单侧 S4 执行分 = TABLE[IU档][proof_strength]。
+# IU档 = 视觉证据点计数（has_side_by_side/macro/instrument/process 求和）；初值待拟合。
+# 把"S4 做得好不好"（模型凭感觉、两极）降维成"清点几个视觉证据 + 效果强度"（可数、稳）。
+_S4_SCORE_TABLE: dict[int, dict[str, float]] = {
+    0: {"weak": 0.0, "moderate": 0.0, "strong": 0.5},   # 无视觉证据（纯口播/静态结果图）
+    1: {"weak": 0.5, "moderate": 1.0, "strong": 1.0},   # 单一证据
+    2: {"weak": 1.0, "moderate": 1.0, "strong": 2.0},   # 基础对比+过程
+    3: {"weak": 1.0, "moderate": 2.0, "strong": 2.0},   # 丰富证据链（3-4 合并）
+}
+_S4_IU_KEYS = ("has_side_by_side", "has_macro_detail", "has_instrument_proof", "has_process_reveal")
+
+
+def _derive_s4_execution(evidence: dict[str, Any] | None) -> float | None:
+    """从单侧 S4 视觉证据清点查表得执行分；evidence 缺失返回 None（调用方退回模型直接给）。"""
+    if not isinstance(evidence, dict):
+        return None
+    iu_sum = sum(1 for k in _S4_IU_KEYS if evidence.get(k))
+    proof = str(evidence.get("proof_strength") or "moderate")
+    return _S4_SCORE_TABLE[min(iu_sum, 3)].get(proof, _S4_SCORE_TABLE[min(iu_sum, 3)]["moderate"])
+
 
 def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] | None,
                 painpoints: list[str], shake: dict[str, bool] | None = None) -> dict[str, Any]:
     """推导单阶段 severity。返回 severity_derivation 溯源 dict（status=derived 时含新 severity）。"""
     creator_exec = stage.get("creator_execution")
     bench_exec = stage.get("benchmark_execution")
+    s4_notes = []
+    # S4 赋分降维：有视觉证据清点则查表覆盖模型直接给的执行分（治"做了展示就打 2"两极病）
+    if stage_id == "S4":
+        c_s4 = _derive_s4_execution(stage.get("creator_s4_evidence"))
+        b_s4 = _derive_s4_execution(stage.get("benchmark_s4_evidence"))
+        if c_s4 is not None:
+            creator_exec = c_s4
+            s4_notes.append(f"达人 S4 证据清点→执行分 {c_s4}")
+        if b_s4 is not None:
+            bench_exec = b_s4
+            s4_notes.append(f"标杆 S4 证据清点→执行分 {b_s4}")
     if creator_exec is None or bench_exec is None:
         return {"status": "skipped", "reason": "执行分缺失，保留模型 severity"}
 
@@ -175,6 +206,8 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
 
     e = max(0.0, float(bench_exec) - float(creator_exec))
     reason = f"E = 标杆执行分 {bench_exec} − 达人执行分 {creator_exec}"
+    if s4_notes:
+        reason += "；" + "；".join(s4_notes)
     if shake_notes:
         reason += "；" + "；".join(shake_notes)
 
@@ -188,7 +221,8 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
     # 事实覆盖层（取 E 下限）：观察事实 > 打分漂移
     b_vis = " ".join(str(v) for v in stage.get("benchmark_visual_evidence") or [])
     c_vis = " ".join(str(v) for v in stage.get("creator_visual_evidence") or [])
-    if stage_id == "S4" and e > 0 and _DEMO_RE.search(b_vis) and not _DEMO_RE.search(c_vis):
+    if stage_id == "S4" and not s4_notes and e > 0 and _DEMO_RE.search(b_vis) and not _DEMO_RE.search(c_vis):
+        # 仅在无 s4_evidence 清点（降级路径）时用旧正则覆盖；有清点则新机制已接管
         e, reason = max(e, 2.0), reason + "；S4 标杆动作演示 vs 达人口头宣称（验证=让用户看到）"
     elif stage_id == "S1" and e > 0 and relevance == "benchmark_only":
         e, reason = max(e, 2.0), reason + "；S1 标杆钩子命中品类痛点、达人未命中"

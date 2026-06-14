@@ -120,6 +120,7 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
         "14b1. 0.5 档同样适用于'内容存在但消费者无法有效接收'：看不清（虚焦/过曝/遮挡/一闪而过/画面晃动到观众抓不住重点）、听不清（吞字/被 BGM 压制）、读不完（字幕停留过短）——物理存在不等于有效传递。S5 背书孤证规则：仅口播提及背书而画面无佐证、或背书标志一闪而过无法辨认，执行分最高 0.5。",
         "14b3. 演示类阶段（S2-S4）呈现有效性锚点：2 分=关键环节可视化到位+效果突出有对比+场景丰富（过长全程记录不加分，标尺是关键环节覆盖非完整性）；仅口头描述/文字叠参数、场景单一、缺效果对比的'做了但呈现单薄'最高 1 分，不得与多场景可视化演示打平。",
         "14b2. 每阶段必须输出 painpoint_relevance（benchmark_only/creator_only/both/none 四选一）：该阶段双方内容是否命中 category_profile.painpoints 的核心决策因素，按内容功能判断（讲没讲到、演没演到核心痛点），不要求字面用词一致。",
+        "14b4. S4 阶段两侧各输出 creator_s4_evidence / benchmark_s4_evidence，清点视觉证据（has_side_by_side/has_macro_detail/has_instrument_proof/has_process_reveal 四布尔 + proof_strength=weak/moderate/strong）。**S3/S4 隔离**：只看画面、口播说的效果不算 S4，光说不算要眼见为实。系统据此查表推 S4 执行分。",
         "14c. 顶层输出 category_profile 品类画像：category_name（品类名）、price_tier（low/mid/high 客单价档）、decision_threshold（impulse 冲动可买 / considered 需被说服）、drive_type（emotional/functional/mixed 驱动类型）、painpoints（该品类目标消费者最在意的决策因素关键词，每个痛点中文+本地语双语表述放同一数组，共 6-16 个词条）。只报品类事实与世界知识，不做权重判断。",
         "15. JSON 输出保持简洁：每个视频列出 3~6 个关键 evidence_units；任何差距、证据或动作列表最多 3 条；每个描述字段最多一句；禁止重复列举未出现的音效、镜头或功能。",
         "16. 输出前按 QA-RULES.md 自检：证据引用必须存在且与阶段时间相交，module_id 必须来自 structure_library_full.md，product_visibility 数值必须自洽。",
