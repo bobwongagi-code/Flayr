@@ -42,6 +42,15 @@ LABELS: dict[str, dict[str, str]] = {
     "sample-youkoubo-c0": {"S1": "large", "S2": "medium", "S3": "medium", "S4": "medium", "S5": "small", "S6": "small"},
     "sample-youkoubo-c1": {"S1": "large", "S2": "large", "S3": "large", "S4": "large", "S5": "small", "S6": "large"},
     "sample-youkoubo-c2": {"S1": "large", "S2": "large", "S3": "large", "S4": "large", "S5": "small", "S6": "large"},
+    # Round6 真泛化盲标（2026-06-13 用户盲标，规则冻结 3e8f7e0；"不涉及"按 small）
+    # carslan/colorkey 同达人×双标杆，两对档位一致；simplus/mmx 系"整体至少 medium"逐阶推断
+    "sample-carslan-b0": {"S1": "large", "S2": "medium", "S3": "medium", "S4": "medium", "S5": "small", "S6": "small"},
+    "sample-carslan-b1": {"S1": "large", "S2": "medium", "S3": "medium", "S4": "medium", "S5": "small", "S6": "small"},
+    "sample-colorkey-b0": {"S1": "medium", "S2": "medium", "S3": "medium", "S4": "medium", "S5": "small", "S6": "small"},
+    "sample-colorkey-b1": {"S1": "medium", "S2": "medium", "S3": "medium", "S4": "medium", "S5": "small", "S6": "small"},
+    "sample-paint": {"S1": "small", "S2": "medium", "S3": "medium", "S4": "medium", "S5": "small", "S6": "small"},
+    "sample-simplus": {"S1": "medium", "S2": "medium", "S3": "medium", "S4": "medium", "S5": "small", "S6": "small"},
+    "sample-mmx": {"S1": "medium", "S2": "medium", "S3": "medium", "S4": "medium", "S5": "small", "S6": "small"},
 }
 STAGES = ["S1", "S2", "S3", "S4", "S5", "S6"]
 _THRIFT_RE = re.compile(r"省钱|划算|性价比|便宜|jimat|murah|affordable", re.IGNORECASE)

@@ -111,3 +111,21 @@ E=1 在现行 W 下够不到 large 阈值。
 压 large 的理由。**据此复议 round5 标签**：wukoubo-c0/c1 的 S2/S3/S4 large→medium
 （双方均完成、达人水果单一呈现弱、用户原注"标杆质感超规格有点儿欺负达人"）。
 skincare S2-S4 维持 large（达人完全没展示=缺失）；youkoubo-c1/c2 维持 large（糊弄/晃动=基本无效）。
+
+
+## Round6 真泛化盲标（2026-06-13 用户盲标，规则冻结 3e8f7e0）
+
+> 5 组 7 对：美妆×4（carslan 定妆散粉 + colorkey 面膜，各同达人×双标杆）+ 家电×2（mmx 洗地机、simplus 挂烫机）+ paint 密封胶。组1/2/paint 泰语，mmx/simplus 马来语。
+> carslan/colorkey 同达人×双标杆，两对档位一致（标杆强弱差异未跨 L/M/S 档）；simplus/mmx 系用户"整体至少 medium"逐阶推断。
+
+| 样本 | S1 | S2 | S3 | S4 | S5 | S6 | 判定要点 |
+|---|---|---|---|---|---|---|---|
+| carslan（散粉，th） | large | medium | medium | medium | small | small | 达人钩子弱（没化妆效果+口播画面对不上）vs 标杆化妆后效果/标杆1专业化妆师身份+双人配合；达人 before/after 不明显效果一般，标杆讲各肤质适用性详细 |
+| colorkey（面膜，th） | medium | medium | medium | medium | small | small | 达人价格做钩子 vs 标杆 day1-7 变化/标杆1道具（day1-5 用10秒超3-5秒定律也ok）；达人介绍空洞"用了变好"+拍打动作夸张，标杆讲各色功效+热销+中国女生皮肤对比/标杆1无口播但使用过程详细 |
+| paint（密封胶，th） | small | medium | medium | medium | small | small | 都用裂缝做钩子（标杆密封胶流出+水流稍吸引但差距小）；达人使用场景一般重复多，标杆多场景更紧凑 |
+| simplus（挂烫机，ms） | medium | medium | medium | medium | small | small | 达人开头展示但对干净衣服显不出价值+站着介绍；标杆使用介绍详细（升降、水箱容积）。整体至少 medium |
+| mmx（洗地机，ms） | medium | medium | medium | medium | small | small | 达人靠口播不做动作信息含量低节奏慢；标杆以产品为中心、使用+加水功能清晰紧凑。整体至少 medium |
+
+**样本外对账（推导 24/42 ≈ round5 23/42，泛化稳定 ~56%）**：S5 **7/7**（背书门槛第三次满分）、S6 6/7、S2/S3 各 5/7 泛化好；**S1 1/7、S4 0/7 崩**——执行分锚点 vs 用户判据系统错位（S4 用户全判 medium=判例②"呈现单薄"，模型对"做了展示"普遍打 2→small 或 0.5→large，medium 中间档打不出）。
+**池化机制实证**：carslan S6 假 large（达人 S6 被标杆污染打 0，跨对真值 2）池化后修正 → carslan severe 3→2；colorkey 漂移落 S5 惰性阶段无影响。池化精准修锚定假 severe、不误伤标杆真差异。
+**两个待议（用户提出）**：① 人标签自一致性是机器对齐的真天花板，待测；② 执行分细化到 5 档（加 1.5"有创新"）能否解 medium 难命中——需重跑验证，留意方差↑ 风险。
