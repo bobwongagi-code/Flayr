@@ -230,9 +230,10 @@ def normalize_painpoint_relevance(value: Any) -> str | None:
     return text if text in {"benchmark_only", "creator_only", "both", "none"} else None
 
 
-def normalize_proposition_delivery(value: Any) -> str | None:
-    """核心视觉命题呈现归一：四值枚举；该阶段双方是否有效呈现 product_profile 核心视觉命题。
-    先作为事实收集，本阶段不参与 derive 卡分；缺失/不合法返回 None。"""
+def normalize_stage_standard_delivery(value: Any) -> str | None:
+    """到位标准达成归一（全阶段统一，泛化自 proposition_delivery）：四值枚举；
+    该阶段双方是否有效达到本阶段的『本品到位标准』（锚点按阶段查，见 prompt 对照表）。
+    先作为事实收集，暂不参与 derive 卡分；缺失/不合法返回 None。"""
     text = str(value or "").strip().lower()
     return text if text in {"benchmark_only", "creator_only", "both", "none"} else None
 
@@ -514,8 +515,8 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 "benchmark_execution": normalize_execution_score(item.get("benchmark_execution")),
                 # 4d：痛点命中事实（替代词法匹配定 C 系数），缺失为 None → derive 词法兜底
                 "painpoint_relevance": normalize_painpoint_relevance(item.get("painpoint_relevance")),
-                # 产品 DNA：该阶段双方是否有效呈现核心视觉命题（先收集，暂不卡分）
-                "proposition_delivery": normalize_proposition_delivery(item.get("proposition_delivery")),
+                # 到位标准达成事实（全阶段统一，见 prompt 对照表；先收集，暂不卡分）
+                "stage_standard_delivery": normalize_stage_standard_delivery(item.get("stage_standard_delivery")),
             }
         )
 
