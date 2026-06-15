@@ -230,6 +230,13 @@ def normalize_painpoint_relevance(value: Any) -> str | None:
     return text if text in {"benchmark_only", "creator_only", "both", "none"} else None
 
 
+def normalize_proposition_delivery(value: Any) -> str | None:
+    """核心视觉命题呈现归一：四值枚举；该阶段双方是否有效呈现 product_profile 核心视觉命题。
+    先作为事实收集，本阶段不参与 derive 卡分；缺失/不合法返回 None。"""
+    text = str(value or "").strip().lower()
+    return text if text in {"benchmark_only", "creator_only", "both", "none"} else None
+
+
 def normalize_category_profile(value: Any) -> dict[str, Any] | None:
     """品类画像归一（4d）：模型只报事实与世界知识，权重政策在代码（postprocess/derive.py）。"""
     if not isinstance(value, dict):
@@ -244,6 +251,31 @@ def normalize_category_profile(value: Any) -> dict[str, Any] | None:
         "decision_threshold": normalize_choice(value.get("decision_threshold"), {"impulse", "considered"}, "considered"),
         "drive_type": normalize_choice(value.get("drive_type"), {"emotional", "functional", "mixed"}, "functional"),
         "painpoints": painpoints,
+    }
+
+
+def normalize_product_profile(value: Any) -> dict[str, Any] | None:
+    """产品商业 DNA 归一：判分前模型先立的"本品视觉命题"尺子。
+
+    core_visual_proposition 是 S2-S4 执行分锚点（"该展示成什么样才算到位"按品现推，跨品类泛化）。
+    模型只报产品事实 + 品类世界知识；后续运营/DNA 库可经 postprocess 覆盖（同 price_tier 降级链）。
+    """
+    if not isinstance(value, dict):
+        return None
+    multipliers = [str(m).strip() for m in value.get("trust_multipliers") or [] if str(m).strip()][:6]
+    dimensions = [str(d).strip() for d in value.get("visual_diff_dimensions") or [] if str(d).strip()][:3]
+    return {
+        # 可视化分叉：no（香水/保健品等效果拍不出）时 S4 视觉审计失效，判断权重应转 S5/达人可信度
+        "visualizable": normalize_choice(value.get("visualizable"), {"yes", "no"}, "yes"),
+        "physical_task": str(value.get("physical_task") or "").strip(),
+        "core_visual_proposition": str(value.get("core_visual_proposition") or "").strip(),
+        # before/after 应变化的视觉维度（S4 核验对比只看这些；未来 CV 检测层的维度钩子）
+        "visual_diff_dimensions": dimensions,
+        "trust_multipliers": multipliers,
+        "shooting_requirement": str(value.get("shooting_requirement") or "").strip(),
+        # 来源占位（model_inferred）：postprocess 命中 DNA 库或运营供给时改写为 library/operator
+        "dna_source": "model_inferred",
+        "confidence": normalize_choice(value.get("confidence"), {"high", "low"}, "high"),
     }
 
 
@@ -482,6 +514,8 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 "benchmark_execution": normalize_execution_score(item.get("benchmark_execution")),
                 # 4d：痛点命中事实（替代词法匹配定 C 系数），缺失为 None → derive 词法兜底
                 "painpoint_relevance": normalize_painpoint_relevance(item.get("painpoint_relevance")),
+                # 产品 DNA：该阶段双方是否有效呈现核心视觉命题（先收集，暂不卡分）
+                "proposition_delivery": normalize_proposition_delivery(item.get("proposition_delivery")),
             }
         )
 
@@ -538,6 +572,7 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
         "key_conclusions": key_conclusions,
         "product_visibility": normalize_product_visibility(result.get("product_visibility")),
         "category_profile": normalize_category_profile(result.get("category_profile")),
+        "product_profile": normalize_product_profile(result.get("product_profile")),
         "loop_closure": normalize_loop_closure(result.get("loop_closure")),
         "video_understanding": normalize_video_understanding(result.get("video_understanding")),
         "stage_analysis": normalized_stages,
