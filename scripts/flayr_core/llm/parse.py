@@ -269,6 +269,8 @@ def normalize_product_profile(value: Any) -> dict[str, Any] | None:
         # 可视化分叉：no（香水/保健品等效果拍不出）时 S4 视觉审计失效，判断权重应转 S5/达人可信度
         "visualizable": normalize_choice(value.get("visualizable"), {"yes", "no"}, "yes"),
         "physical_task": str(value.get("physical_task") or "").strip(),
+        # S1 钩子命题：本品最有拦截力的点（模型推，运营可经降级链覆盖）
+        "hook_proposition": str(value.get("hook_proposition") or "").strip(),
         "core_visual_proposition": str(value.get("core_visual_proposition") or "").strip(),
         # before/after 应变化的视觉维度（S4 核验对比只看这些；未来 CV 检测层的维度钩子）
         "visual_diff_dimensions": dimensions,
