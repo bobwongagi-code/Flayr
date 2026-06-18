@@ -48,6 +48,9 @@ from .claims_my import (
     reconcile_certification_ownership,
 )
 
+# 4d：severity 确定性推导（执行分 + 品类权重表；事实缺失自动跳过，绝不抛错）
+from .derive import derive_severity_from_facts
+
 
 def apply_postprocess_chain(normalized: dict[str, Any], analysis: dict[str, Any]) -> None:
     """两个 caller 共享的中段流水线。每一步对应一个独立职责模块。"""
@@ -65,4 +68,5 @@ def apply_postprocess_chain(normalized: dict[str, Any], analysis: dict[str, Any]
     fill_missing_evidence_references(normalized)                             # repair      引用错位时补占位或就近匹配
     derive_product_visibility(normalized, analysis)                          # repair      达人产品出镜标记确定性累加 product_visibility
     stabilize_stage_severity(normalized)                                      # repair      severity 阶段归属漂移校准
+    derive_severity_from_facts(normalized, analysis)                          # derive      4d 执行分+权重表确定性推导（成功则覆盖，缺事实保留上游结果；含晃动封顶）
     stabilize_improvement_priorities(normalized)                              # repair      Top 改进跟随最终商业判断

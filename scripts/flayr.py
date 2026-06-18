@@ -20,6 +20,7 @@ from flayr_core.prompt import write_analysis_input
 from flayr_core.proposal_clip import generate_proposal_clips
 from flayr_core.proposal_video import config_from_args
 from flayr_core.report import write_report
+from flayr_core.motion import compute_shake_metric
 from flayr_core.shot_track import build_shot_track
 from flayr_core.subtitle_track import build_subtitle_track
 from flayr_core.translation import sync_chinese_translation, translate_transcript_with_llm
@@ -97,6 +98,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--product-name", default="未填写", help="Product name.")
     parser.add_argument("--product-category", default="", help="Product category from the structure-library category set.")
     parser.add_argument("--product-price", default="未填写", help="Product price.")
+    parser.add_argument(
+        "--product-tier",
+        choices=("low", "mid", "high"),
+        default=None,
+        help="运营提供的客单价档（以 TikTok Shop 同品类为参照：low 走量/mid 主流/high 类目内溢价）。"
+        "提供则覆盖模型对 price_tier 的世界知识判断（运营领域知识更可靠）；不提供则用模型判断兜底。",
+    )
     parser.add_argument(
         "--target-market",
         choices=("auto", "sea", "my"),
@@ -483,6 +491,10 @@ def process_video(
     if args.translate_with_llm:
         translate_transcript_with_llm(args, role, role_dir, result)
 
+    # 晃动信号：本地 ffmpeg vmafmotion 确定性指标（零成本）。severe 时 derive 对
+    # 视觉依赖阶段执行分封顶 0.5——晃动=无法有效接收（2026-06-12 用户判例）。
+    result["shake"] = compute_shake_metric(video_path)
+
     # 镜头轨：本地 ffmpeg 自适应切分，默认跑（无成本）。供 omni 拿精确镜头边界。
     shot_track = build_shot_track(role_dir, video_path, result.get("duration_seconds"))
     result["shot_track_status"] = shot_track.get("status")
@@ -556,6 +568,7 @@ def build_analysis(
             "name": args.product_name,
             "category": args.product_category,
             "price": args.product_price,
+            "tier": args.product_tier,  # 运营客单价档；None 时 derive 退回模型判断
             "target_market": args.target_market,
             "core_selling_points": args.core_selling_points,
             "target_user": args.target_user,

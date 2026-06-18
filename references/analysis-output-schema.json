@@ -119,9 +119,39 @@
       "evidence": [
         "必须至少 1 条，引用时间段、画面证据或口播证据。"
       ],
-      "severity": "large | medium | small"
+      "severity": "large | medium | small",
+      "creator_execution": "0 | 0.5 | 1 | 2。达人侧独立执行分：0=未执行该阶段功能；0.5=做了但对核心功能基本无效（敷衍、平庸无感，或画面晃动/模糊到无法有效接收）；1=合格（功能完成且有效；S2-S4 仅口头/文字、场景单一、缺效果对比的'呈现单薄'封顶 1）；2=出色（S2-S4 要求关键环节可视化+效果对比+场景丰富，过长全程记录不加分）。先独立打分再对比，禁止因对比回调。",
+      "benchmark_execution": "0 | 0.5 | 1 | 2。标杆侧独立执行分，标尺同上。两个执行分是系统确定性推导差距等级的事实输入。",
+      "painpoint_relevance": "benchmark_only | creator_only | both | none。该阶段双方内容是否命中 category_profile.painpoints 的核心决策因素；按内容功能判断，不要求字面用词一致。系统据此定痛点命中系数。",
+      "stage_standard_delivery": "benchmark_only | creator_only | both | none。该阶段双方是否有效达到本阶段的『本品到位标准』（按阶段查产品锚点：S1 钩子→hook_proposition、S2 引出→承接钩子的自然引出、S3 使用过程→core_selling_points+usage_context（使用中传卖点）、S4 效果→core_visual_proposition、S5 信任→trust_multipliers、S6 促单→decision_threshold 匹配的 CTA）。做到/展示到才算，仅口头讲到不算。先作为事实收集，暂不参与推导。"
     }
   ],
+  "category_profile": {
+    "category_name": "品类名，如：一次性马桶刷。",
+    "price_tier": "low | mid | high。客单价档（以 TikTok Shop 同品类为参照）。模型按世界知识判，作兜底；运营经 --product-tier 提供时由 postprocess 覆盖。",
+    "price_tier_source": "operator | model_fallback。price_tier 来源标记，postprocess 填。",
+    "price": "运营经 --product-price 提供的价格留痕（可审计 price_tier 判定依据），postprocess 填。",
+    "decision_threshold": "impulse | considered。冲动可买 / 需被说服。",
+    "drive_type": "emotional | functional | mixed。购买驱动类型。",
+    "painpoints": [
+      "该品类目标消费者最在意的决策因素关键词；每个痛点同时给中文和本地语两种表述放进同一数组（共 6-16 个词条），供系统跨语言匹配。只报品类事实与世界知识，不做权重判断。"
+    ]
+  },
+  "product_profile": {
+    "visualizable": "yes | no。该产品核心价值能否视觉化呈现。yes 走 S4 视觉命题审计；no（香水/保健品/隐形矫正等效果拍不出）时判断权重从 S4 效果呈现转向 S5 信任与达人可信度。这个分叉判断本身品类无关。",
+    "physical_task": "该产品解决的最直观尴尬/任务。例：定妆粉饼消除粉底后油光、实现哑光定妆。",
+    "hook_proposition": "S1 钩子命题：本品对目标人群最有拦截力的点——最尖锐痛点或最强承诺/反差（功能品常=physical_task，情绪/新奇品=新奇感/身份/反差）。S1 执行分以此为锚点。模型按品类+视频推，运营可覆盖。",
+    "core_visual_proposition": "★核心视觉命题★ 哪个决定性画面瞬间让消费者瞬间信服，即本品『到位效果展示』的标准。例：强光下半脸反光 vs 半脸哑光的对比；面膜逐日肤质变化 + 敷后透亮。这是 S2-S4 执行分的评判锚点，按本品现推、不要套通用 before/after。",
+    "visual_diff_dimensions": [
+      "本品 before/after 应在哪些视觉维度上发生变化，S4 核验对比时只看这些维度：从 亮度/反光、纹理/毛孔、色泽/均匀度、水润/干燥、肿胀/轮廓 中选，或按品自命名（如遮瑕覆盖、去污、拉丝、电量变化）。例：定妆粉饼=亮度/反光；补水面膜=水润/干燥。1-3 个。"
+    ],
+    "trust_multipliers": [
+      "该品类建立专业度/信任的元素，如美容仪、周期记录、专业涂抹手法、第三方检测、实验背景，给 3-6 个。"
+    ],
+    "shooting_requirement": "卖点需要什么拍摄条件才能显现。例：效果细微需正面强光 + 面部特写；wide shot 或暗光下拍不出即视为无效展示。",
+    "dna_source": "library | operator | model_inferred。DNA 来源标记，postprocess 填；模型现推为 model_inferred。",
+    "confidence": "high | low。模型对该 DNA 判断的置信度；小众品/本地新奇特品类宜标 low。"
+  },
   "improvements": [
     {
       "title": "一句大白话标题",

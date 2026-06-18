@@ -194,6 +194,94 @@ def normalize_task_completion(value: Any) -> str:
     return "partial"
 
 
+def normalize_execution_score(value: Any) -> float | None:
+    """单侧执行分归一：0=不执行，0.5=敷衍，1=合格，2=好（4d 推导的输入事实）。
+
+    解析失败返回 None——下游 derive 对 None 优雅跳过、保留模型 severity，
+    所以这里宁缺毋滥，不做强行兜底映射。
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if float(value) in {0.0, 0.5, 1.0, 2.0} else None
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    try:
+        number = float(text)
+        return number if number in {0.0, 0.5, 1.0, 2.0} else None
+    except ValueError:
+        pass
+    # 容忍少量语义词漂移（与 task_completion 自由文本的教训一致：枚举指令挡不全）
+    if re.search(r"未执行|不执行|没有执行|缺失|none", text):
+        return 0.0
+    if re.search(r"敷衍|轻带|几乎无效|perfunctory", text):
+        return 0.5
+    if re.search(r"合格|完成|adequate|ok", text):
+        return 1.0
+    if re.search(r"出色|优秀|很好|excellent|strong", text):
+        return 2.0
+    return None
+
+
+def normalize_painpoint_relevance(value: Any) -> str | None:
+    """痛点命中归一（4d）：四值枚举；缺失/不合法返回 None → derive 退回词法匹配兜底。"""
+    text = str(value or "").strip().lower()
+    return text if text in {"benchmark_only", "creator_only", "both", "none"} else None
+
+
+def normalize_stage_standard_delivery(value: Any) -> str | None:
+    """到位标准达成归一（全阶段统一，泛化自 proposition_delivery）：四值枚举；
+    该阶段双方是否有效达到本阶段的『本品到位标准』（锚点按阶段查，见 prompt 对照表）。
+    先作为事实收集，暂不参与 derive 卡分；缺失/不合法返回 None。"""
+    text = str(value or "").strip().lower()
+    return text if text in {"benchmark_only", "creator_only", "both", "none"} else None
+
+
+def normalize_category_profile(value: Any) -> dict[str, Any] | None:
+    """品类画像归一（4d）：模型只报事实与世界知识，权重政策在代码（postprocess/derive.py）。"""
+    if not isinstance(value, dict):
+        return None
+    painpoints = [str(p).strip() for p in value.get("painpoints") or [] if str(p).strip()][:10]
+    return {
+        "category_name": str(value.get("category_name") or "").strip(),
+        "price_tier": normalize_choice(value.get("price_tier"), {"low", "mid", "high"}, "mid"),
+        # 来源占位（model_fallback）：postprocess 若发现运营档位会改写为 operator 并填 price
+        "price_tier_source": "model_fallback",
+        "price": "",
+        "decision_threshold": normalize_choice(value.get("decision_threshold"), {"impulse", "considered"}, "considered"),
+        "drive_type": normalize_choice(value.get("drive_type"), {"emotional", "functional", "mixed"}, "functional"),
+        "painpoints": painpoints,
+    }
+
+
+def normalize_product_profile(value: Any) -> dict[str, Any] | None:
+    """产品商业 DNA 归一：判分前模型先立的"本品视觉命题"尺子。
+
+    core_visual_proposition 是 S2-S4 执行分锚点（"该展示成什么样才算到位"按品现推，跨品类泛化）。
+    模型只报产品事实 + 品类世界知识；后续运营/DNA 库可经 postprocess 覆盖（同 price_tier 降级链）。
+    """
+    if not isinstance(value, dict):
+        return None
+    multipliers = [str(m).strip() for m in value.get("trust_multipliers") or [] if str(m).strip()][:6]
+    dimensions = [str(d).strip() for d in value.get("visual_diff_dimensions") or [] if str(d).strip()][:3]
+    return {
+        # 可视化分叉：no（香水/保健品等效果拍不出）时 S4 视觉审计失效，判断权重应转 S5/达人可信度
+        "visualizable": normalize_choice(value.get("visualizable"), {"yes", "no"}, "yes"),
+        "physical_task": str(value.get("physical_task") or "").strip(),
+        # S1 钩子命题：本品最有拦截力的点（模型推，运营可经降级链覆盖）
+        "hook_proposition": str(value.get("hook_proposition") or "").strip(),
+        "core_visual_proposition": str(value.get("core_visual_proposition") or "").strip(),
+        # before/after 应变化的视觉维度（S4 核验对比只看这些；未来 CV 检测层的维度钩子）
+        "visual_diff_dimensions": dimensions,
+        "trust_multipliers": multipliers,
+        "shooting_requirement": str(value.get("shooting_requirement") or "").strip(),
+        # 来源占位（model_inferred）：postprocess 命中 DNA 库或运营供给时改写为 library/operator
+        "dna_source": "model_inferred",
+        "confidence": normalize_choice(value.get("confidence"), {"high", "low"}, "high"),
+    }
+
+
 def normalize_bool_flag(value: Any) -> bool:
     """把模型可能输出的 true/"yes"/1/"是" 等统一成 bool。"""
     if isinstance(value, bool):
@@ -421,6 +509,16 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 "gap": required_text(item, "gap"),
                 "evidence": normalize_evidence(item.get("evidence")),
                 "severity": normalize_severity(item.get("severity")),
+                # 模型直判快照（归一时定格）：severity 后续会被 stabilize/derive 改写，
+                # 校准对照口径必须用这份，不能用链上任何一步之后的值（code review #5）
+                "model_severity": normalize_severity(item.get("severity")),
+                # 4d：两侧独立执行分（0/0.5/1/2），缺失为 None → derive 优雅跳过
+                "creator_execution": normalize_execution_score(item.get("creator_execution")),
+                "benchmark_execution": normalize_execution_score(item.get("benchmark_execution")),
+                # 4d：痛点命中事实（替代词法匹配定 C 系数），缺失为 None → derive 词法兜底
+                "painpoint_relevance": normalize_painpoint_relevance(item.get("painpoint_relevance")),
+                # 到位标准达成事实（全阶段统一，见 prompt 对照表；先收集，暂不卡分）
+                "stage_standard_delivery": normalize_stage_standard_delivery(item.get("stage_standard_delivery")),
             }
         )
 
@@ -476,6 +574,8 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
         "holistic_assessment": normalize_holistic_assessment(result.get("holistic_assessment")),
         "key_conclusions": key_conclusions,
         "product_visibility": normalize_product_visibility(result.get("product_visibility")),
+        "category_profile": normalize_category_profile(result.get("category_profile")),
+        "product_profile": normalize_product_profile(result.get("product_profile")),
         "loop_closure": normalize_loop_closure(result.get("loop_closure")),
         "video_understanding": normalize_video_understanding(result.get("video_understanding")),
         "stage_analysis": normalized_stages,
