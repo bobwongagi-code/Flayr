@@ -494,6 +494,14 @@ def establish_product_foundation(
     """Step-0：看视频前先据产品事实 + 品类世界知识确立品的商业地基（category_profile 特征 +
     product_profile 命题），存 product_foundation.json 并返回，供阶段1 观察、阶段2 判断、4d 政策消费。
     失败返回 None，下游回退到阶段2 内联产出——主分析始终能跑完出报告（架构不变量）。"""
+    # 护栏：产品 name+category 都缺失时，Step-0 无锚可依、只会编通用废话；此时让位给阶段2
+    # 视频推断（至少有真实画面信号），返回 None 触发降级。运营给了 name/category 才走 Step-0。
+    product = analysis.get("product") or {}
+    name = str(product.get("name") or "").strip()
+    category = str(product.get("category") or "").strip()
+    if name in ("", "未填写", "未提供") and category in ("", "未填写", "未提供"):
+        print("Step-0 跳过：产品 name+category 均缺失，退回阶段2 视频推断（避免无锚现编废话）", flush=True)
+        return None
     payload = build_product_foundation_payload(args.llm_model, analysis)
     request_path = run_dir / "llm_product_foundation_request.json"
     response_path = run_dir / "llm_product_foundation_response.json"
