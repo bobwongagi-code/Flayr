@@ -147,6 +147,19 @@ def read_track_markdown(track_path: Path, renderer: Any, disabled_hint: str) -> 
 # Payload 构造
 # ---------------------------------------------------------------------------
 
+def observation_method_view() -> str:
+    """从 observation-guide.md 抽"观察方法视图"——§一整片观察 + §二抽帧框架 + §三四轨，供阶段1
+    事实抽取逐维观察（单一来源，消灭内联副本）。丢 §0 宪法（阶段1 不归类）、§四 BGM→severity 与
+    §五 失误清单的判断；但 §四/§五 的输入事实（BGM 在场/类型、画中画小窗、遮挡、全片覆盖、口播对齐）
+    已落在 §一-§三、不随判断一起丢（删判断留输入事实，同'演示即证据'）。"""
+    path = ROOT / "references" / "observation-guide.md"
+    if not path.is_file():
+        return ""
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    m = re.search(r"(## 一、.*?)(?=\n## 四、)", text, flags=re.S)
+    return m.group(1).strip() if m else ""
+
+
 def build_product_foundation_payload(model: str, analysis: dict[str, Any]) -> dict[str, Any]:
     """Step-0 品的商业地基：看视频前，据产品事实 + 品类世界知识确立 category_profile(特征) +
     product_profile(命题)，作为下游 S1-S6 判断的独立尺子。纯文本不附视频——地基独立于任一条
@@ -250,6 +263,8 @@ def build_video_fact_payload(
             f"- 原视频：{info.get('path') or ''}",
             f"- 时长：{format_seconds(info.get('duration_seconds'))}",
             "",
+            "## 观察方法（看视频按以下全部维度逐项观察，不漏项——这是唯一的观察方法来源）",
+            observation_method_view(),
             obs_hint,
             "## 本地语言转写",
             read_text_if_exists(role_dir / "transcript.txt"),
@@ -327,15 +342,12 @@ def build_video_fact_payload(
         "你是单视频事实抽取器。只输出严格 JSON，不要 Markdown。"
         "只分析当前这一条视频，禁止引用、比较或猜测另一条视频。"
         f"{visual_source_hint}"
-        "你能同时看到连续画面、听到声音。请像人一样观看：沿时间线找出所有关键变化点"
-        "（转场、产品出现、表情突变、字幕高亮、特效、情绪转折、BGM 起落），"
-        "在变化点处切分 evidence_units，输出 4 到 8 条，沿时间线排列，id 必须使用指定前缀，"
+        "你能同时看到连续画面、听到声音。严格按用户消息中『观察方法』一节的全部维度逐项观察、不漏项"
+        "（含镜头语言/取景完整性、遮挡与 UI 危险区、画中画小窗、拍摄视角、口播与画面对齐、四轨对齐），"
+        "沿时间线找关键变化点切分 evidence_units，输出 4 到 8 条，沿时间线排列，id 必须使用指定前缀，"
         "time_range 用真实时间（如 2.5s - 4.0s）。"
-        "每条都要据实填 visual_fact（画面/表情/字幕/特效）和 audio_fact（BGM/语气/音效）；"
-        "visual_fact 中同时记录镜头语言/取景完整性的客观事实——画面是否歪斜、动作主体是否只见局部"
-        "（如演示对象只拍到一半）、关键动作是否在画面内完成、关键动作或文字是否被手/头发/道具遮挡、"
-        "关键内容是否落在 TikTok UI 遮挡区（画面底部购物车区与右侧点赞按钮区）；"
-        "按画面如实记，不做评价，这是执行性差距与有效传递的有效信号；"
+        "把各维度观察到的画面事实记入 visual_fact、声音事实记入 audio_fact（BGM 在场与类型/语气/音效）、"
+        "口播与画面的对齐关系（同步/提前/滞后/无关）记入 information；按实记录，不做评价；"
         "每条还要标 product_visible（该时段画面里能否看到产品本体，true/false）与 product_coverage"
         "（产品视觉占比 none｜low｜medium｜high，看不到写 none）：这两项用于确定性统计产品出镜，"
         "据画面如实标，产品被手遮住或只露局部按真实可见程度给 low；"
