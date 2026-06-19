@@ -164,7 +164,7 @@ def build_product_foundation_payload(model: str, analysis: dict[str, Any]) -> di
     """Step-0 品的商业地基：看视频前，据产品事实 + 品类世界知识确立 category_profile(特征) +
     product_profile(命题)，作为下游 S1-S6 判断的独立尺子。纯文本不附视频——地基独立于任一条
     视频，避免'阶段2 现编标尺又当场自评'的循环。运营未给的字段用品类世界知识补全。"""
-    p = analysis.get("product", {})
+    p = analysis.get("product") or {}
     text = "\n\n".join(
         [
             "# 品的商业地基确立（Step-0，先于看视频）",
