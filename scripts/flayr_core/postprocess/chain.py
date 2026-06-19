@@ -52,8 +52,20 @@ from .claims_my import (
 from .derive import derive_severity_from_facts
 
 
+def stamp_product_foundation(normalized: dict[str, Any], analysis: dict[str, Any] | None) -> None:
+    """Step-0 品地基权威覆盖：若上游已确立 product_foundation（特征+命题），用它覆盖结果里的
+    category_profile/product_profile，杜绝阶段2 内联现编的漂移；下游 derive(4d) 因此读到权威值。
+    无地基（如离线复跑、Step-0 失败兜底）则原样保留模型产出，主分析照常跑完。"""
+    foundation = (analysis or {}).get("product_foundation") or {}
+    if foundation.get("category_profile"):
+        normalized["category_profile"] = foundation["category_profile"]
+    if foundation.get("product_profile"):
+        normalized["product_profile"] = foundation["product_profile"]
+
+
 def apply_postprocess_chain(normalized: dict[str, Any], analysis: dict[str, Any]) -> None:
     """两个 caller 共享的中段流水线。每一步对应一个独立职责模块。"""
+    stamp_product_foundation(normalized, analysis)                           # foundation  Step-0 品地基权威覆盖（须在 derive 前）
     validate_transcript_attribution(normalized, analysis)                    # validate    跨视频串证据校验
     align_clear_commerce_evidence(normalized)                                # repair      关键词归位 benchmark 事实
     bind_timed_transcript_quotes(normalized, analysis)                       # repair      SRT 时间戳回填 quote

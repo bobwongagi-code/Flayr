@@ -147,6 +147,56 @@ def read_track_markdown(track_path: Path, renderer: Any, disabled_hint: str) -> 
 # Payload 构造
 # ---------------------------------------------------------------------------
 
+def build_product_foundation_payload(model: str, analysis: dict[str, Any]) -> dict[str, Any]:
+    """Step-0 品的商业地基：看视频前，据产品事实 + 品类世界知识确立 category_profile(特征) +
+    product_profile(命题)，作为下游 S1-S6 判断的独立尺子。纯文本不附视频——地基独立于任一条
+    视频，避免'阶段2 现编标尺又当场自评'的循环。运营未给的字段用品类世界知识补全。"""
+    p = analysis.get("product", {})
+    text = "\n\n".join(
+        [
+            "# 品的商业地基确立（Step-0，先于看视频）",
+            "你是带货短视频分析系统的产品分析师。在任何视频分析之前，先根据产品信息 + 你的品类世界知识，"
+            "确立这个产品的商业地基（特征 category_profile + 命题 product_profile），作为后续 S1-S6 判断的尺子。"
+            "只分析产品本身，不涉及任何视频。运营未给的字段用品类世界知识补全。",
+            "## 产品信息（运营给定）",
+            f"- 产品名：{p.get('name') or '未填写'}",
+            f"- 品类：{p.get('category') or '未填写'}",
+            f"- 价格：{p.get('price') or '未填写（按品类+型号判市场档位 low/mid/high）'}",
+            f"- 核心卖点：{p.get('core_selling_points') or '未填写（按品类世界知识推该品最该主打的卖点）'}",
+            f"- 目标用户/痛点：{p.get('target_user') or '未填写（按品类推目标人群与核心痛点）'}",
+            f"- 购买动机：{p.get('purchase_motivation') or '未填写（按品类推）'}",
+            f"- 目标市场：{p.get('target_market') or 'auto'}",
+            f"- 备注：{p.get('notes') or '无'}",
+            "## 输出严格 JSON（两个对象）",
+            "category_profile（品类特征，只报事实+世界知识，不做权重判断）：category_name、price_tier(low|mid|high)、"
+            "decision_threshold(impulse 冲动可买|considered 需被说服)、drive_type(emotional|functional|mixed)、"
+            "painpoints（该品类目标消费者最在意的决策因素，每词中文+本地语放同一数组，6-16 个）。",
+            "product_profile（产品商业 DNA，S1-S6 打分的尺子）：visualizable(yes|no 核心价值能否视觉化)、"
+            "physical_task（解决的最直观尴尬）、hook_proposition（S1 钩子命题，类型取决于本品、不限痛点——"
+            "可痛点/承诺/反差/情绪/向往/视觉吸引/身份代入/场景还原，见 structure_library S1 七型）、"
+            "core_selling_points（S3 主轴：使用过程要演示传递的核心卖点，1-6 个）、"
+            "usage_context（S3 场景层：本品典型使用场景=卖点演示的舞台）、"
+            "core_visual_proposition（S4 决定性视觉瞬间=到位效果标准，按本品现推、别套通用 before/after）、"
+            "visual_diff_dimensions（before/after 应变化的视觉维度，1-3 个）、"
+            "trust_multipliers（建立专业度/信任的元素，3-6 个）、shooting_requirement（卖点显现所需拍摄条件）、"
+            "confidence(high|low，小众或本地新奇特品标 low)。",
+            "只报产品事实与品类世界知识，不臆造具体功效数据/检测数字/价格优惠。",
+        ]
+    )
+    system_prompt = (
+        "你是产品商业分析师。只输出严格 JSON（含 category_profile 与 product_profile 两个对象），不要 Markdown。"
+        "基于产品事实 + 品类世界知识确立商业地基，运营未给的字段据品类世界知识补全，不臆造具体功效数据。"
+    )
+    return {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": [{"type": "text", "text": text}]},
+        ],
+        "temperature": 0.0,
+    }
+
+
 def build_video_fact_payload(
     model: str,
     role: str,
@@ -175,6 +225,23 @@ def build_video_fact_payload(
         else "随请求附带本视频的若干关键帧和完整音频。"
     )
 
+    # 品地基命题注入（Step-0 产出）：告诉事实抽取器该重点盯哪些证据，只导观察不下结论；无地基则退回通用抽取。
+    fnd = (analysis.get("product_foundation") or {}).get("product_profile") or {}
+    obs_hint = ""
+    if fnd:
+        csp = "、".join(fnd.get("core_selling_points") or []) or "（无）"
+        vdd = "、".join(fnd.get("visual_diff_dimensions") or []) or "（无）"
+        obs_hint = "\n".join(
+            [
+                "## 本品重点观察线索（据产品地基，帮你定位该盯什么；只记客观证据、不下结论）",
+                f"- 核心视觉命题：{fnd.get('core_visual_proposition') or '（无）'}——留意画面有没有出现/拍清这个决定性瞬间，按实记拍到与否、是否清晰。",
+                f"- before/after 应变化的视觉维度：{vdd}——重点观察这些维度的画面证据。",
+                f"- 核心卖点：{csp}——留意使用过程中这些卖点有没有被动作演示出来。",
+                f"- 典型使用场景：{fnd.get('usage_context') or '（无）'}。",
+                "命题相关证据尤其别漏；但不要为凑命题臆造没拍到的东西。",
+            ]
+        )
+
     text = "\n\n".join(
         [
             f"# 单视频事实抽取：{role}",
@@ -183,6 +250,7 @@ def build_video_fact_payload(
             f"- 原视频：{info.get('path') or ''}",
             f"- 时长：{format_seconds(info.get('duration_seconds'))}",
             "",
+            obs_hint,
             "## 本地语言转写",
             read_text_if_exists(role_dir / "transcript.txt"),
             "",
@@ -351,9 +419,22 @@ def build_llm_comparison_payload(
     commercial_framework = read_text_if_exists(ROOT / "references" / "commercial-judgement-framework.md")
     market_knowledge = read_text_if_exists(ROOT / "references" / "market-knowledge-my.md")
     qa_rules = read_text_if_exists(ROOT / "QA-RULES.md")
+    # Step-0 品地基注入：已确立则作为 S1-S6 判断的尺子直接采用，模型不再另起炉灶现编（防"现编标尺又自评"）。
+    fnd = (analysis or {}).get("product_foundation") or {}
+    foundation_block = ""
+    if fnd.get("category_profile") or fnd.get("product_profile"):
+        foundation_block = (
+            "## 本品商业地基（Step-0 已确立，作为 S1-S6 判断的尺子，直接采用）\n"
+            "以下 category_profile（特征）与 product_profile（命题）已在看视频前据产品事实+品类世界知识确立。"
+            "S1-S6 的锚点（hook_proposition/core_selling_points/usage_context/core_visual_proposition/"
+            "trust_multipliers/decision_threshold 等）一律以此为准，直接用它判断达人/标杆，不要另起炉灶重推；"
+            "你输出的 category_profile/product_profile 必须原样回填这套地基。\n"
+            + json.dumps(fnd, ensure_ascii=False, indent=2)
+        )
     user_text = "\n\n".join(
         [
             context,
+            foundation_block,
             "## 商业评判框架（判断差距权重的方法）",
             commercial_framework,
             "## 目标市场知识库（仅作判断依据，不在报告呈现）",
@@ -378,9 +459,9 @@ def build_llm_comparison_payload(
             "0.5 档同样适用于'内容存在但消费者无法有效接收'：看不清（虚焦/过曝/遮挡/一闪而过/画面晃动到观众抓不住重点）、听不清（吞字/被 BGM 压制）、读不完（字幕停留过短）——物理存在不等于有效传递，晃动按观众可看性判而非镜头美学。S5 背书孤证规则：仅口播提及背书而画面无任何佐证、或背书标志一闪而过无法辨认，执行分最高 0.5（高决策门槛品类口头孤证视为无效背书）。",
             "painpoint_relevance 只能取 benchmark_only、creator_only、both、none 四选一：该阶段双方内容是否命中 category_profile.painpoints 中的核心决策因素——只有标杆命中/只有达人命中/双方都命中/双方都未命中。按内容功能判断（讲没讲到、演没演到核心痛点），不要求字面用词一致。",
             "category_profile 必须含：category_name（品类名）, price_tier（low|mid|high 客单价档）, decision_threshold（impulse|considered）, drive_type（emotional|functional|mixed）, painpoints（该品类目标消费者最在意的决策因素关键词，每个痛点同时给中文和本地语两种表述放进同一数组，共 6-16 个词条）。只报品类事实与世界知识，不做权重判断。",
-            "打分前必须先输出 product_profile 产品商业 DNA（这是 S1-S6 打分的尺子，先立尺再量）：visualizable（yes|no，核心价值能否视觉化）、physical_task（解决的最直观尴尬）、hook_proposition（本品对目标人群最有拦截力的点=钩子命题，最尖锐痛点或最强承诺/反差，模型按品类+视频推、运营可覆盖）、core_visual_proposition（决定性视觉瞬间=本品到位效果展示的标准，按本品现推，别套通用 before/after）、visual_diff_dimensions（本品 before/after 应在哪些视觉维度变化，从 亮度反光/纹理毛孔/色泽均匀度/水润干燥/肿胀轮廓 中选或按品自命名如去污/拉丝，1-3 个，S4 核验对比只看这些维度）、trust_multipliers（建立专业度的元素如美容仪/周期记录/专业手法/第三方检测，3-6 个）、shooting_requirement（卖点显现所需拍摄条件）、confidence（high|low，小众或本地新奇特品标 low）。只报产品事实与品类世界知识。visualizable=no（香水/保健品/隐形矫正等效果拍不出）时，S4 不强求视觉命题，把判断重心放到 S5 信任放大与达人可信度。",
+            "打分前必须先输出 product_profile 产品商业 DNA（这是 S1-S6 打分的尺子，先立尺再量）：visualizable（yes|no，核心价值能否视觉化）、physical_task（解决的最直观尴尬）、hook_proposition（本品对目标人群最有拦截力的点=钩子命题，类型取决于本品、不限痛点——可痛点/承诺/反差/情绪/向往/视觉吸引/身份代入/场景还原等，见 structure_library S1 七型，模型按品类+视频推、运营可覆盖）、core_visual_proposition（决定性视觉瞬间=本品到位效果展示的标准，按本品现推，别套通用 before/after）、visual_diff_dimensions（本品 before/after 应在哪些视觉维度变化，从 亮度反光/纹理毛孔/色泽均匀度/水润干燥/肿胀轮廓 中选或按品自命名如去污/拉丝，1-3 个，S4 核验对比只看这些维度）、trust_multipliers（建立专业度的元素如美容仪/周期记录/专业手法/第三方检测，3-6 个）、shooting_requirement（卖点显现所需拍摄条件）、confidence（high|low，小众或本地新奇特品标 low）。只报产品事实与品类世界知识。visualizable=no（香水/保健品/隐形矫正等效果拍不出）时，S4 不强求视觉命题，把判断重心放到 S5 信任放大与达人可信度。",
             "每阶段输出 stage_standard_delivery（benchmark_only|creator_only|both|none）：该阶段双方是否有效达到本阶段的『本品到位标准』（见下条对照表锚点）。做到/展示到才算，仅口头讲到不算。先作为事实输出，暂不参与推导。",
-            "S1-S6 执行分统一三层判：阶段目标(core_question) → 用了什么做法(module_id/module_fit) → 该做法在【本品】上到位没(execution)。'到位'按阶段查本品锚点、核心目标为主轴次要元素不补偿弱核心；本轮已接入的阶段锚点——S4 效果呈现→锚 core_visual_proposition（详见前述演示锚点+闭环核验+核心主轴三条）；S5 信任放大→锚 trust_multipliers：硬信任（第三方认证/检测/临床/仪器实测/官方背书）有效呈现可达 2，软信任（真实好评/社会认同/向往式对比/使用记录/达人自用）算信任但封顶 1（软不如硬），自述功效/纯参数不算；位置优先——视频开头的此类背书内容算 S1 钩子（留人）、结尾算 S6 CTA，不要按语义把开头/结尾的背书塞进 S5；判'用没用且呈现有效'非'口头说没说'，口播孤证或标志一闪而过最高 0.5；S6 促单→锚 decision_threshold：到位=CTA 力度与时机匹配决策类型——impulse 冲动品需清晰直接购买指令+紧迫感/购物车引导（弱 CTA 或无 CTA 失分），considered 高决策品需在消除最后顾虑（正品/退换/适配/价格合理性）之后再给 CTA（硬推却没消顾虑不算到位）。S1 钩子→锚 hook_proposition：到位=开头段扣住本品最有拦截力的点（最尖锐痛点或最强承诺/反差）让目标人群停下，而非泛泛开场（开头的背书/认证类内容按钩子算，见位置宪法）；S2 产品引出→到位=引出自然 + 承接 S1 钩子（冲着钩子抛出的那个点去承接，痛点钩→引出冲着解痛点）+ 引出产品身份（这是什么品）；S2 只判这两件事，不判卖点本身、也不判卖点细节/选购指导/适配人群/参数/信息完整度（这些归 S3/S4）——标杆比达人多讲分肤质版/选购建议/卖点细节，不构成 S2 差距，只要达人自然引出+点明产品身份即同等到位；锚 hook_proposition 承接；S3 使用过程→主轴锚 core_selling_points（卖点传递有效性）+ 场景层 usage_context：到位=真实使用过程中把核心卖点'演示出来'被看见（清洁机吸力强/干湿分离/易倒垃圾在动作里可见，不是嘴上讲——演示即证据=打开水箱看见分层）；按 14b5 这是不可补偿主轴，场景再丰富人员再多样、卖点没在过程落地仍判弱；前置门槛真实感（显假/摆拍直接封顶低分）；S3 不评教学清晰度；场景层三看——适配度（场景给没给卖点舞台，地毯/沙发高、光洁瓷砖低）+丰富性（多场景覆盖多卖点 或 单场景做厚=多角度多卖点完整过程非一个动作反复，二选一）+连贯一致（拧成同一产品叙事且与真实用法一致，非拼贴非演错用法）；人员看配置是否强化说服非人数（单/多人/单人用+多人体验皆可，多人须带'大家都有好体验'社会化证据）；独立背书归 S5。",
+            "S1-S6 执行分统一三层判：阶段目标(core_question) → 用了什么做法(module_id/module_fit) → 该做法在【本品】上到位没(execution)。'到位'按阶段查本品锚点、核心目标为主轴次要元素不补偿弱核心；本轮已接入的阶段锚点——S4 效果呈现→锚 core_visual_proposition（详见前述演示锚点+闭环核验+核心主轴三条）；S5 信任放大→锚 trust_multipliers：硬信任（第三方认证/检测/临床/仪器实测/官方背书）有效呈现可达 2，软信任（真实好评/社会认同/向往式对比/使用记录/达人自用）算信任但封顶 1（软不如硬），自述功效/纯参数不算；位置优先——视频开头的此类背书内容算 S1 钩子（留人）、结尾算 S6 CTA，不要按语义把开头/结尾的背书塞进 S5；判'用没用且呈现有效'非'口头说没说'，口播孤证或标志一闪而过最高 0.5；S6 促单→到位=把 structure_library S6 五型各自【适配条件】（含排除项，如价格锚定/赠品堆叠排除情感满足品=category_profile.drive_type=emotional）套上本品特征 category_profile（decision_threshold/drive_type/品类）+命题 product_profile，判达人/标杆选的 CTA 类型适配与否＋执行到位与否，gap=适配×执行差距；决策类型（冲动/高决策）是输入之一非唯一轴——冲动品需清晰指令+紧迫感、高决策品需先消顾虑再 CTA，但哪型 CTA 好仍由(五型适配条件×本品命题)结合得出。S1 钩子→到位=把 structure_library S1 七型各自【适配条件】（按品类/购买动机匹配）套上本品特征 category_profile（品类/drive_type/decision_threshold）+命题 product_profile（hook_proposition），判达人/标杆选的钩子类型适配本品与否＋执行到位与否，gap=适配×执行差距；不预设某根轴（痛点/视觉冲击/悬念）通用为好，好坏由(类型适配条件×本品命题)结合得出（潮玩配场景还原/反差、儿童牙膏配身份代入/场景还原、榨汁机配反差/场景还原）；开头的背书/认证类内容按钩子算（见位置宪法）；S2 产品引出→到位=引出自然 + 承接 S1 钩子（冲着钩子抛出的那个点去承接，痛点钩→引出冲着解痛点）+ 引出产品身份（这是什么品）；S2 只判这两件事，不判卖点本身、也不判卖点细节/选购指导/适配人群/参数/信息完整度（这些归 S3/S4）——标杆比达人多讲分肤质版/选购建议/卖点细节，不构成 S2 差距，只要达人自然引出+点明产品身份即同等到位；锚 hook_proposition 承接；S3 使用过程→主轴锚 core_selling_points（卖点传递有效性）+ 场景层 usage_context：到位=真实使用过程中把核心卖点'演示出来'被看见（清洁机吸力强/干湿分离/易倒垃圾在动作里可见，不是嘴上讲——演示即证据=打开水箱看见分层）；按 14b5 这是不可补偿主轴，场景再丰富人员再多样、卖点没在过程落地仍判弱；前置门槛真实感（显假/摆拍直接封顶低分）；S3 不评教学清晰度；场景层三看——适配度（场景给没给卖点舞台，地毯/沙发高、光洁瓷砖低）+丰富性（多场景覆盖多卖点 或 单场景做厚=多角度多卖点完整过程非一个动作反复，二选一）+连贯一致（拧成同一产品叙事且与真实用法一致，非拼贴非演错用法）；人员看配置是否强化说服非人数（单/多人/单人用+多人体验皆可，多人须带'大家都有好体验'社会化证据）；独立背书归 S5。",
             "improvements 每项必须含：title,target_stage,gmv_impact,gap_type,time_range,creator_time_range,benchmark_time_range,problem,benchmark_reference,benchmark_evidence_ids,suggestion,actions,gmv_reason,evidence,creator_script,creator_script_zh,base_frame_suitability,best_base_frame_time,base_frame_evidence_id,base_frame_reason,aigc_prompt,aigc_image_path,expected_effect,priority。",
             "可额外输出 top-level low_confidence_stages，数组元素只能是 S1-S6；只有当该阶段现有帧/音频不足以支撑 severity 时才填写，最多 2 个。",
             "除 stage_analysis、improvements、video_understanding.evidence_units、low_confidence_stages 和 category_profile.painpoints 外，所有数组最多 1 条。所有描述字段最多一句且不超过 40 个汉字。video_understanding 必须原样使用事实清单，不得新增、改写或跨视频移动 evidence_units。",

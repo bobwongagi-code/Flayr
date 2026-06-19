@@ -22,6 +22,8 @@ from ..utils import write_json
 from .api import call_llm_api, extract_chat_completion_text, read_llm_api_key
 from .parse import (
     normalize_analysis_result,
+    normalize_category_profile,
+    normalize_product_profile,
     normalize_video_fact_result,
     parse_json_text,
 )
@@ -29,6 +31,7 @@ from .payload import (
     build_llm_comparison_payload,
     build_llm_payload,
     build_llm_repair_payload,
+    build_product_foundation_payload,
     build_stage_review_payload,
     build_video_fact_payload,
     select_role_visual_inputs,
@@ -149,6 +152,10 @@ def run_large_model_analysis(
         raise SystemExit(f"Missing API key: set ${args.llm_api_key_env}{keychain_hint}, or use --llm-dry-run.")
 
     if args.llm_include_images:
+        # Step-0：先确立品的商业地基（特征+命题），贯穿喂给阶段1 观察 + 阶段2 判断；失败则下游内联兜底。
+        foundation = establish_product_foundation(args, analysis, run_dir, api_key)
+        if foundation:
+            analysis["product_foundation"] = foundation
         facts = run_video_fact_extraction(args, analysis, run_dir, api_key)
         if args.llm_dry_run:
             print(f"LLM dry run: fact request payloads written to {run_dir}")
@@ -477,6 +484,37 @@ def _process_llm_result(
 # ---------------------------------------------------------------------------
 # 单视频事实抽取
 # ---------------------------------------------------------------------------
+
+def establish_product_foundation(
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    run_dir: Path,
+    api_key: str,
+) -> dict[str, Any] | None:
+    """Step-0：看视频前先据产品事实 + 品类世界知识确立品的商业地基（category_profile 特征 +
+    product_profile 命题），存 product_foundation.json 并返回，供阶段1 观察、阶段2 判断、4d 政策消费。
+    失败返回 None，下游回退到阶段2 内联产出——主分析始终能跑完出报告（架构不变量）。"""
+    payload = build_product_foundation_payload(args.llm_model, analysis)
+    request_path = run_dir / "llm_product_foundation_request.json"
+    response_path = run_dir / "llm_product_foundation_response.json"
+    write_json(request_path, payload)
+    if args.llm_dry_run:
+        return None
+    try:
+        result_text = fetch_json_completion(args, api_key, request_path, response_path)
+        raw = parse_json_text(result_text)
+        foundation = {
+            "category_profile": normalize_category_profile(raw.get("category_profile")),
+            "product_profile": normalize_product_profile(raw.get("product_profile")),
+        }
+        if not foundation["category_profile"] and not foundation["product_profile"]:
+            raise ValueError("category_profile 与 product_profile 均为空")
+    except Exception as exc:  # noqa: BLE001
+        print(f"Step-0 品地基确立失败，回退到阶段2 内联产出：{exc}", flush=True)
+        return None
+    write_json(run_dir / "product_foundation.json", foundation)
+    return foundation
+
 
 def run_video_fact_extraction(
     args: argparse.Namespace,
