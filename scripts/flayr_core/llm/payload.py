@@ -403,6 +403,31 @@ def build_evidence_sensory_inputs(
     return content
 
 
+def structure_library_judgment_view() -> str:
+    """从 structure_library_full.md 抽"判断视图"——每模块只留 编号+名称+一句话功能+【适配条件】，
+    扔掉【镜头】【文案】【声音】【节奏】【降级规则】制作规格（那些服务样片生成；喂进判断会诱导
+    模型"看模式"扣分，违"看功能不看模式"宪法）。运行时从 full 文档单一来源抽取，不另维护副本。
+    用途：补进阶段2 判断上下文，让模型判 module_id/适配时有客观结构骨架可依（此前被砍、锚到空气）。"""
+    path = ROOT / "structure_library_full.md"
+    if not path.is_file():
+        return ""
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    blocks = re.split(r"\n(?=###\s+S[1-6]-[A-Z][:：])", text)
+    lines: list[str] = []
+    for blk in blocks:
+        m = re.match(r"###\s+(S[1-6]-[A-Z])[:：]\s*(.+)", blk.strip())
+        if not m:
+            continue
+        mid, name = m.group(1), m.group(2).strip()
+        pre_code = blk[m.end():].split("```", 1)[0]
+        func_lines = [ln.strip() for ln in pre_code.splitlines() if ln.strip()]
+        func = func_lines[0] if func_lines else ""
+        cm = re.search(r"【适配条件】\s*(.*?)(?=\n\s*【|\n```|\Z)", blk, flags=re.S)
+        fit = " ".join(ln.strip() for ln in cm.group(1).splitlines() if ln.strip()) if cm else ""
+        lines.append(f"- {mid} {name}：{func}｜适配：{fit}")
+    return "\n".join(lines)
+
+
 def build_llm_comparison_payload(
     model: str,
     analysis_input: str,
@@ -435,6 +460,8 @@ def build_llm_comparison_payload(
         [
             context,
             foundation_block,
+            "## S1-S6 模块结构库（判断视图：客观类型 + 适配条件，判 module_id 与类型对本品适配用；这是结构层、非判断层，不讲好坏）",
+            structure_library_judgment_view(),
             "## 商业评判框架（判断差距权重的方法）",
             commercial_framework,
             "## 目标市场知识库（仅作判断依据，不在报告呈现）",
