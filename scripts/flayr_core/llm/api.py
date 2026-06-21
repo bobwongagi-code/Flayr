@@ -45,7 +45,8 @@ def read_llm_api_key(args: argparse.Namespace) -> str:
     completed = run_command(command)
     if completed.returncode != 0:
         return ""
-    return completed.stdout
+    # keychain 读出的值带尾换行，混进 Authorization 头会把请求体顶空（400 Request body is required），必须 strip
+    return completed.stdout.strip()
 
 
 def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path) -> str:
