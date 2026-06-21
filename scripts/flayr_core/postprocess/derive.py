@@ -194,8 +194,15 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
     c_demo = stage.get("creator_has_effect_demo")
     if b_demo is None and c_demo is None:
         b_demo, c_demo = bool(_DEMO_RE.search(b_vis)), bool(_DEMO_RE.search(c_vis))
+    # S3 使用过程放大：模型基于结构库 S3-A~E 判出的布尔。无正则兜底——布尔缺失（存量结果）
+    # 则不触发，保留 S3 旧空白行为（derive.py 此前无任何 S3 专属逻辑）。用严格 is True/is False，
+    # 仅在明确"标杆演示了使用、达人没演"时放大，不确定（None）不触发，保守。
+    b_usage = stage.get("benchmark_has_usage_demo")
+    c_usage = stage.get("creator_has_usage_demo")
     if stage_id == "S4" and e > 0 and b_demo and not c_demo:
         e, reason = max(e, 2.0), reason + "；S4 标杆呈现了效果(S4-A~F)、达人未呈现（验证=让用户看到）"
+    elif stage_id == "S3" and e > 0 and b_usage is True and c_usage is False:
+        e, reason = max(e, 2.0), reason + "；S3 标杆把卖点演示出来(S3-A~E)、达人只口播未演示（演示即证据）"
     elif stage_id == "S1" and e > 0 and relevance == "benchmark_only":
         e, reason = max(e, 2.0), reason + "；S1 标杆钩子命中品类痛点、达人未命中"
 
