@@ -131,6 +131,19 @@ def normalize_support_status(value: Any, quote: Any) -> str:
     return "voice_only" if str(quote or "").strip() else "visual_only"
 
 
+def normalize_effect_demo(value: Any) -> bool | None:
+    """S4 效果呈现布尔（结构库 S4-A~F）。返回 True/False；非 S4/null/缺失/无法解析→None
+    （derive 见 None 才回退 _DEMO_RE 词法兜底）。容忍模型吐 bool 或 true/false/yes/no/1/0 字符串。"""
+    if isinstance(value, bool):
+        return value
+    token = str(value or "").strip().lower()
+    if token in {"true", "yes", "1"}:
+        return True
+    if token in {"false", "no", "0"}:
+        return False
+    return None
+
+
 def normalize_base_frame_suitability(value: Any, best_time: Any) -> str:
     status = str(value or "").strip().lower()
     if status in {"usable", "no_suitable_frame"}:
@@ -502,6 +515,8 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 "benchmark_evidence_ids": normalize_evidence(item.get("benchmark_evidence_ids")),
                 "benchmark_visual_evidence": normalize_evidence(item.get("benchmark_visual_evidence")),
                 "benchmark_support_status": normalize_support_status(item.get("benchmark_support_status"), item.get("benchmark_quote")),
+                # S4 效果呈现布尔（结构库 S4-A~F 判定）：缺失为 None → derive 回退 _DEMO_RE 词法兜底
+                "benchmark_has_effect_demo": normalize_effect_demo(item.get("benchmark_has_effect_demo")),
                 "benchmark_quote": str(item.get("benchmark_quote") or "").strip(),
                 "benchmark_quote_zh": str(item.get("benchmark_quote_zh") or "").strip(),
                 "creator_summary": required_text(item, "creator_summary"),
@@ -509,6 +524,7 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 "creator_evidence_ids": normalize_evidence(item.get("creator_evidence_ids")),
                 "creator_visual_evidence": normalize_evidence(item.get("creator_visual_evidence")),
                 "creator_support_status": normalize_support_status(item.get("creator_support_status"), item.get("creator_quote")),
+                "creator_has_effect_demo": normalize_effect_demo(item.get("creator_has_effect_demo")),
                 "creator_quote": str(item.get("creator_quote") or "").strip(),
                 "creator_quote_zh": str(item.get("creator_quote_zh") or "").strip(),
                 "gap": required_text(item, "gap"),

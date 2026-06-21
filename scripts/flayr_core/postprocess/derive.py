@@ -188,8 +188,14 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
     # 事实覆盖层（取 E 下限）：观察事实 > 打分漂移
     b_vis = " ".join(str(v) for v in stage.get("benchmark_visual_evidence") or [])
     c_vis = " ".join(str(v) for v in stage.get("creator_visual_evidence") or [])
-    if stage_id == "S4" and e > 0 and _DEMO_RE.search(b_vis) and not _DEMO_RE.search(c_vis):
-        e, reason = max(e, 2.0), reason + "；S4 标杆动作演示 vs 达人口头宣称（验证=让用户看到）"
+    # S4 效果呈现放大：优先读模型基于结构库 S4-A~F 判出的结构化布尔（稳，不随措辞抖）；
+    # 布尔缺失（存量结果无此字段）才回退扫 _DEMO_RE 关键词（脆，仅兜底，见 TODO §ROOT/§0）
+    b_demo = stage.get("benchmark_has_effect_demo")
+    c_demo = stage.get("creator_has_effect_demo")
+    if b_demo is None and c_demo is None:
+        b_demo, c_demo = bool(_DEMO_RE.search(b_vis)), bool(_DEMO_RE.search(c_vis))
+    if stage_id == "S4" and e > 0 and b_demo and not c_demo:
+        e, reason = max(e, 2.0), reason + "；S4 标杆呈现了效果(S4-A~F)、达人未呈现（验证=让用户看到）"
     elif stage_id == "S1" and e > 0 and relevance == "benchmark_only":
         e, reason = max(e, 2.0), reason + "；S1 标杆钩子命中品类痛点、达人未命中"
 

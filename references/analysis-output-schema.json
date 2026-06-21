@@ -102,6 +102,7 @@
         "与该核心信息对应、实际可见的画面事实；若画面不能验证口播信息，要直接说明。"
       ],
       "benchmark_support_status": "supported | voice_only | visual_only | conflict",
+      "benchmark_has_effect_demo": "仅 S4 需判：标杆是否对本卖点做了『效果呈现』(结构库 S4-A~F 任一：前后对比/局部特写/人vs人/人vs道具/借物量化/过程可视化)，true|false；非 S4 阶段填 null。判据见用户消息中 S4 字段说明。",
       "benchmark_quote": "标杆该阶段的本地语言口播原句；没有明确口播则留空。",
       "benchmark_quote_zh": "benchmark_quote 的中文翻译；没有则留空。",
       "creator_summary": "达人在这个阶段怎么做，必须具体。",
@@ -113,6 +114,7 @@
         "与该核心信息对应、实际可见的画面事实；若不能验证则直接说明。"
       ],
       "creator_support_status": "supported | voice_only | visual_only | conflict",
+      "creator_has_effect_demo": "仅 S4 需判：达人是否对本卖点做了『效果呈现』(结构库 S4-A~F 任一)，true|false；非 S4 阶段填 null。判据见用户消息中 S4 字段说明。",
       "creator_quote": "达人该阶段的本地语言口播原句；没有明确口播则留空。",
       "creator_quote_zh": "creator_quote 的中文翻译；没有则留空。",
       "gap": "达人和爆款的具体差距，必须指向画面、话术或节奏。",
