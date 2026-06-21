@@ -91,3 +91,11 @@ B线挂账（2/17，低优先）
 ```
 
 **证据链**：抽帧 n=17 排序反转（carslan 5 < youkoubo-c2 6）→ 视频 n=2 平手（6=6）→ 硬化对照 bluetooth 9 / youkoubo-c1 4（证明视频能分极端）→ youkoubo-c2 三窗口全 6（证否"选段问题"，坐实中间档维度错位）。用户人眼定调：carslan 稳（凑脸+剪辑造成假抖）、youkoubo-c2 真抖（手没拿稳、镜头变化不顺滑）。
+
+## 附录 D：品地基覆盖修复 + 重测「不算数」（2026-06-21）
+
+**覆盖窟窿**：原 baseline-v2 品 Step-0 只覆盖 **6/17**（11 条 analysis.json `product.name=未填写`/`category=""` 触发护栏降级 → 判断只站结构库一条腿）。已给 11 条补 category（取自 ground-truth-labels.md）+ 重跑 Step-0 → **17/17 全建起品地基**，内容品类专属、正确（simplus 终于有"蒸汽抚平褶皱"的命题）。
+
+**「补地基提升假设」重跑结果 = 不算数**：11 条重跑 v3 总账 65%→64%，看似没提升。但细查证明这**不是地基的判决，是测量尺子在抖**（见 [TODO §0 优先级一]）——skincare S4：v2「涂抹」撞 `_DEMO_RE`→large（对），v3 同动作换「推开/抹匀」→漏→medium（错），两版实质判读相同、地基没参与退步。
+
+**决策（已拍）**：**v2 保留为基准，v3 不冻**（依据：youkoubo-c1 从满分 6 跌到 3，原本判对的被 derive 噪声打坏）。**地基判决悬着**——必须等 derive 修稳（TODO §0）后在稳定尺子上重测 v2 vs v3，才是真实答案。tag `baseline-v2-foundations-obsview` 不动。
