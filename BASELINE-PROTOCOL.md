@@ -36,11 +36,15 @@ runs_exp/<实验名>/X/run_1..N/ + diff_vs_baseline.json  ← 实验，每个独
 - 输出：每阶段 **众数 severity + 一致度 (k/N) + 众数 B/C**；一致度 `< 4/5`（或 `<3/3`）**自动标红「不可信」**。
 - 任何报告/实验结论必须经它产出，禁止手抄单跑值。
 
-## 待 5× 定的两个参数
-- **N**：`[待 5× 定]`——wobble 凶 → N=5；温和 → N=3。
-- **facts 重跑策略**：`[待 5×]`——5× 测 video_facts 跨次稳不稳：
-  - facts 稳 → 抽一次 facts、只 N 跑阶段2（省一大笔 API）；
-  - facts 也抖 → 必须全流程（Step-0+facts+对比）N 跑。
+## 两个参数（5× 已定，2026-06-21 封版）
+- **N = 5**。依据：carslan-b0 5× 实测，中段 S1-S4 的 B 抖到 3/5（wobble 凶），需至少 5 次取众数；沿用项目 Repeat5 先例。
+- **facts 重跑策略 = 全流程 N 跑**（Step-0+facts+对比，不可 shortcut）。依据：5× 实测 video_facts **每次都不同**（benchmark/creator information 文本 5/5 唯一、benchmark 单元数 7↔6），**阶段1 抽取本身不确定**——不能「抽一次 facts 只跑阶段2」，必须全流程 N 跑。
+
+## ⚠️ 5× 铁的发现：mode 口径必要但不充分
+carslan-b0 即便取 N=5 众数，**S1/S2/S3 一致度仍只 3/5 = 仍🔴**。
+→ mode 口径能**诚实标出**「这些阶段不可信」（达成本协议目的：不再假装可信），但**盖不住抖动本身**。
+→ **子②（阶段1 感知不确定性）是真缺陷，必须单独治**（见 TODO §0/执行分线子②）；光靠多跑取众数，wobbly 样本的中段永远🔴。
+→ 含义：baseline-v3 出来后，**中段 wobbly 样本/阶段会带🔴标记**——这是诚实，不是 baseline 失败；它精确定位了子② 该治哪几格。
 
 ## 删除范围（清旧账，等 5× 完 + 确认后执行）
 - **删**（污染输出 + 历史垃圾）：所有 `analysis_result*.json`、`_blindcmp_*`、`dev_stage_*`、`gate_*`、`facts_backup_*`、`llm_*response/request`、`*.sse`、`*.stream_req.json`、`preHED/preHUD/v2bak` 备份、`runs/_probe`、`runs/_*_status.json`。
