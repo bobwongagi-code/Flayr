@@ -18,10 +18,13 @@ STAGES = ["S1", "S2", "S3", "S4", "S5", "S6"]
 
 
 def mode_agree(vals):
-    """众数 + 该众数出现次数 k。None 也参与计数（缺字段本身是信号）。"""
+    """众数 + 该众数出现次数 k + 是否平局。None 也参与计数（缺字段本身是信号）。
+    平局（多个值并列最高）时 most_common 取序任意，故另返 is_tie 让展示诚实。"""
     counter = Counter(vals)
-    value, k = counter.most_common(1)[0]
-    return value, k
+    top = counter.most_common()
+    value, k = top[0]
+    is_tie = len(top) > 1 and top[1][1] == k
+    return value, k, is_tie
 
 
 def main(target):
@@ -31,6 +34,8 @@ def main(target):
         sys.exit(f"无 run_*_result.json 于 {d}")
     runs = [json.loads(f.read_text(encoding="utf-8")).get("stage_analysis") or [] for f in files]
     n = len(runs)
+    if n < 3:  # 协议铁律1：单/双跑无法判稳定性，N=1 时门槛恒满足会假绿灯放行单跑
+        sys.exit(f"⚠ N={n} 太小：稳定口径需 N≥3（baseline N=5）。拒绝出口径——单/双跑判不了稳定性。")
     kmin = math.ceil(STABLE_RATIO * n)
     print(f"样本目录: {d}  | N={n}  | 稳定门槛 mode≥{kmin}/{n}")
     print(f"{'阶段':<6}{'severity(众/N)':<22}{'B(众/N)':<16}{'C(众/N)':<16}判定")
@@ -39,20 +44,21 @@ def main(target):
         sevs = [r[i].get("severity") if i < len(r) else None for r in runs]
         b = [r[i].get("benchmark_execution") if i < len(r) else None for r in runs]
         c = [r[i].get("creator_execution") if i < len(r) else None for r in runs]
-        sm, sk = mode_agree(sevs)
-        bm, bk = mode_agree(b)
-        cm, ck = mode_agree(c)
+        sm, sk, s_tie = mode_agree(sevs)
+        bm, bk, _ = mode_agree(b)
+        cm, ck, _ = mode_agree(c)
         sev_red = sk < kmin
         bc_shaky = (bk < kmin) or (ck < kmin)
         if sev_red:
-            flag = "🔴不可信"
+            flag = "🔴不可信（平局）" if s_tie else "🔴不可信"
             n_red += 1
         elif bc_shaky:
             flag = "⚠侥幸稳(B/C抖)"
             n_warn += 1
         else:
             flag = "✓稳"
-        print(f"{stg:<6}{f'{sm}({sk}/{n})':<22}{f'{bm}({bk}/{n})':<16}{f'{cm}({ck}/{n})':<16}{flag}")
+        sev_disp = f"{sm}({sk}/{n}){'平' if s_tie else ''}"
+        print(f"{stg:<6}{sev_disp:<22}{f'{bm}({bk}/{n})':<16}{f'{cm}({ck}/{n})':<16}{flag}")
     print()
     if n_red:
         print(f"结论：{n_red} 个🔴不可信阶段——该样本中段需子② 修复后复测（mode 口径盖不住，见协议）。")

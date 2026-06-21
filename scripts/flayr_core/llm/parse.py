@@ -135,8 +135,10 @@ def normalize_demo_flag(value: Any) -> bool | None:
     """演示布尔通用归一（S4 has_effect_demo / S3 has_usage_demo）。返回 True/False；
     非该阶段/null/缺失/无法解析→None（derive 见 None：S4 回退 _DEMO_RE 兜底，S3 不放大）。
     容忍模型吐 bool 或 true/false/yes/no/1/0 字符串。"""
-    if isinstance(value, bool):
+    if isinstance(value, bool):  # 必须先于 int 判（Python 中 bool 是 int 子类）
         return value
+    if isinstance(value, (int, float)):  # 模型偶吐数字 0/1 当布尔
+        return True if value == 1 else False if value == 0 else None
     token = str(value or "").strip().lower()
     if token in {"true", "yes", "1"}:
         return True

@@ -27,8 +27,9 @@ LLM_CURL_RETRIES = 2
 
 def read_llm_api_key(args: argparse.Namespace) -> str:
     """优先从环境变量读取 API key，回退到 macOS Keychain。"""
-    env_key = os.environ.get(args.llm_api_key_env, "")
-    if env_key.strip():
+    # env 与 keychain 两条路径都 strip：尾换行混进 Authorization 头会把请求体顶空（400 Request body is required）
+    env_key = os.environ.get(args.llm_api_key_env, "").strip()
+    if env_key:
         return env_key
     service = args.llm_api_key_keychain_service
     if not service:

@@ -199,7 +199,7 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
     # 仅在明确"标杆演示了使用、达人没演"时放大，不确定（None）不触发，保守。
     b_usage = stage.get("benchmark_has_usage_demo")
     c_usage = stage.get("creator_has_usage_demo")
-    if stage_id == "S4" and e > 0 and b_demo and not c_demo:
+    if stage_id == "S4" and e > 0 and b_demo is True and c_demo is False:
         e, reason = max(e, 2.0), reason + "；S4 标杆呈现了效果(S4-A~F)、达人未呈现（验证=让用户看到）"
     elif stage_id == "S3" and e > 0 and b_usage is True and c_usage is False:
         e, reason = max(e, 2.0), reason + "；S3 标杆把卖点演示出来(S3-A~E)、达人只口播未演示（演示即证据）"
