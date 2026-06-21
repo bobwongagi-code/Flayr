@@ -16,3 +16,7 @@ venv/
 
 # 本地配置（可能含密钥/路径）
 .claude/settings.local.json
+
+# baseline-v3 运行数据(基准/实验输出,文件系统只读纪律,不入 git)
+runs_baseline_v3/
+runs_exp/
