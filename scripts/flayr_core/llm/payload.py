@@ -307,6 +307,7 @@ def build_video_fact_payload(
                             "product_visible": True,
                             "product_coverage": "该时段产品在画面里的视觉占比：none｜low｜medium｜high。看不到产品写 none。",
                             "third_party_endorsement": False,
+                            "functions": ["S3_usage", "S4_effect"],
                         }
                     ],
                 },
@@ -344,7 +345,8 @@ def build_video_fact_payload(
         f"{visual_source_hint}"
         "你能同时看到连续画面、听到声音。严格按用户消息中『观察方法』一节的全部维度逐项观察、不漏项"
         "（含镜头语言/取景完整性、遮挡与 UI 危险区、画中画小窗、拍摄视角、口播与画面对齐、四轨对齐），"
-        "沿时间线找关键变化点切分 evidence_units，输出 4 到 8 条，沿时间线排列，id 必须使用指定前缀，"
+        "按带货短视频的天然结构（钩子→产品引出→使用过程→效果呈现→信任放大→促单）找证据切分 evidence_units，"
+        "目标是抽出对分析带货视频有价值的事实，而非随意找转折点；输出 4 到 8 条，沿时间线排列，id 必须使用指定前缀，"
         "time_range 用真实时间（如 2.5s - 4.0s）。"
         "把各维度观察到的画面事实记入 visual_fact、声音事实记入 audio_fact（BGM 在场与类型/语气/音效）、"
         "口播与画面的对齐关系（同步/提前/滞后/无关）记入 information；按实记录，不做评价；"
@@ -355,6 +357,9 @@ def build_video_fact_payload(
         "机构类型（监管认证如 KKM/Halal/SIRIM、行业协会、评测中心/实验室、高校研究、调研咨询、"
         "疾病防治中心）且其数据/实验/结论在证明本产品价值，两者同时成立才 true；"
         "仅出现机构名字、赞助或合作 logo、达人自述功效、普通用户评论，都是 false；"
+        "每条还要标 functions（list，多选）：这段画面支撑哪些带货功能，枚举 S1_hook/S2_intro/S3_usage/S4_effect/S5_trust/S6_cta，"
+        "按信息功能判断、信道无关（口播/字幕/画面/特效综合看，无口播也能判），一段可同时支撑多个"
+        "（手在操作+效果出来 → [S3_usage,S4_effect]）；这是描述这段在带货结构里干什么、不是评价好坏，没有对应功能就不标；"
         "voiceover 必须逐字来自当前视频 transcript.srt，画面看不清的时段在 visual_fact 写画面证据不足待复核；"
         "无 BGM 或无明显音效时 audio_fact 写无，不要臆造。"
         "不得臆造牙齿前后对比、用户评论、证书、检测报告、认证、价格、优惠或功效。"

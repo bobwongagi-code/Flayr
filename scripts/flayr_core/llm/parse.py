@@ -614,6 +614,23 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
 # 单视频事实抽取归一化（fact extraction 模式专用）
 # ---------------------------------------------------------------------------
 
+_FUNCTION_ENUM = {"S1_hook", "S2_intro", "S3_usage", "S4_effect", "S5_trust", "S6_cta"}
+
+
+def normalize_functions(value: Any) -> list[str] | None:
+    """evidence_unit 的 functions 多选标记（这段画面支撑哪些带货功能，描述性非评价）。
+    缺失/None/非 list/无合法值 → None（老 facts 无此字段，nullable 不强制回填）；
+    过滤非法枚举、去重保序。"""
+    if not isinstance(value, list):
+        return None
+    out: list[str] = []
+    for v in value:
+        token = str(v or "").strip()
+        if token in _FUNCTION_ENUM and token not in out:
+            out.append(token)
+    return out or None
+
+
 def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
     code = "B" if role == "benchmark" else "C"
     units = result.get("evidence_units")
@@ -640,6 +657,8 @@ def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dic
                 "product_visible": normalize_bool_flag(unit.get("product_visible")),
                 "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
                 "third_party_endorsement": normalize_bool_flag(unit.get("third_party_endorsement")),
+                # 这段支撑哪些带货功能（多选，描述性）；nullable，老 facts 缺失为 None
+                "functions": normalize_functions(unit.get("functions")),
             }
         )
     validate_single_video_facts(role, normalized, analysis)
