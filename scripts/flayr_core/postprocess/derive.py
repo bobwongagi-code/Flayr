@@ -119,6 +119,24 @@ def _side_text(stage: dict[str, Any], side: str) -> str:
     return " ".join(str(stage.get(k) or "") for k in keys)
 
 
+def _side_endorsement(result: dict[str, Any], side: str) -> tuple[bool, bool, bool]:
+    """从 Stage1 facts 聚合该侧硬背书存在性（口播/画面各一）：代码聚合、不让 Stage2 重判（绕过判断层）。
+    作用域：facts 有 functions 标记时只取含 S5_trust 的 unit；无标记（老 facts）退回全 unit。
+    返回 (verbal, visual, available)——available 表示该侧有无结构化 endorsement 字段（无则 derive 退回正则兜底）。"""
+    vu = result.get("video_understanding")
+    side_vu = vu.get(side) if isinstance(vu, dict) else None
+    units = side_vu.get("evidence_units") if isinstance(side_vu, dict) else None
+    if not isinstance(units, list):
+        return (False, False, False)
+    units = [u for u in units if isinstance(u, dict)]
+    has_fn = any(u.get("functions") for u in units)
+    pool = [u for u in units if "S5_trust" in (u.get("functions") or [])] if has_fn else units
+    verbal = any(u.get("endorsement_verbal") is True for u in pool)
+    visual = any(u.get("endorsement_visual") is True for u in pool)
+    available = any(("endorsement_verbal" in u or "endorsement_visual" in u) for u in units)
+    return (verbal, visual, available)
+
+
 def _painpoint_tokens(painpoints: list[str]) -> list[str]:
     """痛点词条分词：模型常输出 'kebersihan (卫生)' 复合串，整串匹配永不命中。
 
@@ -143,13 +161,41 @@ def _hits(text: str, words: list[str]) -> bool:
 _SHAKE_CAPPED_STAGES = {"S1", "S2", "S3", "S4"}
 
 
+def _s4_gate_score(side: str, stage: dict[str, Any]) -> float:
+    """S4 三层闸门推导单侧 execution（替代模型直判 0/0.5/1/2，原型）。
+    L1 has_effect_demo（存在性，稳）→ L2 painpoint_relevance（品锚，稳）→
+    L1b has_comparison_structure（对比结构在不在场，不判强弱）→ L3 顶档复用模型原始分定 1↔2。
+    稳定地板（0/0.5/1）全由稳定闸门决定，只有顶档 1↔2 继承模型抖动（=要测的残差）。
+    任一稳定闸门信号缺失（None）则不闸门、退回模型原始分（保守，仿 derive 既有兜底）。"""
+    raw = float(stage.get(f"{side}_execution") or 0)
+    demo = stage.get(f"{side}_has_effect_demo")
+    rel = stage.get("painpoint_relevance")
+    if demo is None or rel is None:
+        return raw                                  # 信号缺失，不闸门
+    if demo is False:
+        return 0.0                                  # L1 没做效果呈现
+    if rel not in {"both", f"{side}_only"}:
+        return 0.5                                  # L2 没命中品的核心价值
+    if stage.get(f"{side}_has_comparison_structure") is not True:
+        return 1.0                                  # 命中品，无对比结构=基础呈现
+    return 2.0 if raw >= 2 else 1.0                 # L3 顶档：复用模型原始分定 1↔2
+
+
 def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] | None,
-                painpoints: list[str], shake: dict[str, bool] | None = None) -> dict[str, Any]:
+                painpoints: list[str], shake: dict[str, bool] | None = None,
+                endorsement: dict[str, tuple[bool, bool, bool]] | None = None) -> dict[str, Any]:
     """推导单阶段 severity。返回 severity_derivation 溯源 dict（status=derived 时含新 severity）。"""
     creator_exec = stage.get("creator_execution")
     bench_exec = stage.get("benchmark_execution")
     if creator_exec is None or bench_exec is None:
         return {"status": "skipped", "reason": "执行分缺失，保留模型 severity"}
+
+    # S4 闸门级联（原型）：用稳定闸门推导分替代模型直判进公式；模型原始分仍留在 *_execution 供对比。
+    # 放在 shake-cap 前 → 闸门分仍受晃动封顶约束。gated 字段写回 stage 供 5 跑稳定性对比。
+    if stage_id == "S4":
+        cg, bg = _s4_gate_score("creator", stage), _s4_gate_score("benchmark", stage)
+        stage["creator_execution_gated"], stage["benchmark_execution_gated"] = cg, bg
+        creator_exec, bench_exec = cg, bg
 
     # 晃动确定性封顶（2026-06-12 用户判例：晃动=无法有效接收）：severe 侧在视觉依赖阶段
     # 执行分封顶 0.5，只降不升、双侧对称。指标由 flayr_core.motion 在预处理算出（零 LLM）。
@@ -169,9 +215,18 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
     if creator_exec == 0 and bench_exec == 0:
         return {"status": "derived", "severity": "small", "E": 0,
                 "reason": "双方均未涉及（执行分均为 0），不进公式"}
-    if stage_id == "S5" and not has_real_endorsement(bench_text) and not has_real_endorsement(creator_text):
-        return {"status": "derived", "severity": "small", "E": 0,
-                "reason": "S5 双方均无真背书 → 均未涉及（卖点类信息归卖点链）"}
+    if stage_id == "S5":
+        bv, bvis, b_avail = (endorsement or {}).get("benchmark") or (False, False, False)
+        cv, cvis, c_avail = (endorsement or {}).get("creator") or (False, False, False)
+        if b_avail or c_avail:  # 有结构化 flag → 读 flag（绕过 Stage2 判断 + 脆弱正则）
+            b_has, c_has = (bv or bvis), (cv or cvis)
+            src = "结构化 flag"
+        else:  # 老 facts 无 flag → 正则兜底，保旧行为
+            b_has, c_has = has_real_endorsement(bench_text), has_real_endorsement(creator_text)
+            src = "正则兜底"
+        if not b_has and not c_has:
+            return {"status": "derived", "severity": "small", "E": 0,
+                    "reason": f"S5 双方均无硬背书 → 均未涉及（{src}）"}
 
     e = max(0.0, float(bench_exec) - float(creator_exec))
     reason = f"E = 标杆执行分 {bench_exec} − 达人执行分 {creator_exec}"
@@ -287,6 +342,8 @@ def derive_severity_from_facts(result: dict[str, Any], analysis: dict[str, Any] 
     archetype = _select_archetype(profile)
     weights = ARCHETYPE_W.get(archetype) if archetype else None
     painpoints = _painpoint_tokens([str(p) for p in (profile or {}).get("painpoints") or [] if str(p).strip()])
+    # S5 硬背书：从 Stage1 facts 代码聚合每侧 ①②，绕过 Stage2 判断（替代 has_real_endorsement 正则）
+    endorsement = {side: _side_endorsement(result, side) for side in ("creator", "benchmark")}
 
     for stage in stages:
         if not isinstance(stage, dict):
@@ -295,7 +352,7 @@ def derive_severity_from_facts(result: dict[str, Any], analysis: dict[str, Any] 
         if not match:
             continue
         try:
-            trace = _derive_one(match.group(1), stage, weights, painpoints, shake)
+            trace = _derive_one(match.group(1), stage, weights, painpoints, shake, endorsement)
         except Exception as exc:  # 架构不变量：推导绝不拖垮主流程
             trace = {"status": "error", "reason": f"推导异常已降级：{exc}"}
         if archetype:

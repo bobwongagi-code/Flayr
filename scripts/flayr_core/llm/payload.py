@@ -306,7 +306,8 @@ def build_video_fact_payload(
                             "audio_fact": "该时刻的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。",
                             "product_visible": True,
                             "product_coverage": "该时段产品在画面里的视觉占比：none｜low｜medium｜high。看不到产品写 none。",
-                            "third_party_endorsement": False,
+                            "endorsement_verbal": False,
+                            "endorsement_visual": False,
                             "functions": ["S3_usage", "S4_effect"],
                         }
                     ],
@@ -353,10 +354,9 @@ def build_video_fact_payload(
         "每条还要标 product_visible（该时段画面里能否看到产品本体，true/false）与 product_coverage"
         "（产品视觉占比 none｜low｜medium｜high，看不到写 none）：这两项用于确定性统计产品出镜，"
         "据画面如实标，产品被手遮住或只露局部按真实可见程度给 low；"
-        "再标 third_party_endorsement（true/false）：该时段内容是否构成第三方机构背书——"
-        "机构类型（监管认证如 KKM/Halal/SIRIM、行业协会、评测中心/实验室、高校研究、调研咨询、"
-        "疾病防治中心）且其数据/实验/结论在证明本产品价值，两者同时成立才 true；"
-        "仅出现机构名字、赞助或合作 logo、达人自述功效、普通用户评论，都是 false；"
+        "再标 endorsement_verbal 与 endorsement_visual（各 true/false，纯观察、不判断算不算有效背书——有效性归后续打分）："
+        "endorsement_verbal＝该时段口播/字幕里有没有【出现】halal/KKM/认证/证书/检测/临床/医生/皮肤科/专家/机构/FDA/GMP/SIRIM/BPOM/GMP/certified 等硬来源词（只看词出没出现，不判断是否构成援引背书）；"
+        "endorsement_visual＝该时段画面里有没有【出现】独立的硬背书视觉证据（证书/检测报告文件/机构认证标识被画面清晰呈现）——产品瓶身上的印刷小标不算，口播说了但画面没出现也不算（口播归 endorsement_verbal，别把听到的脑补成画面）；"
         "每条还要标 functions（list，多选）：这段画面支撑哪些带货功能，枚举 S1_hook/S2_intro/S3_usage/S4_effect/S5_trust/S6_cta，"
         "按信息功能判断、信道无关（口播/字幕/画面/特效综合看，无口播也能判），一段可同时支撑多个"
         "（手在操作+效果出来 → [S3_usage,S4_effect]）；这是描述这段在带货结构里干什么、不是评价好坏，没有对应功能就不标；"
@@ -494,7 +494,7 @@ def build_llm_comparison_payload(
             "## 输出要求",
             "只输出严格 JSON，不要 Markdown。字段必须使用 references/analysis-output-schema.json 的字段名。",
             "必须输出：one_line_verdict, one_line_summary, executive_summary, holistic_assessment（每维独立）, key_conclusions（1-5 条消费者视角）, product_visibility, category_profile, product_profile, loop_closure, video_understanding, stage_analysis[6], improvements（1-5 条，按 GMV 杠杆排序）。",
-            "stage_analysis 每项必须含：stage, time_range, benchmark_time_range, creator_time_range, core_question, creator_module_id, benchmark_module_id, module_fit, module_fit_reason, task_completion, gap_type, gap_summary, voice_performance, benchmark_summary, benchmark_key_message, benchmark_evidence_ids, benchmark_visual_evidence, benchmark_support_status, benchmark_has_effect_demo, benchmark_has_usage_demo, benchmark_quote, benchmark_quote_zh, creator_summary, creator_key_message, creator_evidence_ids, creator_visual_evidence, creator_support_status, creator_has_effect_demo, creator_has_usage_demo, creator_quote, creator_quote_zh, gap, evidence, severity, creator_execution, benchmark_execution, painpoint_relevance, stage_standard_delivery。",
+            "stage_analysis 每项必须含：stage, time_range, benchmark_time_range, creator_time_range, core_question, creator_module_id, benchmark_module_id, module_fit, module_fit_reason, task_completion, gap_type, gap_summary, voice_performance, benchmark_summary, benchmark_key_message, benchmark_evidence_ids, benchmark_visual_evidence, benchmark_support_status, benchmark_has_effect_demo, benchmark_has_usage_demo, benchmark_has_comparison_structure, benchmark_quote, benchmark_quote_zh, creator_summary, creator_key_message, creator_evidence_ids, creator_visual_evidence, creator_support_status, creator_has_effect_demo, creator_has_usage_demo, creator_has_comparison_structure, creator_quote, creator_quote_zh, gap, evidence, severity, creator_execution, benchmark_execution, painpoint_relevance, stage_standard_delivery。",
             "task_completion 只能取 complete、partial、missing 三选一（达人侧该阶段功能完成度），禁止 both_complete、no_gap 等任何其他词；标杆侧完成情况写在 benchmark_summary。",
             "creator_execution 与 benchmark_execution 取值只能是 0、0.5、1、2 四个数字：0=未执行该阶段功能；0.5=做了但对该阶段核心功能基本无效——敷衍、平庸无感、几乎不起作用（如一句轻带的 CTA、平铺直叙毫无抓力的开场、仅口头承诺没有任何验证支撑）；1=执行合格（功能完成且对观众有效）；2=执行出色（可视化演示/铺垫到位/感染力强）。两侧按该阶段功能定义各自独立打分，先打分再对比，禁止因对比结果回调任何一侧分数。",
             "效果呈现阶段（S4）执行分以 product_profile.core_visual_proposition（本品核心视觉命题）为评判锚点，不套通用 before/after：先判该侧有没有拍出本品的决定性瞬间（定妆粉饼=粉底油光→哑光对比、面膜=逐日变化+敷后效果），并满足 product_profile.shooting_requirement（效果细微的品需正面强光+面部特写才算拍到）。拍出命题且拍摄到位才给 2；只完成动作（揭膜/擦粉/口头带过）未体现命题、或拍摄条件不支撑（暗光/无特写/wide shot 看不出效果）按敷衍计最高 0.5；做了但缺命题对比的'呈现单薄'最高 1。过长全程记录不加分（标尺是命题覆盖非完整性）。两侧各自独立打分，禁止因对比回调。",
@@ -506,6 +506,12 @@ def build_llm_comparison_payload(
             "⑤过程可视化（特写/慢镜让肉眼不易察觉的效果成为画面——粉质覆盖/精华渗透/泡沫溶解/拉丝/吸水/去渍过程，S4-F）。"
             "判 false 当以下单独出现：纯使用动作（涂抹/按压/拆装步骤，无效果变化可见）→ 属 S3；产品出镜无人操作；口头/字幕描述效果但画面无对应效果画面；只展示外观/材质/包装。"
             "注意：不要求效果『非常明显』，观众能看见变化/差异/量化结果即计 true。这是一个干净的结构化判断（看见效果呈现=true，只看见动作/口播=false），别用自由文本描述替代。",
+            "S4 还要逐侧输出布尔字段 benchmark_has_comparison_structure / creator_has_comparison_structure（非 S4 阶段填 null）——该侧画面里有没有出现『对比结构』。"
+            "这是结构在不在场的描述，不是强弱评价：你只判断有没有这种结构，绝不判断对比明不明显、效果强不强（强弱是执行分的事，不归这个字段）。判 true 当出现以下任意一种结构："
+            "①前后对比结构——半脸 / 分屏并列 / 带 Before-After 字样标注 / 同一部位两个时间点切换；②可量化数字出现在画面（百分比、时长、重量、温度等具体数值）；③仪器/设备测量结果画面（皮肤检测仪、体脂秤、温度计等）。"
+            "正例（都判 true）：半脸对比里 After 一侧只是轻微哑光、局部变化、肉眼看不强 → 仍是 true（结构在场就算，轻微/局部/不明显都不影响判定）；画面角落出现『-30% 出油』之类数字 → true；皮肤检测仪屏幕读数入镜 → true。"
+            "负例（都判 false）：只有文字或口播声称『效果很好/用完皮肤变好了』但画面无任何图像结构对比 → false；只展示使用后单侧画面、无前后对比/无数字/无仪器 → false；仅主观感受描述无结构 → false。"
+            "再强调：判的是『对比结构在不在画面里』，不是『对比强不强』。结构在=true，三种结构一个都没有=false。",
             "S3 还要逐侧输出布尔字段 benchmark_has_usage_demo / creator_has_usage_demo（非 S3 阶段填 null）——本侧有没有在真实使用过程中把核心卖点『演示出来被看见』。"
             "判 true 当满足结构库 S3-A~E 任意一种真实使用演示：①单场景全流程（开箱到使用完整展示，S3-A）；②多场景拼接（多场景覆盖卖点，S3-B）；"
             "③多人像使用（不同人演示，S3-C）；④步骤拆解式（分步操作演示，S3-D）；⑤沉浸第一视角（第一人称实操，S3-E）——关键是核心卖点在使用动作里被看见（清洁机吸力/干湿分离在动作里可见、涂抹推开过程可见），演示即证据。"

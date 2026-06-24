@@ -114,9 +114,11 @@ check(
 from flayr_core.llm.parse import normalize_video_understanding  # noqa: E402
 
 u = normalize_video_understanding(
-    {"creator": {"evidence_units": [{"id": "C1", "time_range": "1s - 3s", "information": "x", "third_party_endorsement": "true"}]}}
+    {"creator": {"evidence_units": [{"id": "C1", "time_range": "1s - 3s", "information": "x", "endorsement_verbal": "true", "endorsement_visual": "false"}]}}
 )
-check("tag 透传 normalize_video_understanding", u["creator"]["evidence_units"][0].get("third_party_endorsement") is True)
+check("背书双信道透传 normalize_video_understanding",
+      u["creator"]["evidence_units"][0].get("endorsement_verbal") is True
+      and u["creator"]["evidence_units"][0].get("endorsement_visual") is False)
 
 # 5. 死代码已清 + 模块仍可导入
 import flayr_core.prompt as prompt_module  # noqa: E402

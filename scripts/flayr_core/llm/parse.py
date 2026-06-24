@@ -388,7 +388,9 @@ def normalize_video_understanding(value: Any) -> dict[str, Any]:
                     "subtitle_fact": str(unit.get("subtitle_fact") or "").strip(),
                     "product_visible": normalize_bool_flag(unit.get("product_visible")),
                     "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
-                    "third_party_endorsement": normalize_bool_flag(unit.get("third_party_endorsement")),
+                    # F 项背书劈成两个纯观察信道（替代焊死判断的 third_party_endorsement）：
+                    "endorsement_verbal": normalize_bool_flag(unit.get("endorsement_verbal")),
+                    "endorsement_visual": normalize_bool_flag(unit.get("endorsement_visual")),
                 }
                 for index, unit in enumerate(units, start=1)
                 if isinstance(unit, dict)
@@ -522,6 +524,8 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 "benchmark_has_effect_demo": normalize_demo_flag(item.get("benchmark_has_effect_demo")),
                 # S3 使用过程布尔（结构库 S3-A~E 判定）：缺失为 None → derive S3 放大器不触发（保留旧空白行为）
                 "benchmark_has_usage_demo": normalize_demo_flag(item.get("benchmark_has_usage_demo")),
+                # S4 对比结构布尔（前后对比/数字/仪器，结构在不在场、不判强弱）：闸门级联 L1b，缺失 None → derive 不闸门退回原始分
+                "benchmark_has_comparison_structure": normalize_demo_flag(item.get("benchmark_has_comparison_structure")),
                 "benchmark_quote": str(item.get("benchmark_quote") or "").strip(),
                 "benchmark_quote_zh": str(item.get("benchmark_quote_zh") or "").strip(),
                 "creator_summary": required_text(item, "creator_summary"),
@@ -531,6 +535,7 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 "creator_support_status": normalize_support_status(item.get("creator_support_status"), item.get("creator_quote")),
                 "creator_has_effect_demo": normalize_demo_flag(item.get("creator_has_effect_demo")),
                 "creator_has_usage_demo": normalize_demo_flag(item.get("creator_has_usage_demo")),
+                "creator_has_comparison_structure": normalize_demo_flag(item.get("creator_has_comparison_structure")),
                 "creator_quote": str(item.get("creator_quote") or "").strip(),
                 "creator_quote_zh": str(item.get("creator_quote_zh") or "").strip(),
                 "gap": required_text(item, "gap"),
@@ -656,7 +661,9 @@ def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dic
                 "audio_fact": str(unit.get("audio_fact") or "").strip(),
                 "product_visible": normalize_bool_flag(unit.get("product_visible")),
                 "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
-                "third_party_endorsement": normalize_bool_flag(unit.get("third_party_endorsement")),
+                # F 项背书劈成两个纯观察信道（替代焊死判断的 third_party_endorsement）：
+                "endorsement_verbal": normalize_bool_flag(unit.get("endorsement_verbal")),
+                "endorsement_visual": normalize_bool_flag(unit.get("endorsement_visual")),
                 # 这段支撑哪些带货功能（多选，描述性）；nullable，老 facts 缺失为 None
                 "functions": normalize_functions(unit.get("functions")),
             }

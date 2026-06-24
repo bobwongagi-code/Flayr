@@ -89,6 +89,12 @@ def main():
                 aip = write_analysis_input(rd, an)
                 run_large_model_analysis(run_args, an, aip, rd)
                 shutil.copy2(rd / "analysis_result.json", dst)
+                # 埋点①：每跑存一份原始 Stage1 facts（自由文本输出），供跨跑覆盖漂移诊断。
+                # rd 是同样本各跑共享目录、facts 每跑被覆盖；同样本串行，故此处即时拷出无竞态。
+                for who in ("creator", "benchmark"):
+                    fsrc = rd / f"video_facts_{who}.json"
+                    if fsrc.is_file():
+                        shutil.copy2(fsrc, out / s / f"video_facts_raw_{who}_{i}.json")
                 set_st(f"{s}/r{i}", f"done {round((time.time() - t0) / 60, 1)}min(try{attempt + 1})")
                 return
             except (Exception, SystemExit) as e:

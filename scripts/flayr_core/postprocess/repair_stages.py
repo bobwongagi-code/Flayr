@@ -134,8 +134,6 @@ def stabilize_stage_severity(result: dict[str, Any]) -> None:
     for stage in result.get("stage_analysis", []):
         stage_id = stage_code(stage)
         text = stage_text(stage)
-        creator_text = role_stage_text(stage, "creator")
-        benchmark_text = role_stage_text(stage, "benchmark")
 
         if creator_not_worse(text):
             set_stage_small(stage)
@@ -146,12 +144,10 @@ def stabilize_stage_severity(result: dict[str, Any]) -> None:
         # S2 不再无条件兜底 small：双方都完成产品引出不代表卖点质量相当，
         # 需由 LLM 按品类消费者决策优先级判断卖点选择是否偏离。
 
-        if stage_id == "S5" and not has_real_endorsement(creator_text) and not has_real_endorsement(benchmark_text):
-            set_stage_small(
-                stage,
-                "双方均未提供第三方背书（认证/检测/测评/口碑/权威），S5 信任放大环节均未涉及；自述功效属卖点，不计为背书。",
-                "双方均未涉及 S5，差距按 small 处理。",
-            )
+        # S5「双方均无背书 → small」闸已移交 derive（2026-06-23）：derive 用结构化 flag
+        # （endorsement_verbal/visual，缺失退 has_real_endorsement 正则兜底）做唯一判定。
+        # 此处旧正则闸删除——它在 derive 之前跑、设 small + gap_summary，derive 后跑覆盖 severity
+        # 却不改 gap_summary，两者一旦不一致（正则 vs flag）会产出「severity≠解释」的自相矛盾。
 
         if stage_id == "S6" and creator_global_has_cta and not benchmark_global_has_cta:
             set_stage_small(
