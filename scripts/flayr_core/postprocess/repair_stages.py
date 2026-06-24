@@ -293,9 +293,27 @@ def has_real_endorsement(text: str) -> bool:
     先抹掉否定语境再匹配，处理"无第三方认证"这类假阳性。
     注意：这是纯正则能稳定到的上限——彻底泛化（语义级"卖点 vs 背书"判断）应改为
     让模型输出结构化标记（同 product_visible 的做法），由代码消费。
+    含软背书（测评/口碑/好评/销量）；S5 severity 闸需要"硬背书"口径时用 has_hard_endorsement。
     """
     cleaned = _NEG_ENDORSEMENT_RE.sub("", str(text or ""))
     return bool(_ENDORSEMENT_RE.search(cleaned))
+
+
+# 硬背书子集（机构/监管/检测临床/医生专家），排除软背书（测评/口碑/好评/销量）。
+# 用户判例：软背书 ≤ 硬背书，双方均无硬背书（哪怕一方有软背书）→ S5 small。
+_HARD_ENDORSEMENT_PATTERN = (
+    r"认证|认可|检测报告|检验|临床|clinical|lab[\s-]?tested|certified|"
+    r"KKM|kelulusan|sijil|BPOM|halal|FDA|SNI|GMP|"
+    r"医生|牙医|皮肤科|药剂师|专家|expert|dermatologist|doktor|权威|官方推荐|机构"
+)
+_HARD_ENDORSEMENT_RE = re.compile(_HARD_ENDORSEMENT_PATTERN, re.IGNORECASE)
+
+
+def has_hard_endorsement(text: str) -> bool:
+    """是否含【硬】背书（机构/监管/检测/医生专家）——软背书(测评/口碑/好评/销量)不算。
+    与 Stage1 结构化 flag endorsement_verbal/visual 的硬来源口径一致；derive S5 闸缺 flag 时用它兜底。"""
+    cleaned = _NEG_ENDORSEMENT_RE.sub("", str(text or ""))
+    return bool(_HARD_ENDORSEMENT_RE.search(cleaned))
 
 
 def creator_has_cta(text: str) -> bool:

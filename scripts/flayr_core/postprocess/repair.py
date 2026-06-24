@@ -40,6 +40,7 @@ from .repair_stages import (
     creator_has_cta,
     creator_not_worse,
     has_real_endorsement,
+    has_hard_endorsement,
     improvement_stage_code,
     role_has_positive_cta,
     role_stage_text,
@@ -63,6 +64,7 @@ __all__ = [
     "role_has_positive_cta",
     "creator_not_worse",
     "has_real_endorsement",
+    "has_hard_endorsement",
     "creator_has_cta",
     "set_stage_small",
     # repair_evidence

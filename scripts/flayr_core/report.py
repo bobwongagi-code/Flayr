@@ -119,13 +119,11 @@ def stage_skipped(stage: dict[str, Any]) -> tuple[bool, str]:
     is_s5 = "S5" in stage_name or "信任" in stage_name or "trust" in stage_name.lower()
 
     if is_s5:
-        # 检查是否有实质信任信号（认证、背书、权威信息等）
-        trust_signals = ("认证", "背书", "权威", "批准", "临床", "医生", "专家", "测试", "检测",
-                         "certif", "approve", "doctor", "clinical", "test", "trust",
-                         "推荐", "获奖", "专利", "实验室")
-        has_trust = any(s in creator or s in benchmark for s in trust_signals)
-        if not has_trust:
-            return True, "双方均未设计信任背书环节，不单独分析。"
+        # 单一来源：跟随 derive 的 S5 硬背书判定，不再独立扫关键词（旧扫描含软背书 test/推荐，
+        # 与 derive 的 hard-only 口径分叉，会出现 derive 打分、报告却跳过的矛盾）。
+        derive_reason = str((stage.get("severity_derivation") or {}).get("reason") or "")
+        if "均无硬背书" in derive_reason:
+            return True, "双方均未提供硬背书（机构/检测/权威），S5 信任放大环节不单独分析。"
 
     if (creator_empty and benchmark_empty) or gap_skip:
         return True, "双方均未设计该环节，不单独分析。"

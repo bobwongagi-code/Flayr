@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from typing import Any
+from typing import Any, NamedTuple
 
-from .repair import has_real_endorsement
+from .repair import has_hard_endorsement
 
 # ── 品类原型 → 阶段权重表 W（政策数据，待数据积累渐进拟合）──────────────────────
 ARCHETYPE_W: dict[str, dict[str, float]] = {
@@ -119,22 +119,30 @@ def _side_text(stage: dict[str, Any], side: str) -> str:
     return " ".join(str(stage.get(k) or "") for k in keys)
 
 
-def _side_endorsement(result: dict[str, Any], side: str) -> tuple[bool, bool, bool]:
+class _Endorsement(NamedTuple):
+    """该侧硬背书聚合结果。具名避免 (verbal, visual, available) 位置元组解包错位。"""
+    verbal: bool      # 口播/字幕出现硬背书来源词
+    visual: bool      # 画面出现独立硬背书视觉证据
+    available: bool   # 该侧 unit 有无结构化 endorsement 字段（无→derive 退回硬背书正则兜底）
+
+
+_NO_ENDORSEMENT = _Endorsement(False, False, False)
+
+
+def _side_endorsement(result: dict[str, Any], side: str) -> _Endorsement:
     """从 Stage1 facts 聚合该侧硬背书存在性（口播/画面各一）：代码聚合、不让 Stage2 重判（绕过判断层）。
-    作用域：facts 有 functions 标记时只取含 S5_trust 的 unit；无标记（老 facts）退回全 unit。
-    返回 (verbal, visual, available)——available 表示该侧有无结构化 endorsement 字段（无则 derive 退回正则兜底）。"""
+    作用域：该侧【全部 unit】——证书/背书出现在任一 unit 即算，不依赖 functions 阶段标记
+    （functions 是模型 descriptive 输出、会误标，挂上去会漏检真背书；背书归不归 S5 由本就只在 S5 闸消费保证）。"""
     vu = result.get("video_understanding")
     side_vu = vu.get(side) if isinstance(vu, dict) else None
     units = side_vu.get("evidence_units") if isinstance(side_vu, dict) else None
     if not isinstance(units, list):
-        return (False, False, False)
+        return _NO_ENDORSEMENT
     units = [u for u in units if isinstance(u, dict)]
-    has_fn = any(u.get("functions") for u in units)
-    pool = [u for u in units if "S5_trust" in (u.get("functions") or [])] if has_fn else units
-    verbal = any(u.get("endorsement_verbal") is True for u in pool)
-    visual = any(u.get("endorsement_visual") is True for u in pool)
+    verbal = any(u.get("endorsement_verbal") is True for u in units)
+    visual = any(u.get("endorsement_visual") is True for u in units)
     available = any(("endorsement_verbal" in u or "endorsement_visual" in u) for u in units)
-    return (verbal, visual, available)
+    return _Endorsement(verbal, visual, available)
 
 
 def _painpoint_tokens(painpoints: list[str]) -> list[str]:
@@ -189,14 +197,14 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         return {"status": "derived", "severity": "small", "E": 0,
                 "reason": "双方均未涉及（执行分均为 0），不进公式"}
     if stage_id == "S5":
-        bv, bvis, b_avail = (endorsement or {}).get("benchmark") or (False, False, False)
-        cv, cvis, c_avail = (endorsement or {}).get("creator") or (False, False, False)
-        if b_avail or c_avail:  # 有结构化 flag → 读 flag（绕过 Stage2 判断 + 脆弱正则）
-            b_has, c_has = (bv or bvis), (cv or cvis)
+        b = (endorsement or {}).get("benchmark") or _NO_ENDORSEMENT
+        c = (endorsement or {}).get("creator") or _NO_ENDORSEMENT
+        if b.available or c.available:  # 有结构化 flag → 读 flag（绕过 Stage2 判断 + 脆弱正则）
+            b_has, c_has = (b.verbal or b.visual), (c.verbal or c.visual)
             src = "结构化 flag"
-        else:  # 老 facts 无 flag → 正则兜底，保旧行为
-            b_has, c_has = has_real_endorsement(bench_text), has_real_endorsement(creator_text)
-            src = "正则兜底"
+        else:  # 老 facts 无 flag → 硬背书正则兜底（软背书不算，与 flag 口径一致：双方均无硬背书→small）
+            b_has, c_has = has_hard_endorsement(bench_text), has_hard_endorsement(creator_text)
+            src = "硬背书正则兜底"
         if not b_has and not c_has:
             return {"status": "derived", "severity": "small", "E": 0,
                     "reason": f"S5 双方均无硬背书 → 均未涉及（{src}）"}
@@ -315,8 +323,9 @@ def derive_severity_from_facts(result: dict[str, Any], analysis: dict[str, Any] 
     archetype = _select_archetype(profile)
     weights = ARCHETYPE_W.get(archetype) if archetype else None
     painpoints = _painpoint_tokens([str(p) for p in (profile or {}).get("painpoints") or [] if str(p).strip()])
-    # S5 硬背书：从 Stage1 facts 代码聚合每侧 ①②，绕过 Stage2 判断（替代 has_real_endorsement 正则）
-    endorsement = {side: _side_endorsement(result, side) for side in ("creator", "benchmark")}
+    # S5 硬背书：从 Stage1 facts 代码聚合每侧 ①②，绕过 Stage2 判断。仅 S5 闸消费——无 S5 阶段则不算
+    endorsement = ({side: _side_endorsement(result, side) for side in ("creator", "benchmark")}
+                   if any("S5" in str(s.get("stage") or "") for s in stages if isinstance(s, dict)) else {})
 
     for stage in stages:
         if not isinstance(stage, dict):

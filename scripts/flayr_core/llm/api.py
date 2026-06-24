@@ -71,6 +71,14 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
     req_path = raw_path.with_name(raw_path.stem + ".stream_req.json")
     req_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     sse_path = raw_path.with_name(raw_path.stem + ".sse")
+    # API key 不进 curl argv（否则 ps/进程列表对本机任意进程可见）：写入 0600 临时文件、
+    # 用 curl `-H @file` 读，finally 删除。比内联 -H "Bearer {key}" 安全。
+    auth_path = raw_path.with_name(raw_path.stem + ".curlauth")
+    auth_path.write_text(f"Authorization: Bearer {api_key}\n", encoding="utf-8")
+    try:
+        os.chmod(auth_path, 0o600)
+    except OSError:
+        pass
 
     curl_command = [
         "curl",
@@ -83,7 +91,7 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
         "--max-time",
         str(LLM_CURL_MAX_TIME_SECONDS),
         "-H",
-        f"Authorization: Bearer {api_key}",
+        f"@{auth_path}",
         "-H",
         "Content-Type: application/json",
         "--data-binary",
@@ -94,33 +102,36 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
     ]
 
     last_error = ""
-    for attempt in range(LLM_CURL_RETRIES + 1):
-        completed = run_command(curl_command)
-        if completed.returncode != 0:
-            body = sse_path.read_text(encoding="utf-8", errors="replace").strip()[:400] if sse_path.is_file() else ""
-            last_error = completed.stderr.strip() or completed.stdout.strip() or "curl failed"
-            if body:
-                last_error = f"{last_error}\n{body}"
-            # 鉴权/请求错误等硬错误快速失败，不浪费重试。
-            if not is_retryable_error(last_error):
+    try:
+        for attempt in range(LLM_CURL_RETRIES + 1):
+            completed = run_command(curl_command)
+            if completed.returncode != 0:
+                body = sse_path.read_text(encoding="utf-8", errors="replace").strip()[:400] if sse_path.is_file() else ""
+                last_error = completed.stderr.strip() or completed.stdout.strip() or "curl failed"
+                if body:
+                    last_error = f"{last_error}\n{body}"
+                # 鉴权/请求错误等硬错误快速失败，不浪费重试。
+                if not is_retryable_error(last_error):
+                    break
+            else:
+                content, usage, complete, finish_reason = parse_sse_stream(sse_path)
+                if complete and content:
+                    response: dict[str, Any] = {
+                        "choices": [{"message": {"content": content}, "finish_reason": finish_reason or "stop"}]
+                    }
+                    if usage:
+                        response["usage"] = usage
+                    raw_text = json.dumps(response, ensure_ascii=False)
+                    raw_path.write_text(raw_text, encoding="utf-8")
+                    return raw_text
+                # 流被中途截断（无 [DONE]/finish_reason）→ 传输问题，可重试。
+                last_error = "流式响应不完整（连接在 [DONE] 前中断）" if content else "流式响应无内容"
+            if attempt >= LLM_CURL_RETRIES:
                 break
-        else:
-            content, usage, complete, finish_reason = parse_sse_stream(sse_path)
-            if complete and content:
-                response: dict[str, Any] = {
-                    "choices": [{"message": {"content": content}, "finish_reason": finish_reason or "stop"}]
-                }
-                if usage:
-                    response["usage"] = usage
-                raw_text = json.dumps(response, ensure_ascii=False)
-                raw_path.write_text(raw_text, encoding="utf-8")
-                return raw_text
-            # 流被中途截断（无 [DONE]/finish_reason）→ 传输问题，可重试。
-            last_error = "流式响应不完整（连接在 [DONE] 前中断）" if content else "流式响应无内容"
-        if attempt >= LLM_CURL_RETRIES:
-            break
-        time.sleep(5 * (attempt + 1))
-    raise SystemExit(f"LLM streaming request failed: {last_error}")
+            time.sleep(5 * (attempt + 1))
+        raise SystemExit(f"LLM streaming request failed: {last_error}")
+    finally:
+        auth_path.unlink(missing_ok=True)
 
 
 def is_retryable_error(error_text: str) -> bool:

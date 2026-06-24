@@ -120,6 +120,30 @@ check("背书双信道透传 normalize_video_understanding",
       u["creator"]["evidence_units"][0].get("endorsement_verbal") is True
       and u["creator"]["evidence_units"][0].get("endorsement_visual") is False)
 
+# 4b. F项背书接管线：全unit聚合 + hard-only口径 + S5闸（软背书/无硬背书→small）
+from flayr_core.postprocess.derive import _side_endorsement, _derive_one, _Endorsement  # noqa: E402
+from flayr_core.postprocess.repair_stages import has_hard_endorsement  # noqa: E402
+
+# 聚合作用域=全unit：背书落在非S5_trust的unit（如S2_intro）也算，不漏检
+_agg = _side_endorsement(
+    {"video_understanding": {"creator": {"evidence_units": [
+        {"functions": ["S2_intro"], "endorsement_verbal": True, "endorsement_visual": False}]}}}, "creator")
+check("背书聚合：非S5_trust unit 的背书也算（全unit作用域）", _agg.verbal is True and _agg.available is True)
+
+# hard-only：硬来源算、软背书(好评/销量/口碑)不算
+check("has_hard_endorsement 硬来源=True", has_hard_endorsement("画面出现 KKM 认证、医生推荐"))
+check("has_hard_endorsement 软背书=False", not has_hard_endorsement("好评如潮、销量第一、口碑很好、testimoni"))
+
+# S5闸：双方均无硬背书flag → small（用户判例：软背书≤硬背书）
+_s5_none = _derive_one("S5", {"creator_execution": 1.0, "benchmark_execution": 1.0, "creator_summary": "好评", "benchmark_summary": "x"},
+                       {"S5": 1.0}, [], None, {"benchmark": _Endorsement(False, False, True), "creator": _Endorsement(False, False, True)})
+check("S5 双方均无硬背书(flag)→small", _s5_none.get("severity") == "small" and "结构化 flag" in _s5_none.get("reason", ""))
+
+# S5闸：一方有硬背书flag → 不判'均未涉及'，进公式
+_s5_one = _derive_one("S5", {"creator_execution": 1.0, "benchmark_execution": 2.0, "creator_summary": "x", "benchmark_summary": "KKM"},
+                      {"S5": 1.0}, [], None, {"benchmark": _Endorsement(False, True, True), "creator": _Endorsement(False, False, True)})
+check("S5 一方有硬背书→进公式不判均未涉及", "均未涉及" not in _s5_one.get("reason", ""))
+
 # 5. 死代码已清 + 模块仍可导入
 import flayr_core.prompt as prompt_module  # noqa: E402
 
