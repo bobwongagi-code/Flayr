@@ -524,8 +524,6 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 "benchmark_has_effect_demo": normalize_demo_flag(item.get("benchmark_has_effect_demo")),
                 # S3 使用过程布尔（结构库 S3-A~E 判定）：缺失为 None → derive S3 放大器不触发（保留旧空白行为）
                 "benchmark_has_usage_demo": normalize_demo_flag(item.get("benchmark_has_usage_demo")),
-                # S4 对比结构布尔（前后对比/数字/仪器，结构在不在场、不判强弱）：闸门级联 L1b，缺失 None → derive 不闸门退回原始分
-                "benchmark_has_comparison_structure": normalize_demo_flag(item.get("benchmark_has_comparison_structure")),
                 "benchmark_quote": str(item.get("benchmark_quote") or "").strip(),
                 "benchmark_quote_zh": str(item.get("benchmark_quote_zh") or "").strip(),
                 "creator_summary": required_text(item, "creator_summary"),
@@ -535,7 +533,6 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 "creator_support_status": normalize_support_status(item.get("creator_support_status"), item.get("creator_quote")),
                 "creator_has_effect_demo": normalize_demo_flag(item.get("creator_has_effect_demo")),
                 "creator_has_usage_demo": normalize_demo_flag(item.get("creator_has_usage_demo")),
-                "creator_has_comparison_structure": normalize_demo_flag(item.get("creator_has_comparison_structure")),
                 "creator_quote": str(item.get("creator_quote") or "").strip(),
                 "creator_quote_zh": str(item.get("creator_quote_zh") or "").strip(),
                 "gap": required_text(item, "gap"),

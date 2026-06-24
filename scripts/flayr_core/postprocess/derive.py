@@ -161,26 +161,6 @@ def _hits(text: str, words: list[str]) -> bool:
 _SHAKE_CAPPED_STAGES = {"S1", "S2", "S3", "S4"}
 
 
-def _s4_gate_score(side: str, stage: dict[str, Any]) -> float:
-    """S4 三层闸门推导单侧 execution（替代模型直判 0/0.5/1/2，原型）。
-    L1 has_effect_demo（存在性，稳）→ L2 painpoint_relevance（品锚，稳）→
-    L1b has_comparison_structure（对比结构在不在场，不判强弱）→ L3 顶档复用模型原始分定 1↔2。
-    稳定地板（0/0.5/1）全由稳定闸门决定，只有顶档 1↔2 继承模型抖动（=要测的残差）。
-    任一稳定闸门信号缺失（None）则不闸门、退回模型原始分（保守，仿 derive 既有兜底）。"""
-    raw = float(stage.get(f"{side}_execution") or 0)
-    demo = stage.get(f"{side}_has_effect_demo")
-    rel = stage.get("painpoint_relevance")
-    if demo is None or rel is None:
-        return raw                                  # 信号缺失，不闸门
-    if demo is False:
-        return 0.0                                  # L1 没做效果呈现
-    if rel not in {"both", f"{side}_only"}:
-        return 0.5                                  # L2 没命中品的核心价值
-    if stage.get(f"{side}_has_comparison_structure") is not True:
-        return 1.0                                  # 命中品，无对比结构=基础呈现
-    return 2.0 if raw >= 2 else 1.0                 # L3 顶档：复用模型原始分定 1↔2
-
-
 def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] | None,
                 painpoints: list[str], shake: dict[str, bool] | None = None,
                 endorsement: dict[str, tuple[bool, bool, bool]] | None = None) -> dict[str, Any]:
@@ -189,13 +169,6 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
     bench_exec = stage.get("benchmark_execution")
     if creator_exec is None or bench_exec is None:
         return {"status": "skipped", "reason": "执行分缺失，保留模型 severity"}
-
-    # S4 闸门级联（原型）：用稳定闸门推导分替代模型直判进公式；模型原始分仍留在 *_execution 供对比。
-    # 放在 shake-cap 前 → 闸门分仍受晃动封顶约束。gated 字段写回 stage 供 5 跑稳定性对比。
-    if stage_id == "S4":
-        cg, bg = _s4_gate_score("creator", stage), _s4_gate_score("benchmark", stage)
-        stage["creator_execution_gated"], stage["benchmark_execution_gated"] = cg, bg
-        creator_exec, bench_exec = cg, bg
 
     # 晃动确定性封顶（2026-06-12 用户判例：晃动=无法有效接收）：severe 侧在视觉依赖阶段
     # 执行分封顶 0.5，只降不升、双侧对称。指标由 flayr_core.motion 在预处理算出（零 LLM）。
