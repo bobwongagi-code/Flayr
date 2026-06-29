@@ -144,6 +144,65 @@ _s5_one = _derive_one("S5", {"creator_execution": 1.0, "benchmark_execution": 2.
                       {"S5": 1.0}, [], None, {"benchmark": _Endorsement(False, True, True), "creator": _Endorsement(False, False, True)})
 check("S5 一方有硬背书→进公式不判均未涉及", "均未涉及" not in _s5_one.get("reason", ""))
 
+# 4c. S1 Hook flag 化（切片 A）：四维推执行分 + hook_exists 红线 + 命题锚 + 残差亮点门
+from flayr_core.llm.parse import normalize_hook_flags  # noqa: E402
+
+
+def _hook(exists, htype, cam=False, cp=False, snd=False, rhy=False, anchors=None):
+    return {"exists": exists, "type": htype,
+            "dims": {"camera": cam, "copy": cp, "sound": snd, "rhythm": rhy},
+            "anchors_proposition": anchors}
+
+
+def _s1_stage(creator_hook, benchmark_hook, **extra):
+    st = {"creator_execution": None, "benchmark_execution": None,
+          "creator_summary": "x", "benchmark_summary": "y",
+          "creator_hook": creator_hook, "benchmark_hook": benchmark_hook}
+    st.update(extra)
+    return st
+
+
+# 四维均满 + 双方相等 → e=0 → small（flag 推执行分，绕过模型 0-2）
+_full = _hook(True, "B", True, True, True, True)
+_t = _derive_one("S1", _s1_stage(_full, dict(_full)), None, [])
+check("S1 四维双满→small（flag 推执行分）", _t.get("severity") == "small" and _t.get("E") == 0)
+
+# 达人 0 维 vs 标杆 4 维（双方均有 Hook，不触红线）→ e=2.0 → S1 large 红线
+_c0 = _hook(True, "B", False, False, False, False)
+_t2 = _derive_one("S1", _s1_stage(_c0, dict(_full)), None, [])
+check("S1 达人四维全缺→large（e=2 核心缺失）", _t2.get("severity") == "large" and _t2.get("E") == 2)
+
+# hook_exists 红线：达人无 Hook、标杆有 Hook → large，且独立于四维
+_t3 = _derive_one("S1", _s1_stage(_hook(False, "unknown"), dict(_full)), None, [])
+check("S1 hook_exists 红线（达人无Hook标杆有）→large", _t3.get("severity") == "large" and "红线" in _t3.get("reason", ""))
+
+# 命题锚放大：小差距(e=0.5)下，标杆锚命题、达人没 → 放大到 large；无 anchors 则保持 small
+_c2 = _hook(True, "B", True, True, False, False)            # 2 维 met → exec 1.0
+_b3 = _hook(True, "B", True, True, True, False)             # 3 维 met → exec 1.5，e=0.5
+_t_no = _derive_one("S1", _s1_stage(_c2, _b3), None, [])
+check("S1 小差距无命题锚→small", _t_no.get("severity") == "small")
+_c2a = _hook(True, "B", True, True, False, False, anchors=False)
+_b3a = _hook(True, "B", True, True, True, False, anchors=True)
+_t_an = _derive_one("S1", _s1_stage(_c2a, _b3a), None, [])
+check("S1 命题锚（标杆锚达人没）→放大 large", _t_an.get("severity") == "large" and "锚定品命题" in _t_an.get("reason", ""))
+
+# 残差亮点门：标杆四维全 met 且 type≠unknown → 开；type=unknown → 不开
+_t_hl = _derive_one("S1", _s1_stage(_c0, dict(_full)), None, [])
+check("S1 亮点门：标杆四维全met+类型明确→开", _t_hl.get("hook_highlight_allowed") is True)
+_unk = _hook(True, "unknown", True, True, True, True)
+_t_unk = _derive_one("S1", _s1_stage(_c0, _unk), None, [])
+check("S1 亮点门：类型 unknown→不开", _t_unk.get("hook_highlight_allowed") is None)
+
+# flag 缺失 → 回退模型执行分（优雅降级，不崩）
+_t_fb = _derive_one("S1", _s1_stage(None, None, creator_execution=1.0, benchmark_execution=2.0), None, [])
+check("S1 flag 缺失→回退模型执行分", _t_fb.get("status") == "derived" and _t_fb.get("E") == 1.0)
+
+# parse 归一：容忍 'S1-B：反差' / 'yes' / 1 等写法
+_nh = normalize_hook_flags({"exists": "true", "type": "S1-B：反差震惊型", "dims": {"camera": "yes", "copy": 1}})
+check("S1 parse 归一 hook_flags（type→B, dims 容错）",
+      _nh["type"] == "B" and _nh["dims"]["camera"] is True and _nh["dims"]["copy"] is True
+      and _nh["dims"]["sound"] is False and _nh["exists"] is True)
+
 # 5. 死代码已清 + 模块仍可导入
 import flayr_core.prompt as prompt_module  # noqa: E402
 

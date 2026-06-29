@@ -147,6 +147,37 @@ def normalize_demo_flag(value: Any) -> bool | None:
     return None
 
 
+_HOOK_TYPE_LETTERS = {"A", "B", "C", "D", "E", "F", "G"}
+
+
+def normalize_hook_type(value: Any) -> str:
+    """归一 S1 钩子类型到单字母 A-G（结构库 S1-A~G），无法识别→unknown。
+    容忍 'B' / 'S1-B' / 's1_b' / 'S1-B：反差震惊型' 等写法。"""
+    s = str(value or "").strip().upper().replace("S1-", "").replace("S1_", "")
+    s = s[:1]  # 取首字母，容忍 'B：反差震惊型' 这类带后缀写法
+    return s if s in _HOOK_TYPE_LETTERS else "unknown"
+
+
+def normalize_hook_flags(value: Any) -> dict[str, Any] | None:
+    """归一单侧 S1 钩子结构化 flag。整体缺失（非 dict）→None，derive 见 None 回退模型执行分（优雅降级）。
+    形状：{exists: bool|None, type: A-G|unknown, dims:{camera/copy/sound/rhythm: bool}, anchors_proposition: bool|None}。
+    四维 dims 用 normalize_bool_flag（缺省 False=未做到）；exists/anchors 用 demo_flag 三态（None=模型没判）。"""
+    if not isinstance(value, dict):
+        return None
+    raw_dims = value.get("dims") if isinstance(value.get("dims"), dict) else {}
+    return {
+        "exists": normalize_demo_flag(value.get("exists")),
+        "type": normalize_hook_type(value.get("type")),
+        "dims": {
+            "camera": normalize_bool_flag(raw_dims.get("camera")),
+            "copy": normalize_bool_flag(raw_dims.get("copy")),
+            "sound": normalize_bool_flag(raw_dims.get("sound")),
+            "rhythm": normalize_bool_flag(raw_dims.get("rhythm")),
+        },
+        "anchors_proposition": normalize_demo_flag(value.get("anchors_proposition")),
+    }
+
+
 def normalize_base_frame_suitability(value: Any, best_time: Any) -> str:
     status = str(value or "").strip().lower()
     if status in {"usable", "no_suitable_frame"}:
@@ -548,6 +579,10 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 "painpoint_relevance": normalize_painpoint_relevance(item.get("painpoint_relevance")),
                 # 到位标准达成事实（全阶段统一，见 prompt 对照表；先收集，暂不卡分）
                 "stage_standard_delivery": normalize_stage_standard_delivery(item.get("stage_standard_delivery")),
+                # S1 Hook 结构化 flag（仅 S1 有意义）：四维 dims 推执行分、exists 红线、anchors 命题锚。
+                # 缺失为 None → derive 回退模型执行分（优雅降级）。模型在 Stage2 产出（切片 B 接线）。
+                "creator_hook": normalize_hook_flags(item.get("creator_hook")),
+                "benchmark_hook": normalize_hook_flags(item.get("benchmark_hook")),
             }
         )
 

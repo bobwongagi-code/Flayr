@@ -169,12 +169,57 @@ def _hits(text: str, words: list[str]) -> bool:
 _SHAKE_CAPPED_STAGES = {"S1", "S2", "S3", "S4"}
 
 
+def _s1_hook_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
+    """S1 Hook flag 化：四维 bool 命中数 → 执行分（met/4×2，落回现有 0-2 尺度）。
+    两侧 hook flag 任一缺失 → 返回 None（derive 回退模型执行分，优雅降级）。
+    hook_exists 是红线/前置（达人无 Hook、标杆有 Hook → large），不混进四维执行分。"""
+    c = stage.get("creator_hook")
+    b = stage.get("benchmark_hook")
+    if not isinstance(c, dict) or not isinstance(b, dict):
+        return None
+    if b.get("exists") is True and c.get("exists") is False:
+        return {"redline": True}
+    c_met = sum(1 for v in (c.get("dims") or {}).values() if v is True)
+    b_met = sum(1 for v in (b.get("dims") or {}).values() if v is True)
+    return {"redline": False, "creator_exec": c_met / 4 * 2, "bench_exec": b_met / 4 * 2}
+
+
+def _s1_bench_anchors_only(stage: dict[str, Any], relevance: str | None) -> bool:
+    """S1 命题锚放大判据：标杆钩子锚定品命题、达人未锚定。
+    flag 在 → 读 hook_anchors_proposition（命题不止痛点）；flag 缺 → 回退旧痛点 relevance 口径。"""
+    b = stage.get("benchmark_hook")
+    c = stage.get("creator_hook")
+    if isinstance(b, dict) and isinstance(c, dict):
+        return b.get("anchors_proposition") is True and c.get("anchors_proposition") is not True
+    return relevance == "benchmark_only"
+
+
+def _s1_bench_highlight(stage: dict[str, Any]) -> bool:
+    """残差亮点门：标杆四维全 met 且 hook_type≠unknown 才开（防模型每次硬写亮点）。
+    只决定'是否允许亮点描述'，进 trace 不进 severity。"""
+    b = stage.get("benchmark_hook")
+    if not isinstance(b, dict):
+        return False
+    dims = b.get("dims") or {}
+    return (b.get("type") not in (None, "", "unknown")
+            and len(dims) == 4 and all(v is True for v in dims.values()))
+
+
 def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] | None,
                 painpoints: list[str], shake: dict[str, bool] | None = None,
                 endorsement: dict[str, tuple[bool, bool, bool]] | None = None) -> dict[str, Any]:
     """推导单阶段 severity。返回 severity_derivation 溯源 dict（status=derived 时含新 severity）。"""
     creator_exec = stage.get("creator_execution")
     bench_exec = stage.get("benchmark_execution")
+    # S1 Hook flag 化：四维 bool 在时由 flag 推执行分，替代模型 0-2 主观分；flag 缺则回退模型分（优雅降级）。
+    # severity 仍走下方 e 差值/阈值/放大器/红线，不把 S1 变成孤立打分系统。
+    if stage_id == "S1":
+        s1 = _s1_hook_exec(stage)
+        if s1 is not None:
+            if s1.get("redline"):
+                return {"status": "derived", "severity": "large", "E": 2,
+                        "reason": "S1 达人无 Hook、标杆有 Hook（hook_exists 红线）"}
+            creator_exec, bench_exec = s1["creator_exec"], s1["bench_exec"]
     if creator_exec is None or bench_exec is None:
         return {"status": "skipped", "reason": "执行分缺失，保留模型 severity"}
 
@@ -239,8 +284,8 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         e, reason = max(e, 2.0), reason + "；S4 标杆呈现了效果(S4-A~F)、达人未呈现（验证=让用户看到）"
     elif stage_id == "S3" and e > 0 and b_usage is True and c_usage is False:
         e, reason = max(e, 2.0), reason + "；S3 标杆把卖点演示出来(S3-A~E)、达人只口播未演示（演示即证据）"
-    elif stage_id == "S1" and e > 0 and relevance == "benchmark_only":
-        e, reason = max(e, 2.0), reason + "；S1 标杆钩子命中品类痛点、达人未命中"
+    elif stage_id == "S1" and e > 0 and _s1_bench_anchors_only(stage, relevance):
+        e, reason = max(e, 2.0), reason + "；S1 标杆钩子锚定品命题、达人未锚定（命题不止痛点）"
 
     # 极性红线：达人持平或更优 → small（达人优势记亮点，绝不是差距）
     if e <= 0:
@@ -271,8 +316,12 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         severity = "medium"
     else:
         severity = "small"
-    return {"status": "derived", "severity": severity, "E": e, "W": w, "C": c_factor,
-            "painpoint_relevance": relevance, "S": score, "reason": reason}
+    trace = {"status": "derived", "severity": severity, "E": e, "W": w, "C": c_factor,
+             "painpoint_relevance": relevance, "S": score, "reason": reason}
+    # 残差亮点门（只进 trace 不进 severity）：标杆四维全 met 且类型明确才允许亮点描述，否则跳过
+    if stage_id == "S1" and _s1_bench_highlight(stage):
+        trace["hook_highlight_allowed"] = True
+    return trace
 
 
 CRITICAL_BAND = 0.2
