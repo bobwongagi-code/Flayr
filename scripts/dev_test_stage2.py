@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 from flayr_core.llm.api import call_llm_api, extract_chat_completion_text, read_llm_api_key
 from flayr_core.llm.parse import parse_json_text
-from flayr_core.llm.payload import build_llm_comparison_payload
+from flayr_core.llm.payload import build_llm_comparison_payload, load_brand_proposition
 from flayr_core.llm.pipeline import _process_llm_result
 from flayr_core.utils import write_json
 
@@ -306,6 +306,13 @@ def main() -> None:
         "creator": json.loads((run / "video_facts_creator.json").read_text(encoding="utf-8")),
     }
     analysis = json.loads((run / "analysis.json").read_text(encoding="utf-8"))
+    # 注入 Step-0 地基 + 冻结命题尺子（pipeline 正常会做；本工具绕过 pipeline，需手动补，否则 S1 hook flag 不触发）
+    foundation_path = run / "product_foundation.json"
+    if foundation_path.is_file():
+        analysis["product_foundation"] = json.loads(foundation_path.read_text(encoding="utf-8"))
+    bp = load_brand_proposition(run)
+    if bp:
+        analysis["brand_proposition"] = bp
     analysis_input = (run / "analysis_input.md").read_text(encoding="utf-8")
 
     payload = build_llm_comparison_payload(MODEL, analysis_input, facts, analysis)

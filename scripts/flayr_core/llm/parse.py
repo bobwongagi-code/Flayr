@@ -174,6 +174,12 @@ def normalize_hook_flags(value: Any) -> dict[str, Any] | None:
             "sound": normalize_bool_flag(raw_dims.get("sound")),
             "rhythm": normalize_bool_flag(raw_dims.get("rhythm")),
         },
+        # landing_met=钩子有没有"打穿"（type 无关三件套：对象/张力/承诺缺一即 false）。三态：None=模型没判。进 severity。
+        "landing_met": normalize_demo_flag(value.get("landing_met")),
+        # landing_reason=landing 判定的一句话理由（须引最早窗口证据）。审计 + B2 稳定性看依据用，derive 不消费。
+        "landing_reason": str(value.get("landing_reason") or "").strip(),
+        # window_evidence=钩子最早 3-5 秒带时间戳的观察，作 type 依据（审计 + B2 type_accuracy 用，derive 不消费）。
+        "window_evidence": str(value.get("window_evidence") or "").strip(),
         "anchors_proposition": normalize_demo_flag(value.get("anchors_proposition")),
     }
 

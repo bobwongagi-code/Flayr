@@ -148,10 +148,10 @@ check("S5 一方有硬背书→进公式不判均未涉及", "均未涉及" not 
 from flayr_core.llm.parse import normalize_hook_flags  # noqa: E402
 
 
-def _hook(exists, htype, cam=False, cp=False, snd=False, rhy=False, anchors=None):
+def _hook(exists, htype, cam=False, cp=False, snd=False, rhy=False, anchors=None, landing=None):
     return {"exists": exists, "type": htype,
             "dims": {"camera": cam, "copy": cp, "sound": snd, "rhythm": rhy},
-            "anchors_proposition": anchors}
+            "landing_met": landing, "anchors_proposition": anchors}
 
 
 def _s1_stage(creator_hook, benchmark_hook, **extra):
@@ -196,6 +196,22 @@ check("S1 亮点门：类型 unknown→不开", _t_unk.get("hook_highlight_allow
 # flag 缺失 → 回退模型执行分（优雅降级，不崩）
 _t_fb = _derive_one("S1", _s1_stage(None, None, creator_execution=1.0, benchmark_execution=2.0), None, [])
 check("S1 flag 缺失→回退模型执行分", _t_fb.get("status") == "derived" and _t_fb.get("E") == 1.0)
+
+# landing 封顶：达人四维 3/4(=1.5) 但钩子没打穿(landing=false) → 执行分封顶 1.0
+_c3_noland = _hook(True, "B", True, True, True, False, landing=False)   # 3 维但 landing=false
+_b4_land = _hook(True, "C", True, True, True, True, landing=True)        # 4 维 landing=true
+_t_cap = _derive_one("S1", _s1_stage(_c3_noland, _b4_land), None, [])
+check("S1 landing 封顶（件齐没打穿→exec≤1.0，e=1.0）", _t_cap.get("E") == 1.0)
+
+# landing 下限（carslan 重演）：标杆立住、达人没立住 → 至少 medium，纠正"件齐误判 small"
+check("S1 landing 下限（标杆立住达人没→medium）",
+      _t_cap.get("severity") == "medium" and "没打穿" in _t_cap.get("reason", ""))
+
+# 双方都没立住 → 不触发下限（同样没打穿，差距小，保持 small）
+_c3_nl = _hook(True, "B", True, True, True, False, landing=False)
+_b3_nl = _hook(True, "C", True, True, True, False, landing=False)
+_t_both = _derive_one("S1", _s1_stage(_c3_nl, _b3_nl), None, [])
+check("S1 双方都没立住→不触发下限（small）", _t_both.get("severity") == "small")
 
 # parse 归一：容忍 'S1-B：反差' / 'yes' / 1 等写法
 _nh = normalize_hook_flags({"exists": "true", "type": "S1-B：反差震惊型", "dims": {"camera": "yes", "copy": 1}})

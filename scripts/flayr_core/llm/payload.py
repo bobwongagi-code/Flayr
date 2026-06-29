@@ -445,6 +445,37 @@ def structure_library_judgment_view() -> str:
     return "\n".join(lines)
 
 
+_BRAND_PAIR_SUFFIX_RE = re.compile(r"-[bc]\d+$")
+
+
+def resolve_brand_key(run_dir_name: str) -> str:
+    """从 run 目录名解析【品】键：去 sample- 前缀、去 -b0/-c1 标杆/达人配对后缀；榨汁机族（wukoubo/youkoubo）归 juicer。"""
+    s = run_dir_name.removeprefix("sample-")
+    if s.startswith(("wukoubo", "youkoubo")):
+        return "juicer"
+    return _BRAND_PAIR_SUFFIX_RE.sub("", s)
+
+
+def load_brand_proposition(run_dir: Path) -> dict[str, Any] | None:
+    """读冻结的 S1 命题尺子 references/brand_propositions.json，按【品】返回 {propositions, painpoints}。
+    文件缺失/无该品条目/解析失败 → None（pipeline 据此降级回 Step-0 现生成命题，优雅降级，不触发 hook flag）。"""
+    path = ROOT / "references" / "brand_propositions.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    entry = data.get(resolve_brand_key(run_dir.name)) if isinstance(data, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    props = [str(p) for p in entry.get("propositions") or [] if str(p).strip()]
+    pains = [str(p) for p in entry.get("painpoints") or [] if str(p).strip()]
+    if not props and not pains:
+        return None
+    return {"propositions": props, "painpoints": pains}
+
+
 def build_llm_comparison_payload(
     model: str,
     analysis_input: str,
@@ -473,10 +504,52 @@ def build_llm_comparison_payload(
             "你输出的 category_profile/product_profile 必须原样回填这套地基。\n"
             + json.dumps(fnd, ensure_ascii=False, indent=2)
         )
+    # S1 钩子命题尺子（冻结·人工策展）：有则作 anchors_proposition 判据，并触发 hook flag 结构化输出（切片 B）。
+    # 缺失则不触发 → derive 回退模型执行分（与 Slice A 优雅降级一致）。
+    bp = (analysis or {}).get("brand_proposition") or {}
+    hook_flag_block = ""
+    if bp.get("propositions") or bp.get("painpoints"):
+        hook_flag_block = (
+            "## 本品 S1 钩子命题尺子（冻结·人工策展，judge anchors_proposition 用）\n"
+            "propositions（能做钩子主张的概念）：" + " / ".join(bp.get("propositions") or []) + "\n"
+            "painpoints（开头核心痛点）：" + " / ".join(bp.get("painpoints") or []) + "\n"
+            "S1 阶段（且仅 S1）每侧【必须】输出 creator_hook 与 benchmark_hook 两个对象，形如：\n"
+            '{"exists": bool（该侧前段是否存在抢注意力的 Hook，非直接进产品介绍）, '
+            '"type": "A"~"G" 或 "unknown"（按 structure_library S1 七型判该侧钩子属哪型。判定铁律：'
+            '①证据优先级 voiceover_zh / on_screen_text / 画面帧事实 ＞ information；information 只是索引、严禁作判定依据，'
+            '尤其不得因某 evidence 的 information 写了"痛点场景/油光/出油"就判 A；'
+            '②只取最早 hook 窗口的主导机制定 type——优先看 0-3s，不足扩到 0-5s，若 voiceover_zh 第一完整句跨到约 6.8s 可用这一整句；'
+            '严禁用该句之后才出现的痛点跟进/产品引出反推 type；'
+            '③若第一句口播是"没抱期待但结果超出预期"这类低期待→高结果表述，必须判反差 B、不得判痛点 A；判不出填 unknown，不影响其余字段）, '
+            '"dims": {"camera": bool, "copy": bool, "sound": bool, "rhythm": bool}'
+            '（该侧钩子在所选 type 下，镜头/文案/声音/节奏四维是否做到结构库给的【必需】结构件——'
+            '做到结构库示例即 true、缺了即 false；只判"做到没"不判"好不好"，不评创新加分；type=unknown 时四维按通用做到度判）, '
+            '"landing_met": bool（钩子有没有"打穿"，【与 type 无关】。判 true 当且仅当：最早 hook 窗口'
+            '（优先 0-3s，不足扩到 0-5s，voiceover_zh 第一完整句跨到约 6.8s 可用整句）内用户能 get 到一个【可停留的理由】，'
+            '且【同时】满足三件——①对象明确：在说谁的问题/谁的场景/谁会关心（油皮、脱妆、经期痛、孩子抗拒刷牙）；'
+            '②张力明确：为什么要继续看（痛点/反差/结果/悬念/场景共鸣/身份代入/认知颠覆 任一）；'
+            '③承诺或证据明确：后面要证明什么（油光变哑光、补妆不花、刷头不用手碰、孩子能接受）。三件缺任一即 false——'
+            '不是没 hook 元素，是 hook 没闭环。【铁律：严禁因为后续 S2/S3 产品介绍补足了逻辑就把 S1 landing 判 true，'
+            '只看最早 hook 窗口本身闭没闭环、不跟后段走】）, '
+            '"landing_reason": "一句话说清 landing 为何 true/false，必须引用最早窗口的具体证据（时间戳+原话/画面），'
+            '如 0-6.8s 仅口播\'结果超预期\'但没说超预期的结果是什么→承诺不明确→false", '
+            '"window_evidence": "钩子最早 3-5 秒实际出现了什么（带时间戳），作为 type 判断依据，'
+            '如 0-4.5s 近脸/指脸/拿产品但未建立使用前后强对比", '
+            '"anchors_proposition": bool（该侧钩子内容是否触及上面任一 proposition 或 painpoint 概念）}。'
+        )
+    # 强制字段要求（放在末尾"输出要求"区，模型严格跟这块走；前面的尺子块只给结构定义）
+    hook_field_req = (
+        "S1 强制：stage_analysis 第 1 项（S1 Hook）必须再含 creator_hook 与 benchmark_hook 两个对象"
+        "（结构见上方：exists/type/dims{camera,copy,sound,rhythm}/landing_met/landing_reason/window_evidence/anchors_proposition）。"
+        "type 为描述字段（按最早窗口主导机制判、不进 severity）；landing_met 是 type 无关的三件套二元判（进 severity）；"
+        "缺失视为违规输出。S2-S6 不含这两个字段。"
+        if hook_flag_block else ""
+    )
     user_text = "\n\n".join(
         [
             context,
             foundation_block,
+            hook_flag_block,
             "## S1-S6 模块结构库（判断视图：客观类型 + 适配条件，判 module_id 与类型对本品适配用；这是结构层、非判断层，不讲好坏）",
             structure_library_judgment_view(),
             "## 商业评判框架（判断差距权重的方法）",
@@ -495,6 +568,7 @@ def build_llm_comparison_payload(
             "只输出严格 JSON，不要 Markdown。字段必须使用 references/analysis-output-schema.json 的字段名。",
             "必须输出：one_line_verdict, one_line_summary, executive_summary, holistic_assessment（每维独立）, key_conclusions（1-5 条消费者视角）, product_visibility, category_profile, product_profile, loop_closure, video_understanding, stage_analysis[6], improvements（1-5 条，按 GMV 杠杆排序）。",
             "stage_analysis 每项必须含：stage, time_range, benchmark_time_range, creator_time_range, core_question, creator_module_id, benchmark_module_id, module_fit, module_fit_reason, task_completion, gap_type, gap_summary, voice_performance, benchmark_summary, benchmark_key_message, benchmark_evidence_ids, benchmark_visual_evidence, benchmark_support_status, benchmark_has_effect_demo, benchmark_has_usage_demo, benchmark_quote, benchmark_quote_zh, creator_summary, creator_key_message, creator_evidence_ids, creator_visual_evidence, creator_support_status, creator_has_effect_demo, creator_has_usage_demo, creator_quote, creator_quote_zh, gap, evidence, severity, creator_execution, benchmark_execution, painpoint_relevance, stage_standard_delivery。",
+            hook_field_req,
             "task_completion 只能取 complete、partial、missing 三选一（达人侧该阶段功能完成度），禁止 both_complete、no_gap 等任何其他词；标杆侧完成情况写在 benchmark_summary。",
             "creator_execution 与 benchmark_execution 取值只能是 0、0.5、1、2 四个数字：0=未执行该阶段功能；0.5=做了但对该阶段核心功能基本无效——敷衍、平庸无感、几乎不起作用（如一句轻带的 CTA、平铺直叙毫无抓力的开场、仅口头承诺没有任何验证支撑）；1=执行合格（功能完成且对观众有效）；2=执行出色（可视化演示/铺垫到位/感染力强）。两侧按该阶段功能定义各自独立打分，先打分再对比，禁止因对比结果回调任何一侧分数。",
             "效果呈现阶段（S4）执行分以 product_profile.core_visual_proposition（本品核心视觉命题）为评判锚点，不套通用 before/after：先判该侧有没有拍出本品的决定性瞬间（定妆粉饼=粉底油光→哑光对比、面膜=逐日变化+敷后效果），并满足 product_profile.shooting_requirement（效果细微的品需正面强光+面部特写才算拍到）。拍出命题且拍摄到位才给 2；只完成动作（揭膜/擦粉/口头带过）未体现命题、或拍摄条件不支撑（暗光/无特写/wide shot 看不出效果）按敷衍计最高 0.5；做了但缺命题对比的'呈现单薄'最高 1。过长全程记录不加分（标尺是命题覆盖非完整性）。两侧各自独立打分，禁止因对比回调。",

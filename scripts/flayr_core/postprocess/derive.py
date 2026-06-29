@@ -181,7 +181,23 @@ def _s1_hook_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
         return {"redline": True}
     c_met = sum(1 for v in (c.get("dims") or {}).values() if v is True)
     b_met = sum(1 for v in (b.get("dims") or {}).values() if v is True)
-    return {"redline": False, "creator_exec": c_met / 4 * 2, "bench_exec": b_met / 4 * 2}
+    c_exec, b_exec = c_met / 4 * 2, b_met / 4 * 2
+    # landing 封顶：钩子没打穿（landing_met=false）→ 该侧执行分最高 1.0，结构件齐全也不算"出色"。
+    if c.get("landing_met") is False:
+        c_exec = min(c_exec, 1.0)
+    if b.get("landing_met") is False:
+        b_exec = min(b_exec, 1.0)
+    return {"redline": False, "creator_exec": c_exec, "bench_exec": b_exec}
+
+
+def _s1_landing_floor(stage: dict[str, Any]) -> bool:
+    """landing 下限：标杆钩子立住、达人没立住 → S1 至少 medium（结构件齐全但钩子没打穿的 case）。
+    双方都没立住则不触发（同样没打穿，差距小）。"""
+    c = stage.get("creator_hook")
+    b = stage.get("benchmark_hook")
+    if not isinstance(c, dict) or not isinstance(b, dict):
+        return False
+    return c.get("landing_met") is False and b.get("landing_met") is True
 
 
 def _s1_bench_anchors_only(stage: dict[str, Any], relevance: str | None) -> bool:
@@ -316,6 +332,10 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         severity = "medium"
     else:
         severity = "small"
+    # landing 下限：标杆钩子立住、达人未立住 → 至少 medium（件齐但钩子没打穿，不该判 small）
+    if stage_id == "S1" and severity == "small" and _s1_landing_floor(stage):
+        severity = "medium"
+        reason += "；landing 下限：标杆钩子立住、达人未立住（结构件齐全但钩子没打穿）"
     trace = {"status": "derived", "severity": severity, "E": e, "W": w, "C": c_factor,
              "painpoint_relevance": relevance, "S": score, "reason": reason}
     # 残差亮点门（只进 trace 不进 severity）：标杆四维全 met 且类型明确才允许亮点描述，否则跳过

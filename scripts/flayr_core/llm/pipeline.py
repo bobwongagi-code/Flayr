@@ -34,6 +34,7 @@ from .payload import (
     build_product_foundation_payload,
     build_stage_review_payload,
     build_video_fact_payload,
+    load_brand_proposition,
     select_role_visual_inputs,
 )
 from ..postprocess import apply_postprocess_chain
@@ -156,6 +157,11 @@ def run_large_model_analysis(
         foundation = establish_product_foundation(args, analysis, run_dir, api_key)
         if foundation:
             analysis["product_foundation"] = foundation
+        # 冻结 S1 命题尺子（人工策展）：按【品】解析，有则挂进 analysis 供 Stage2 判 anchors + 触发 hook flag；
+        # 无则不挂 → 优雅降级回模型执行分（Slice A 路径）。
+        brand_proposition = load_brand_proposition(run_dir)
+        if brand_proposition:
+            analysis["brand_proposition"] = brand_proposition
         facts = run_video_fact_extraction(args, analysis, run_dir, api_key)
         if args.llm_dry_run:
             print(f"LLM dry run: fact request payloads written to {run_dir}")
