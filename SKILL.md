@@ -47,22 +47,27 @@ python3 scripts/flayr.py improve \
    Also write `frames/manifest.json` and `frames/stage_frames.json` so S1-S6 diagnosis has full-funnel visual evidence.
 5. Transcribe speech in the detected local language when Whisper is available, and keep a Chinese translation beside it.
    Use `--translate-with-llm` when the Chinese translation should be generated automatically.
-6. Generate `analysis_input.md` for large-model diagnosis.
-7. If `--llm-model` is provided, call the configured OpenAI-compatible chat endpoint to generate `analysis_result.json`.
+6. Classify `speech_mode`: `spoken`, `subtitle_driven`, `visual_driven`, or `music_driven`.
+   Use `transcript_packed` / `transcript.srt` as the primary spine only for `spoken` videos. For no-speech videos, use OCR subtitles, visual changes, timeline views, shot tracks, and audio rhythm instead.
+7. Generate secondary evidence artifacts from those assets: `frames/selection_report.*`, `contact_sheets/`, `timeline_views/`, `transcript_packed.*`, and `video_evidence_audit.json`.
+   These artifacts are audit aids, not direct scoring inputs. Stage1 visual payloads should prefer Hook/CTA timeline views before raw frames when available.
+8. Generate `analysis_input.md` for large-model diagnosis.
+9. If `--llm-model` is provided, call the configured OpenAI-compatible chat endpoint to generate `analysis_result.json`.
    Use `--llm-include-images` when the model should inspect Hook/CTA focus frames directly; keep `--llm-image-limit` modest, such as 8 to 12 images.
    Validate the model JSON against the schema. If JSON syntax or required fields fail, run one repair request and only then fail loudly.
-8. If a large-model result exists, pass it with `--analysis-result-json` and merge it back into the report.
-9. Analyze videos through the 6-slot commerce structure: Hook, product intro, usage, result, trust, CTA.
-10. For compare/improve mode, produce stage-level gaps and top 3 to 5 improvements.
-11. Generate output under a timestamped run directory:
+10. If a large-model result exists, pass it with `--analysis-result-json` and merge it back into the report.
+11. Analyze videos through the 6-slot commerce structure: Hook, product intro, usage, result, trust, CTA.
+12. For compare/improve mode, produce stage-level gaps and top 3 to 5 improvements.
+13. Generate output under a timestamped run directory:
    - `analysis.json`
    - `analysis_input.md`
    - `report.html`
    - extracted frames and audio
+   - contact sheets and timeline views
    - local-language `transcript.txt`
    - Chinese `transcript.zh.txt`
    - `improved_video_plan.json`
-12. Only create a final `improved.mp4` when enough timed script and audio replacement data exists. If not, output a precise assembly plan instead of pretending the video was improved.
+14. Only create a final `improved.mp4` when enough timed script and audio replacement data exists. If not, output a precise assembly plan instead of pretending the video was improved.
 
 ## Analysis Rules
 

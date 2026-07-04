@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import py_compile
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -223,6 +224,50 @@ check("S1 parse 归一 hook_flags（type→B, dims 容错）",
 import flayr_core.prompt as prompt_module  # noqa: E402
 
 check("prompt.render_stage_frame_markdown 已删", not hasattr(prompt_module, "render_stage_frame_markdown"))
+
+# 6. speech_mode 四分支：有口播、字幕驱动、音乐驱动、纯视觉驱动
+from flayr_core.speech_mode import classify_speech_mode  # noqa: E402
+
+with tempfile.TemporaryDirectory() as tmp:
+    tmp_dir = Path(tmp)
+    spoken = tmp_dir / "spoken"
+    spoken.mkdir()
+    (spoken / "transcript.txt").write_text("Ini memang senang pakai.", encoding="utf-8")
+    (spoken / "transcript.srt").write_text(
+        "1\n00:00:00,000 --> 00:00:02,000\nIni memang senang pakai.\n",
+        encoding="utf-8",
+    )
+    check("speech_mode spoken", classify_speech_mode(spoken, {"transcription_status": "completed"})["mode"] == "spoken")
+
+    subtitle = tmp_dir / "subtitle"
+    subtitle.mkdir()
+    (subtitle / "transcript.txt").write_text("music", encoding="utf-8")
+    (subtitle / "subtitle_track.json").write_text(
+        json.dumps({"segments": [{"text": "RM9.90", "start": 0, "end": 2}]}),
+        encoding="utf-8",
+    )
+    check(
+        "speech_mode subtitle_driven",
+        classify_speech_mode(subtitle, {"transcription_status": "completed"})["mode"] == "subtitle_driven",
+    )
+
+    music = tmp_dir / "music"
+    music.mkdir()
+    (music / "transcript.txt").write_text("[music]", encoding="utf-8")
+    audio = music / "audio.wav"
+    audio.write_bytes(b"RIFF")
+    check(
+        "speech_mode music_driven",
+        classify_speech_mode(music, {"audio_path": str(audio), "transcription_status": "completed"})["mode"] == "music_driven",
+    )
+
+    visual = tmp_dir / "visual"
+    visual.mkdir()
+    (visual / "transcript.txt").write_text("Whisper unavailable or audio extraction failed.", encoding="utf-8")
+    check(
+        "speech_mode visual_driven",
+        classify_speech_mode(visual, {"transcription_status": "placeholder"})["mode"] == "visual_driven",
+    )
 
 print()
 print("RESULT:", "PASS" if not failures else f"FAIL ({len(failures)}): {failures}")

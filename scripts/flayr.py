@@ -22,6 +22,7 @@ from flayr_core.proposal_video import config_from_args
 from flayr_core.report import write_report
 from flayr_core.motion import compute_shake_metric
 from flayr_core.shot_track import build_shot_track
+from flayr_core.speech_mode import classify_speech_mode
 from flayr_core.subtitle_track import build_subtitle_track
 from flayr_core.translation import sync_chinese_translation, translate_transcript_with_llm
 from flayr_core.utils import write_json, write_text
@@ -30,6 +31,7 @@ from flayr_core.video import (
     extract_frames,
     probe_duration_seconds,
 )
+from flayr_core.video_evidence import build_video_evidence_artifacts
 from flayr_core.whisper import run_whisper
 
 
@@ -427,6 +429,7 @@ def process_video(
     if getattr(args, "reuse_preprocessing", False):
         cached = load_existing_video_result(role_dir)
         if cached is not None:
+            ensure_video_evidence_artifacts(role_dir, cached)
             print(f"[reuse] {role}: 复用已有预处理（跳过抽帧/转写/OCR）")
             return cached
     frames_dir = role_dir / "frames"
@@ -448,6 +451,7 @@ def process_video(
         "focus_frames": [],
         "stage_frame_manifest_path": None,
         "stage_frames": [],
+        "video_evidence": {},
         "duration_seconds": None,
         "frame_strategy": {
             "base": "1 fps across full video",
@@ -465,6 +469,7 @@ def process_video(
         "translation_language": "zh",
         "translation_path": None,
         "translation_status": "not_started",
+        "speech_mode": {},
         "errors": [],
     }
 
@@ -515,9 +520,32 @@ def process_video(
     else:
         result["subtitle_track_status"] = "disabled_no_dashscope_key"
 
+    result["speech_mode"] = classify_speech_mode(role_dir, result)
+
+    # 二级证据视图：去重审计、顺序联系表、packed transcript、timeline view。
+    # 这些 artifact 只用于复核和后续模型证据定位，不直接改变评分。
+    result["video_evidence"] = build_video_evidence_artifacts(role_dir, result)
+
     # 落盘预处理结果，供 --reuse-preprocessing 下次复用（即使本次 LLM 阶段后续失败也已写）。
     write_json(role_dir / "_preprocess.json", result)
     return result
+
+
+def ensure_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> None:
+    """Ensure reused preprocessing also has secondary evidence artifacts."""
+    if not isinstance(info.get("speech_mode"), dict) or not info.get("speech_mode", {}).get("mode"):
+        info["speech_mode"] = classify_speech_mode(role_dir, info)
+    existing = info.get("video_evidence") if isinstance(info.get("video_evidence"), dict) else {}
+    timeline_dir = Path(str(existing.get("timeline_views_dir") or role_dir / "timeline_views"))
+    selection_report = Path(str(existing.get("frame_selection_report_path") or role_dir / "frames" / "selection_report.json"))
+    audit_path = Path(str(existing.get("audit_path") or role_dir / "video_evidence_audit.json"))
+    transcript_ready = not (role_dir / "transcript.srt").is_file() or Path(
+        str(existing.get("transcript_pack_path") or role_dir / "transcript_packed.md")
+    ).is_file()
+    if existing and timeline_dir.is_dir() and selection_report.is_file() and audit_path.is_file() and transcript_ready:
+        return
+    info["video_evidence"] = build_video_evidence_artifacts(role_dir, info)
+    write_json(role_dir / "_preprocess.json", info)
 
 
 def resolve_ocr_policy(args: argparse.Namespace) -> tuple[bool, str]:

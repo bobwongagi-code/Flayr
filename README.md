@@ -61,6 +61,7 @@ Flayr/
 │       ├── translation.py        # 转写翻译
 │       ├── prompt.py             # analysis_input.md 装配
 │       ├── artifacts.py          # 帧/时间区间选取
+│       ├── video_evidence.py     # 去重审计、联系表、timeline 证据视图
 │       ├── proposal_clip.py      # Top 提升点提案样片结构化与原片切片
 │       ├── report.py             # HTML 报告渲染
 │       ├── llm/                  # LLM 调用层
@@ -194,6 +195,11 @@ python3 scripts/flayr.py ... improve \
 | `proposal_clips/proposal_*_ai.mp4` | AI 示意样片（仅启用 `--proposal-video-backend` 且任务成功时存在） |
 | `transcript.txt` / `.srt` / `.zh.txt` | 转写与翻译 |
 | `frames/` `focus_frames/` | 抽取的关键帧 |
+| `frames/selection_report.*` | 全片帧去重审计，记录每帧 keep/drop 原因 |
+| `contact_sheets/` | Hook、CTA、S1-S6 的顺序联系表 |
+| `timeline_views/` | Hook、CTA 的帧序列 + 波形 + 口播证据图 |
+| `transcript_packed.*` | 带时间戳的紧凑口播索引 |
+| `video_evidence_audit.json` | 二级证据视图自检结果 |
 
 ---
 
@@ -202,7 +208,8 @@ python3 scripts/flayr.py ... improve \
 1. **全模态主导**：判断环节必须能看画面、听声音，不退化成读文字摘要
 2. **关注变化点**：高密度连续帧交给模型自己找变化点，而非人工均匀抽帧替它决定看哪
 3. **事实与判断分离**：阶段一锁定事实防串供，阶段二在事实基线上做感官判断
-4. **Fail-loud**：依赖缺失、API 失败立即报错，不静默降级
+4. **按证据形态切换主骨架**：有口播用口播时间线，无口播则切到字幕/OCR、画面变化、镜头轨和音频节奏
+5. **Fail-loud**：依赖缺失、API 失败立即报错，不静默降级
 5. **证据可追溯**：每个结论都绑定时间点和画面/口播证据
 6. **GMV 导向**：所有建议围绕停留、信任、下单转化
 7. **本地化**：话术用达人原语言，适配东南亚市场

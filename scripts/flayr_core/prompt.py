@@ -25,6 +25,7 @@ from .artifacts import (
     sample_evenly,
 )
 from .shot_track import render_shot_track_markdown
+from .speech_mode import speech_mode_prompt
 from .subtitle_track import render_subtitle_track_markdown
 from .utils import read_optional_text
 
@@ -149,6 +150,7 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
                 f"- 时长：{format_seconds(info.get('duration_seconds'))}",
                 f"- 检测语言：{info.get('detected_language') or info.get('transcription_language') or '未知'}",
                 f"- 口播状态：{speech_status(role_dir, info)}",
+                f"- 证据组织模式：{speech_mode_label(info)}",
                 f"- 普通关键帧：{info.get('frame_count', 0)} 张，目录：{info['frames_dir']}",
                 f"- 加密关键帧：{info.get('focus_frame_count', 0)} 张，目录：{info['focus_frames_dir']}",
                 "",
@@ -159,6 +161,10 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
                 "### 加密关键帧时间戳",
                 "",
                 render_focus_frame_markdown(info),
+                "",
+                "### 二级视频证据视图（复核用，不是评分字段）",
+                "",
+                render_video_evidence_markdown(role_dir, info),
                 "",
                 "### 本地语言转写",
                 "",
@@ -222,6 +228,13 @@ def speech_status(role_dir: Path, info: dict[str, Any]) -> str:
     return "已检测到有效口播"
 
 
+def speech_mode_label(info: dict[str, Any]) -> str:
+    mode = info.get("speech_mode") if isinstance(info.get("speech_mode"), dict) else {}
+    if not mode:
+        return "未分类"
+    return speech_mode_prompt(mode)
+
+
 def read_analysis_prompt() -> str:
     return read_optional_text(ROOT / "ANALYSIS-PROMPT.md")
 
@@ -253,3 +266,37 @@ def render_timeline_frame_markdown(info: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_video_evidence_markdown(role_dir: Path, info: dict[str, Any]) -> str:
+    evidence = info.get("video_evidence") if isinstance(info.get("video_evidence"), dict) else {}
+    selection_report_path = Path(str(evidence.get("frame_selection_report_path") or role_dir / "frames" / "selection_report.json"))
+    dedup_count = evidence.get("dedup_kept_frame_count")
+    if dedup_count is None and selection_report_path.is_file():
+        try:
+            report = json.loads(selection_report_path.read_text(encoding="utf-8"))
+            dedup_count = report.get("kept_count")
+        except (json.JSONDecodeError, OSError):
+            dedup_count = "未知"
+    lines = [
+        f"- 帧去重审计：{selection_report_path}",
+        f"- 帧去重审计 HTML：{evidence.get('frame_selection_report_html_path') or role_dir / 'frames' / 'selection_report.html'}",
+        f"- 去重后变化帧：{dedup_count if dedup_count is not None else '未知'} / 原始 {info.get('frame_count', 0)}",
+        f"- 顺序联系表目录：{evidence.get('contact_sheets_dir') or role_dir / 'contact_sheets'}",
+        f"- 时间线证据图目录：{evidence.get('timeline_views_dir') or role_dir / 'timeline_views'}",
+        f"- 证据视图自检：{evidence.get('audit_path') or role_dir / 'video_evidence_audit.json'}",
+    ]
+    views = evidence.get("timeline_views") if isinstance(evidence, dict) else None
+    if isinstance(views, list) and views:
+        lines.append("- 时间线证据图：")
+        for item in views:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("label") or "timeline"
+            start = item.get("start_seconds")
+            end = item.get("end_seconds")
+            path = item.get("path") or ""
+            lines.append(f"  - {label}: {start}s-{end}s {path}")
+    packed = evidence.get("transcript_pack_path") if isinstance(evidence, dict) else None
+    packed_path = Path(str(packed or role_dir / "transcript_packed.md"))
+    lines.extend(["", "#### 紧凑口播索引", ""])
+    lines.append(read_optional_text(packed_path))
+    return "\n".join(str(line) for line in lines)

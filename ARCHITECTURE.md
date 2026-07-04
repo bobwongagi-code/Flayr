@@ -232,6 +232,25 @@ scripts/
 - `video.py` 负责写 manifest，`artifacts.py` 负责读和选择 manifest。
 - 它是分析侧和报告侧之间的稳定数据访问层。
 
+### 3.3b `video_evidence.py` — 二级视频证据视图
+
+职责：
+
+- 基于已有 `frames/`、`focus_frames/`、`audio.wav`、`transcript.srt` 生成复核用 artifact。
+- 写出 `frames/selection_report.json` 和 `.html`，记录滑动窗口视觉去重的 keep/drop 原因。
+- 写出 `contact_sheets/`，把 Hook、CTA、阶段代表帧按时间顺序压成联系表。
+- 写出 `timeline_views/`，把帧序列、波形、口播时间戳放在同一张图中。
+- 写出 `transcript_packed.md/json`，作为紧凑的时间戳口播索引。
+- 写出 `video_evidence_audit.json`，自检关键证据视图是否真实落盘。
+- `prompt.py` 在 `analysis_input.md` 中展示这些证据索引。
+- `llm/payload.py` 在单视频事实抽取时优先附加 Hook/CTA timeline view，再补原始帧。
+
+约束：
+
+- 不删除原始帧。
+- 不直接改变评分、severity 或报告结论。
+- 缺少可视化依赖时允许降级，不阻断主流程。
+
 ### 3.4 `whisper.py` — 语音转写
 
 职责：
@@ -246,6 +265,20 @@ scripts/
 - 不用英文式空格分词判断是否有有效口播。
 - 东南亚语言如泰语、马来语、印尼语必须保留本地语言转写。
 - 涉及口播归属到具体阶段时，以 `transcript.srt` 的时间范围为准，不根据文案相似度跨段引用。
+
+### 3.4b `speech_mode.py` — 证据组织模式
+
+职责：
+
+- 根据 `transcript.txt`、`transcript.srt`、`subtitle_track.json` 和音频存在性，为每条视频写出 `speech_mode`。
+- 模式包括 `spoken`、`subtitle_driven`、`visual_driven`、`music_driven`。
+- 为 `prompt.py` 和 `llm/payload.py` 提供统一的证据优先级提示。
+
+约束：
+
+- `spoken` 才以口播时间线作为主骨架。
+- `subtitle_driven` 以 OCR 字幕轨作为文案骨架，不能把字幕写成口播。
+- `visual_driven` / `music_driven` 不因 `voiceover` 为空天然扣分，必须按画面变化、镜头轨、BGM/节奏判断阶段功能是否完成。
 
 ### 3.5 `translation.py` — 中文翻译
 
@@ -408,6 +441,8 @@ flayr.py
   │   └─ 写 transcript.txt
   ├─ translation.py
   │   └─ 通过 llm.api 调模型，写 transcript.zh.txt
+  ├─ video_evidence.py
+  │   └─ 写 selection_report / contact_sheets / timeline_views / transcript_packed
   ├─ prompt.py
   │   └─ 写 analysis_input.md
   ├─ llm/pipeline.py

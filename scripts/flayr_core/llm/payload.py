@@ -20,6 +20,7 @@ from ..artifacts import (
     select_frames_for_time_range,
 )
 from ..shot_track import render_shot_track_markdown
+from ..speech_mode import speech_mode_prompt
 from ..subtitle_track import render_subtitle_track_markdown
 from .api import audio_to_mp3_data_url, image_to_data_url, video_to_data_url
 
@@ -33,16 +34,17 @@ ROOT = Path(__file__).resolve().parents[3]
 def select_role_visual_inputs(info: dict[str, Any], role: str, image_limit: int) -> list[dict[str, str]]:
     """为单视频事实抽取选关键帧，最多 image_limit 张。"""
     selected: list[dict[str, str]] = []
-    for entry in get_llm_frame_candidates(info, image_limit):
+    for entry in get_llm_visual_candidates(info, image_limit):
         frame = Path(str(entry.get("path", "")))
         if not frame.exists():
             continue
-        timestamp = format_seconds(entry.get("timestamp_seconds"))
+        timestamp = format_seconds(entry.get("timestamp_seconds")) if entry.get("timestamp_seconds") is not None else ""
+        marker = f" @ {timestamp}" if timestamp else ""
         selected.append(
             {
                 "role": role,
                 "path": str(frame),
-                "label": f"{role} {entry.get('stage') or entry.get('label', 'frame')} @ {timestamp} {frame.name}",
+                "label": f"{role} {entry.get('stage') or entry.get('label', 'frame')}{marker} {frame.name}",
                 "data_url": image_to_data_url(frame),
             }
         )
@@ -62,17 +64,18 @@ def select_llm_visual_inputs(analysis: dict[str, Any], image_limit: int) -> list
     per_role_limit = max(1, image_limit // len(roles))
     selected: list[dict[str, str]] = []
     for role in roles:
-        entries = get_llm_frame_candidates(videos[role], per_role_limit)
+        entries = get_llm_visual_candidates(videos[role], per_role_limit)
         for entry in entries[:per_role_limit]:
             frame = Path(str(entry.get("path", "")))
             if not frame.exists():
                 continue
-            timestamp = format_seconds(entry.get("timestamp_seconds"))
+            timestamp = format_seconds(entry.get("timestamp_seconds")) if entry.get("timestamp_seconds") is not None else ""
+            marker = f" @ {timestamp}" if timestamp else ""
             selected.append(
                 {
                     "role": role,
                     "path": str(frame),
-                    "label": f"{role} {entry.get('stage') or entry.get('label', 'frame')} @ {timestamp} {frame.name}",
+                    "label": f"{role} {entry.get('stage') or entry.get('label', 'frame')}{marker} {frame.name}",
                     "data_url": image_to_data_url(frame),
                 }
             )
@@ -80,7 +83,7 @@ def select_llm_visual_inputs(analysis: dict[str, Any], image_limit: int) -> list
     if len(selected) < image_limit:
         used_paths = {item["path"] for item in selected}
         for role in roles:
-            entries = get_llm_frame_candidates(videos[role], image_limit)
+            entries = get_llm_visual_candidates(videos[role], image_limit)
             for entry in entries:
                 if len(selected) >= image_limit:
                     break
@@ -89,18 +92,69 @@ def select_llm_visual_inputs(analysis: dict[str, Any], image_limit: int) -> list
                     continue
                 if str(frame) in used_paths:
                     continue
-                timestamp = format_seconds(entry.get("timestamp_seconds"))
+                timestamp = format_seconds(entry.get("timestamp_seconds")) if entry.get("timestamp_seconds") is not None else ""
+                marker = f" @ {timestamp}" if timestamp else ""
                 selected.append(
                     {
                         "role": role,
                         "path": str(frame),
-                        "label": f"{role} {entry.get('stage') or entry.get('label', 'frame')} @ {timestamp} {frame.name}",
+                        "label": f"{role} {entry.get('stage') or entry.get('label', 'frame')}{marker} {frame.name}",
                         "data_url": image_to_data_url(frame),
                     }
                 )
                 used_paths.add(str(frame))
 
     return selected[:image_limit]
+
+
+def get_llm_visual_candidates(info: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    """候选视觉输入：先给 Hook/CTA timeline view，再补原始帧。
+
+    Timeline view 把帧序列、波形、口播放在同一张图里，适合 Stage1 先判断
+    口播和画面是否对齐；原始帧继续负责细节观察。
+    """
+    if limit <= 0:
+        return []
+    timeline_limit = min(2, max(0, limit // 3))
+    timeline_entries = get_timeline_view_entries(info)[:timeline_limit]
+    remaining = max(0, limit - len(timeline_entries))
+    used = {str(entry.get("path") or "") for entry in timeline_entries}
+    frame_entries = [
+        entry for entry in get_llm_frame_candidates(info, remaining)
+        if str(entry.get("path") or "") not in used
+    ]
+    return timeline_entries + frame_entries
+
+
+def get_timeline_view_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
+    evidence = info.get("video_evidence")
+    views = evidence.get("timeline_views") if isinstance(evidence, dict) else None
+    entries: list[dict[str, Any]] = []
+    if isinstance(views, list):
+        for item in views:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "")
+            if path:
+                entries.append(
+                    {
+                        "label": f"{item.get('label') or 'timeline'} timeline",
+                        "path": path,
+                        "timestamp_seconds": None,
+                    }
+                )
+    if entries:
+        return entries
+
+    work_dir = Path(str(info.get("work_dir") or ""))
+    timeline_dir = work_dir / "timeline_views"
+    if not timeline_dir.is_dir():
+        return []
+    for label in ("hook", "cta"):
+        path = timeline_dir / f"{label}.jpg"
+        if path.is_file():
+            entries.append({"label": f"{label} timeline", "path": str(path), "timestamp_seconds": None})
+    return entries
 
 
 def get_llm_frame_candidates(info: dict[str, Any], limit: int) -> list[dict[str, Any]]:
@@ -111,6 +165,8 @@ def get_llm_frame_candidates(info: dict[str, Any], limit: int) -> list[dict[str,
     - 整数秒上 1fps 全片帧与 2fps 首尾帧会撞车（同一画面），按秒去重避免重复浪费注意力。
     撞车时让 focus 帧覆盖 timeline 帧，因为 focus 帧带 hook/cta 标签、信息更具体。
     """
+    if limit <= 0:
+        return []
     focus_limit = 2 if limit >= 6 else 0
     timeline_limit = max(1, limit - focus_limit)
     timeline_entries = sample_evenly(get_frame_entries(info), timeline_limit)
@@ -226,6 +282,7 @@ def build_video_fact_payload(
     info = analysis.get("videos", {}).get(role, {})
     code = "B" if role == "benchmark" else "C"
     role_dir = Path(str(info.get("work_dir") or ""))
+    mode_prompt = speech_mode_prompt(info.get("speech_mode") if isinstance(info.get("speech_mode"), dict) else {})
 
     # 优先走原生视频；失败则降级为抽帧。
     video_path = Path(str(info.get("path") or ""))
@@ -233,9 +290,9 @@ def build_video_fact_payload(
     native_video = video_data_url is not None
 
     visual_source_hint = (
-        "随请求附带本视频的原生画面（已抽帧为连续序列）和完整音轨。"
+        "随请求附带本视频的原生画面（已抽帧为连续序列）、完整音轨，以及 Hook/CTA 时间线证据图。"
         if native_video
-        else "随请求附带本视频的若干关键帧和完整音频。"
+        else "随请求附带本视频的若干关键帧/时间线证据图和完整音频。"
     )
 
     # 品地基命题注入（Step-0 产出）：告诉事实抽取器该重点盯哪些证据，只导观察不下结论；无地基则退回通用抽取。
@@ -262,12 +319,16 @@ def build_video_fact_payload(
             f"- 产品：{analysis.get('product', {}).get('name') or '未填写'}",
             f"- 原视频：{info.get('path') or ''}",
             f"- 时长：{format_seconds(info.get('duration_seconds'))}",
+            f"- 证据组织模式：{mode_prompt}",
             "",
             "## 观察方法（看视频按以下全部维度逐项观察，不漏项——这是唯一的观察方法来源）",
             observation_method_view(),
             obs_hint,
             "## 本地语言转写",
             read_text_if_exists(role_dir / "transcript.txt"),
+            "",
+            "## 紧凑口播索引（先按这个理解口播顺序；逐字引用仍以 transcript.srt 为准）",
+            read_text_if_exists(role_dir / "transcript_packed.md"),
             "",
             "## 带时间戳口播分段（口播时间归因的权威依据）",
             read_text_if_exists(role_dir / "transcript.srt"),
@@ -323,6 +384,15 @@ def build_video_fact_payload(
         content.append(
             {"type": "video_url", "video_url": {"url": video_data_url}}
         )
+        for item in visual_inputs:
+            if "timeline" not in str(item.get("label") or "").lower():
+                continue
+            content.extend(
+                [
+                    {"type": "text", "text": f"时间线证据图：{item['label']}，本地路径：{item['path']}"},
+                    {"type": "image_url", "image_url": {"url": item["data_url"], "detail": "low"}},
+                ]
+            )
     else:
         for item in visual_inputs:
             content.extend(
@@ -346,6 +416,10 @@ def build_video_fact_payload(
         f"{visual_source_hint}"
         "你能同时看到连续画面、听到声音。严格按用户消息中『观察方法』一节的全部维度逐项观察、不漏项"
         "（含镜头语言/取景完整性、遮挡与 UI 危险区、画中画小窗、拍摄视角、口播与画面对齐、四轨对齐），"
+        "必须先读取用户消息中的 speech_mode/证据组织模式，并按其证据优先级组织事实："
+        "spoken 以口播时间线为骨架；subtitle_driven 以 OCR 字幕轨为文案骨架；visual_driven 以画面变化和镜头轨为骨架；"
+        "music_driven 以画面变化、BGM/节奏/音效为骨架。无有效口播时 voiceover 与 voiceover_zh 必须留空，"
+        "不得把屏幕字幕、画面文案或你对画面的理解伪装成口播。"
         "按带货短视频的天然结构（钩子→产品引出→使用过程→效果呈现→信任放大→促单）找证据切分 evidence_units，"
         "目标是抽出对分析带货视频有价值的事实，而非随意找转折点；输出 4 到 8 条，沿时间线排列，id 必须使用指定前缀，"
         "time_range 用真实时间（如 2.5s - 4.0s）。"
@@ -492,6 +566,7 @@ def build_llm_comparison_payload(
     commercial_framework = read_text_if_exists(ROOT / "references" / "commercial-judgement-framework.md")
     market_knowledge = read_text_if_exists(ROOT / "references" / "market-knowledge-my.md")
     qa_rules = read_text_if_exists(ROOT / "QA-RULES.md")
+    speech_mode_block = render_speech_mode_block(analysis or {})
     # Step-0 品地基注入：已确立则作为 S1-S6 判断的尺子直接采用，模型不再另起炉灶现编（防"现编标尺又自评"）。
     fnd = (analysis or {}).get("product_foundation") or {}
     foundation_block = ""
@@ -564,6 +639,8 @@ def build_llm_comparison_payload(
             qa_rules,
             "## 已校验单视频事实清单（唯一事实来源）",
             json.dumps(facts, ensure_ascii=False, indent=2),
+            "## 各视频证据组织模式（判断时必须尊重）",
+            speech_mode_block,
             "## 输出要求",
             "只输出严格 JSON，不要 Markdown。字段必须使用 references/analysis-output-schema.json 的字段名。",
             "必须输出：one_line_verdict, one_line_summary, executive_summary, holistic_assessment（每维独立）, key_conclusions（1-5 条消费者视角）, product_visibility, category_profile, product_profile, loop_closure, video_understanding, stage_analysis[6], improvements（1-5 条，按 GMV 杠杆排序）。",
@@ -631,6 +708,8 @@ def build_llm_comparison_payload(
         "不得据此新增或改写 facts 的事实单元；"
         "当帧/音频与 facts 文字描述冲突时以 facts 为准，可在该处判断理由中标注'此处存在感知歧义'。"
         "请按 S1-S6 功能阶段对齐两条视频的 evidence 再做横向对比，不要按绝对时间对齐。"
+        "判断口播表现时必须尊重 speech_mode：spoken 视频评口播骨架；subtitle_driven 视频评字幕文案轨；"
+        "visual_driven/music_driven 视频不得因 voiceover 为空而直接扣分，必须看画面变化、OCR、BGM/节奏是否完成同一阶段功能。"
         "\n\n## 低置信阶段声明（Phase C）\n"
         "如果某个阶段的 severity 需要观察连续动作、效果瞬间或声画关系，而当前 evidence 代表帧/切片音频不足，"
         "可在 top-level low_confidence_stages 写入该阶段代码（如 [\"S4\"]），最多 2 个。"
@@ -641,6 +720,18 @@ def build_llm_comparison_payload(
         "若发现会违反 QA 的内容，先自行修正再输出 JSON。"
     )
     return payload
+
+
+def render_speech_mode_block(analysis: dict[str, Any]) -> str:
+    videos = analysis.get("videos") if isinstance(analysis.get("videos"), dict) else {}
+    lines = []
+    for role in ("benchmark", "creator"):
+        info = videos.get(role) if isinstance(videos, dict) else None
+        if not isinstance(info, dict):
+            continue
+        mode = info.get("speech_mode") if isinstance(info.get("speech_mode"), dict) else {}
+        lines.append(f"- {role}: {speech_mode_prompt(mode)}")
+    return "\n".join(lines) if lines else "（未分类，按事实清单和现有素材判断）"
 
 
 def build_stage_review_payload(
