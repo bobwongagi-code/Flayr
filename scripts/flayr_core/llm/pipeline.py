@@ -166,6 +166,7 @@ def run_large_model_analysis(
         if args.llm_dry_run:
             print(f"LLM dry run: fact request payloads written to {run_dir}")
             return None
+        analysis["s1_hook_flags_required"] = True
         analysis_input = analysis_input_path.read_text(encoding="utf-8")
         payload = build_llm_comparison_payload(args.llm_model, analysis_input, facts, analysis)
     else:

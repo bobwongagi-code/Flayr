@@ -110,6 +110,7 @@ def validate_quality_contract(result: dict[str, Any], analysis: dict[str, Any]) 
       - 历史结果中常见、且已有下游兜底的弱问题写入 qa_warnings。
     """
     validate_module_ids(result)
+    validate_s1_hook_flags(result, analysis)
     validate_stage_time_coherence(result)
     validate_product_visibility(result, analysis)
     validate_narrative_evidence_consistency(result)
@@ -247,6 +248,51 @@ def official_module_ids() -> set[str]:
         return set()
     text = path.read_text(encoding="utf-8", errors="ignore")
     return set(re.findall(r"^###\s+(S[1-6]-[A-Z])[:：]", text, flags=re.M))
+
+
+def validate_s1_hook_flags(result: dict[str, Any], analysis: dict[str, Any]) -> None:
+    """S1 hook flag 化硬门禁：新主链必须产出结构化 hook facts。
+
+    历史 analysis_result 可能没有 creator_hook/benchmark_hook，因此只在主链显式标记
+    s1_hook_flags_required，或结果已经出现任一 hook 字段时启用。启用后缺字段即触发
+    repair，避免 derive 静默回退到模型 0-2 主观执行分。
+    """
+    stages = result.get("stage_analysis", [])
+    if not stages or not isinstance(stages[0], dict):
+        return
+    s1 = stages[0]
+    has_any_hook = isinstance(s1.get("creator_hook"), dict) or isinstance(s1.get("benchmark_hook"), dict)
+    if not analysis.get("s1_hook_flags_required") and not has_any_hook:
+        return
+
+    errors: list[str] = []
+    for role in ("creator", "benchmark"):
+        key = f"{role}_hook"
+        hook = s1.get(key)
+        if not isinstance(hook, dict):
+            errors.append(f"S1 缺少 {key}")
+            continue
+        if hook.get("exists") not in {True, False}:
+            errors.append(f"S1 {key}.exists 必须是 bool")
+        if str(hook.get("type") or "").strip() not in {"A", "B", "C", "D", "E", "F", "G", "unknown"}:
+            errors.append(f"S1 {key}.type 必须是 A-G 或 unknown")
+        dims = hook.get("dims")
+        if not isinstance(dims, dict):
+            errors.append(f"S1 {key}.dims 必须是 object")
+        else:
+            for dim in ("camera", "copy", "sound", "rhythm"):
+                if dims.get(dim) not in {True, False}:
+                    errors.append(f"S1 {key}.dims.{dim} 必须是 bool")
+        if hook.get("landing_met") not in {True, False}:
+            errors.append(f"S1 {key}.landing_met 必须是 bool")
+        if not str(hook.get("landing_reason") or "").strip():
+            errors.append(f"S1 {key}.landing_reason 不能为空")
+        if not str(hook.get("window_evidence") or "").strip():
+            errors.append(f"S1 {key}.window_evidence 不能为空")
+        if hook.get("anchors_proposition") not in {True, False}:
+            errors.append(f"S1 {key}.anchors_proposition 必须是 bool")
+    if errors:
+        raise SystemExit("S1 hook flag 输出不完整：" + "；".join(errors))
 
 
 def validate_stage_time_coherence(result: dict[str, Any]) -> None:

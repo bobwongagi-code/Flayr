@@ -550,6 +550,34 @@ def load_brand_proposition(run_dir: Path) -> dict[str, Any] | None:
     return {"propositions": props, "painpoints": pains}
 
 
+def hook_anchor_terms(bp: dict[str, Any], foundation: dict[str, Any]) -> tuple[list[str], list[str], str]:
+    """Resolve S1 anchor terms for hook flags.
+
+    Frozen human-curated terms are strongest. Step-0 product/category profiles are
+    the fallback so hook flags remain active for new products and normal timestamp
+    run directories.
+    """
+    props = [str(p).strip() for p in bp.get("propositions") or [] if str(p).strip()]
+    pains = [str(p).strip() for p in bp.get("painpoints") or [] if str(p).strip()]
+    if props or pains:
+        return props, pains, "冻结·人工策展"
+
+    product_profile = foundation.get("product_profile") if isinstance(foundation.get("product_profile"), dict) else {}
+    category_profile = foundation.get("category_profile") if isinstance(foundation.get("category_profile"), dict) else {}
+    fallback_props = []
+    for key in ("hook_proposition", "physical_task"):
+        value = str(product_profile.get(key) or "").strip()
+        if value and value not in fallback_props:
+            fallback_props.append(value)
+    fallback_pains = [
+        str(item).strip()
+        for item in category_profile.get("painpoints") or []
+        if str(item).strip()
+    ][:12]
+    source = "Step-0 产品地基回退" if fallback_props or fallback_pains else "无冻结尺子，按当轮 product_profile/category_profile 判断"
+    return fallback_props, fallback_pains, source
+
+
 def build_llm_comparison_payload(
     model: str,
     analysis_input: str,
@@ -579,46 +607,44 @@ def build_llm_comparison_payload(
             "你输出的 category_profile/product_profile 必须原样回填这套地基。\n"
             + json.dumps(fnd, ensure_ascii=False, indent=2)
         )
-    # S1 钩子命题尺子（冻结·人工策展）：有则作 anchors_proposition 判据，并触发 hook flag 结构化输出（切片 B）。
-    # 缺失则不触发 → derive 回退模型执行分（与 Slice A 优雅降级一致）。
+    # S1 钩子命题尺子：优先用冻结·人工策展；没有则回退 Step-0 地基。无命题也仍强制输出 hook flags，
+    # 因为 dims/landing 是通用钩子质量事实，不应依赖人工品库是否覆盖。
     bp = (analysis or {}).get("brand_proposition") or {}
-    hook_flag_block = ""
-    if bp.get("propositions") or bp.get("painpoints"):
-        hook_flag_block = (
-            "## 本品 S1 钩子命题尺子（冻结·人工策展，judge anchors_proposition 用）\n"
-            "propositions（能做钩子主张的概念）：" + " / ".join(bp.get("propositions") or []) + "\n"
-            "painpoints（开头核心痛点）：" + " / ".join(bp.get("painpoints") or []) + "\n"
-            "S1 阶段（且仅 S1）每侧【必须】输出 creator_hook 与 benchmark_hook 两个对象，形如：\n"
-            '{"exists": bool（该侧前段是否存在抢注意力的 Hook，非直接进产品介绍）, '
-            '"type": "A"~"G" 或 "unknown"（按 structure_library S1 七型判该侧钩子属哪型。判定铁律：'
-            '①证据优先级 voiceover_zh / on_screen_text / 画面帧事实 ＞ information；information 只是索引、严禁作判定依据，'
-            '尤其不得因某 evidence 的 information 写了"痛点场景/油光/出油"就判 A；'
-            '②只取最早 hook 窗口的主导机制定 type——优先看 0-3s，不足扩到 0-5s，若 voiceover_zh 第一完整句跨到约 6.8s 可用这一整句；'
-            '严禁用该句之后才出现的痛点跟进/产品引出反推 type；'
-            '③若第一句口播是"没抱期待但结果超出预期"这类低期待→高结果表述，必须判反差 B、不得判痛点 A；判不出填 unknown，不影响其余字段）, '
-            '"dims": {"camera": bool, "copy": bool, "sound": bool, "rhythm": bool}'
-            '（该侧钩子在所选 type 下，镜头/文案/声音/节奏四维是否做到结构库给的【必需】结构件——'
-            '做到结构库示例即 true、缺了即 false；只判"做到没"不判"好不好"，不评创新加分；type=unknown 时四维按通用做到度判）, '
-            '"landing_met": bool（钩子有没有"打穿"，【与 type 无关】。判 true 当且仅当：最早 hook 窗口'
-            '（优先 0-3s，不足扩到 0-5s，voiceover_zh 第一完整句跨到约 6.8s 可用整句）内用户能 get 到一个【可停留的理由】，'
-            '且【同时】满足三件——①对象明确：在说谁的问题/谁的场景/谁会关心（油皮、脱妆、经期痛、孩子抗拒刷牙）；'
-            '②张力明确：为什么要继续看（痛点/反差/结果/悬念/场景共鸣/身份代入/认知颠覆 任一）；'
-            '③承诺或证据明确：后面要证明什么（油光变哑光、补妆不花、刷头不用手碰、孩子能接受）。三件缺任一即 false——'
-            '不是没 hook 元素，是 hook 没闭环。【铁律：严禁因为后续 S2/S3 产品介绍补足了逻辑就把 S1 landing 判 true，'
-            '只看最早 hook 窗口本身闭没闭环、不跟后段走】）, '
-            '"landing_reason": "一句话说清 landing 为何 true/false，必须引用最早窗口的具体证据（时间戳+原话/画面），'
-            '如 0-6.8s 仅口播\'结果超预期\'但没说超预期的结果是什么→承诺不明确→false", '
-            '"window_evidence": "钩子最早 3-5 秒实际出现了什么（带时间戳），作为 type 判断依据，'
-            '如 0-4.5s 近脸/指脸/拿产品但未建立使用前后强对比", '
-            '"anchors_proposition": bool（该侧钩子内容是否触及上面任一 proposition 或 painpoint 概念）}。'
-        )
+    props, pains, anchor_source = hook_anchor_terms(bp, fnd)
+    hook_flag_block = (
+        f"## 本品 S1 钩子命题尺子（{anchor_source}，judge anchors_proposition 用）\n"
+        "propositions（能做钩子主张的概念）：" + (" / ".join(props) if props else "（未提供；按 product_profile.hook_proposition 自行判）") + "\n"
+        "painpoints（开头核心痛点）：" + (" / ".join(pains) if pains else "（未提供；按 category_profile.painpoints 自行判）") + "\n"
+        "S1 阶段（且仅 S1）每侧【必须】输出 creator_hook 与 benchmark_hook 两个对象，形如：\n"
+        '{"exists": bool（该侧前段是否存在抢注意力的 Hook，非直接进产品介绍）, '
+        '"type": "A"~"G" 或 "unknown"（按 structure_library S1 七型判该侧钩子属哪型。判定铁律：'
+        '①证据优先级 voiceover_zh / on_screen_text / 画面帧事实 ＞ information；information 只是索引、严禁作判定依据，'
+        '尤其不得因某 evidence 的 information 写了"痛点场景/油光/出油"就判 A；'
+        '②只取最早 hook 窗口的主导机制定 type——优先看 0-3s，不足扩到 0-5s，若 voiceover_zh 第一完整句跨到约 6.8s 可用这一整句；'
+        '严禁用该句之后才出现的痛点跟进/产品引出反推 type；'
+        '③若第一句口播是"没抱期待但结果超出预期"这类低期待→高结果表述，必须判反差 B、不得判痛点 A；判不出填 unknown，不影响其余字段）, '
+        '"dims": {"camera": bool, "copy": bool, "sound": bool, "rhythm": bool}'
+        '（该侧钩子在所选 type 下，镜头/文案/声音/节奏四维是否做到结构库给的【必需】结构件——'
+        '做到结构库示例即 true、缺了即 false；只判"做到没"不判"好不好"，不评创新加分；type=unknown 时四维按通用做到度判）, '
+        '"landing_met": bool（钩子有没有"打穿"，【与 type 无关】。判 true 当且仅当：最早 hook 窗口'
+        '（优先 0-3s，不足扩到 0-5s，voiceover_zh 第一完整句跨到约 6.8s 可用整句）内用户能 get 到一个【可停留的理由】，'
+        '且【同时】满足三件——①对象明确：在说谁的问题/谁的场景/谁会关心（油皮、脱妆、经期痛、孩子抗拒刷牙）；'
+        '②张力明确：为什么要继续看（痛点/反差/结果/悬念/场景共鸣/身份代入/认知颠覆 任一）；'
+        '③承诺或证据明确：后面要证明什么（油光变哑光、补妆不花、刷头不用手碰、孩子能接受）。三件缺任一即 false——'
+        '不是没 hook 元素，是 hook 没闭环。【铁律：严禁因为后续 S2/S3 产品介绍补足了逻辑就把 S1 landing 判 true，'
+        '只看最早 hook 窗口本身闭没闭环、不跟后段走】）, '
+        '"landing_reason": "一句话说清 landing 为何 true/false，必须引用最早窗口的具体证据（时间戳+原话/画面），'
+        '如 0-6.8s 仅口播\'结果超预期\'但没说超预期的结果是什么→承诺不明确→false", '
+        '"window_evidence": "钩子最早 3-5 秒实际出现了什么（带时间戳），作为 type 判断依据，'
+        '如 0-4.5s 近脸/指脸/拿产品但未建立使用前后强对比", '
+        '"anchors_proposition": bool（该侧钩子内容是否触及上面任一 proposition、painpoint，或 product_profile.hook_proposition/category_profile.painpoints 概念）}。'
+    )
     # 强制字段要求（放在末尾"输出要求"区，模型严格跟这块走；前面的尺子块只给结构定义）
     hook_field_req = (
         "S1 强制：stage_analysis 第 1 项（S1 Hook）必须再含 creator_hook 与 benchmark_hook 两个对象"
         "（结构见上方：exists/type/dims{camera,copy,sound,rhythm}/landing_met/landing_reason/window_evidence/anchors_proposition）。"
         "type 为描述字段（按最早窗口主导机制判、不进 severity）；landing_met 是 type 无关的三件套二元判（进 severity）；"
         "缺失视为违规输出。S2-S6 不含这两个字段。"
-        if hook_flag_block else ""
     )
     user_text = "\n\n".join(
         [
@@ -1058,6 +1084,8 @@ def build_llm_repair_payload(
                     "每个阶段引用的事实单元时间必须与阶段时间相交；缺少独立内容的阶段也要提供该时段的无对应内容事实单元。"
                     "提供了 transcript.srt 时，以其时间戳重新校对口播对应阶段；认证与产品属性连续表达时只归入 S2。"
                     "一条事实只归属一个主要阶段；KKM 等认证信息不能写入 Hook，与产品引出同段出现时仅归入 S2；口播提及但画面不可见时标记 voice_only。"
+                    "S1 Hook 必须补齐 creator_hook 与 benchmark_hook 两个对象，字段为 exists(bool)、type(A-G 或 unknown)、dims{camera,copy,sound,rhythm}(bool)、landing_met(bool)、landing_reason(非空)、window_evidence(非空)、anchors_proposition(bool)。"
+                    "landing_met 按 type 无关三件套判断：最早 hook 窗口内对象明确、张力明确、承诺或证据明确，缺一即 false；不得用后续 S2/S3 产品介绍补足 S1 landing。"
                     "提升点必须保留 benchmark_evidence_ids、base_frame_suitability、best_base_frame_time、base_frame_evidence_id、base_frame_reason 和 aigc_prompt；无可用达人素材时写 no_suitable_frame 且时间与 base_frame_evidence_id 留空。aigc_image_path 留空。"
                     "修复 improvements 时也必须遵循达人框架约束、卖点适配权重和标杆功能意图转译，不得把 benchmark_reference 直接改写成 suggestion。"
                     "健康品类建议不得声称调节激素、改善月经、治疗症状或虚构优惠。建议话术必须重新设计，不得复制标杆原句。"

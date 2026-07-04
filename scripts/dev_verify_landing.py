@@ -48,7 +48,7 @@ except ValueError as exc:
     check("schema JSON 合法", False, str(exc)[:120])
 
 # 3. Q19 叙事一致性四用例
-from flayr_core.postprocess.validate import validate_narrative_evidence_consistency  # noqa: E402
+from flayr_core.postprocess.validate import validate_narrative_evidence_consistency, validate_s1_hook_flags  # noqa: E402
 
 
 def mk(gap: str, c_quote: str, b_quote: str = "") -> dict:
@@ -220,6 +220,39 @@ check("S1 parse 归一 hook_flags（type→B, dims 容错）",
       _nh["type"] == "B" and _nh["dims"]["camera"] is True and _nh["dims"]["copy"] is True
       and _nh["dims"]["sound"] is False and _nh["exists"] is True)
 
+_valid_hook = {
+    "exists": True,
+    "type": "B",
+    "dims": {"camera": True, "copy": True, "sound": False, "rhythm": True},
+    "landing_met": False,
+    "landing_reason": "0-3s 有反差但承诺不明确",
+    "window_evidence": "0-3s 口播低期待到高结果",
+    "anchors_proposition": True,
+}
+try:
+    validate_s1_hook_flags(
+        {"stage_analysis": [{"stage": "S1 Hook", "creator_hook": _valid_hook, "benchmark_hook": dict(_valid_hook)}]},
+        {"s1_hook_flags_required": True},
+    )
+    _s1_gate_ok = True
+except SystemExit:
+    _s1_gate_ok = False
+check("S1 hook flag 门禁：完整字段通过", _s1_gate_ok)
+
+try:
+    validate_s1_hook_flags({"stage_analysis": [{"stage": "S1 Hook"}]}, {"s1_hook_flags_required": True})
+    _s1_gate_failed = False
+except SystemExit as exc:
+    _s1_gate_failed = "缺少 creator_hook" in str(exc) and "缺少 benchmark_hook" in str(exc)
+check("S1 hook flag 门禁：主链缺字段触发 repair", _s1_gate_failed)
+
+try:
+    validate_s1_hook_flags({"stage_analysis": [{"stage": "S1 Hook", "creator_hook": None, "benchmark_hook": None}]}, {})
+    _s1_legacy_ok = True
+except SystemExit:
+    _s1_legacy_ok = False
+check("S1 hook flag 门禁：旧结果无标记不误伤", _s1_legacy_ok)
+
 # 5. 死代码已清 + 模块仍可导入
 import flayr_core.prompt as prompt_module  # noqa: E402
 
@@ -227,6 +260,7 @@ check("prompt.render_stage_frame_markdown 已删", not hasattr(prompt_module, "r
 
 # 6. speech_mode 四分支：有口播、字幕驱动、音乐驱动、纯视觉驱动
 from flayr_core.speech_mode import classify_speech_mode  # noqa: E402
+from flayr_core.llm.payload import build_llm_comparison_payload, hook_anchor_terms  # noqa: E402
 
 with tempfile.TemporaryDirectory() as tmp:
     tmp_dir = Path(tmp)
@@ -268,6 +302,23 @@ with tempfile.TemporaryDirectory() as tmp:
         "speech_mode visual_driven",
         classify_speech_mode(visual, {"transcription_status": "placeholder"})["mode"] == "visual_driven",
     )
+
+# 7. S1 hook flag 化不再依赖冻结品库：无 brand_proposition 也必须触发 flags
+_foundation = {
+    "product_profile": {"hook_proposition": "清洁更卫生", "physical_task": "避免手碰脏刷头"},
+    "category_profile": {"painpoints": ["异味", "细菌滋生"]},
+}
+_props, _pains, _source = hook_anchor_terms({}, _foundation)
+check("S1 hook anchors 回退 Step-0", _props[:2] == ["清洁更卫生", "避免手碰脏刷头"] and "异味" in _pains)
+_payload = build_llm_comparison_payload(
+    "test-model",
+    "analysis input",
+    {},
+    {"product_foundation": _foundation, "videos": {}},
+)
+_content = _payload["messages"][1]["content"]
+_user_text = _content[0]["text"] if isinstance(_content, list) else str(_content)
+check("S1 hook flags 无冻结品库仍强制输出", "S1 强制" in _user_text and "creator_hook" in _user_text)
 
 print()
 print("RESULT:", "PASS" if not failures else f"FAIL ({len(failures)}): {failures}")
