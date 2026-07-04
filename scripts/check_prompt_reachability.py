@@ -113,6 +113,7 @@ WAIVED: dict[str, str] = {}
 BULK_OR_INTENTIONAL: set[str] = {
     "references/commerce-translation-guidelines.md",  # 翻译步专用，非分析链
     "references/analysis-output-schema.json",          # 输出契约，字段经阶段2 指令转述
+    "references/brand_propositions.json",              # 冻结品牌命题结构化数据，阶段2 运行时注入，不做 prompt 文档 item 级检查
     "ANALYSIS-PROMPT.md",  # superseded：v1.1 单次流程已被阶段2 内联指令取代，且装进被砍的 analysis_input；freshness 域非 reachability，不 gate，待退役（标 superseded 或删）
     # 下列已在 REGISTRY 做 item 级检查，列此仅为登记可见：
     "QA-RULES.md",

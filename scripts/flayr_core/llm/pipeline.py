@@ -35,8 +35,8 @@ from .payload import (
     build_stage_review_payload,
     build_video_fact_payload,
     load_brand_proposition,
-    select_role_visual_inputs,
 )
+from .media import select_role_visual_inputs
 from ..postprocess import apply_postprocess_chain
 from ..postprocess.derive import critical_severity_stages
 from ..postprocess.health_rewrite import (
@@ -227,7 +227,13 @@ def parse_and_validate_llm_result(
     except SystemExit as exc:
         first_error = str(exc)
 
-    repair_payload = build_llm_repair_payload(args.llm_model, raw_result_text, first_error, analysis_input)
+    repair_payload = build_llm_repair_payload(
+        args.llm_model,
+        raw_result_text,
+        first_error,
+        analysis_input,
+        locked_video_understanding,
+    )
     repair_request_path = run_dir / "llm_repair_request.json"
     repair_response_path = run_dir / "llm_repair_response.json"
     write_json(repair_request_path, repair_payload)
@@ -440,7 +446,13 @@ def apply_stage_review_updates(
         if code in updates_by_code:
             # 字段级合并而非整字典替换：回看若漏掉执行分等新字段，保留原值，
             # 否则 derive 对复核阶段反而退化为模型直判（code review #1）。
-            merged_stages.append({**stage, **updates_by_code[code]})
+            base_stage = dict(stage)
+            # S1 hook flags 是 severity 输入事实。S1 回看后必须由回看结果重判，
+            # 不能字段级合并时沿用旧 hook，否则会出现"新 stage 套旧 hook"。
+            if code == "S1":
+                base_stage.pop("creator_hook", None)
+                base_stage.pop("benchmark_hook", None)
+            merged_stages.append({**base_stage, **updates_by_code[code]})
         else:
             merged_stages.append(stage)
     merged["stage_analysis"] = merged_stages

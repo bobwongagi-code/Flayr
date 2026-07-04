@@ -88,6 +88,8 @@ def render_stage_rows(analysis: dict[str, Any]) -> str:
 
 def stage_skipped(stage: dict[str, Any]) -> tuple[bool, str]:
     """判断阶段是否双方都未设计（如 S5 都无信任背书），如是则折叠不展开分析。"""
+    if normalize_severity(stage.get("severity")) != "small":
+        return False, ""
     skip_phrases = (
         "没有形成可独立核验", "均未设计", "未发现对应", "无明显设计",
         "均未", "无明显", "双方均无", "未涉及", "无法识别",

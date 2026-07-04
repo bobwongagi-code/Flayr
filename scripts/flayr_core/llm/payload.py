@@ -11,177 +11,14 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ..artifacts import (
-    format_seconds,
-    get_focus_frame_entries,
-    get_frame_entries,
-    parse_time_range_seconds,
-    sample_evenly,
-    select_frames_for_time_range,
-)
+from ..artifacts import format_seconds, parse_time_range_seconds
 from ..shot_track import render_shot_track_markdown
 from ..speech_mode import speech_mode_prompt
 from ..subtitle_track import render_subtitle_track_markdown
-from .api import audio_to_mp3_data_url, image_to_data_url, video_to_data_url
+from .api import audio_to_mp3_data_url, video_to_data_url
+from .media import build_evidence_sensory_inputs
 
 ROOT = Path(__file__).resolve().parents[3]
-
-
-# ---------------------------------------------------------------------------
-# 视觉素材选取（喂给多模态 LLM 的关键帧）
-# ---------------------------------------------------------------------------
-
-def select_role_visual_inputs(info: dict[str, Any], role: str, image_limit: int) -> list[dict[str, str]]:
-    """为单视频事实抽取选关键帧，最多 image_limit 张。"""
-    selected: list[dict[str, str]] = []
-    for entry in get_llm_visual_candidates(info, image_limit):
-        frame = Path(str(entry.get("path", "")))
-        if not frame.exists():
-            continue
-        timestamp = format_seconds(entry.get("timestamp_seconds")) if entry.get("timestamp_seconds") is not None else ""
-        marker = f" @ {timestamp}" if timestamp else ""
-        selected.append(
-            {
-                "role": role,
-                "path": str(frame),
-                "label": f"{role} {entry.get('stage') or entry.get('label', 'frame')}{marker} {frame.name}",
-                "data_url": image_to_data_url(frame),
-            }
-        )
-    return selected[:image_limit]
-
-
-def select_llm_visual_inputs(analysis: dict[str, Any], image_limit: int) -> list[dict[str, str]]:
-    """跨视频选关键帧（同时含 benchmark 和 creator）。"""
-    if image_limit <= 0:
-        return []
-
-    videos = analysis.get("videos", {})
-    roles = [role for role in ("benchmark", "creator") if role in videos]
-    if not roles:
-        return []
-
-    per_role_limit = max(1, image_limit // len(roles))
-    selected: list[dict[str, str]] = []
-    for role in roles:
-        entries = get_llm_visual_candidates(videos[role], per_role_limit)
-        for entry in entries[:per_role_limit]:
-            frame = Path(str(entry.get("path", "")))
-            if not frame.exists():
-                continue
-            timestamp = format_seconds(entry.get("timestamp_seconds")) if entry.get("timestamp_seconds") is not None else ""
-            marker = f" @ {timestamp}" if timestamp else ""
-            selected.append(
-                {
-                    "role": role,
-                    "path": str(frame),
-                    "label": f"{role} {entry.get('stage') or entry.get('label', 'frame')}{marker} {frame.name}",
-                    "data_url": image_to_data_url(frame),
-                }
-            )
-
-    if len(selected) < image_limit:
-        used_paths = {item["path"] for item in selected}
-        for role in roles:
-            entries = get_llm_visual_candidates(videos[role], image_limit)
-            for entry in entries:
-                if len(selected) >= image_limit:
-                    break
-                frame = Path(str(entry.get("path", "")))
-                if not frame.exists():
-                    continue
-                if str(frame) in used_paths:
-                    continue
-                timestamp = format_seconds(entry.get("timestamp_seconds")) if entry.get("timestamp_seconds") is not None else ""
-                marker = f" @ {timestamp}" if timestamp else ""
-                selected.append(
-                    {
-                        "role": role,
-                        "path": str(frame),
-                        "label": f"{role} {entry.get('stage') or entry.get('label', 'frame')}{marker} {frame.name}",
-                        "data_url": image_to_data_url(frame),
-                    }
-                )
-                used_paths.add(str(frame))
-
-    return selected[:image_limit]
-
-
-def get_llm_visual_candidates(info: dict[str, Any], limit: int) -> list[dict[str, Any]]:
-    """候选视觉输入：先给 Hook/CTA timeline view，再补原始帧。
-
-    Timeline view 把帧序列、波形、口播放在同一张图里，适合 Stage1 先判断
-    口播和画面是否对齐；原始帧继续负责细节观察。
-    """
-    if limit <= 0:
-        return []
-    timeline_limit = min(2, max(0, limit // 3))
-    timeline_entries = get_timeline_view_entries(info)[:timeline_limit]
-    remaining = max(0, limit - len(timeline_entries))
-    used = {str(entry.get("path") or "") for entry in timeline_entries}
-    frame_entries = [
-        entry for entry in get_llm_frame_candidates(info, remaining)
-        if str(entry.get("path") or "") not in used
-    ]
-    return timeline_entries + frame_entries
-
-
-def get_timeline_view_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
-    evidence = info.get("video_evidence")
-    views = evidence.get("timeline_views") if isinstance(evidence, dict) else None
-    entries: list[dict[str, Any]] = []
-    if isinstance(views, list):
-        for item in views:
-            if not isinstance(item, dict):
-                continue
-            path = str(item.get("path") or "")
-            if path:
-                entries.append(
-                    {
-                        "label": f"{item.get('label') or 'timeline'} timeline",
-                        "path": path,
-                        "timestamp_seconds": None,
-                    }
-                )
-    if entries:
-        return entries
-
-    work_dir = Path(str(info.get("work_dir") or ""))
-    timeline_dir = work_dir / "timeline_views"
-    if not timeline_dir.is_dir():
-        return []
-    for label in ("hook", "cta"):
-        path = timeline_dir / f"{label}.jpg"
-        if path.is_file():
-            entries.append({"label": f"{label} timeline", "path": str(path), "timestamp_seconds": None})
-    return entries
-
-
-def get_llm_frame_candidates(info: dict[str, Any], limit: int) -> list[dict[str, Any]]:
-    """从一个视频的全片帧 + 加密 focus 帧中选候选帧。
-
-    合并后按时间戳排序、按秒去重：
-    - 保证喂给模型的帧序列时间轴单调递增，不会出现"中段帧后又跳回首段"的乱序；
-    - 整数秒上 1fps 全片帧与 2fps 首尾帧会撞车（同一画面），按秒去重避免重复浪费注意力。
-    撞车时让 focus 帧覆盖 timeline 帧，因为 focus 帧带 hook/cta 标签、信息更具体。
-    """
-    if limit <= 0:
-        return []
-    focus_limit = 2 if limit >= 6 else 0
-    timeline_limit = max(1, limit - focus_limit)
-    timeline_entries = sample_evenly(get_frame_entries(info), timeline_limit)
-    focus_entries = sample_evenly(get_focus_frame_entries(info), focus_limit)
-    by_second: dict[float, dict[str, Any]] = {}
-    # 先放 timeline 占位，再用 focus 覆盖同秒条目。
-    for entry in timeline_entries:
-        if not str(entry.get("path") or ""):
-            continue
-        by_second.setdefault(round(float(entry.get("timestamp_seconds") or 0.0), 1), entry)
-    for entry in focus_entries:
-        if not str(entry.get("path") or ""):
-            continue
-        by_second[round(float(entry.get("timestamp_seconds") or 0.0), 1)] = entry
-    return sorted(by_second.values(), key=lambda item: float(item.get("timestamp_seconds") or 0.0))
 
 
 def read_text_if_exists(path: Path) -> str:
@@ -449,51 +286,6 @@ def build_video_fact_payload(
     }
 
 
-def build_evidence_sensory_inputs(
-    analysis: dict[str, Any],
-    facts: dict[str, Any],
-    frames_per_unit: int = 1,
-) -> list[dict[str, Any]]:
-    """为阶段二对比判断准备"感官素材"：给每条 evidence_unit 配关键帧 + 切片音频。
-
-    Phase B 核心：让判断环节能"看着证据、听着声音"做比较，而不是只读 facts 文字。
-    - 关键帧：按 evidence 的 time_range 从该 role 的全片帧中取（带 MM:SS 标注）；
-    - 音频：按 time_range 切对应时间窗（声画对齐，不丢整条）；
-    严格只服务"已存在的 evidence"，不新增事实单元（防串供基线不动）。
-    """
-    content: list[dict[str, Any]] = []
-    videos = analysis.get("videos", {})
-    for role in ("benchmark", "creator"):
-        role_facts = facts.get(role) or {}
-        units = role_facts.get("evidence_units") or []
-        info = videos.get(role) or {}
-        audio_path = Path(str(info.get("work_dir") or "")) / "audio.wav"
-        duration = info.get("duration_seconds")
-        for unit in units:
-            uid = str(unit.get("id") or "")
-            time_range = str(unit.get("time_range") or "")
-            if not uid or not time_range:
-                continue
-            start, end = parse_time_range_seconds(time_range, duration)
-            label = f"{role} {uid} @ {time_range}"
-            # 关键帧
-            frames = select_frames_for_time_range(info, time_range, limit=frames_per_unit)
-            for fr in frames:
-                frame_path = Path(str(fr.get("path") or ""))
-                if not frame_path.is_file():
-                    continue
-                content.append({"type": "text", "text": f"【{label}｜画面帧】"})
-                content.append(
-                    {"type": "image_url", "image_url": {"url": image_to_data_url(frame_path), "detail": "low"}}
-                )
-            # 切片音频（声画对齐）
-            seg = audio_to_mp3_data_url(audio_path, start=start, duration=max(0.1, end - start))
-            if seg is not None:
-                content.append({"type": "text", "text": f"【{label}｜该时段音频】"})
-                content.append({"type": "input_audio", "input_audio": {"data": seg, "format": "mp3"}})
-    return content
-
-
 def structure_library_judgment_view() -> str:
     """从 structure_library_full.md 抽"判断视图"——每模块只留 编号+名称+一句话功能+【适配条件】，
     扔掉【镜头】【文案】【声音】【节奏】【降级规则】制作规格（那些服务样片生成；喂进判断会诱导
@@ -532,7 +324,7 @@ def resolve_brand_key(run_dir_name: str) -> str:
 
 def load_brand_proposition(run_dir: Path) -> dict[str, Any] | None:
     """读冻结的 S1 命题尺子 references/brand_propositions.json，按【品】返回 {propositions, painpoints}。
-    文件缺失/无该品条目/解析失败 → None（pipeline 据此降级回 Step-0 现生成命题，优雅降级，不触发 hook flag）。"""
+    文件缺失/无该品条目/解析失败 → None（pipeline 据此降级回 Step-0 命题，hook flag 仍会输出）。"""
     path = ROOT / "references" / "brand_propositions.json"
     if not path.is_file():
         return None
@@ -776,6 +568,66 @@ def build_stage_review_payload(
         stage for stage in current_result.get("stage_analysis", [])
         if stage_code(stage.get("stage")) in target_codes
     ]
+    stage_update_example: dict[str, Any] = {
+        "stage": "S4 效果呈现",
+        "time_range": "标杆真实时间 / 达人真实时间",
+        "benchmark_time_range": "0.0s - 0.0s",
+        "creator_time_range": "0.0s - 0.0s",
+        "core_question": "用户能不能看见价值",
+        "creator_module_id": "unknown",
+        "benchmark_module_id": "unknown",
+        "module_fit": "fit | degraded | unfit | unknown",
+        "module_fit_reason": "一句话",
+        "task_completion": "complete | partial | missing",
+        "gap_type": "structural | execution | resource",
+        "gap_summary": ["一句话"],
+        "voice_performance": {
+            "pace": "语速判断",
+            "energy": "情绪判断",
+            "key_pause": False,
+            "note": "一句话",
+        },
+        "benchmark_summary": "一句话",
+        "benchmark_key_message": "一句话",
+        "benchmark_evidence_ids": ["B1"],
+        "benchmark_visual_evidence": ["一句话"],
+        "benchmark_support_status": "supported | voice_only | visual_only | conflict",
+        "benchmark_quote": "本地语言口播；没有留空",
+        "benchmark_quote_zh": "中文翻译；没有留空",
+        "creator_summary": "一句话",
+        "creator_key_message": "一句话",
+        "creator_evidence_ids": ["C1"],
+        "creator_visual_evidence": ["一句话"],
+        "creator_support_status": "supported | voice_only | visual_only | conflict",
+        "creator_quote": "本地语言口播；没有留空",
+        "creator_quote_zh": "中文翻译；没有留空",
+        "gap": "达人做了什么→标杆做了什么→对购买意愿影响。",
+        "evidence": ["引用时间段、画面或口播证据"],
+        "severity": "large | medium | small",
+        "creator_execution": "0 | 0.5 | 1 | 2",
+        "benchmark_execution": "0 | 0.5 | 1 | 2",
+        "painpoint_relevance": "benchmark_only | creator_only | both | none",
+    }
+    s1_contract = ""
+    if "S1" in target_codes:
+        stage_update_example["stage"] = "S1 Hook"
+        stage_update_example["core_question"] = "用户凭什么停下来"
+        hook_example = {
+            "exists": True,
+            "type": "A-G 或 unknown",
+            "dims": {"camera": True, "copy": True, "sound": True, "rhythm": True},
+            "landing_met": True,
+            "landing_reason": "引用最早 hook 窗口内的时间戳+原话/画面，说明对象/张力/承诺或证据是否齐全",
+            "window_evidence": "0.0s-5.0s 最早 hook 窗口实际出现的画面/口播/字幕",
+            "anchors_proposition": True,
+        }
+        stage_update_example["creator_hook"] = hook_example
+        stage_update_example["benchmark_hook"] = hook_example
+        s1_contract = (
+            "目标阶段包含 S1 时，stage_update 必须同时重判 creator_hook 与 benchmark_hook；"
+            "不得沿用当前阶段判断里的旧 hook。landing_met 仍按最早 hook 窗口三件套判："
+            "对象明确 + 张力明确 + 承诺或证据明确，缺一即 false，禁止用后续 S2/S3 补足。"
+        )
     content: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -787,51 +639,13 @@ def build_stage_review_payload(
                     "只重判 target_stages 中列出的阶段；不要改写 video_understanding，不要新增 evidence_unit。",
                     "必须先在 gap 字段写清判断依据（达人做了什么→标杆做了什么→对购买意愿影响），再给 severity。",
                     "回看后必须按主分析同一标尺重打 creator_execution 与 benchmark_execution（0=未执行；0.5=做了但基本无效/敷衍/无法有效接收；1=合格有效；2=出色。两侧独立打分，先打分再对比）和 painpoint_relevance——系统将据这些事实重推导差距等级；severity 仍需填写但仅作参考。",
+                    s1_contract,
                     "只输出严格 JSON，不要 Markdown。",
                     "输出格式：",
                     json.dumps(
                         {
                             "stage_updates": [
-                                {
-                                    "stage": "S4 效果呈现",
-                                    "time_range": "标杆真实时间 / 达人真实时间",
-                                    "benchmark_time_range": "0.0s - 0.0s",
-                                    "creator_time_range": "0.0s - 0.0s",
-                                    "core_question": "用户能不能看见价值",
-                                    "creator_module_id": "unknown",
-                                    "benchmark_module_id": "unknown",
-                                    "module_fit": "fit | degraded | unfit | unknown",
-                                    "module_fit_reason": "一句话",
-                                    "task_completion": "complete | partial | missing",
-                                    "gap_type": "structural | execution | resource",
-                                    "gap_summary": ["一句话"],
-                                    "voice_performance": {
-                                        "pace": "语速判断",
-                                        "energy": "情绪判断",
-                                        "key_pause": False,
-                                        "note": "一句话",
-                                    },
-                                    "benchmark_summary": "一句话",
-                                    "benchmark_key_message": "一句话",
-                                    "benchmark_evidence_ids": ["B1"],
-                                    "benchmark_visual_evidence": ["一句话"],
-                                    "benchmark_support_status": "supported | voice_only | visual_only | conflict",
-                                    "benchmark_quote": "本地语言口播；没有留空",
-                                    "benchmark_quote_zh": "中文翻译；没有留空",
-                                    "creator_summary": "一句话",
-                                    "creator_key_message": "一句话",
-                                    "creator_evidence_ids": ["C1"],
-                                    "creator_visual_evidence": ["一句话"],
-                                    "creator_support_status": "supported | voice_only | visual_only | conflict",
-                                    "creator_quote": "本地语言口播；没有留空",
-                                    "creator_quote_zh": "中文翻译；没有留空",
-                                    "gap": "达人做了什么→标杆做了什么→对购买意愿影响。",
-                                    "evidence": ["引用时间段、画面或口播证据"],
-                                    "severity": "large | medium | small",
-                                    "creator_execution": "0 | 0.5 | 1 | 2",
-                                    "benchmark_execution": "0 | 0.5 | 1 | 2",
-                                    "painpoint_relevance": "benchmark_only | creator_only | both | none",
-                                }
+                                stage_update_example
                             ],
                             "review_notes": ["为什么回看后这样判断"],
                         },
@@ -858,6 +672,7 @@ def build_stage_review_payload(
                     "你是 Flayr 的低置信阶段复核器。只输出严格 JSON。"
                     "本轮只能基于用户给出的 facts 和原生视频切片，重判指定 S1-S6 阶段。"
                     "不得新增、删除或改写 evidence_units；可修正该阶段的 gap、severity、support_status、summary、quote 和 evidence 引用。"
+                    "如果目标阶段包含 S1，必须重新输出 creator_hook 与 benchmark_hook，不得复用旧 hook 判断。"
                     "severity 仍按购买意愿影响定级：large=直接影响购买意愿的硬伤；medium=削弱说服力但不致命；small=细节瑕疵或达人持平/更优。"
                     # 接地约束：禁止从含糊音频脑补话术（kakwan S6 幻觉教训）；不预设判断方向。
                     "判断只能基于切片中真实听到/看到的内容：引用口播必须能对上切片音频，"
@@ -1063,12 +878,16 @@ def build_llm_repair_payload(
     raw_result_text: str,
     error_message: str,
     analysis_input: str,
+    locked_video_understanding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """JSON 修复请求 payload。校验失败时由 pipeline 触发。
 
     设 max_tokens=16384 与 build_llm_comparison_payload 一致；
     否则 qwen 等 provider 默认 max_tokens 偏低，重新输出完整结构会被截断成残缺 JSON。
     """
+    locked_facts_block = ""
+    if locked_video_understanding:
+        locked_facts_block = json.dumps(locked_video_understanding, ensure_ascii=False, indent=2)
     return {
         "model": model,
         "max_tokens": 16384,
@@ -1102,6 +921,8 @@ def build_llm_repair_payload(
                         analysis_input[:12000],
                         "校验错误：",
                         error_message,
+                        "已锁定单视频事实清单（唯一事实源，补字段只能引用这里，不得新增/改写 evidence_units）：",
+                        locked_facts_block[:24000] if locked_facts_block else "（未提供 locked facts；只能修 JSON 结构，不得补事实依据）",
                         "模型原始输出：",
                         raw_result_text[:12000],
                     ]

@@ -509,16 +509,14 @@ def process_video(
     # 没 key/调试时降级为 disabled，不影响主流程。
     result["subtitle_track_status"] = "disabled_by_policy"
     result["subtitle_track_path"] = None
-    should_ocr, ocr_key = resolve_ocr_policy(args)
+    should_ocr, ocr_key, ocr_disabled_reason = resolve_ocr_policy(args)
     if should_ocr:
         subtitle_track = build_subtitle_track(role_dir, result, ocr_key)
         result["subtitle_track_status"] = subtitle_track.get("status")
         if subtitle_track.get("segments"):
             result["subtitle_track_path"] = str(role_dir / "subtitle_track.json")
-    elif ocr_key:
-        result["subtitle_track_status"] = "disabled_by_policy"
     else:
-        result["subtitle_track_status"] = "disabled_no_dashscope_key"
+        result["subtitle_track_status"] = ocr_disabled_reason
 
     result["speech_mode"] = classify_speech_mode(role_dir, result)
 
@@ -548,19 +546,23 @@ def ensure_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> Non
     write_json(role_dir / "_preprocess.json", info)
 
 
-def resolve_ocr_policy(args: argparse.Namespace) -> tuple[bool, str]:
+def resolve_ocr_policy(args: argparse.Namespace) -> tuple[bool, str, str]:
     if getattr(args, "no_ocr", False):
-        return False, ""
+        return False, "", "disabled_by_policy"
     if getattr(args, "with_ocr", False):
         mode = "on"
     else:
         mode = getattr(args, "ocr_mode", "auto")
     if mode == "off" or getattr(args, "llm_dry_run", False):
-        return False, ""
+        return False, "", "disabled_by_policy"
     api_key = read_llm_api_key(args).strip()
+    if not api_key:
+        return False, "", "disabled_no_dashscope_key"
+    if not looks_like_dashscope_config(args):
+        return False, "", "disabled_non_dashscope_config"
     if mode == "on":
-        return bool(api_key), api_key
-    return bool(api_key and looks_like_dashscope_config(args)), api_key
+        return True, api_key, ""
+    return True, api_key, ""
 
 
 def looks_like_dashscope_config(args: argparse.Namespace) -> bool:

@@ -78,6 +78,34 @@
       "benchmark_time_range": "标杆视频中该阶段真实起止时间，例如 0~5s",
       "creator_time_range": "达人视频中该阶段真实起止时间，例如 0~8s",
       "core_question": "用户凭什么停下来",
+      "creator_hook": {
+        "exists": "仅 S1 必填：达人前段是否存在抢注意力的 Hook，true|false。",
+        "type": "仅 S1 必填：S1-A~G 的字母 A-G，或 unknown。type 只作描述字段，不直接进入 severity。",
+        "dims": {
+          "camera": "仅 S1 必填：镜头结构件是否做到，true|false。",
+          "copy": "仅 S1 必填：文案/字幕/口播结构件是否做到，true|false。",
+          "sound": "仅 S1 必填：声音/语气/BGM 结构件是否做到，true|false。",
+          "rhythm": "仅 S1 必填：节奏/停顿/剪辑结构件是否做到，true|false。"
+        },
+        "landing_met": "仅 S1 必填：最早 hook 窗口内对象明确 + 张力明确 + 承诺或证据明确，三件齐才 true。",
+        "landing_reason": "仅 S1 必填：一句话引用最早 hook 窗口证据，说明 landing_met 为何 true/false。",
+        "window_evidence": "仅 S1 必填：钩子最早 3-5 秒实际出现了什么，带时间戳。",
+        "anchors_proposition": "仅 S1 必填：是否锚定本品 hook_proposition / painpoints / product_profile/category_profile 概念，true|false。"
+      },
+      "benchmark_hook": {
+        "exists": "仅 S1 必填：标杆前段是否存在抢注意力的 Hook，true|false。",
+        "type": "仅 S1 必填：S1-A~G 的字母 A-G，或 unknown。type 只作描述字段，不直接进入 severity。",
+        "dims": {
+          "camera": "仅 S1 必填：镜头结构件是否做到，true|false。",
+          "copy": "仅 S1 必填：文案/字幕/口播结构件是否做到，true|false。",
+          "sound": "仅 S1 必填：声音/语气/BGM 结构件是否做到，true|false。",
+          "rhythm": "仅 S1 必填：节奏/停顿/剪辑结构件是否做到，true|false。"
+        },
+        "landing_met": "仅 S1 必填：最早 hook 窗口内对象明确 + 张力明确 + 承诺或证据明确，三件齐才 true。",
+        "landing_reason": "仅 S1 必填：一句话引用最早 hook 窗口证据，说明 landing_met 为何 true/false。",
+        "window_evidence": "仅 S1 必填：钩子最早 3-5 秒实际出现了什么，带时间戳。",
+        "anchors_proposition": "仅 S1 必填：是否锚定本品 hook_proposition / painpoints / product_profile/category_profile 概念，true|false。"
+      },
       "creator_module_id": "S1-A 等结构库官方模块编号；无法识别写 unknown。",
       "benchmark_module_id": "S1-A 等结构库官方模块编号；无法识别写 unknown。",
       "module_fit": "fit | degraded | unfit | unknown",

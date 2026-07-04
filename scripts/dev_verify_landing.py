@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import os
 import py_compile
 import sys
 import tempfile
@@ -260,7 +261,14 @@ check("prompt.render_stage_frame_markdown 已删", not hasattr(prompt_module, "r
 
 # 6. speech_mode 四分支：有口播、字幕驱动、音乐驱动、纯视觉驱动
 from flayr_core.speech_mode import classify_speech_mode  # noqa: E402
-from flayr_core.llm.payload import build_llm_comparison_payload, hook_anchor_terms  # noqa: E402
+from flayr_core.llm.payload import (  # noqa: E402
+    build_llm_comparison_payload,
+    build_llm_repair_payload,
+    build_stage_review_payload,
+    hook_anchor_terms,
+)
+from flayr_core.report import stage_skipped  # noqa: E402
+from flayr import resolve_ocr_policy  # noqa: E402
 
 with tempfile.TemporaryDirectory() as tmp:
     tmp_dir = Path(tmp)
@@ -319,6 +327,47 @@ _payload = build_llm_comparison_payload(
 _content = _payload["messages"][1]["content"]
 _user_text = _content[0]["text"] if isinstance(_content, list) else str(_content)
 check("S1 hook flags 无冻结品库仍强制输出", "S1 强制" in _user_text and "creator_hook" in _user_text)
+
+_repair_payload = build_llm_repair_payload(
+    "test-model",
+    "{}",
+    "S1 hook flag 输出不完整",
+    "analysis input",
+    {"benchmark": {"evidence_units": [{"id": "B1", "time_range": "0s - 3s"}]}},
+)
+_repair_user = _repair_payload["messages"][1]["content"]
+check("repair payload 携带 locked facts", "已锁定单视频事实清单" in _repair_user and '"B1"' in _repair_user)
+
+_review_payload = build_stage_review_payload(
+    "test-model",
+    {"videos": {}},
+    {"benchmark": {"evidence_units": []}, "creator": {"evidence_units": []}},
+    {"stage_analysis": [{"stage": "S1 Hook", "creator_time_range": "0s - 5s", "benchmark_time_range": "0s - 5s"}]},
+    ["S1"],
+)
+_review_user = _review_payload["messages"][1]["content"][0]["text"]
+check("Phase C S1 回看强制重判 hook flags", "creator_hook" in _review_user and "benchmark_hook" in _review_user)
+
+_skip, _reason = stage_skipped({"stage": "S2 产品引出", "severity": "medium", "gap": "达人未涉及产品身份，标杆有明确引出"})
+check("报告折叠：medium/large 差距不因'未涉及'被隐藏", not _skip)
+
+
+class _OcrArgs:
+    no_ocr = False
+    with_ocr = True
+    ocr_mode = "on"
+    llm_dry_run = False
+    llm_api_url = "https://api.openai.com/v1/chat/completions"
+    llm_api_key_env = "FLAYR_TEST_OPENAI_KEY"
+    llm_api_key_keychain_service = None
+    llm_api_key_keychain_account = "API_KEY"
+    llm_model = "gpt-test"
+
+
+os.environ["FLAYR_TEST_OPENAI_KEY"] = "not-a-dashscope-key"
+_should_ocr, _ocr_key, _ocr_reason = resolve_ocr_policy(_OcrArgs())
+check("OCR 非 DashScope 配置快速禁用", not _should_ocr and _ocr_reason == "disabled_non_dashscope_config")
+os.environ.pop("FLAYR_TEST_OPENAI_KEY", None)
 
 print()
 print("RESULT:", "PASS" if not failures else f"FAIL ({len(failures)}): {failures}")

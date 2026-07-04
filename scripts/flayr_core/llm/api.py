@@ -23,6 +23,9 @@ from ..utils import run_command
 
 LLM_CURL_MAX_TIME_SECONDS = 900
 LLM_CURL_RETRIES = 2
+VIDEO_DATA_URL_MAX_DURATION_SECONDS = 180.0
+VIDEO_DATA_URL_MAX_BYTES = 24 * 1024 * 1024
+VIDEO_TRANSCODE_TIMEOUT_SECONDS = 300
 
 
 def read_llm_api_key(args: argparse.Namespace) -> str:
@@ -226,6 +229,9 @@ def video_to_data_url(
     max_width: int = 480,
     start: float | None = None,
     duration: float | None = None,
+    max_duration_seconds: float = VIDEO_DATA_URL_MAX_DURATION_SECONDS,
+    max_data_bytes: int = VIDEO_DATA_URL_MAX_BYTES,
+    timeout_seconds: int = VIDEO_TRANSCODE_TIMEOUT_SECONDS,
 ) -> str | None:
     """把本地视频重编码成小体积 mp4 的 base64 data URL，供 omni 原生视频理解。
 
@@ -243,6 +249,10 @@ def video_to_data_url(
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return None
+    if duration is None:
+        media_duration = probe_media_duration_seconds(path)
+        if media_duration is not None and media_duration > max_duration_seconds:
+            return None
     tmp_path = ""
     try:
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
@@ -265,10 +275,13 @@ def video_to_data_url(
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=timeout_seconds,
         )
+        if Path(tmp_path).stat().st_size > max_data_bytes:
+            return None
         encoded = base64.b64encode(Path(tmp_path).read_bytes()).decode("ascii")
         return f"data:video/mp4;base64,{encoded}"
-    except (subprocess.CalledProcessError, OSError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         return None
     finally:
         if tmp_path:
@@ -276,6 +289,38 @@ def video_to_data_url(
                 os.remove(tmp_path)
             except OSError:
                 pass
+
+
+def probe_media_duration_seconds(path: Path) -> float | None:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        completed = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        return float(completed.stdout.strip())
+    except ValueError:
+        return None
 
 
 def audio_to_mp3_data_url(
