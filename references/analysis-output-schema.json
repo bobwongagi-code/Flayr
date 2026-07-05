@@ -87,9 +87,13 @@
           "sound": "仅 S1 必填：声音/语气/BGM 结构件是否做到，true|false。",
           "rhythm": "仅 S1 必填：节奏/停顿/剪辑结构件是否做到，true|false。"
         },
-        "landing_met": "仅 S1 必填：最早 hook 窗口内对象明确 + 张力明确 + 承诺或证据明确，三件齐才 true。",
-        "landing_reason": "仅 S1 必填：一句话引用最早 hook 窗口证据，说明 landing_met 为何 true/false。",
-        "window_evidence": "仅 S1 必填：钩子最早 3-5 秒实际出现了什么，带时间戳。",
+        "hook_boundary_seconds": "仅 S1 必填：S1 Hook 结束、S2 产品引出开始的秒点。按 S1 留人机制到 S2 产品/解决方案承接的功能切换判断，不是固定秒数；S2-A 承接式引出可早于产品实物或产品名出现。",
+        "hook_boundary_reason": "仅 S1 必填：一句话说明 S1 主导信息是什么、为什么此处切到 S2。",
+        "s2_start_signal": "仅 S1 必填：边界后的第一个 S2 信号，如开始回答 Hook、解决方案承接、产品名、产品揭晓、认证卖点或产品成为画面主角。",
+        "landing_met": "仅 S1 必填：0 到 hook_boundary_seconds 内对象明确 + 张力明确 + 承诺或证据明确，三件齐才 true。",
+        "landing_reason": "仅 S1 必填：一句话只引用 0 到 hook_boundary_seconds 内证据，说明 landing_met 为何 true/false。",
+        "window_evidence": "仅 S1 必填：0 到 hook_boundary_seconds 内实际出现了什么，带时间戳。",
+        "landing_window_leak": "仅 S1 必填：landing 判断是否借用了 hook_boundary_seconds 之后的 S2/S3 材料，true|false；若 true，landing_met 应为 false。",
         "anchors_proposition": "仅 S1 必填：是否锚定本品 hook_proposition / painpoints / product_profile/category_profile 概念，true|false。"
       },
       "benchmark_hook": {
@@ -101,9 +105,13 @@
           "sound": "仅 S1 必填：声音/语气/BGM 结构件是否做到，true|false。",
           "rhythm": "仅 S1 必填：节奏/停顿/剪辑结构件是否做到，true|false。"
         },
-        "landing_met": "仅 S1 必填：最早 hook 窗口内对象明确 + 张力明确 + 承诺或证据明确，三件齐才 true。",
-        "landing_reason": "仅 S1 必填：一句话引用最早 hook 窗口证据，说明 landing_met 为何 true/false。",
-        "window_evidence": "仅 S1 必填：钩子最早 3-5 秒实际出现了什么，带时间戳。",
+        "hook_boundary_seconds": "仅 S1 必填：S1 Hook 结束、S2 产品引出开始的秒点。按 S1 留人机制到 S2 产品/解决方案承接的功能切换判断，不是固定秒数；S2-A 承接式引出可早于产品实物或产品名出现。",
+        "hook_boundary_reason": "仅 S1 必填：一句话说明 S1 主导信息是什么、为什么此处切到 S2。",
+        "s2_start_signal": "仅 S1 必填：边界后的第一个 S2 信号，如开始回答 Hook、解决方案承接、产品名、产品揭晓、认证卖点或产品成为画面主角。",
+        "landing_met": "仅 S1 必填：0 到 hook_boundary_seconds 内对象明确 + 张力明确 + 承诺或证据明确，三件齐才 true。",
+        "landing_reason": "仅 S1 必填：一句话只引用 0 到 hook_boundary_seconds 内证据，说明 landing_met 为何 true/false。",
+        "window_evidence": "仅 S1 必填：0 到 hook_boundary_seconds 内实际出现了什么，带时间戳。",
+        "landing_window_leak": "仅 S1 必填：landing 判断是否借用了 hook_boundary_seconds 之后的 S2/S3 材料，true|false；若 true，landing_met 应为 false。",
         "anchors_proposition": "仅 S1 必填：是否锚定本品 hook_proposition / painpoints / product_profile/category_profile 概念，true|false。"
       },
       "creator_module_id": "S1-A 等结构库官方模块编号；无法识别写 unknown。",

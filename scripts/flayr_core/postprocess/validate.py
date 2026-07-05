@@ -289,6 +289,15 @@ def validate_s1_hook_flags(result: dict[str, Any], analysis: dict[str, Any]) -> 
             errors.append(f"S1 {key}.landing_reason 不能为空")
         if not str(hook.get("window_evidence") or "").strip():
             errors.append(f"S1 {key}.window_evidence 不能为空")
+        boundary = hook.get("hook_boundary_seconds")
+        if not isinstance(boundary, (int, float)) or boundary < 0:
+            errors.append(f"S1 {key}.hook_boundary_seconds 必须是非负数字")
+        if not str(hook.get("hook_boundary_reason") or "").strip():
+            errors.append(f"S1 {key}.hook_boundary_reason 不能为空")
+        if not str(hook.get("s2_start_signal") or "").strip():
+            errors.append(f"S1 {key}.s2_start_signal 不能为空")
+        if hook.get("landing_window_leak") not in {True, False}:
+            errors.append(f"S1 {key}.landing_window_leak 必须是 bool")
         if hook.get("anchors_proposition") not in {True, False}:
             errors.append(f"S1 {key}.anchors_proposition 必须是 bool")
     if errors:

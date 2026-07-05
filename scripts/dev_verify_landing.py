@@ -124,7 +124,7 @@ check("背书双信道透传 normalize_video_understanding",
 
 # 4b. F项背书接管线：全unit聚合 + hard-only口径 + S5闸（软背书/无硬背书→small）
 from flayr_core.postprocess.derive import _side_endorsement, _derive_one, _Endorsement  # noqa: E402
-from flayr_core.postprocess.repair_stages import has_hard_endorsement  # noqa: E402
+from flayr_core.postprocess.repair_stages import has_hard_endorsement, repair_s1_hook_boundaries  # noqa: E402
 
 # 聚合作用域=全unit：背书落在非S5_trust的unit（如S2_intro）也算，不漏检
 _agg = _side_endorsement(
@@ -153,7 +153,14 @@ from flayr_core.llm.parse import normalize_hook_flags  # noqa: E402
 def _hook(exists, htype, cam=False, cp=False, snd=False, rhy=False, anchors=None, landing=None):
     return {"exists": exists, "type": htype,
             "dims": {"camera": cam, "copy": cp, "sound": snd, "rhythm": rhy},
-            "landing_met": landing, "anchors_proposition": anchors}
+            "hook_boundary_seconds": 3.0,
+            "hook_boundary_reason": "3.0s 后开始产品引出",
+            "s2_start_signal": "产品成为解决方案主角",
+            "landing_met": landing,
+            "landing_reason": "0-3s 钩子窗口内对象张力承诺齐全",
+            "window_evidence": "0-3s 钩子窗口",
+            "landing_window_leak": False,
+            "anchors_proposition": anchors}
 
 
 def _s1_stage(creator_hook, benchmark_hook, **extra):
@@ -221,13 +228,92 @@ check("S1 parse 归一 hook_flags（type→B, dims 容错）",
       _nh["type"] == "B" and _nh["dims"]["camera"] is True and _nh["dims"]["copy"] is True
       and _nh["dims"]["sound"] is False and _nh["exists"] is True)
 
+_leaky = normalize_hook_flags({
+    "exists": True,
+    "type": "B",
+    "dims": {"camera": True, "copy": True, "sound": True, "rhythm": False},
+    "hook_boundary_seconds": 4.5,
+    "hook_boundary_reason": "4.5s 后产品开始作为解决方案出现",
+    "s2_start_signal": "5.2s 口播产品名",
+    "landing_met": True,
+    "landing_reason": "0-4.5s 有反差，5.2s 产品解决油光所以闭环",
+    "window_evidence": "0-4.5s 反差口播",
+    "anchors_proposition": True,
+})
+check("S1 hook boundary leak 自动压 landing=false",
+      _leaky["landing_window_leak"] is True and _leaky["landing_met"] is False)
+
+with tempfile.TemporaryDirectory() as td:
+    role_dir = Path(td)
+    (role_dir / "transcript.srt").write_text(
+        "1\n00:00:00,000 --> 00:00:06,800\n反差句：本来没期待但结果超预期\n\n"
+        "2\n00:00:06,800 --> 00:00:14,360\n脸很油，能拯救我们的就是这个产品\n",
+        encoding="utf-8",
+    )
+    _boundary_result = {
+        "video_understanding": {
+            "creator": {
+                "evidence_units": [
+                    {
+                        "id": "C1",
+                        "time_range": "0.0s - 10.4s",
+                        "information": "油光痛点与产品需求场景",
+                        "voiceover_zh": "本来没期待但结果超预期。脸很油，能拯救我们的就是这个产品。",
+                        "functions": ["S1_hook", "S2_intro"],
+                    }
+                ]
+            }
+        },
+        "stage_analysis": [
+            {
+                "stage": "S1 Hook",
+                "creator_hook": {
+                    "exists": True,
+                    "type": "B",
+                    "dims": {"camera": True, "copy": True, "sound": True, "rhythm": False},
+                    "hook_boundary_seconds": 10.4,
+                    "hook_boundary_reason": "10.4s 产品正式亮相",
+                    "s2_start_signal": "产品亮相",
+                    "landing_met": True,
+                    "landing_reason": "0-10.4s 对象油皮、张力超预期、承诺能拯救油光齐全",
+                    "window_evidence": "0-10.4s 口播",
+                    "landing_window_leak": False,
+                    "anchors_proposition": True,
+                },
+                "benchmark_hook": {
+                    "exists": True,
+                    "type": "C",
+                    "dims": {"camera": True, "copy": True, "sound": True, "rhythm": True},
+                    "hook_boundary_seconds": 3.0,
+                    "hook_boundary_reason": "3s 后产品引出开始",
+                    "s2_start_signal": "产品名和解决方案出现",
+                    "landing_met": True,
+                    "landing_reason": "0-3s 三件套齐全",
+                    "window_evidence": "0-3s 钩子窗口",
+                    "landing_window_leak": False,
+                    "anchors_proposition": True,
+                },
+            }
+        ],
+    }
+    repair_s1_hook_boundaries(_boundary_result, {"videos": {"creator": {"work_dir": str(role_dir)}}})
+    _fixed = _boundary_result["stage_analysis"][0]["creator_hook"]
+    check("S1 边界候选后处理：10.4s 收回 6.8s 且 leak 压 landing=false",
+          _fixed["hook_boundary_seconds"] == 6.8
+          and _fixed["landing_window_leak"] is True
+          and _fixed["landing_met"] is False)
+
 _valid_hook = {
     "exists": True,
     "type": "B",
     "dims": {"camera": True, "copy": True, "sound": False, "rhythm": True},
+    "hook_boundary_seconds": 3.0,
+    "hook_boundary_reason": "3s 后产品引出开始",
+    "s2_start_signal": "产品名和解决方案出现",
     "landing_met": False,
     "landing_reason": "0-3s 有反差但承诺不明确",
     "window_evidence": "0-3s 口播低期待到高结果",
+    "landing_window_leak": False,
     "anchors_proposition": True,
 }
 try:

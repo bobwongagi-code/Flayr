@@ -13,7 +13,7 @@ import json
 import re
 from typing import Any
 
-from ..artifacts import format_seconds
+from ..artifacts import format_seconds, parse_time_range_seconds
 from ..llm.parse import STAGES
 from .utils import (
     adjacent_review_range,
@@ -25,7 +25,147 @@ from .utils import (
 )
 
 
+S2_START_CUES = [
+    "能解决",
+    "解决",
+    "能拯救",
+    "拯救",
+    "救",
+    "直到我发现",
+    "我发现",
+    "我用的是",
+    "我用的就是",
+    "答案",
+    "秘密",
+    "就是它",
+    "这款",
+    "这个",
+    "产品",
+    "认证",
+    "成分",
+    "价格",
+    "优惠",
+    "推荐",
+    "朋友推荐",
+    "医生",
+]
+
+
 # region align ---------------------------------------------------------------
+
+def repair_s1_hook_boundaries(result: dict[str, Any], analysis: dict[str, Any]) -> None:
+    """用 SRT/facts 候选边界收敛 S1 Hook，避免模型等到产品亮相才把 S2 切出来。"""
+    s1 = next((stage for stage in result.get("stage_analysis", []) if str(stage.get("stage", "")).startswith("S1")), None)
+    if not isinstance(s1, dict):
+        return
+    for role, side in (("creator", "creator"), ("benchmark", "benchmark")):
+        hook = s1.get(f"{side}_hook")
+        if not isinstance(hook, dict):
+            continue
+        candidate = infer_s1_boundary_candidate(role, result, analysis)
+        if not candidate:
+            continue
+        current = hook.get("hook_boundary_seconds")
+        if isinstance(current, bool) or not isinstance(current, (int, float)):
+            current = None
+        if current is None or float(current) > candidate["seconds"] + 0.5:
+            hook["hook_boundary_seconds"] = candidate["seconds"]
+            hook["hook_boundary_reason"] = f"{hook.get('hook_boundary_reason') or ''}（系统按 SRT/facts 边界候选收回：{candidate['reason']}）"
+            if not hook.get("s2_start_signal"):
+                hook["s2_start_signal"] = candidate.get("cue") or "S2 产品/解决方案承接开始"
+        reason = str(hook.get("landing_reason") or "")
+        leaks_by_time = hook_reason_window_leaks(reason, hook.get("hook_boundary_seconds"))
+        leaks_by_cue = bool(candidate.get("cue") and candidate["cue"] in reason)
+        if leaks_by_time or leaks_by_cue:
+            hook["landing_window_leak"] = True
+            if hook.get("landing_met") is True:
+                hook["landing_met"] = False
+
+
+def infer_s1_boundary_candidate(role: str, result: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any] | None:
+    segments = read_srt_segments((analysis.get("videos") or {}).get(role, {}) if isinstance(analysis.get("videos"), dict) else {})
+    if len(segments) >= 2:
+        first = segments[0]
+        second = segments[1]
+        start = float(second.get("start") or 0.0)
+        if 0 < start <= 12:
+            first_fact = find_early_evidence_for_role(role, result)
+            text = " ".join(
+                [
+                    str(first_fact.get("voiceover_zh") or ""),
+                    str(first_fact.get("information") or ""),
+                    str(second.get("text") or ""),
+                ]
+            )
+            cue = find_s2_start_cue(text)
+            if cue:
+                return {
+                    "seconds": round(start, 2),
+                    "cue": cue,
+                    "reason": (
+                        f"SRT 第一句 {first.get('start', 0):.2f}-{first.get('end', 0):.2f}s 更像 S1 留人；"
+                        f"第二句从 {start:.2f}s 出现“{cue}”类 S2 承接信号。"
+                    ),
+                }
+    return infer_boundary_from_evidence(role, result)
+
+
+def infer_boundary_from_evidence(role: str, result: dict[str, Any]) -> dict[str, Any] | None:
+    units = get_role_evidence_units(role, result)
+    if len(units) < 2:
+        return None
+    previous = units[0]
+    for current in units[1:4]:
+        current_start, _ = parse_time_range_seconds(current.get("time_range"), None)
+        if current_start <= 0 or current_start > 12:
+            continue
+        prev_functions = {str(item) for item in previous.get("functions") or []}
+        current_functions = {str(item) for item in current.get("functions") or []}
+        current_text = " ".join(
+            str(current.get(key) or "")
+            for key in ("information", "voiceover_zh", "visual_fact", "subtitle_fact")
+        )
+        cue = find_s2_start_cue(current_text)
+        if "S1_hook" in prev_functions and ("S2_intro" in current_functions or cue):
+            return {
+                "seconds": round(current_start, 2),
+                "cue": cue,
+                "reason": (
+                    f"facts 中 {previous.get('id')} 主功能为 S1_hook，"
+                    f"{current.get('id')} 从 {current_start:.2f}s 进入 S2_intro/产品承接。"
+                ),
+            }
+        previous = current
+    return None
+
+
+def find_early_evidence_for_role(role: str, result: dict[str, Any]) -> dict[str, Any]:
+    units = get_role_evidence_units(role, result)
+    if not units:
+        return {}
+    return min(units, key=lambda unit: parse_time_range_seconds(unit.get("time_range"), None)[0])
+
+
+def get_role_evidence_units(role: str, result: dict[str, Any]) -> list[dict[str, Any]]:
+    facts = result.get("video_understanding") if isinstance(result.get("video_understanding"), dict) else {}
+    direct = facts.get(role) if isinstance(facts.get(role), dict) else {}
+    units = direct.get("evidence_units") if isinstance(direct.get("evidence_units"), list) else []
+    return [unit for unit in units if isinstance(unit, dict)]
+
+
+def find_s2_start_cue(text: str) -> str:
+    compact = re.sub(r"\s+", "", text)
+    for cue in S2_START_CUES:
+        if cue in compact:
+            return cue
+    return ""
+
+
+def hook_reason_window_leaks(reason: str, boundary_seconds: Any, tolerance: float = 0.3) -> bool:
+    if isinstance(boundary_seconds, bool) or not isinstance(boundary_seconds, (int, float)):
+        return False
+    vals = [float(m) for m in re.findall(r"(\d+(?:\.\d+)?)\s*s", reason or "")]
+    return bool(vals and max(vals) > float(boundary_seconds) + tolerance)
 
 def align_clear_commerce_evidence(result: dict[str, Any]) -> None:
     """按关键词把 benchmark 的高确定性事实归到对应阶段（成分→S2, feedback→S4, KKM 认证→S5 等）。"""

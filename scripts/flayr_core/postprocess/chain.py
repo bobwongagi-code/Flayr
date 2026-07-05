@@ -38,6 +38,7 @@ from .repair import (
     ground_stage_visual_evidence,
     materialize_spoken_stage_evidence,
     reconcile_unsupported_cta,
+    repair_s1_hook_boundaries,
     stabilize_improvement_priorities,
     stabilize_stage_severity,
 )
@@ -79,6 +80,7 @@ def apply_postprocess_chain(normalized: dict[str, Any], analysis: dict[str, Any]
     materialize_spoken_stage_evidence(normalized)                            # repair      有口播无时段证据时补 stage 占位
     fill_missing_evidence_references(normalized)                             # repair      引用错位时补占位或就近匹配
     derive_product_visibility(normalized, analysis)                          # repair      达人产品出镜标记确定性累加 product_visibility
+    repair_s1_hook_boundaries(normalized, analysis)                           # repair      S1/S2 边界按 SRT/facts 候选收敛，防 Hook 吃掉产品引出
     stabilize_stage_severity(normalized)                                      # repair      severity 阶段归属漂移校准
     derive_severity_from_facts(normalized, analysis)                          # derive      4d 执行分+权重表确定性推导（成功则覆盖，缺事实保留上游结果；含晃动封顶）
     stabilize_improvement_priorities(normalized)                              # repair      Top 改进跟随最终商业判断

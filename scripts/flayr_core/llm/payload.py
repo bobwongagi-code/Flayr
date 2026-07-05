@@ -15,6 +15,7 @@ from ..artifacts import format_seconds, parse_time_range_seconds
 from ..shot_track import render_shot_track_markdown
 from ..speech_mode import speech_mode_prompt
 from ..subtitle_track import render_subtitle_track_markdown
+from ..video_evidence import parse_srt_segments
 from .api import audio_to_mp3_data_url, video_to_data_url
 from .media import build_evidence_sensory_inputs
 
@@ -342,6 +343,166 @@ def load_brand_proposition(run_dir: Path) -> dict[str, Any] | None:
     return {"propositions": props, "painpoints": pains}
 
 
+S2_START_CUES = [
+    "能解决",
+    "解决",
+    "能拯救",
+    "拯救",
+    "救",
+    "直到我发现",
+    "我发现",
+    "我用的是",
+    "我用的就是",
+    "答案",
+    "秘密",
+    "就是它",
+    "这款",
+    "这个",
+    "产品",
+    "认证",
+    "成分",
+    "价格",
+    "优惠",
+    "推荐",
+    "朋友推荐",
+    "医生",
+]
+
+
+def build_s1_boundary_hint_block(analysis: dict[str, Any] | None, facts: dict[str, Any]) -> str:
+    """用 SRT 句段给 Stage2 一个 S1/S2 边界候选，避免粗 evidence 单元把 Hook 和产品引出焊死。"""
+    if not analysis:
+        return ""
+    videos = analysis.get("videos") if isinstance(analysis.get("videos"), dict) else {}
+    lines = [
+        "## S1/S2 边界候选（代码从 transcript.srt + facts 提取，仅辅助裁边界）",
+        "按 structure_library_full.md：S1 是抢夺注意力，S2 是从 Hook 自然过渡到产品。",
+        "若候选处下一句已经开始承接/揭晓/否定转正/第三方推荐，即使产品实物或产品名还没出现，也优先视为 S2 起点。",
+    ]
+    wrote_any = False
+    for role in ("creator", "benchmark"):
+        info = videos.get(role) if isinstance(videos, dict) else None
+        if not isinstance(info, dict):
+            continue
+        role_dir = Path(str(info.get("work_dir") or ""))
+        segments = parse_srt_segments(role_dir / "transcript.srt")[:4]
+        if not segments:
+            continue
+        candidate = infer_s1_boundary_candidate(role, segments, facts)
+        lines.append("")
+        lines.append(f"- {role}:")
+        if candidate:
+            lines.append(f"  - candidate_hook_boundary_seconds: {candidate['seconds']:.2f}")
+            lines.append(f"  - candidate_reason: {candidate['reason']}")
+        else:
+            lines.append("  - candidate_hook_boundary_seconds: 未自动识别；仍按下方 SRT 句段自行按功能裁边界。")
+        lines.append("  - early_srt:")
+        for segment in segments:
+            lines.append(
+                f"    [{segment['start_seconds']:.2f}-{segment['end_seconds']:.2f}] {segment['text']}"
+            )
+        wrote_any = True
+    return "\n".join(lines) if wrote_any else ""
+
+
+def infer_s1_boundary_candidate(
+    role: str,
+    segments: list[dict[str, Any]],
+    facts: dict[str, Any],
+) -> dict[str, Any] | None:
+    if len(segments) < 2:
+        return None
+    first = segments[0]
+    second = segments[1]
+    start = float(second.get("start_seconds") or 0.0)
+    if start <= 0 or start > 12:
+        return None
+
+    first_fact = find_early_evidence_for_role(role, facts)
+    voice_zh = str(first_fact.get("voiceover_zh") or "")
+    info = str(first_fact.get("information") or "")
+    second_text = str(second.get("text") or "")
+    cue = find_s2_start_cue(" ".join([voice_zh, second_text, info]))
+    if cue:
+        return {
+            "seconds": start,
+            "reason": (
+                f"SRT 第一句 {first['start_seconds']:.2f}-{first['end_seconds']:.2f}s 更像 S1 留人；"
+                f"第二句从 {start:.2f}s 开始出现“{cue}”类承接/解决方案信号，按 S2-A/S2-B/S2-C/S2-D 功能可能已进入 S2。"
+            ),
+        }
+
+    evidence_candidate = infer_boundary_from_evidence(role, facts)
+    if evidence_candidate:
+        return evidence_candidate
+    return None
+
+
+def infer_boundary_from_evidence(role: str, facts: dict[str, Any]) -> dict[str, Any] | None:
+    units = get_role_evidence_units(role, facts)
+    if len(units) < 2:
+        return None
+    previous = units[0]
+    for current in units[1:4]:
+        current_start = parse_evidence_start(current.get("time_range"))
+        if current_start <= 0 or current_start > 12:
+            continue
+        prev_functions = {str(item) for item in previous.get("functions") or []}
+        current_functions = {str(item) for item in current.get("functions") or []}
+        current_text = " ".join(
+            str(current.get(key) or "")
+            for key in ("information", "voiceover_zh", "visual_fact", "subtitle_fact")
+        )
+        if "S1_hook" in prev_functions and (
+            "S2_intro" in current_functions or find_s2_start_cue(current_text)
+        ):
+            return {
+                "seconds": current_start,
+                "reason": (
+                    f"facts 中前一单元 {previous.get('id')} 主功能为 S1_hook，"
+                    f"{current.get('id')} 从 {current_start:.2f}s 开始进入 S2_intro/产品承接信号。"
+                ),
+            }
+        previous = current
+    return None
+
+
+def find_early_evidence_for_role(role: str, facts: dict[str, Any]) -> dict[str, Any]:
+    role_units = get_role_evidence_units(role, facts)
+    if not role_units:
+        return {}
+    return min(role_units, key=lambda unit: parse_evidence_start(unit.get("time_range")))
+
+
+def get_role_evidence_units(role: str, facts: dict[str, Any]) -> list[dict[str, Any]]:
+    prefix = "C" if role == "creator" else "B"
+    units = facts.get("evidence_units") if isinstance(facts.get("evidence_units"), list) else []
+    role_units = [unit for unit in units if isinstance(unit, dict) and str(unit.get("id") or "").startswith(prefix)]
+    if not role_units:
+        direct = facts.get(role) if isinstance(facts.get(role), dict) else {}
+        role_units = direct.get("evidence_units") if isinstance(direct.get("evidence_units"), list) else []
+    if not role_units:
+        videos = facts.get("videos") if isinstance(facts.get("videos"), dict) else {}
+        nested = videos.get(role) if isinstance(videos.get(role), dict) else {}
+        role_units = nested.get("evidence_units") if isinstance(nested.get("evidence_units"), list) else []
+    if not role_units:
+        return []
+    return [unit for unit in role_units if isinstance(unit, dict)]
+
+
+def parse_evidence_start(value: Any) -> float:
+    start, _ = parse_time_range_seconds(str(value or ""), None)
+    return start
+
+
+def find_s2_start_cue(text: str) -> str:
+    compact = re.sub(r"\s+", "", text)
+    for cue in S2_START_CUES:
+        if cue in compact:
+            return cue
+    return ""
+
+
 def hook_anchor_terms(bp: dict[str, Any], foundation: dict[str, Any]) -> tuple[list[str], list[str], str]:
     """Resolve S1 anchor terms for hook flags.
 
@@ -387,6 +548,7 @@ def build_llm_comparison_payload(
     market_knowledge = read_text_if_exists(ROOT / "references" / "market-knowledge-my.md")
     qa_rules = read_text_if_exists(ROOT / "QA-RULES.md")
     speech_mode_block = render_speech_mode_block(analysis or {})
+    s1_boundary_hint_block = build_s1_boundary_hint_block(analysis, facts)
     # Step-0 品地基注入：已确立则作为 S1-S6 判断的尺子直接采用，模型不再另起炉灶现编（防"现编标尺又自评"）。
     fnd = (analysis or {}).get("product_foundation") or {}
     foundation_block = ""
@@ -418,31 +580,43 @@ def build_llm_comparison_payload(
         '"dims": {"camera": bool, "copy": bool, "sound": bool, "rhythm": bool}'
         '（该侧钩子在所选 type 下，镜头/文案/声音/节奏四维是否做到结构库给的【必需】结构件——'
         '做到结构库示例即 true、缺了即 false；只判"做到没"不判"好不好"，不评创新加分；type=unknown 时四维按通用做到度判）, '
-        '"landing_met": bool（钩子有没有"打穿"，【与 type 无关】。判 true 当且仅当：最早 hook 窗口'
-        '（优先 0-3s，不足扩到 0-5s，voiceover_zh 第一完整句跨到约 6.8s 可用整句）内用户能 get 到一个【可停留的理由】，'
+        '"hook_boundary_seconds": number（该侧 S1 Hook 的结束秒点，不是固定 3/5/6 秒。按 structure_library_full.md 的槽位职责判：'
+        'S1=抢夺注意力，让用户留下；S2=从 Hook 自然过渡到产品。边界就是主导信息从"留人机制"切到"产品/解决方案引出/解决方案承接"的第一个时刻。'
+        '判定优先级：口播语义切换 > 字幕/贴纸信息切换 > 画面主体/产品功能切换 > 场景/镜头功能切换。'
+        'S2 起点信号包括：开始回答 Hook、开始说"能解决/能拯救/直到我发现/我用的是/答案是/就是它"这类承接话术、'
+        '产品名/品类名/解决方案/卖点/认证/成分/价格/购买理由开始出现，或产品从道具变为解决方案主角/揭晓对象/推荐对象。'
+        '重要：S2-A 承接式引出可以早于产品实物出镜或产品名出现；不要等到产品画面/产品名才切 S2。'
+        '产品在 S1 画面里出现不自动算 S2；但一旦口播/字幕开始把某个东西作为解决方案承接 Hook，即使还没露出包装，也已经是 S2。'
+        '若第一句完整 Hook 跨过 5 秒，可取第一句结束；但不能把后续产品解释并入 S1）, '
+        '"hook_boundary_reason": "一句话说明为什么这里是 S1/S2 边界：S1 主导信息是什么，S2 起点信号是什么", '
+        '"s2_start_signal": "边界后第一个 S2 信号，如产品名/解决方案承接/产品揭晓/认证卖点/产品成为画面主角", '
+        '"landing_met": bool（钩子有没有"打穿"，【与 type 无关】。判 true 当且仅当：0 到 hook_boundary_seconds 内用户能 get 到一个【可停留的理由】，'
         '且【同时】满足三件——①对象明确：在说谁的问题/谁的场景/谁会关心（油皮、脱妆、经期痛、孩子抗拒刷牙）；'
         '②张力明确：为什么要继续看（痛点/反差/结果/悬念/场景共鸣/身份代入/认知颠覆 任一）；'
         '③承诺或证据明确：后面要证明什么（油光变哑光、补妆不花、刷头不用手碰、孩子能接受）。三件缺任一即 false——'
         '不是没 hook 元素，是 hook 没闭环。【铁律：严禁因为后续 S2/S3 产品介绍补足了逻辑就把 S1 landing 判 true，'
-        '只看最早 hook 窗口本身闭没闭环、不跟后段走】）, '
-        '"landing_reason": "一句话说清 landing 为何 true/false，必须引用最早窗口的具体证据（时间戳+原话/画面），'
-        '如 0-6.8s 仅口播\'结果超预期\'但没说超预期的结果是什么→承诺不明确→false", '
-        '"window_evidence": "钩子最早 3-5 秒实际出现了什么（带时间戳），作为 type 判断依据，'
+        '只看 0 到 hook_boundary_seconds 本身闭没闭环、不跟后段走】）, '
+        '"landing_reason": "一句话说清 landing 为何 true/false，必须只引用 0 到 hook_boundary_seconds 内的具体证据（时间戳+原话/画面），'
+        '如 0-6.8s 仅口播\'结果超预期\'但没说超预期的结果是什么→承诺不明确→false；严禁引用 hook_boundary_seconds 之后的产品/卖点/认证来补足", '
+        '"window_evidence": "0 到 hook_boundary_seconds 内实际出现了什么（带时间戳），作为 type 判断依据，'
         '如 0-4.5s 近脸/指脸/拿产品但未建立使用前后强对比", '
+        '"landing_window_leak": bool（landing_reason 或 landing_met 是否借用了 hook_boundary_seconds 之后的 S2/S3 材料。若引用边界后的产品名/卖点/认证/解决方案补足三件套，必须 true 且 landing_met=false）, '
         '"anchors_proposition": bool（该侧钩子内容是否触及上面任一 proposition、painpoint，或 product_profile.hook_proposition/category_profile.painpoints 概念）}。'
     )
     # 强制字段要求（放在末尾"输出要求"区，模型严格跟这块走；前面的尺子块只给结构定义）
     hook_field_req = (
         "S1 强制：stage_analysis 第 1 项（S1 Hook）必须再含 creator_hook 与 benchmark_hook 两个对象"
-        "（结构见上方：exists/type/dims{camera,copy,sound,rhythm}/landing_met/landing_reason/window_evidence/anchors_proposition）。"
+        "（结构见上方：exists/type/dims{camera,copy,sound,rhythm}/hook_boundary_seconds/hook_boundary_reason/s2_start_signal/landing_met/landing_reason/window_evidence/landing_window_leak/anchors_proposition）。"
         "type 为描述字段（按最早窗口主导机制判、不进 severity）；landing_met 是 type 无关的三件套二元判（进 severity）；"
-        "缺失视为违规输出。S2-S6 不含这两个字段。"
+        "hook_boundary_seconds 必须按 structure_library 的 S1 留人机制→S2 产品引出/解决方案承接功能切换来判，不得写死固定秒数；"
+        "S2-A 承接式引出可早于产品实物或产品名出现，不能等产品画面才切 S2；缺失视为违规输出。S2-S6 不含这两个字段。"
     )
     user_text = "\n\n".join(
         [
             context,
             foundation_block,
             hook_flag_block,
+            s1_boundary_hint_block,
             "## S1-S6 模块结构库（判断视图：客观类型 + 适配条件，判 module_id 与类型对本品适配用；这是结构层、非判断层，不讲好坏）",
             structure_library_judgment_view(),
             "## 商业评判框架（判断差距权重的方法）",
@@ -616,17 +790,24 @@ def build_stage_review_payload(
             "exists": True,
             "type": "A-G 或 unknown",
             "dims": {"camera": True, "copy": True, "sound": True, "rhythm": True},
+            "hook_boundary_seconds": 4.5,
+            "hook_boundary_reason": "S1 是痛点/反差/悬念留人，S2 从解决方案承接/产品引出/产品揭晓开始",
+            "s2_start_signal": "开始回答 Hook 或把某个东西作为解决方案承接，即使产品尚未出镜",
             "landing_met": True,
-            "landing_reason": "引用最早 hook 窗口内的时间戳+原话/画面，说明对象/张力/承诺或证据是否齐全",
-            "window_evidence": "0.0s-5.0s 最早 hook 窗口实际出现的画面/口播/字幕",
+            "landing_reason": "只引用 0 到 hook_boundary_seconds 内的时间戳+原话/画面，说明对象/张力/承诺或证据是否齐全",
+            "window_evidence": "0.0s 到 hook_boundary_seconds 内实际出现的画面/口播/字幕",
+            "landing_window_leak": False,
             "anchors_proposition": True,
         }
         stage_update_example["creator_hook"] = hook_example
         stage_update_example["benchmark_hook"] = hook_example
         s1_contract = (
             "目标阶段包含 S1 时，stage_update 必须同时重判 creator_hook 与 benchmark_hook；"
-            "不得沿用当前阶段判断里的旧 hook。landing_met 仍按最早 hook 窗口三件套判："
-            "对象明确 + 张力明确 + 承诺或证据明确，缺一即 false，禁止用后续 S2/S3 补足。"
+            "不得沿用当前阶段判断里的旧 hook。先按 structure_library_full.md 判 S1/S2 边界："
+            "S1=抢夺注意力，S2=从 Hook 自然过渡到产品；开始回答 Hook、解决方案承接、产品名/卖点/认证/产品成为主角通常是 S2 起点。"
+            "S2-A 承接式引出可早于产品实物或产品名出现，不能等产品画面才切 S2。"
+            "landing_met 只能按 0 到 hook_boundary_seconds 内的三件套判：对象明确 + 张力明确 + 承诺或证据明确，"
+            "缺一即 false，禁止用后续 S2/S3 补足；若 landing_reason 引用边界后内容，landing_window_leak=true 且 landing_met=false。"
         )
     content: list[dict[str, Any]] = [
         {
@@ -903,8 +1084,9 @@ def build_llm_repair_payload(
                     "每个阶段引用的事实单元时间必须与阶段时间相交；缺少独立内容的阶段也要提供该时段的无对应内容事实单元。"
                     "提供了 transcript.srt 时，以其时间戳重新校对口播对应阶段；认证与产品属性连续表达时只归入 S2。"
                     "一条事实只归属一个主要阶段；KKM 等认证信息不能写入 Hook，与产品引出同段出现时仅归入 S2；口播提及但画面不可见时标记 voice_only。"
-                    "S1 Hook 必须补齐 creator_hook 与 benchmark_hook 两个对象，字段为 exists(bool)、type(A-G 或 unknown)、dims{camera,copy,sound,rhythm}(bool)、landing_met(bool)、landing_reason(非空)、window_evidence(非空)、anchors_proposition(bool)。"
-                    "landing_met 按 type 无关三件套判断：最早 hook 窗口内对象明确、张力明确、承诺或证据明确，缺一即 false；不得用后续 S2/S3 产品介绍补足 S1 landing。"
+                    "S1 Hook 必须补齐 creator_hook 与 benchmark_hook 两个对象，字段为 exists(bool)、type(A-G 或 unknown)、dims{camera,copy,sound,rhythm}(bool)、hook_boundary_seconds(number)、hook_boundary_reason(非空)、s2_start_signal(非空)、landing_met(bool)、landing_reason(非空)、window_evidence(非空)、landing_window_leak(bool)、anchors_proposition(bool)。"
+                    "hook_boundary_seconds 按 structure_library_full.md 的 S1 留人机制→S2 产品引出/解决方案承接功能切换判断，不得写死固定秒数；S2-A 承接式引出可早于产品实物或产品名出现，不能等产品画面才切 S2。"
+                    "landing_met 按 type 无关三件套判断：0 到 hook_boundary_seconds 内对象明确、张力明确、承诺或证据明确，缺一即 false；不得用后续 S2/S3 产品介绍补足 S1 landing。若引用边界后材料，landing_window_leak=true 且 landing_met=false。"
                     "提升点必须保留 benchmark_evidence_ids、base_frame_suitability、best_base_frame_time、base_frame_evidence_id、base_frame_reason 和 aigc_prompt；无可用达人素材时写 no_suitable_frame 且时间与 base_frame_evidence_id 留空。aigc_image_path 留空。"
                     "修复 improvements 时也必须遵循达人框架约束、卖点适配权重和标杆功能意图转译，不得把 benchmark_reference 直接改写成 suggestion。"
                     "健康品类建议不得声称调节激素、改善月经、治疗症状或虚构优惠。建议话术必须重新设计，不得复制标杆原句。"

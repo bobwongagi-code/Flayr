@@ -148,6 +148,7 @@ def normalize_demo_flag(value: Any) -> bool | None:
 
 
 _HOOK_TYPE_LETTERS = {"A", "B", "C", "D", "E", "F", "G"}
+_HOOK_TS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*s")
 
 
 def normalize_hook_type(value: Any) -> str:
@@ -158,6 +159,30 @@ def normalize_hook_type(value: Any) -> str:
     return s if s in _HOOK_TYPE_LETTERS else "unknown"
 
 
+def normalize_hook_boundary_seconds(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if number >= 0 else None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        number = float(text)
+        return number if number >= 0 else None
+    except ValueError:
+        return None
+
+
+def hook_reason_window_leaks(reason: str, boundary_seconds: float | None, tolerance: float = 0.3) -> bool:
+    """landing_reason 引用了 hook 边界后的时间戳，说明 S1 判断借用了 S2/S3 材料。"""
+    if boundary_seconds is None:
+        return False
+    vals = [float(m) for m in _HOOK_TS_RE.findall(reason or "")]
+    return bool(vals and max(vals) > boundary_seconds + tolerance)
+
+
 def normalize_hook_flags(value: Any) -> dict[str, Any] | None:
     """归一单侧 S1 钩子结构化 flag。整体缺失（非 dict）→None，derive 见 None 回退模型执行分（优雅降级）。
     形状：{exists: bool|None, type: A-G|unknown, dims:{camera/copy/sound/rhythm: bool}, anchors_proposition: bool|None}。
@@ -165,6 +190,14 @@ def normalize_hook_flags(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     raw_dims = value.get("dims") if isinstance(value.get("dims"), dict) else {}
+    boundary_seconds = normalize_hook_boundary_seconds(value.get("hook_boundary_seconds"))
+    landing_reason = str(value.get("landing_reason") or "").strip()
+    model_leak = normalize_demo_flag(value.get("landing_window_leak"))
+    deterministic_leak = hook_reason_window_leaks(landing_reason, boundary_seconds)
+    landing_window_leak = bool(model_leak is True or deterministic_leak)
+    landing_met = normalize_demo_flag(value.get("landing_met"))
+    if landing_window_leak and landing_met is True:
+        landing_met = False
     return {
         "exists": normalize_demo_flag(value.get("exists")),
         "type": normalize_hook_type(value.get("type")),
@@ -175,11 +208,15 @@ def normalize_hook_flags(value: Any) -> dict[str, Any] | None:
             "rhythm": normalize_bool_flag(raw_dims.get("rhythm")),
         },
         # landing_met=钩子有没有"打穿"（type 无关三件套：对象/张力/承诺缺一即 false）。三态：None=模型没判。进 severity。
-        "landing_met": normalize_demo_flag(value.get("landing_met")),
+        "landing_met": landing_met,
         # landing_reason=landing 判定的一句话理由（须引最早窗口证据）。审计 + B2 稳定性看依据用，derive 不消费。
-        "landing_reason": str(value.get("landing_reason") or "").strip(),
+        "landing_reason": landing_reason,
         # window_evidence=钩子最早 3-5 秒带时间戳的观察，作 type 依据（审计 + B2 type_accuracy 用，derive 不消费）。
         "window_evidence": str(value.get("window_evidence") or "").strip(),
+        "hook_boundary_seconds": boundary_seconds,
+        "hook_boundary_reason": str(value.get("hook_boundary_reason") or "").strip(),
+        "s2_start_signal": str(value.get("s2_start_signal") or "").strip(),
+        "landing_window_leak": landing_window_leak,
         "anchors_proposition": normalize_demo_flag(value.get("anchors_proposition")),
     }
 
