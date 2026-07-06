@@ -297,7 +297,7 @@ def _s2_risky_module(stage: dict[str, Any]) -> bool:
 
 
 def _s3_usage_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
-    """S3 使用过程 flag：真实使用 + 核心卖点可见是主轴，场景/连续/丰富只在主轴成立后加分。"""
+    """S3 使用过程 flag：真实使用 + 核心卖点可见是主轴，场景组织/表现层只在主轴成立后加分。"""
     c = stage.get("creator_s3")
     b = stage.get("benchmark_s3")
     if not isinstance(c, dict) or not isinstance(b, dict):
@@ -306,13 +306,39 @@ def _s3_usage_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
     def side_exec(flag: dict[str, Any]) -> float:
         if flag.get("exists") is False:
             return 0.0
-        if flag.get("real_usage_met") is False or flag.get("fake_or_staged") is True:
+        if flag.get("mouth_only_or_static") is True:
+            return 0.0
+        if flag.get("result_only_without_process") is True:
+            return 0.5
+        has_usage = flag.get("usage_process_visible")
+        if has_usage is None:
+            has_usage = flag.get("real_usage_met")
+        if has_usage is False or flag.get("fake_or_staged") is True:
             return 0.0
         if flag.get("core_selling_point_visible") is not True:
             return 0.5
-        if flag.get("usage_context_fit") is True and flag.get("continuity_met") is True:
-            return 2.0 if flag.get("richness_met") is True else 1.0
-        return 0.5
+        if flag.get("usage_context_fit") is not True:
+            return 0.5
+
+        mode = str(flag.get("scene_mode") or "unknown")
+        if mode == "single_scene":
+            strong_scene = (
+                flag.get("single_scene_continuity_met") is True
+                and (flag.get("single_scene_variation_met") is True or flag.get("richness_met") is True)
+            )
+        elif mode == "multi_scene":
+            strong_scene = (
+                flag.get("multi_scene_logic_met") is True
+                and flag.get("multi_scene_transition_met") is True
+                and flag.get("multi_scene_role_adaptation_met") is True
+            )
+        elif mode == "multi_person":
+            strong_scene = flag.get("role_design_met") is True and flag.get("role_interaction_met") is True
+        elif mode == "hybrid":
+            strong_scene = flag.get("continuity_met") is True and flag.get("richness_met") is True
+        else:
+            strong_scene = flag.get("continuity_met") is True and flag.get("richness_met") is True
+        return 2.0 if strong_scene else 1.0
 
     return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
 
@@ -323,17 +349,45 @@ def _s3_core_floor(stage: dict[str, Any]) -> tuple[bool, str]:
     b = stage.get("benchmark_s3")
     if not isinstance(c, dict) or not isinstance(b, dict):
         return False, ""
-    benchmark_core = b.get("real_usage_met") is True and b.get("core_selling_point_visible") is True
+    benchmark_core = (
+        (b.get("usage_process_visible") is True or b.get("real_usage_met") is True)
+        and b.get("core_selling_point_visible") is True
+    )
     if not benchmark_core:
         return False, ""
     missing = []
-    if c.get("real_usage_met") is False or c.get("fake_or_staged") is True:
+    if c.get("mouth_only_or_static") is True:
+        missing.append("只口播/静态展示")
+    if c.get("result_only_without_process") is True:
+        missing.append("只有结果没有使用过程")
+    if c.get("usage_process_visible") is False or c.get("real_usage_met") is False or c.get("fake_or_staged") is True:
         missing.append("缺少真实使用过程")
     if c.get("core_selling_point_visible") is not True:
         missing.append("核心卖点未在动作里可见")
     if not missing:
         return False, ""
     return True, "；S3 核心演示下限：" + "、".join(missing)
+
+
+def _s4_effect_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
+    """S4 效果因果 flag：效果要可见，也要可信地由产品造成；只有结果没过程不能直接高分。"""
+    c = stage.get("creator_s4")
+    b = stage.get("benchmark_s4")
+    if not isinstance(c, dict) or not isinstance(b, dict):
+        return None
+
+    def side_exec(flag: dict[str, Any]) -> float:
+        if flag.get("effect_visible") is False:
+            return 0.0
+        if flag.get("tamper_or_cut_risk") is True:
+            return 0.5
+        if flag.get("process_linked_effect") is True and flag.get("effect_attribution_supported") is True:
+            return 2.0
+        if flag.get("result_only_without_process") is True:
+            return 1.0 if flag.get("effect_attribution_supported") is True else 0.5
+        return 1.0 if flag.get("effect_attribution_supported") is True else 0.5
+
+    return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
 
 
 def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] | None,
@@ -359,6 +413,10 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         s3 = _s3_usage_exec(stage)
         if s3 is not None:
             creator_exec, bench_exec = s3["creator_exec"], s3["bench_exec"]
+    elif stage_id == "S4":
+        s4 = _s4_effect_exec(stage)
+        if s4 is not None:
+            creator_exec, bench_exec = s4["creator_exec"], s4["bench_exec"]
     if creator_exec is None or bench_exec is None:
         return {"status": "skipped", "reason": "执行分缺失，保留模型 severity"}
 

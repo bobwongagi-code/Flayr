@@ -151,6 +151,8 @@ _HOOK_TYPE_LETTERS = {"A", "B", "C", "D", "E", "F", "G"}
 _S2_TYPE_LETTERS = {"A", "B", "C", "D"}
 _S3_TYPE_LETTERS = {"A", "B", "C", "D", "E"}
 _HOOK_TS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*s")
+_S3_SCENE_MODES = {"single_scene", "multi_scene", "multi_person", "hybrid", "unknown"}
+_S3_PRESENTATION_OVERLAYS = {"step_breakdown", "first_person", "asmr", "closeup", "none"}
 
 
 def normalize_hook_type(value: Any) -> str:
@@ -173,6 +175,26 @@ def normalize_s3_type(value: Any) -> str:
     s = str(value or "").strip().upper().replace("S3-", "").replace("S3_", "")
     s = s[:1]
     return s if s in _S3_TYPE_LETTERS else "unknown"
+
+
+def normalize_s3_scene_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return mode if mode in _S3_SCENE_MODES else "unknown"
+
+
+def normalize_presentation_overlays(value: Any) -> list[str]:
+    if isinstance(value, list):
+        raw = value
+    elif isinstance(value, str) and value.strip():
+        raw = re.split(r"[,/，、\s]+", value.strip())
+    else:
+        raw = []
+    overlays: list[str] = []
+    for item in raw:
+        key = str(item or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if key in _S3_PRESENTATION_OVERLAYS and key not in overlays:
+            overlays.append(key)
+    return overlays or ["none"]
 
 
 def normalize_hook_boundary_seconds(value: Any) -> float | None:
@@ -261,18 +283,50 @@ def normalize_s3_flags(value: Any) -> dict[str, Any] | None:
     """归一 S3 使用过程 flag。缺失返回 None，derive/validate 按主链标记决定是否消费。"""
     if not isinstance(value, dict):
         return None
+    usage_process_visible = normalize_demo_flag(value.get("usage_process_visible"))
+    if usage_process_visible is None:
+        usage_process_visible = normalize_demo_flag(value.get("real_usage_met"))
     return {
         "exists": normalize_demo_flag(value.get("exists")),
         "module_type": normalize_s3_type(value.get("module_type")),
+        "usage_process_visible": usage_process_visible,
+        "result_only_without_process": normalize_demo_flag(value.get("result_only_without_process")),
+        "mouth_only_or_static": normalize_demo_flag(value.get("mouth_only_or_static")),
         "real_usage_met": normalize_demo_flag(value.get("real_usage_met")),
         "core_selling_point_visible": normalize_demo_flag(value.get("core_selling_point_visible")),
+        "demonstrated_selling_points": normalize_evidence(value.get("demonstrated_selling_points")),
+        "missing_selling_points": normalize_evidence(value.get("missing_selling_points")),
+        "scene_mode": normalize_s3_scene_mode(value.get("scene_mode")),
         "usage_context_fit": normalize_demo_flag(value.get("usage_context_fit")),
         "continuity_met": normalize_demo_flag(value.get("continuity_met")),
         "richness_met": normalize_demo_flag(value.get("richness_met")),
+        "single_scene_continuity_met": normalize_demo_flag(value.get("single_scene_continuity_met")),
+        "single_scene_variation_met": normalize_demo_flag(value.get("single_scene_variation_met")),
+        "multi_scene_logic_met": normalize_demo_flag(value.get("multi_scene_logic_met")),
+        "multi_scene_transition_met": normalize_demo_flag(value.get("multi_scene_transition_met")),
+        "multi_scene_role_adaptation_met": normalize_demo_flag(value.get("multi_scene_role_adaptation_met")),
+        "role_design_met": normalize_demo_flag(value.get("role_design_met")),
+        "role_interaction_met": normalize_demo_flag(value.get("role_interaction_met")),
+        "presentation_overlays": normalize_presentation_overlays(value.get("presentation_overlays")),
         "fake_or_staged": normalize_demo_flag(value.get("fake_or_staged")),
         "start_seconds": normalize_hook_boundary_seconds(value.get("start_seconds")),
         "end_seconds": normalize_hook_boundary_seconds(value.get("end_seconds")),
         "usage_reason": str(value.get("usage_reason") or "").strip(),
+        "evidence_ids": normalize_evidence(value.get("evidence_ids")),
+    }
+
+
+def normalize_s4_flags(value: Any) -> dict[str, Any] | None:
+    """归一 S4 效果因果 flag。缺失返回 None，derive 保留旧 S4 路径。"""
+    if not isinstance(value, dict):
+        return None
+    return {
+        "effect_visible": normalize_demo_flag(value.get("effect_visible")),
+        "effect_attribution_supported": normalize_demo_flag(value.get("effect_attribution_supported")),
+        "result_only_without_process": normalize_demo_flag(value.get("result_only_without_process")),
+        "process_linked_effect": normalize_demo_flag(value.get("process_linked_effect")),
+        "tamper_or_cut_risk": normalize_demo_flag(value.get("tamper_or_cut_risk")),
+        "effect_reason": str(value.get("effect_reason") or "").strip(),
         "evidence_ids": normalize_evidence(value.get("evidence_ids")),
     }
 
@@ -690,6 +744,9 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 # 缺失为 None → derive 保守降级。
                 "creator_s3": normalize_s3_flags(item.get("creator_s3")),
                 "benchmark_s3": normalize_s3_flags(item.get("benchmark_s3")),
+                # S4 效果因果 flag：只约束"效果是否可信地由产品造成"，缺失则保留旧 S4 判断。
+                "creator_s4": normalize_s4_flags(item.get("creator_s4")),
+                "benchmark_s4": normalize_s4_flags(item.get("benchmark_s4")),
             }
         )
 

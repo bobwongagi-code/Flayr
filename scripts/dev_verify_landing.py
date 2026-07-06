@@ -54,6 +54,7 @@ from flayr_core.postprocess.validate import (  # noqa: E402
     validate_s1_hook_flags,
     validate_s2_contract_flags,
     validate_s3_usage_flags,
+    validate_s4_effect_flags,
 )
 
 
@@ -152,7 +153,7 @@ _s5_one = _derive_one("S5", {"creator_execution": 1.0, "benchmark_execution": 2.
 check("S5 一方有硬背书→进公式不判均未涉及", "均未涉及" not in _s5_one.get("reason", ""))
 
 # 4c. S1 Hook flag 化（切片 A）：四维推执行分 + hook_exists 红线 + 命题锚 + 残差亮点门
-from flayr_core.llm.parse import normalize_hook_flags, normalize_s2_flags, normalize_s3_flags  # noqa: E402
+from flayr_core.llm.parse import normalize_hook_flags, normalize_s2_flags, normalize_s3_flags, normalize_s4_flags  # noqa: E402
 
 
 def _hook(exists, htype, cam=False, cp=False, snd=False, rhy=False, anchors=None, landing=None):
@@ -294,16 +295,51 @@ _s2_risky = _derive_one(
 check("S2 风险引出方式→reason 标注风险模块",
       "高风险引出方式" in _s2_risky.get("reason", ""))
 
-# S3 使用过程 flag：真实使用 + 核心卖点可见是主轴，场景丰富只做加分
-def _s3_flag(exists=True, module="A", real=True, core=True, context=True, continuity=True, richness=False, fake=False):
+# S3 使用过程 flag：真实使用 + 核心卖点可见是主轴，场景组织/表现层只做加分
+def _s3_flag(
+    exists=True,
+    module="A",
+    usage=True,
+    result_only=False,
+    mouth_static=False,
+    real=True,
+    core=True,
+    context=True,
+    continuity=True,
+    richness=False,
+    fake=False,
+    scene="single_scene",
+    single_continuity=True,
+    single_variation=False,
+    multi_logic=False,
+    multi_transition=False,
+    multi_role=False,
+    role_design=False,
+    role_interaction=False,
+    overlays=None,
+):
     return {
         "exists": exists,
         "module_type": module,
+        "usage_process_visible": usage,
+        "result_only_without_process": result_only,
+        "mouth_only_or_static": mouth_static,
         "real_usage_met": real,
         "core_selling_point_visible": core,
+        "demonstrated_selling_points": ["核心卖点"],
+        "missing_selling_points": [] if core else ["核心卖点"],
+        "scene_mode": scene,
         "usage_context_fit": context,
         "continuity_met": continuity,
         "richness_met": richness,
+        "single_scene_continuity_met": single_continuity,
+        "single_scene_variation_met": single_variation,
+        "multi_scene_logic_met": multi_logic,
+        "multi_scene_transition_met": multi_transition,
+        "multi_scene_role_adaptation_met": multi_role,
+        "role_design_met": role_design,
+        "role_interaction_met": role_interaction,
+        "presentation_overlays": overlays or ["none"],
         "fake_or_staged": fake,
         "start_seconds": 8.0,
         "end_seconds": 18.0,
@@ -312,7 +348,7 @@ def _s3_flag(exists=True, module="A", real=True, core=True, context=True, contin
     }
 
 
-_s3_good = _s3_flag(richness=True)
+_s3_good = _s3_flag(richness=True, single_variation=True)
 _s3_no_core = _s3_flag(core=False, richness=True)
 _s3_trace = _derive_one(
     "S3",
@@ -340,6 +376,107 @@ _s3_thin = _derive_one(
 )
 check("S3 核心卖点可见但素材不丰富→小到中差距",
       _s3_thin.get("severity") in {"small", "medium"} and _s3_thin.get("E") == 1)
+
+_s3_result_only = _derive_one(
+    "S3",
+    {"creator_s3": _s3_flag(usage=False, result_only=True), "benchmark_s3": _s3_good, "creator_summary": "x", "benchmark_summary": "y"},
+    {"S3": 1.6},
+    [],
+)
+check("S3 只有结果没有过程→最高 0.5",
+      _s3_result_only.get("severity") in {"medium", "large"} and _s3_result_only.get("E") == 1.5)
+
+_s3_static = _derive_one(
+    "S3",
+    {"creator_s3": _s3_flag(usage=False, mouth_static=True), "benchmark_s3": _s3_good, "creator_summary": "x", "benchmark_summary": "y"},
+    {"S3": 1.6},
+    [],
+)
+check("S3 只口播/静态展示→执行分按 0 处理",
+      _s3_static.get("severity") == "large" and _s3_static.get("E") == 2)
+
+_s3_multi_strong = _derive_one(
+    "S3",
+    {
+        "creator_s3": _s3_flag(scene="multi_scene", single_continuity=False, multi_logic=True, multi_transition=True, multi_role=True),
+        "benchmark_s3": _s3_flag(scene="multi_scene", single_continuity=False, multi_logic=True, multi_transition=True, multi_role=True),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S3": 1.6},
+    [],
+)
+check("S3 多场景组织完整→可与标杆持平",
+      _s3_multi_strong.get("severity") == "small" and _s3_multi_strong.get("E") == 0)
+
+_s3_multi_scattered = _derive_one(
+    "S3",
+    {
+        "creator_s3": _s3_flag(scene="multi_scene", single_continuity=False, multi_logic=False, multi_transition=False, multi_role=False, richness=True),
+        "benchmark_s3": _s3_flag(scene="single_scene", single_variation=True, richness=True),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S3": 1.6},
+    [],
+)
+check("S3 多场景散乱→不因场景多自动加分",
+      _s3_multi_scattered.get("severity") in {"medium", "large"} and _s3_multi_scattered.get("E") == 1)
+
+_s3_people = _derive_one(
+    "S3",
+    {
+        "creator_s3": _s3_flag(scene="multi_person", single_continuity=False, role_design=True, role_interaction=True),
+        "benchmark_s3": _s3_flag(scene="multi_person", single_continuity=False, role_design=True, role_interaction=True),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S3": 1.6},
+    [],
+)
+check("S3 多人使用角色清楚且互动服务卖点→可成立",
+      _s3_people.get("severity") == "small" and _s3_people.get("E") == 0)
+
+
+def _s4_flag(effect=True, attribution=True, result_only=False, linked=True, tamper=False):
+    return {
+        "effect_visible": effect,
+        "effect_attribution_supported": attribution,
+        "result_only_without_process": result_only,
+        "process_linked_effect": linked,
+        "tamper_or_cut_risk": tamper,
+        "effect_reason": "效果可见且因果清楚",
+        "evidence_ids": ["C3"],
+    }
+
+
+_s4_result_weak = _derive_one(
+    "S4",
+    {
+        "creator_s4": _s4_flag(attribution=False, result_only=True, linked=False),
+        "benchmark_s4": _s4_flag(),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S4": 1.4},
+    [],
+)
+check("S4 只有结果且无因果桥→效果展示封顶弱",
+      _s4_result_weak.get("severity") in {"medium", "large"} and _s4_result_weak.get("E") == 1.5)
+
+_s4_result_bound = _derive_one(
+    "S4",
+    {
+        "creator_s4": _s4_flag(result_only=True, linked=False),
+        "benchmark_s4": _s4_flag(),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S4": 1.4},
+    [],
+)
+check("S4 只有结果但产品结果强绑定→最多中等可信",
+      _s4_result_bound.get("severity") in {"small", "medium"} and _s4_result_bound.get("E") == 1)
 
 # parse 归一：容忍 'S1-B：反差' / 'yes' / 1 等写法
 _nh = normalize_hook_flags({"exists": "true", "type": "S1-B：反差震惊型", "dims": {"camera": "yes", "copy": 1}})
@@ -372,11 +509,25 @@ check("S2 parse 归一 contract flags（type→B, bool/时间/evidence 容错）
 _ns3 = normalize_s3_flags({
     "exists": "yes",
     "module_type": "S3-D：步骤拆解式",
+    "usage_process_visible": 1,
+    "result_only_without_process": "false",
+    "mouth_only_or_static": "no",
     "real_usage_met": 1,
     "core_selling_point_visible": "true",
+    "demonstrated_selling_points": ["控油"],
+    "missing_selling_points": "遮毛孔",
+    "scene_mode": "single-scene",
     "usage_context_fit": "no",
     "continuity_met": "yes",
     "richness_met": 0,
+    "single_scene_continuity_met": "yes",
+    "single_scene_variation_met": "no",
+    "multi_scene_logic_met": "no",
+    "multi_scene_transition_met": "no",
+    "multi_scene_role_adaptation_met": "no",
+    "role_design_met": "no",
+    "role_interaction_met": "no",
+    "presentation_overlays": "step_breakdown, closeup",
     "fake_or_staged": "false",
     "start_seconds": "8.5",
     "end_seconds": 18,
@@ -387,8 +538,25 @@ check("S3 parse 归一 usage flags（type→D, bool/时间/evidence 容错）",
       _ns3["module_type"] == "D"
       and _ns3["exists"] is True
       and _ns3["usage_context_fit"] is False
+      and _ns3["scene_mode"] == "single_scene"
+      and _ns3["presentation_overlays"] == ["step_breakdown", "closeup"]
       and _ns3["start_seconds"] == 8.5
       and _ns3["evidence_ids"] == ["C2"])
+
+_ns4 = normalize_s4_flags({
+    "effect_visible": "yes",
+    "effect_attribution_supported": 0,
+    "result_only_without_process": "true",
+    "process_linked_effect": "false",
+    "tamper_or_cut_risk": "no",
+    "effect_reason": "只有结果没有过程",
+    "evidence_ids": "C3",
+})
+check("S4 parse 归一 effect flags（bool/evidence 容错）",
+      _ns4["effect_visible"] is True
+      and _ns4["effect_attribution_supported"] is False
+      and _ns4["result_only_without_process"] is True
+      and _ns4["evidence_ids"] == ["C3"])
 
 _leaky = normalize_hook_flags({
     "exists": True,
@@ -762,6 +930,34 @@ try:
 except SystemExit as exc:
     _s3_gate_failed = "缺少 creator_s3" in str(exc) and "缺少 benchmark_s3" in str(exc)
 check("S3 usage flag 门禁：主链缺字段触发 repair", _s3_gate_failed)
+
+_valid_s4 = _s4_flag()
+try:
+    validate_s4_effect_flags(
+        {
+            "stage_analysis": [
+                {"stage": "S1 Hook"},
+                {"stage": "S2 产品引出"},
+                {"stage": "S3 使用过程"},
+                {"stage": "S4 效果呈现", "creator_s4": _valid_s4, "benchmark_s4": dict(_valid_s4)},
+            ]
+        },
+        {"s4_flags_required": True},
+    )
+    _s4_gate_ok = True
+except SystemExit:
+    _s4_gate_ok = False
+check("S4 effect flag 门禁：完整字段通过", _s4_gate_ok)
+
+try:
+    validate_s4_effect_flags(
+        {"stage_analysis": [{"stage": "S1 Hook"}, {"stage": "S2 产品引出"}, {"stage": "S3 使用过程"}, {"stage": "S4 效果呈现"}]},
+        {"s4_flags_required": True},
+    )
+    _s4_gate_failed = False
+except SystemExit as exc:
+    _s4_gate_failed = "缺少 creator_s4" in str(exc) and "缺少 benchmark_s4" in str(exc)
+check("S4 effect flag 门禁：主链缺字段触发 repair", _s4_gate_failed)
 
 # 5. 死代码已清 + 模块仍可导入
 import flayr_core.prompt as prompt_module  # noqa: E402

@@ -636,27 +636,66 @@ def build_llm_comparison_payload(
         "S2 flag 只服务衔接契约，不评卖点细节；S1 提过的钩子关键词不得在 S2 重复分析，S2 已分析的引出方式不得在 S3 重复。"
     )
     s3_flag_block = (
-        "## S3 使用过程 flag（只判真实使用中核心卖点是否被动作演示出来）\n"
+        "## S3 使用过程 flag V2（真实使用过程 + 场景组织 + 表现层，S3/S4 可同段但分功能判断）\n"
         "S3 阶段（且仅 S3）每侧【必须】输出 creator_s3 与 benchmark_s3 两个对象，形如：\n"
         '{"exists": bool（该侧是否存在使用过程功能；S2/S3 合并时也算存在）, '
-        '"module_type": "A"~"E" 或 "unknown"（按 structure_library S3 五型判：A单场景全流程/B多场景拼接/C多人像使用/D步骤拆解/E沉浸第一视角）, '
-        '"real_usage_met": bool（是否是真实使用动作，而非静态展示、摆拍假用、只拿着产品说）, '
+        '"module_type": "A"~"E" 或 "unknown"（按最接近的 structure_library S3 五型描述，D步骤拆解/E沉浸第一视角更多是表现层，不得因此压过场景主轴）, '
+        '"usage_process_visible": bool（是否看见产品被实际使用的过程；只给最终结果不算）, '
+        '"result_only_without_process": bool（只展示使用后的结果/成品/不漏/变干净/变美，但没看到产品如何造成结果）, '
+        '"mouth_only_or_static": bool（只拿着产品口播/静态展示/字幕讲卖点，没有真实使用动作）, '
+        '"real_usage_met": bool（是否是真实可信的使用动作，而非摆拍假用、错误用法或只拿着产品说）, '
         '"core_selling_point_visible": bool（product_profile.core_selling_points 中至少一个核心卖点是否在使用动作里被看见；只口播不算）, '
+        '"demonstrated_selling_points": ["动作里实际被证明的核心卖点，必须来自 product_profile.core_selling_points 或其同义表达"], '
+        '"missing_selling_points": ["该阶段该演但没有被动作证明的核心卖点"], '
+        '"scene_mode": "single_scene|multi_scene|multi_person|hybrid|unknown"（单场景/多场景/多人使用/混合；单场景和多场景无天然高低）, '
         '"usage_context_fit": bool（使用场景是否给核心卖点提供合适舞台，如去污在脏污面、控油在出油/补妆场景）, '
         '"continuity_met": bool（过程是否连贯且符合真实用法，不是无关镜头拼贴或错误用法）, '
-        '"richness_met": bool（多场景覆盖多卖点，或单场景做厚：多角度、多步骤、多卖点完整过程；必须在 core_selling_point_visible=true 后才有意义）, '
+        '"richness_met": bool（在核心卖点可见后，是否通过多角度/多步骤/多卖点/多场景把使用过程做厚）, '
+        '"single_scene_continuity_met": bool（scene_mode=single_scene 时，单一场景内是否连续展示产品使用；其他模式填 false）, '
+        '"single_scene_variation_met": bool（scene_mode=single_scene 时，人物状态/服装/角度/时间感是否有合理变化，让单场景不单调；其他模式填 false）, '
+        '"multi_scene_logic_met": bool（scene_mode=multi_scene 时，多场景是否组成清楚卖点链条/生活逻辑，而不是散乱拼贴；其他模式填 false）, '
+        '"multi_scene_transition_met": bool（scene_mode=multi_scene 时，画面切换是否合理流畅；其他模式填 false）, '
+        '"multi_scene_role_adaptation_met": bool（scene_mode=multi_scene 时，达人造型/动作/道具是否随场景合理调整；其他模式填 false）, '
+        '"role_design_met": bool（scene_mode=multi_person 时，主导/辅助/模特/孩子/家人/专业人员等角色是否清楚；其他模式填 false）, '
+        '"role_interaction_met": bool（scene_mode=multi_person 时，互动是否自然且服务卖点；其他模式填 false）, '
+        '"presentation_overlays": ["step_breakdown|first_person|asmr|closeup|none"]（表现手法，可与单/多场景/多人交叉，不是独立高分理由）, '
         '"fake_or_staged": bool（显假摆拍/错误使用/画面无法相信时 true）, '
         '"start_seconds": number, "end_seconds": number, '
         '"usage_reason": "一句话说明实际使用了什么、哪个核心卖点被动作证明；没证明要直说", '
         '"evidence_ids": ["C1"]}。\n'
-        "S3 铁律：演示即证据。口播/字幕说卖点但画面没做出来，不算 core_selling_point_visible；"
-        "场景丰富、人物多、步骤多都不能补偿核心卖点没落地；独立效果结果归 S4，背书归 S5。"
+        "S3/S4 边界铁律：同一段画面可以同时支持 S3_usage 和 S4_effect；S3 只消费'产品如何被使用/核心卖点如何在动作中发生'，"
+        "S4 消费'结果是否可见、效果是否可信地由产品造成'。"
+        "S3 铁律：口播/字幕说卖点但画面没做出来，不算 core_selling_point_visible；只有结果没有过程，S3 最高只能算弱；"
+        "场景丰富、人物多、步骤多、ASMR/第一视角都不能补偿核心卖点没落地；独立效果结果归 S4，背书归 S5。"
     )
     s3_field_req = (
         "S3 强制：stage_analysis 第 3 项（S3 使用过程）必须再含 creator_s3 与 benchmark_s3 两个对象"
-        "（结构见上方：exists/module_type/real_usage_met/core_selling_point_visible/usage_context_fit/continuity_met/"
-        "richness_met/fake_or_staged/start_seconds/end_seconds/usage_reason/evidence_ids）。"
+        "（结构见上方：exists/module_type/usage_process_visible/result_only_without_process/mouth_only_or_static/real_usage_met/"
+        "core_selling_point_visible/demonstrated_selling_points/missing_selling_points/scene_mode/usage_context_fit/continuity_met/"
+        "richness_met/single_scene_continuity_met/single_scene_variation_met/multi_scene_logic_met/multi_scene_transition_met/"
+        "multi_scene_role_adaptation_met/role_design_met/role_interaction_met/presentation_overlays/fake_or_staged/"
+        "start_seconds/end_seconds/usage_reason/evidence_ids）。"
         "S3 flag 只服务真实使用过程判断，不评效果结果，不把 S4/S5 内容回填到 S3。"
+    )
+    s4_flag_block = (
+        "## S4 效果因果 flag（只判效果是否可见，以及是否可信地由产品造成）\n"
+        "S4 阶段（且仅 S4）每侧【必须】输出 creator_s4 与 benchmark_s4 两个对象，形如：\n"
+        '{"effect_visible": bool（效果/结果是否肉眼可见）, '
+        '"effect_attribution_supported": bool（画面是否支持该效果由本产品造成，而不是剪辑、换物、灯光或口播脑补）, '
+        '"result_only_without_process": bool（只给结果但没给产品导致结果的过程；这会限制 S4 上限）, '
+        '"process_linked_effect": bool（能看到产品使用动作与结果变化之间的连续或可信连接）, '
+        '"tamper_or_cut_risk": bool（存在换场景/跳剪/光线变化/对象替换导致作弊感时 true）, '
+        '"effect_reason": "一句话说明效果是否可见、因果是否成立；只有结果没过程要直说", '
+        '"evidence_ids": ["C1"]}。\n'
+        "S4 铁律：只给结果、没有过程，不等于高分效果展示。"
+        "若 result_only_without_process=true 且 effect_attribution_supported=false，效果很薄弱；"
+        "若只有结果但产品和结果强绑定，也最多是中等可信；只有 process_linked_effect=true 且 effect_visible=true 才能视为强效果呈现。"
+    )
+    s4_field_req = (
+        "S4 强制：stage_analysis 第 4 项（S4 效果呈现）必须再含 creator_s4 与 benchmark_s4 两个对象"
+        "（结构见上方：effect_visible/effect_attribution_supported/result_only_without_process/process_linked_effect/"
+        "tamper_or_cut_risk/effect_reason/evidence_ids）。"
+        "S4 flag 只服务效果因果判断；不要用 S3 的使用过程完整性替代 S4 效果可见性，也不要用单纯结果图替代因果证明。"
     )
     user_text = "\n\n".join(
         [
@@ -665,6 +704,7 @@ def build_llm_comparison_payload(
             hook_flag_block,
             s2_flag_block,
             s3_flag_block,
+            s4_flag_block,
             s1_boundary_hint_block,
             "## S1-S6 模块结构库（判断视图：客观类型 + 适配条件，判 module_id 与类型对本品适配用；这是结构层、非判断层，不讲好坏）",
             structure_library_judgment_view(),
@@ -689,6 +729,7 @@ def build_llm_comparison_payload(
             hook_field_req,
             s2_field_req,
             s3_field_req,
+            s4_field_req,
             "task_completion 只能取 complete、partial、missing 三选一（达人侧该阶段功能完成度），禁止 both_complete、no_gap 等任何其他词；标杆侧完成情况写在 benchmark_summary。",
             "creator_execution 与 benchmark_execution 取值只能是 0、0.5、1、2 四个数字：0=未执行该阶段功能；0.5=做了但对该阶段核心功能基本无效——敷衍、平庸无感、几乎不起作用（如一句轻带的 CTA、平铺直叙毫无抓力的开场、仅口头承诺没有任何验证支撑）；1=执行合格（功能完成且对观众有效）；2=执行出色（可视化演示/铺垫到位/感染力强）。两侧按该阶段功能定义各自独立打分，先打分再对比，禁止因对比结果回调任何一侧分数。",
             "效果呈现阶段（S4）执行分以 product_profile.core_visual_proposition（本品核心视觉命题）为评判锚点，不套通用 before/after：先判该侧有没有拍出本品的决定性瞬间（定妆粉饼=粉底油光→哑光对比、面膜=逐日变化+敷后效果），并满足 product_profile.shooting_requirement（效果细微的品需正面强光+面部特写才算拍到）。拍出命题且拍摄到位才给 2；只完成动作（揭膜/擦粉/口头带过）未体现命题、或拍摄条件不支撑（暗光/无特写/wide shot 看不出效果）按敷衍计最高 0.5；做了但缺命题对比的'呈现单薄'最高 1。过长全程记录不加分（标尺是命题覆盖非完整性）。两侧各自独立打分，禁止因对比回调。",
@@ -836,6 +877,7 @@ def build_stage_review_payload(
     s1_contract = ""
     s2_contract = ""
     s3_contract = ""
+    s4_contract = ""
     if "S1" in target_codes:
         stage_update_example["stage"] = "S1 Hook"
         stage_update_example["core_question"] = "用户凭什么停下来"
@@ -893,11 +935,25 @@ def build_stage_review_payload(
         s3_example = {
             "exists": True,
             "module_type": "A-E 或 unknown",
+            "usage_process_visible": True,
+            "result_only_without_process": False,
+            "mouth_only_or_static": False,
             "real_usage_met": True,
             "core_selling_point_visible": True,
+            "demonstrated_selling_points": ["动作里实际证明的核心卖点"],
+            "missing_selling_points": [],
+            "scene_mode": "single_scene|multi_scene|multi_person|hybrid|unknown",
             "usage_context_fit": True,
             "continuity_met": True,
             "richness_met": False,
+            "single_scene_continuity_met": True,
+            "single_scene_variation_met": False,
+            "multi_scene_logic_met": False,
+            "multi_scene_transition_met": False,
+            "multi_scene_role_adaptation_met": False,
+            "role_design_met": False,
+            "role_interaction_met": False,
+            "presentation_overlays": ["step_breakdown"],
             "fake_or_staged": False,
             "start_seconds": 8.0,
             "end_seconds": 18.0,
@@ -908,9 +964,29 @@ def build_stage_review_payload(
         stage_update_example["benchmark_s3"] = s3_example
         s3_contract = (
             "目标阶段包含 S3 时，stage_update 必须同时重判 creator_s3 与 benchmark_s3；"
-            "S3 只判真实使用过程：是否真实操作、核心卖点是否在动作里可见、场景是否适配、过程是否连贯、素材是否足够丰富。"
-            "只口播/字幕说卖点但画面没演，不算 core_selling_point_visible；场景丰富不能补偿核心卖点没落地。"
-            "效果结果归 S4，背书归 S5，不要回填到 S3。"
+            "S3 只判真实使用过程：有没有使用过程、是否只有结果无过程、是否只口播静态、核心卖点是否在动作里可见、"
+            "场景是单场景/多场景/多人/混合、场景组织是否服务卖点。"
+            "只口播/字幕说卖点但画面没演，不算 core_selling_point_visible；只有结果没有过程，S3 最高只能算弱；"
+            "场景丰富、ASMR、第一视角、步骤拆解都不能补偿核心卖点没落地。效果结果归 S4，背书归 S5，不要回填到 S3。"
+        )
+    if "S4" in target_codes:
+        stage_update_example["stage"] = "S4 效果呈现"
+        stage_update_example["core_question"] = "用户能不能看见效果并相信效果由产品造成"
+        s4_example = {
+            "effect_visible": True,
+            "effect_attribution_supported": True,
+            "result_only_without_process": False,
+            "process_linked_effect": True,
+            "tamper_or_cut_risk": False,
+            "effect_reason": "画面能看见产品使用动作与结果变化之间的可信连接；若只有结果没过程要直说",
+            "evidence_ids": ["C1"],
+        }
+        stage_update_example["creator_s4"] = s4_example
+        stage_update_example["benchmark_s4"] = s4_example
+        s4_contract = (
+            "目标阶段包含 S4 时，stage_update 必须同时重判 creator_s4 与 benchmark_s4；"
+            "S4 只判效果是否可见、效果是否可信地由产品造成。只有结果没有过程不能直接高分；"
+            "没有因果桥时 effect_attribution_supported=false，有跳剪/换物/光线变化风险时 tamper_or_cut_risk=true。"
         )
     content: list[dict[str, Any]] = [
         {
@@ -926,6 +1002,7 @@ def build_stage_review_payload(
                     s1_contract,
                     s2_contract,
                     s3_contract,
+                    s4_contract,
                     "只输出严格 JSON，不要 Markdown。",
                     "输出格式：",
                     json.dumps(
@@ -1193,7 +1270,8 @@ def build_llm_repair_payload(
                     "hook_boundary_seconds 按 structure_library_full.md 的 S1 留人机制→S2 产品引出/解决方案承接功能切换判断，不得写死固定秒数；S2-A 承接式引出可早于产品实物或产品名出现，不能等产品画面才切 S2。"
                     "landing_met 按 type 无关三件套判断：0 到 hook_boundary_seconds 内对象明确、张力明确、承诺或证据明确，缺一即 false；不得用后续 S2/S3 产品介绍补足 S1 landing。若引用边界后材料，landing_window_leak=true 且 landing_met=false。"
                     "S2 产品引出必须补齐 creator_s2 与 benchmark_s2 两个对象，字段为 exists(bool)、merged_with_s3(bool)、module_type(A-D或unknown)、handoff_met(bool)、s1_s2_compatible(bool)、product_identity_clear(bool)、product_role_clear(bool)、excluded_or_risky_module(bool)、start_seconds(number)、end_seconds(number)、handoff_reason(非空)、evidence_ids(非空数组)。"
-                    "S3 使用过程必须补齐 creator_s3 与 benchmark_s3 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、real_usage_met(bool)、core_selling_point_visible(bool)、usage_context_fit(bool)、continuity_met(bool)、richness_met(bool)、fake_or_staged(bool)、start_seconds(number)、end_seconds(number)、usage_reason(非空)、evidence_ids(非空数组)。"
+                    "S3 使用过程必须补齐 creator_s3 与 benchmark_s3 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、usage_process_visible(bool)、result_only_without_process(bool)、mouth_only_or_static(bool)、real_usage_met(bool)、core_selling_point_visible(bool)、demonstrated_selling_points(数组)、missing_selling_points(数组)、scene_mode(single_scene/multi_scene/multi_person/hybrid/unknown)、usage_context_fit(bool)、continuity_met(bool)、richness_met(bool)、single_scene_continuity_met(bool)、single_scene_variation_met(bool)、multi_scene_logic_met(bool)、multi_scene_transition_met(bool)、multi_scene_role_adaptation_met(bool)、role_design_met(bool)、role_interaction_met(bool)、presentation_overlays(数组)、fake_or_staged(bool)、start_seconds(number)、end_seconds(number)、usage_reason(非空)、evidence_ids(非空数组)。"
+                    "S4 效果呈现必须补齐 creator_s4 与 benchmark_s4 两个对象，字段为 effect_visible(bool)、effect_attribution_supported(bool)、result_only_without_process(bool)、process_linked_effect(bool)、tamper_or_cut_risk(bool)、effect_reason(非空)、evidence_ids(非空数组)。"
                     "提升点必须保留 benchmark_evidence_ids、base_frame_suitability、best_base_frame_time、base_frame_evidence_id、base_frame_reason 和 aigc_prompt；无可用达人素材时写 no_suitable_frame 且时间与 base_frame_evidence_id 留空。aigc_image_path 留空。"
                     "修复 improvements 时也必须遵循达人框架约束、卖点适配权重和标杆功能意图转译，不得把 benchmark_reference 直接改写成 suggestion。"
                     "健康品类建议不得声称调节激素、改善月经、治疗症状或虚构优惠。建议话术必须重新设计，不得复制标杆原句。"

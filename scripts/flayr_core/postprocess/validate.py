@@ -113,6 +113,7 @@ def validate_quality_contract(result: dict[str, Any], analysis: dict[str, Any]) 
     validate_s1_hook_flags(result, analysis)
     validate_s2_contract_flags(result, analysis)
     validate_s3_usage_flags(result, analysis)
+    validate_s4_effect_flags(result, analysis)
     validate_stage_time_coherence(result)
     validate_product_visibility(result, analysis)
     validate_narrative_evidence_consistency(result)
@@ -377,17 +378,34 @@ def validate_s3_usage_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
             continue
         for bool_key in (
             "exists",
+            "usage_process_visible",
+            "result_only_without_process",
+            "mouth_only_or_static",
             "real_usage_met",
             "core_selling_point_visible",
             "usage_context_fit",
             "continuity_met",
             "richness_met",
+            "single_scene_continuity_met",
+            "single_scene_variation_met",
+            "multi_scene_logic_met",
+            "multi_scene_transition_met",
+            "multi_scene_role_adaptation_met",
+            "role_design_met",
+            "role_interaction_met",
             "fake_or_staged",
         ):
             if flag.get(bool_key) not in {True, False}:
                 errors.append(f"S3 {key}.{bool_key} 必须是 bool")
         if str(flag.get("module_type") or "").strip() not in {"A", "B", "C", "D", "E", "unknown"}:
             errors.append(f"S3 {key}.module_type 必须是 A-E 或 unknown")
+        if str(flag.get("scene_mode") or "").strip() not in {"single_scene", "multi_scene", "multi_person", "hybrid", "unknown"}:
+            errors.append(f"S3 {key}.scene_mode 必须是 single_scene/multi_scene/multi_person/hybrid/unknown")
+        overlays = flag.get("presentation_overlays")
+        if not isinstance(overlays, list) or not overlays:
+            errors.append(f"S3 {key}.presentation_overlays 必须是非空数组")
+        elif any(str(item) not in {"step_breakdown", "first_person", "asmr", "closeup", "none"} for item in overlays):
+            errors.append(f"S3 {key}.presentation_overlays 含非法值")
         start = flag.get("start_seconds")
         end = flag.get("end_seconds")
         if not isinstance(start, (int, float)) or isinstance(start, bool) or start < 0:
@@ -402,6 +420,40 @@ def validate_s3_usage_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
             errors.append(f"S3 {key}.evidence_ids 不能为空")
     if errors:
         raise SystemExit("S3 使用过程 flag 输出不完整：" + "；".join(errors))
+
+
+def validate_s4_effect_flags(result: dict[str, Any], analysis: dict[str, Any]) -> None:
+    """S4 效果因果 flag 门禁。"""
+    stages = result.get("stage_analysis", [])
+    if len(stages) < 4 or not isinstance(stages[3], dict):
+        return
+    s4 = stages[3]
+    has_any_s4 = isinstance(s4.get("creator_s4"), dict) or isinstance(s4.get("benchmark_s4"), dict)
+    if not analysis.get("s4_flags_required") and not has_any_s4:
+        return
+
+    errors: list[str] = []
+    for role in ("creator", "benchmark"):
+        key = f"{role}_s4"
+        flag = s4.get(key)
+        if not isinstance(flag, dict):
+            errors.append(f"S4 缺少 {key}")
+            continue
+        for bool_key in (
+            "effect_visible",
+            "effect_attribution_supported",
+            "result_only_without_process",
+            "process_linked_effect",
+            "tamper_or_cut_risk",
+        ):
+            if flag.get(bool_key) not in {True, False}:
+                errors.append(f"S4 {key}.{bool_key} 必须是 bool")
+        if not str(flag.get("effect_reason") or "").strip():
+            errors.append(f"S4 {key}.effect_reason 不能为空")
+        if not flag.get("evidence_ids"):
+            errors.append(f"S4 {key}.evidence_ids 不能为空")
+    if errors:
+        raise SystemExit("S4 效果因果 flag 输出不完整：" + "；".join(errors))
 
 
 def validate_stage_time_coherence(result: dict[str, Any]) -> None:
