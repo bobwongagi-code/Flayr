@@ -148,6 +148,7 @@ def normalize_demo_flag(value: Any) -> bool | None:
 
 
 _HOOK_TYPE_LETTERS = {"A", "B", "C", "D", "E", "F", "G"}
+_S2_TYPE_LETTERS = {"A", "B", "C", "D"}
 _HOOK_TS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*s")
 
 
@@ -157,6 +158,13 @@ def normalize_hook_type(value: Any) -> str:
     s = str(value or "").strip().upper().replace("S1-", "").replace("S1_", "")
     s = s[:1]  # 取首字母，容忍 'B：反差震惊型' 这类带后缀写法
     return s if s in _HOOK_TYPE_LETTERS else "unknown"
+
+
+def normalize_s2_type(value: Any) -> str:
+    """归一 S2 产品引出类型到 A-D（结构库 S2-A~D），无法识别→unknown。"""
+    s = str(value or "").strip().upper().replace("S2-", "").replace("S2_", "")
+    s = s[:1]
+    return s if s in _S2_TYPE_LETTERS else "unknown"
 
 
 def normalize_hook_boundary_seconds(value: Any) -> float | None:
@@ -218,6 +226,26 @@ def normalize_hook_flags(value: Any) -> dict[str, Any] | None:
         "s2_start_signal": str(value.get("s2_start_signal") or "").strip(),
         "landing_window_leak": landing_window_leak,
         "anchors_proposition": normalize_demo_flag(value.get("anchors_proposition")),
+    }
+
+
+def normalize_s2_flags(value: Any) -> dict[str, Any] | None:
+    """归一 S2 产品引出契约 flag。缺失返回 None，derive/validate 按主链标记决定是否消费。"""
+    if not isinstance(value, dict):
+        return None
+    return {
+        "exists": normalize_demo_flag(value.get("exists")),
+        "merged_with_s3": normalize_demo_flag(value.get("merged_with_s3")),
+        "module_type": normalize_s2_type(value.get("module_type")),
+        "handoff_met": normalize_demo_flag(value.get("handoff_met")),
+        "s1_s2_compatible": normalize_demo_flag(value.get("s1_s2_compatible")),
+        "product_identity_clear": normalize_demo_flag(value.get("product_identity_clear")),
+        "product_role_clear": normalize_demo_flag(value.get("product_role_clear")),
+        "excluded_or_risky_module": normalize_demo_flag(value.get("excluded_or_risky_module")),
+        "start_seconds": normalize_hook_boundary_seconds(value.get("start_seconds")),
+        "end_seconds": normalize_hook_boundary_seconds(value.get("end_seconds")),
+        "handoff_reason": str(value.get("handoff_reason") or "").strip(),
+        "evidence_ids": normalize_evidence(value.get("evidence_ids")),
     }
 
 
@@ -626,6 +654,10 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 # 缺失为 None → derive 回退模型执行分（优雅降级）。模型在 Stage2 产出（切片 B 接线）。
                 "creator_hook": normalize_hook_flags(item.get("creator_hook")),
                 "benchmark_hook": normalize_hook_flags(item.get("benchmark_hook")),
+                # S2 产品引出契约 flag：只判 S1→S2 是否自然交接、产品身份/角色是否明确。
+                # 不做四维执行分，缺失为 None → derive 保守降级。
+                "creator_s2": normalize_s2_flags(item.get("creator_s2")),
+                "benchmark_s2": normalize_s2_flags(item.get("benchmark_s2")),
             }
         )
 

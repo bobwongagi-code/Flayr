@@ -167,6 +167,7 @@ def run_large_model_analysis(
             print(f"LLM dry run: fact request payloads written to {run_dir}")
             return None
         analysis["s1_hook_flags_required"] = True
+        analysis["s2_flags_required"] = True
         analysis_input = analysis_input_path.read_text(encoding="utf-8")
         payload = build_llm_comparison_payload(args.llm_model, analysis_input, facts, analysis)
     else:
@@ -452,6 +453,9 @@ def apply_stage_review_updates(
             if code == "S1":
                 base_stage.pop("creator_hook", None)
                 base_stage.pop("benchmark_hook", None)
+            if code == "S2":
+                base_stage.pop("creator_s2", None)
+                base_stage.pop("benchmark_s2", None)
             merged_stages.append({**base_stage, **updates_by_code[code]})
         else:
             merged_stages.append(stage)

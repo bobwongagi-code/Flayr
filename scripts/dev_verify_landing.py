@@ -49,7 +49,11 @@ except ValueError as exc:
     check("schema JSON 合法", False, str(exc)[:120])
 
 # 3. Q19 叙事一致性四用例
-from flayr_core.postprocess.validate import validate_narrative_evidence_consistency, validate_s1_hook_flags  # noqa: E402
+from flayr_core.postprocess.validate import (  # noqa: E402
+    validate_narrative_evidence_consistency,
+    validate_s1_hook_flags,
+    validate_s2_contract_flags,
+)
 
 
 def mk(gap: str, c_quote: str, b_quote: str = "") -> dict:
@@ -147,7 +151,7 @@ _s5_one = _derive_one("S5", {"creator_execution": 1.0, "benchmark_execution": 2.
 check("S5 一方有硬背书→进公式不判均未涉及", "均未涉及" not in _s5_one.get("reason", ""))
 
 # 4c. S1 Hook flag 化（切片 A）：四维推执行分 + hook_exists 红线 + 命题锚 + 残差亮点门
-from flayr_core.llm.parse import normalize_hook_flags  # noqa: E402
+from flayr_core.llm.parse import normalize_hook_flags, normalize_s2_flags  # noqa: E402
 
 
 def _hook(exists, htype, cam=False, cp=False, snd=False, rhy=False, anchors=None, landing=None):
@@ -195,6 +199,12 @@ _b3a = _hook(True, "B", True, True, True, False, anchors=True)
 _t_an = _derive_one("S1", _s1_stage(_c2a, _b3a), None, [])
 check("S1 命题锚（标杆锚达人没）→放大 large", _t_an.get("severity") == "large" and "锚定品命题" in _t_an.get("reason", ""))
 
+_c_full_no_anchor = _hook(True, "G", True, True, True, True, anchors=False, landing=True)
+_b_full_anchor = _hook(True, "C", True, True, True, True, anchors=True, landing=True)
+_t_anchor_floor = _derive_one("S1", _s1_stage(_c_full_no_anchor, _b_full_anchor), None, [])
+check("S1 命题锚下限：件齐但达人只泛留人→medium",
+      _t_anchor_floor.get("severity") == "medium" and "命题锚下限" in _t_anchor_floor.get("reason", ""))
+
 # 残差亮点门：标杆四维全 met 且 type≠unknown → 开；type=unknown → 不开
 _t_hl = _derive_one("S1", _s1_stage(_c0, dict(_full)), None, [])
 check("S1 亮点门：标杆四维全met+类型明确→开", _t_hl.get("hook_highlight_allowed") is True)
@@ -222,11 +232,94 @@ _b3_nl = _hook(True, "C", True, True, True, False, landing=False)
 _t_both = _derive_one("S1", _s1_stage(_c3_nl, _b3_nl), None, [])
 check("S1 双方都没立住→不触发下限（small）", _t_both.get("severity") == "small")
 
+# S2 契约 flag：只判 S1→S2 衔接，不做四维主观分
+def _s2_flag(exists=True, merged=False, module="A", handoff=True, compat=True, identity=True, role=True, risky=False):
+    return {
+        "exists": exists,
+        "merged_with_s3": merged,
+        "module_type": module,
+        "handoff_met": handoff,
+        "s1_s2_compatible": compat,
+        "product_identity_clear": identity,
+        "product_role_clear": role,
+        "excluded_or_risky_module": risky,
+        "start_seconds": 3.0,
+        "end_seconds": 6.0,
+        "handoff_reason": "S1 提出痛点，S2 用产品身份和解决方案接住",
+        "evidence_ids": ["C1"],
+    }
+
+
+_s2_good = _s2_flag()
+_s2_bad = _s2_flag(handoff=False, compat=False, role=False)
+_s2_trace = _derive_one(
+    "S2",
+    {"creator_s2": _s2_bad, "benchmark_s2": _s2_good, "creator_summary": "x", "benchmark_summary": "y"},
+    {"S2": 1.0},
+    [],
+)
+check("S2 契约 flag：标杆接住达人没接住→至少 medium",
+      _s2_trace.get("severity") == "medium")
+
+_s2_merged = _derive_one(
+    "S2",
+    {"creator_s2": _s2_flag(merged=True), "benchmark_s2": _s2_good, "creator_summary": "x", "benchmark_summary": "y"},
+    {"S2": 1.0},
+    [],
+)
+check("S2 merged_with_s3=true 且产品身份/角色清楚→不因缺独立S2扣分",
+      _s2_merged.get("severity") == "small" and _s2_merged.get("E") == 0)
+
+_s2_upstream_missing = _derive_one(
+    "S2",
+    {
+        "creator_s2": _s2_flag(merged=True, handoff=False, compat=False, identity=True, role=True),
+        "benchmark_s2": _s2_good,
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S2": 1.0},
+    [],
+)
+check("S2 上游缺 S1 但产品身份/角色清楚→不重复计罚",
+      _s2_upstream_missing.get("severity") == "small" and _s2_upstream_missing.get("E") == 0)
+
+_s2_risky = _derive_one(
+    "S2",
+    {"creator_s2": _s2_flag(risky=True, handoff=False), "benchmark_s2": _s2_good, "creator_summary": "x", "benchmark_summary": "y"},
+    {"S2": 1.0},
+    [],
+)
+check("S2 风险引出方式→reason 标注风险模块",
+      "高风险引出方式" in _s2_risky.get("reason", ""))
+
 # parse 归一：容忍 'S1-B：反差' / 'yes' / 1 等写法
 _nh = normalize_hook_flags({"exists": "true", "type": "S1-B：反差震惊型", "dims": {"camera": "yes", "copy": 1}})
 check("S1 parse 归一 hook_flags（type→B, dims 容错）",
       _nh["type"] == "B" and _nh["dims"]["camera"] is True and _nh["dims"]["copy"] is True
       and _nh["dims"]["sound"] is False and _nh["exists"] is True)
+
+_ns2 = normalize_s2_flags({
+    "exists": "yes",
+    "merged_with_s3": 0,
+    "module_type": "S2-B：解谜式",
+    "handoff_met": 1,
+    "s1_s2_compatible": "true",
+    "product_identity_clear": "true",
+    "product_role_clear": "false",
+    "excluded_or_risky_module": "no",
+    "start_seconds": "3.7",
+    "end_seconds": 8,
+    "handoff_reason": "解谜引出产品",
+    "evidence_ids": "C1",
+})
+check("S2 parse 归一 contract flags（type→B, bool/时间/evidence 容错）",
+      _ns2["module_type"] == "B"
+      and _ns2["exists"] is True
+      and _ns2["merged_with_s3"] is False
+      and _ns2["product_role_clear"] is False
+      and _ns2["start_seconds"] == 3.7
+      and _ns2["evidence_ids"] == ["C1"])
 
 _leaky = normalize_hook_flags({
     "exists": True,
@@ -303,6 +396,222 @@ with tempfile.TemporaryDirectory() as td:
           and _fixed["landing_window_leak"] is True
           and _fixed["landing_met"] is False)
 
+_early_boundary_result = {
+    "video_understanding": {
+        "benchmark": {
+            "evidence_units": [
+                {
+                    "id": "B1",
+                    "time_range": "0.0s - 10.4s",
+                    "information": "列举经期不适、疲劳、脸色暗沉等痛点。",
+                    "voiceover_zh": "很久没来月经，痛经非常严重，脸色暗淡，这个呢，看起来老了。",
+                    "visual_fact": "达人展示痛点插图和面部特写。",
+                    "functions": ["S1_hook"],
+                },
+                {
+                    "id": "B2",
+                    "time_range": "10.4s - 13.8s",
+                    "information": "引出产品营养素和认证。",
+                    "voiceover_zh": "这个它含有14种营养素，是有KKM批准的。",
+                    "visual_fact": "产品宣传图展示认证和成分。",
+                    "functions": ["S2_intro", "S5_trust"],
+                },
+            ]
+        }
+    },
+    "stage_analysis": [
+        {
+            "stage": "S1 Hook",
+            "creator_hook": dict(_boundary_result["stage_analysis"][0]["benchmark_hook"]),
+            "benchmark_hook": {
+                "exists": True,
+                "type": "A",
+                "dims": {"camera": True, "copy": True, "sound": True, "rhythm": True},
+                "hook_boundary_seconds": 3.18,
+                "hook_boundary_reason": "误把痛点枚举中的这个切成 S2",
+                "s2_start_signal": "这个",
+                "landing_met": True,
+                "landing_reason": "0-10.4s 对象经期女性、痛经疲劳张力、后续解决方向明确",
+                "window_evidence": "0-10.4s 痛点枚举",
+                "landing_window_leak": False,
+                "anchors_proposition": True,
+            },
+        }
+    ],
+}
+repair_s1_hook_boundaries(_early_boundary_result, {"videos": {"benchmark": {}}})
+_early_fixed = _early_boundary_result["stage_analysis"][0]["benchmark_hook"]
+check("S1 边界候选后处理：粗 cue 不把 B1 中途误切成 S2",
+      _early_fixed["hook_boundary_seconds"] == 10.4
+      and _early_fixed["landing_met"] is True
+      and _early_fixed["landing_window_leak"] is False)
+
+with tempfile.TemporaryDirectory() as td:
+    role_dir = Path(td)
+    (role_dir / "transcript.srt").write_text(
+        "1\n00:00:00,000 --> 00:00:03,700\n买一送一，现在买最划算\n\n"
+        "2\n00:00:03,700 --> 00:00:08,000\n再送 6 片，还有优惠\n",
+        encoding="utf-8",
+    )
+    _promo_result = {
+        "video_understanding": {
+            "creator": {
+                "evidence_units": [
+                    {
+                        "id": "C1",
+                        "time_range": "0.0s - 3.7s",
+                        "information": "买一送一促销钩子。",
+                        "voiceover_zh": "买一送一，现在买最划算。",
+                        "visual_fact": "达人手持两盒面膜。",
+                        "functions": ["S1_hook"],
+                    }
+                ]
+            }
+        },
+        "stage_analysis": [
+            {
+                "stage": "S1 Hook",
+                "creator_hook": {
+                    "exists": True,
+                    "type": "G",
+                    "dims": {"camera": True, "copy": True, "sound": True, "rhythm": True},
+                    "hook_boundary_seconds": 3.7,
+                    "hook_boundary_reason": "3.7s 后继续讲赠品优惠",
+                    "s2_start_signal": "继续讲赠品优惠",
+                    "landing_met": True,
+                    "landing_reason": "0-3.7s 对象、优惠张力、现在买最划算的承诺齐全。",
+                    "window_evidence": "0-3.7s 促销 Hook",
+                    "landing_window_leak": False,
+                    "anchors_proposition": False,
+                },
+                "benchmark_hook": dict(_boundary_result["stage_analysis"][0]["benchmark_hook"]),
+            }
+        ],
+    }
+    repair_s1_hook_boundaries(_promo_result, {"videos": {"creator": {"work_dir": str(role_dir)}}})
+    _promo_fixed = _promo_result["stage_analysis"][0]["creator_hook"]
+    check("S1 leak 复核：促销 Hook 内的优惠词不算窗口泄漏",
+          _promo_fixed["landing_met"] is True and _promo_fixed["landing_window_leak"] is False)
+
+_floor_result = {
+    "video_understanding": {
+        "benchmark": {
+            "evidence_units": [
+                {
+                    "id": "B1",
+                    "time_range": "0.0s - 5.4s",
+                    "information": "开场口播牙齿坏了，展示儿童牙膏产品。",
+                    "voiceover": "Rosak gigi",
+                    "voiceover_zh": "牙齿坏了，糟糕。",
+                    "visual_fact": "达人手持牙膏和牙刷向镜头展示。",
+                    "audio_fact": "有人声和轻快 BGM。",
+                    "functions": ["S2_intro"],
+                }
+            ]
+        }
+    },
+    "stage_analysis": [
+        {
+            "stage": "S1 Hook",
+            "creator_hook": dict(_boundary_result["stage_analysis"][0]["benchmark_hook"]),
+            "benchmark_hook": {
+                "exists": False,
+                "type": "unknown",
+                "dims": {"camera": False, "copy": False, "sound": False, "rhythm": False},
+                "hook_boundary_seconds": 0.0,
+                "hook_boundary_reason": "模型判无 Hook",
+                "s2_start_signal": "",
+                "landing_met": False,
+                "landing_reason": "无前段独立 Hook",
+                "window_evidence": "",
+                "landing_window_leak": False,
+                "anchors_proposition": False,
+            },
+        }
+    ],
+}
+repair_s1_hook_boundaries(_floor_result, {"videos": {"benchmark": {}}})
+_floor_fixed = _floor_result["stage_analysis"][0]["benchmark_hook"]
+check("S1 facts floor：有痛点口播和画面时不允许 hook 全无",
+      _floor_fixed["exists"] is True
+      and _floor_fixed["dims"]["camera"] is True
+      and _floor_fixed["dims"]["copy"] is True
+      and _floor_fixed["dims"]["sound"] is True
+      and _floor_fixed["dims"]["rhythm"] is False)
+
+_anchor_result = {
+    "video_understanding": {
+        "creator": {
+            "evidence_units": [
+                {
+                    "id": "C1",
+                    "time_range": "0.0s - 5.0s",
+                    "information": "开场明确女性人群，并引出多种补充剂整合方案。",
+                    "voiceover_zh": "这个是专为女性准备的哦，谁如果已经吃了很多种补充剂。",
+                    "visual_fact": "达人手持女性复合维生素瓶。",
+                    "functions": ["S1_hook", "S2_intro"],
+                }
+            ]
+        },
+        "benchmark": {
+            "evidence_units": [
+                {
+                    "id": "B1",
+                    "time_range": "0.0s - 10.4s",
+                    "information": "列举痛经、疲劳、面色暗沉等女性生理痛点。",
+                    "voiceover_zh": "很久没来月经，痛经很严重，也很容易累，脸色暗沉。",
+                    "visual_fact": "画面配合腹痛插图和面部特写。",
+                    "functions": ["S1_hook"],
+                }
+            ]
+        },
+    },
+    "stage_analysis": [
+        {
+            "stage": "S1 Hook",
+            "creator_hook": {
+                "exists": True,
+                "type": "D",
+                "dims": {"camera": True, "copy": True, "sound": True, "rhythm": False},
+                "hook_boundary_seconds": 3.7,
+                "hook_boundary_reason": "3.7s 后进入产品承接",
+                "s2_start_signal": "开始讲补充剂整合方案",
+                "landing_met": False,
+                "landing_reason": "0-5s 明确女性和多补充剂人群。",
+                "window_evidence": "0-5s 女性/补充剂",
+                "landing_window_leak": False,
+                "anchors_proposition": True,
+            },
+            "benchmark_hook": {
+                "exists": True,
+                "type": "A",
+                "dims": {"camera": True, "copy": True, "sound": True, "rhythm": True},
+                "hook_boundary_seconds": 10.4,
+                "hook_boundary_reason": "10.4s 后产品引出",
+                "s2_start_signal": "产品营养素出现",
+                "landing_met": True,
+                "landing_reason": "0-10.4s 命中痛经、疲劳、脸色暗沉。",
+                "window_evidence": "0-10.4s 痛经疲劳暗沉",
+                "landing_window_leak": False,
+                "anchors_proposition": True,
+            },
+        }
+    ],
+}
+_period_bp = {
+    "brand_proposition": {
+        "propositions": ["生理期专用配方", "补气血(含铁)", "经期情绪舒缓"],
+        "painpoints": ["经期腹痛", "情绪波动", "疲劳乏力", "面色暗沉", "手脚冰冷"],
+    },
+    "videos": {"creator": {}, "benchmark": {}},
+}
+repair_s1_hook_boundaries(_anchor_result, _period_bp)
+_anchor_creator = _anchor_result["stage_analysis"][0]["creator_hook"]
+_anchor_benchmark = _anchor_result["stage_analysis"][0]["benchmark_hook"]
+check("S1 anchors：女性/补充剂泛词不算 are_xie 核心命题锚",
+      _anchor_creator["anchors_proposition"] is False
+      and _anchor_benchmark["anchors_proposition"] is True)
+
 _valid_hook = {
     "exists": True,
     "type": "B",
@@ -339,6 +648,24 @@ try:
 except SystemExit:
     _s1_legacy_ok = False
 check("S1 hook flag 门禁：旧结果无标记不误伤", _s1_legacy_ok)
+
+_valid_s2 = _s2_flag()
+try:
+    validate_s2_contract_flags(
+        {"stage_analysis": [{"stage": "S1 Hook"}, {"stage": "S2 产品引出", "creator_s2": _valid_s2, "benchmark_s2": dict(_valid_s2)}]},
+        {"s2_flags_required": True},
+    )
+    _s2_gate_ok = True
+except SystemExit:
+    _s2_gate_ok = False
+check("S2 contract flag 门禁：完整字段通过", _s2_gate_ok)
+
+try:
+    validate_s2_contract_flags({"stage_analysis": [{"stage": "S1 Hook"}, {"stage": "S2 产品引出"}]}, {"s2_flags_required": True})
+    _s2_gate_failed = False
+except SystemExit as exc:
+    _s2_gate_failed = "缺少 creator_s2" in str(exc) and "缺少 benchmark_s2" in str(exc)
+check("S2 contract flag 门禁：主链缺字段触发 repair", _s2_gate_failed)
 
 # 5. 死代码已清 + 模块仍可导入
 import flayr_core.prompt as prompt_module  # noqa: E402
@@ -413,6 +740,18 @@ _payload = build_llm_comparison_payload(
 _content = _payload["messages"][1]["content"]
 _user_text = _content[0]["text"] if isinstance(_content, list) else str(_content)
 check("S1 hook flags 无冻结品库仍强制输出", "S1 强制" in _user_text and "creator_hook" in _user_text)
+
+from dev_s1_b2_matrix import classify_issues, hook_summary  # noqa: E402
+
+_jitter_side = hook_summary([
+    {"hook_boundary_seconds": 16.9, "landing_met": True, "exists": True, "anchors_proposition": True, "dims": {"camera": True, "copy": True, "sound": True, "rhythm": True}},
+    {"hook_boundary_seconds": 17.7, "landing_met": True, "exists": True, "anchors_proposition": True, "dims": {"camera": True, "copy": True, "sound": True, "rhythm": True}},
+])
+_jitter_issues = classify_issues(2, 2, ["medium", "medium"], _jitter_side, _jitter_side)
+check("S1 B2 审计：1秒内边界 jitter 不算 unstable",
+      _jitter_side["boundary"]["jitter_tolerated"] is True
+      and "creator_boundary_unstable" not in _jitter_issues
+      and "benchmark_boundary_unstable" not in _jitter_issues)
 
 _repair_payload = build_llm_repair_payload(
     "test-model",

@@ -38,9 +38,10 @@ S2_START_CUES = [
     "答案",
     "秘密",
     "就是它",
-    "这款",
-    "这个",
-    "产品",
+    "这个产品",
+    "这款产品",
+    "这个是",
+    "这款是",
     "认证",
     "成分",
     "价格",
@@ -49,6 +50,75 @@ S2_START_CUES = [
     "朋友推荐",
     "医生",
 ]
+
+S1_HOOK_CUES = [
+    "痛",
+    "糟糕",
+    "坏了",
+    "不来月经",
+    "经期",
+    "疲劳",
+    "脸色暗",
+    "油光",
+    "出油",
+    "没期待",
+    "超预期",
+    "结果",
+    "为什么",
+    "是不是",
+    "有没有",
+    "适合",
+    "家里有",
+    "2岁",
+    "女性",
+    "perempuan",
+    "rosak",
+    "gigi",
+    "period",
+    "penat",
+]
+
+GENERIC_SUPPLEMENT_ANCHOR_CUES = [
+    "女性",
+    "woman",
+    "women",
+    "perempuan",
+    "补充剂",
+    "supplement",
+    "suplemen",
+    "维生素",
+    "vitamin",
+    "multivitamin",
+]
+
+PERIOD_ANCHOR_CUES = [
+    "生理",
+    "经期",
+    "月经",
+    "痛经",
+    "气血",
+    "含铁",
+    "铁",
+    "情绪",
+    "腹痛",
+    "疲劳",
+    "乏力",
+    "面色",
+    "暗沉",
+    "手脚",
+    "荷尔蒙",
+]
+
+ANCHOR_ALIASES = {
+    "生理期专用配方": ["生理", "经期", "月经", "period", "haid"],
+    "补气血(含铁)": ["气血", "含铁", "铁", "iron", "darah"],
+    "经期情绪舒缓": ["经期", "情绪", "mood", "hormon", "hormone"],
+    "经期腹痛": ["经期", "痛经", "腹痛", "senggugut", "period"],
+    "情绪波动": ["情绪", "mood", "hormon", "hormone"],
+    "疲劳乏力": ["疲劳", "乏力", "累", "penat", "tired"],
+    "面色暗沉": ["面色", "脸色", "暗沉", "kusam", "tua"],
+    "手脚冰冷": ["手脚", "冰冷", "冷"],
+}
 
 
 # region align ---------------------------------------------------------------
@@ -62,24 +132,138 @@ def repair_s1_hook_boundaries(result: dict[str, Any], analysis: dict[str, Any]) 
         hook = s1.get(f"{side}_hook")
         if not isinstance(hook, dict):
             continue
+        repair_s1_hook_observable_floor(role, hook, result)
         candidate = infer_s1_boundary_candidate(role, result, analysis)
-        if not candidate:
-            continue
-        current = hook.get("hook_boundary_seconds")
-        if isinstance(current, bool) or not isinstance(current, (int, float)):
-            current = None
-        if current is None or float(current) > candidate["seconds"] + 0.5:
-            hook["hook_boundary_seconds"] = candidate["seconds"]
-            hook["hook_boundary_reason"] = f"{hook.get('hook_boundary_reason') or ''}（系统按 SRT/facts 边界候选收回：{candidate['reason']}）"
-            if not hook.get("s2_start_signal"):
-                hook["s2_start_signal"] = candidate.get("cue") or "S2 产品/解决方案承接开始"
+        if candidate:
+            current = hook.get("hook_boundary_seconds")
+            if isinstance(current, bool) or not isinstance(current, (int, float)):
+                current = None
+            should_apply_candidate = (
+                current is None
+                or float(current) > candidate["seconds"] + 0.5
+                or (candidate.get("source") == "evidence" and float(current) < candidate["seconds"] - 0.5)
+            )
+            if should_apply_candidate:
+                hook["hook_boundary_seconds"] = candidate["seconds"]
+                hook["hook_boundary_reason"] = f"{hook.get('hook_boundary_reason') or ''}（系统按 SRT/facts 边界候选收回：{candidate['reason']}）"
+                if not hook.get("s2_start_signal"):
+                    hook["s2_start_signal"] = candidate.get("cue") or "S2 产品/解决方案承接开始"
         reason = str(hook.get("landing_reason") or "")
         leaks_by_time = hook_reason_window_leaks(reason, hook.get("hook_boundary_seconds"))
-        leaks_by_cue = bool(candidate.get("cue") and candidate["cue"] in reason)
-        if leaks_by_time or leaks_by_cue:
+        if leaks_by_time:
             hook["landing_window_leak"] = True
             if hook.get("landing_met") is True:
                 hook["landing_met"] = False
+                append_system_note(
+                    hook,
+                    "landing_reason",
+                    "系统按 S1 边界复核：该理由借用了边界后的 S2/S3 材料，landing 改为 false。",
+                )
+        repair_s1_anchor_proposition(role, hook, result, analysis)
+
+
+def append_system_note(target: dict[str, Any], key: str, note: str) -> None:
+    """给模型原理由追加确定性后处理说明，避免审计字段和修正结果互相矛盾。"""
+    current = str(target.get(key) or "").strip()
+    if note in current:
+        return
+    target[key] = f"{current}（{note}）" if current else f"（{note}）"
+
+
+def repair_s1_anchor_proposition(role: str, hook: dict[str, Any], result: dict[str, Any], analysis: dict[str, Any]) -> None:
+    """按冻结 S1 命题尺子压掉宽泛人群/品类词造成的 anchors 误判。
+
+    典型 case：女性保健品开头只说"女性/很多补充剂"，没有触及经期、气血、疲劳、面色等
+    冻结命题时，不能算命题锚定。
+    """
+    if hook.get("anchors_proposition") is not True:
+        return
+    bp = analysis.get("brand_proposition") if isinstance(analysis.get("brand_proposition"), dict) else {}
+    terms = [str(item).strip() for item in (bp.get("propositions") or []) + (bp.get("painpoints") or []) if str(item).strip()]
+    if not terms or not anchor_set_is_period_specific(terms):
+        return
+    evidence = find_early_evidence_for_role(role, result)
+    text = " ".join(
+        part
+        for part in [
+            evidence_text(evidence or {}),
+            str(hook.get("window_evidence") or ""),
+            str(hook.get("landing_reason") or ""),
+        ]
+        if part
+    )
+    if direct_anchor_hit(text, terms):
+        return
+    if any(cue.lower() in text.lower() for cue in GENERIC_SUPPLEMENT_ANCHOR_CUES):
+        hook["anchors_proposition"] = False
+        append_system_note(
+            hook,
+            "landing_reason",
+            "系统按冻结 S1 命题尺子复核：仅有人群/补充剂泛词，未命中经期、气血、疲劳、面色等核心锚点，anchors 改为 false。",
+        )
+
+
+def anchor_set_is_period_specific(terms: list[str]) -> bool:
+    text = " ".join(terms)
+    return any(cue in text for cue in PERIOD_ANCHOR_CUES)
+
+
+def direct_anchor_hit(text: str, terms: list[str]) -> bool:
+    compact = re.sub(r"\s+", "", text).lower()
+    needles: list[str] = []
+    for term in terms:
+        needles.append(term)
+        needles.extend(ANCHOR_ALIASES.get(term, []))
+    for needle in needles:
+        value = re.sub(r"\s+", "", str(needle)).lower()
+        if value and value in compact:
+            return True
+    return False
+
+
+def repair_s1_hook_observable_floor(role: str, hook: dict[str, Any], result: dict[str, Any]) -> None:
+    """用早段 facts 给 hook_exists 和四维可观察项做下限，防模型偶发把有证据的 Hook 判成全无。"""
+    evidence = find_early_evidence_for_role(role, result)
+    if not evidence or not early_evidence_has_hook_signal(evidence):
+        return
+    if hook.get("exists") is not True:
+        hook["exists"] = True
+        hook["hook_boundary_reason"] = f"{hook.get('hook_boundary_reason') or ''}（系统按早段 facts 识别到 Hook 信号，修正 exists=true）"
+    dims = hook.get("dims") if isinstance(hook.get("dims"), dict) else {}
+    hook["dims"] = dims
+    if has_visual_signal(evidence):
+        dims["camera"] = True
+    if has_copy_signal(evidence):
+        dims["copy"] = True
+    if has_sound_signal(evidence):
+        dims["sound"] = True
+
+
+def early_evidence_has_hook_signal(unit: dict[str, Any]) -> bool:
+    funcs = {str(item) for item in unit.get("functions") or []}
+    text = evidence_text(unit)
+    return "S1_hook" in funcs or any(cue.lower() in text.lower() for cue in S1_HOOK_CUES)
+
+
+def has_visual_signal(unit: dict[str, Any]) -> bool:
+    visual = str(unit.get("visual_fact") or "").strip()
+    return bool(visual and "未发现" not in visual and "无" != visual)
+
+
+def has_copy_signal(unit: dict[str, Any]) -> bool:
+    text = " ".join(str(unit.get(key) or "") for key in ("information", "voiceover_zh", "subtitle_fact", "voiceover"))
+    return any(cue.lower() in text.lower() for cue in S1_HOOK_CUES) or bool(str(unit.get("voiceover_zh") or "").strip())
+
+
+def has_sound_signal(unit: dict[str, Any]) -> bool:
+    return bool(str(unit.get("voiceover") or "").strip() or str(unit.get("audio_fact") or "").strip())
+
+
+def evidence_text(unit: dict[str, Any]) -> str:
+    return " ".join(
+        str(unit.get(key) or "")
+        for key in ("information", "voiceover", "voiceover_zh", "visual_fact", "subtitle_fact")
+    )
 
 
 def infer_s1_boundary_candidate(role: str, result: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any] | None:
@@ -102,6 +286,7 @@ def infer_s1_boundary_candidate(role: str, result: dict[str, Any], analysis: dic
                 return {
                     "seconds": round(start, 2),
                     "cue": cue,
+                    "source": "srt",
                     "reason": (
                         f"SRT 第一句 {first.get('start', 0):.2f}-{first.get('end', 0):.2f}s 更像 S1 留人；"
                         f"第二句从 {start:.2f}s 出现“{cue}”类 S2 承接信号。"
@@ -130,6 +315,7 @@ def infer_boundary_from_evidence(role: str, result: dict[str, Any]) -> dict[str,
             return {
                 "seconds": round(current_start, 2),
                 "cue": cue,
+                "source": "evidence",
                 "reason": (
                     f"facts 中 {previous.get('id')} 主功能为 S1_hook，"
                     f"{current.get('id')} 从 {current_start:.2f}s 进入 S2_intro/产品承接。"

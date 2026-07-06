@@ -111,6 +111,7 @@ def validate_quality_contract(result: dict[str, Any], analysis: dict[str, Any]) 
     """
     validate_module_ids(result)
     validate_s1_hook_flags(result, analysis)
+    validate_s2_contract_flags(result, analysis)
     validate_stage_time_coherence(result)
     validate_product_visibility(result, analysis)
     validate_narrative_evidence_consistency(result)
@@ -302,6 +303,55 @@ def validate_s1_hook_flags(result: dict[str, Any], analysis: dict[str, Any]) -> 
             errors.append(f"S1 {key}.anchors_proposition 必须是 bool")
     if errors:
         raise SystemExit("S1 hook flag 输出不完整：" + "；".join(errors))
+
+
+def validate_s2_contract_flags(result: dict[str, Any], analysis: dict[str, Any]) -> None:
+    """S2 产品引出契约 flag 门禁。
+
+    历史结果可能没有 creator_s2/benchmark_s2，因此只在主链显式要求或结果已含字段时校验。
+    """
+    stages = result.get("stage_analysis", [])
+    if len(stages) < 2 or not isinstance(stages[1], dict):
+        return
+    s2 = stages[1]
+    has_any_s2 = isinstance(s2.get("creator_s2"), dict) or isinstance(s2.get("benchmark_s2"), dict)
+    if not analysis.get("s2_flags_required") and not has_any_s2:
+        return
+
+    errors: list[str] = []
+    for role in ("creator", "benchmark"):
+        key = f"{role}_s2"
+        flag = s2.get(key)
+        if not isinstance(flag, dict):
+            errors.append(f"S2 缺少 {key}")
+            continue
+        for bool_key in (
+            "exists",
+            "merged_with_s3",
+            "handoff_met",
+            "s1_s2_compatible",
+            "product_identity_clear",
+            "product_role_clear",
+            "excluded_or_risky_module",
+        ):
+            if flag.get(bool_key) not in {True, False}:
+                errors.append(f"S2 {key}.{bool_key} 必须是 bool")
+        if str(flag.get("module_type") or "").strip() not in {"A", "B", "C", "D", "unknown"}:
+            errors.append(f"S2 {key}.module_type 必须是 A-D 或 unknown")
+        start = flag.get("start_seconds")
+        end = flag.get("end_seconds")
+        if not isinstance(start, (int, float)) or isinstance(start, bool) or start < 0:
+            errors.append(f"S2 {key}.start_seconds 必须是非负数字")
+        if not isinstance(end, (int, float)) or isinstance(end, bool) or end < 0:
+            errors.append(f"S2 {key}.end_seconds 必须是非负数字")
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)) and not isinstance(start, bool) and not isinstance(end, bool) and end < start:
+            errors.append(f"S2 {key}.end_seconds 必须大于等于 start_seconds")
+        if not str(flag.get("handoff_reason") or "").strip():
+            errors.append(f"S2 {key}.handoff_reason 不能为空")
+        if not flag.get("evidence_ids"):
+            errors.append(f"S2 {key}.evidence_ids 不能为空")
+    if errors:
+        raise SystemExit("S2 产品引出契约 flag 输出不完整：" + "；".join(errors))
 
 
 def validate_stage_time_coherence(result: dict[str, Any]) -> None:

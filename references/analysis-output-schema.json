@@ -114,6 +114,38 @@
         "landing_window_leak": "仅 S1 必填：landing 判断是否借用了 hook_boundary_seconds 之后的 S2/S3 材料，true|false；若 true，landing_met 应为 false。",
         "anchors_proposition": "仅 S1 必填：是否锚定本品 hook_proposition / painpoints / product_profile/category_profile 概念，true|false。"
       },
+      "creator_s2": {
+        "exists": "仅 S2 必填：达人侧是否存在产品引出功能；≤15s 且 S2/S3 合并也算存在，true|false。",
+        "merged_with_s3": "仅 S2 必填：产品引出与使用演示是否合并，true|false。",
+        "module_type": "仅 S2 必填：S2-A~D 的字母 A-D，或 unknown。",
+        "handoff_met": "仅 S2 必填：是否自然承接该侧 S1 抛出的痛点/悬念/结果/场景，true|false。",
+        "s1_s2_compatible": "仅 S2 必填：按结构库 S1→S2 兼容矩阵判断是否兼容，true|false。",
+        "product_identity_clear": "仅 S2 必填：用户是否知道这是哪个产品/品类/品牌之一，true|false。",
+        "product_role_clear": "仅 S2 必填：产品是否成为解决方案/答案/推荐对象/对比胜出者，true|false。",
+        "excluded_or_risky_module": "仅 S2 必填：是否用了结构库对该品类排除或高合规风险的引出方式，true|false。",
+        "start_seconds": "仅 S2 必填：S2 起始秒点。",
+        "end_seconds": "仅 S2 必填：S2 结束秒点。",
+        "handoff_reason": "仅 S2 必填：一句话说明 S1 提了什么、S2 如何接住；没接住要直说。",
+        "evidence_ids": [
+          "仅 S2 必填：支撑该侧 S2 判断的 evidence id。"
+        ]
+      },
+      "benchmark_s2": {
+        "exists": "仅 S2 必填：标杆侧是否存在产品引出功能；≤15s 且 S2/S3 合并也算存在，true|false。",
+        "merged_with_s3": "仅 S2 必填：产品引出与使用演示是否合并，true|false。",
+        "module_type": "仅 S2 必填：S2-A~D 的字母 A-D，或 unknown。",
+        "handoff_met": "仅 S2 必填：是否自然承接该侧 S1 抛出的痛点/悬念/结果/场景，true|false。",
+        "s1_s2_compatible": "仅 S2 必填：按结构库 S1→S2 兼容矩阵判断是否兼容，true|false。",
+        "product_identity_clear": "仅 S2 必填：用户是否知道这是哪个产品/品类/品牌之一，true|false。",
+        "product_role_clear": "仅 S2 必填：产品是否成为解决方案/答案/推荐对象/对比胜出者，true|false。",
+        "excluded_or_risky_module": "仅 S2 必填：是否用了结构库对该品类排除或高合规风险的引出方式，true|false。",
+        "start_seconds": "仅 S2 必填：S2 起始秒点。",
+        "end_seconds": "仅 S2 必填：S2 结束秒点。",
+        "handoff_reason": "仅 S2 必填：一句话说明 S1 提了什么、S2 如何接住；没接住要直说。",
+        "evidence_ids": [
+          "仅 S2 必填：支撑该侧 S2 判断的 evidence id。"
+        ]
+      },
       "creator_module_id": "S1-A 等结构库官方模块编号；无法识别写 unknown。",
       "benchmark_module_id": "S1-A 等结构库官方模块编号；无法识别写 unknown。",
       "module_fit": "fit | degraded | unfit | unknown",

@@ -356,9 +356,10 @@ S2_START_CUES = [
     "答案",
     "秘密",
     "就是它",
-    "这款",
-    "这个",
-    "产品",
+    "这个产品",
+    "这款产品",
+    "这个是",
+    "这款是",
     "认证",
     "成分",
     "价格",
@@ -611,11 +612,35 @@ def build_llm_comparison_payload(
         "hook_boundary_seconds 必须按 structure_library 的 S1 留人机制→S2 产品引出/解决方案承接功能切换来判，不得写死固定秒数；"
         "S2-A 承接式引出可早于产品实物或产品名出现，不能等产品画面才切 S2；缺失视为违规输出。S2-S6 不含这两个字段。"
     )
+    s2_flag_block = (
+        "## S2 产品引出契约 flag（只判 S1→S2 衔接，不做四维打分）\n"
+        "S2 阶段（且仅 S2）每侧【必须】输出 creator_s2 与 benchmark_s2 两个对象，形如：\n"
+        '{"exists": bool（该侧是否存在产品引出功能；≤15s 且 S2/S3 合并也算存在）, '
+        '"merged_with_s3": bool（成片≤15s 或产品引出与使用演示不可分时 true；true 时不因缺独立 S2 扣分）, '
+        '"module_type": "A"~"D" 或 "unknown"（按 structure_library S2 四型判：A承接式/B解谜式/C对比式/D第三方式）, '
+        '"handoff_met": bool（是否自然承接该侧 S1 抛出的痛点/悬念/结果/场景；不是单纯产品露出）, '
+        '"s1_s2_compatible": bool（按 structure_library 的 S1→S2 兼容矩阵判模块组合是否兼容）, '
+        '"product_identity_clear": bool（用户是否知道这是什么产品/品类/品牌之一，不能只看到模糊道具）, '
+        '"product_role_clear": bool（产品是否成为解决方案/答案/推荐对象/对比胜出者，而非背景道具）, '
+        '"excluded_or_risky_module": bool（是否用了结构库对该品类排除或高合规风险的引出方式，如保健/美妆用否定竞品式 S2-C）, '
+        '"start_seconds": number, "end_seconds": number, '
+        '"handoff_reason": "一句话说明 S1 提了什么、S2 如何接住；若没接住要直说", '
+        '"evidence_ids": ["C1"]}。\n'
+        "S2 铁律：产品露出≠产品引出完成；讲卖点细节/成分/选购建议不归 S2，归 S3/S4/S5；"
+        "S2 只判三件事——承接 S1、说清产品身份、让产品成为答案/解决方案。"
+    )
+    s2_field_req = (
+        "S2 强制：stage_analysis 第 2 项（S2 产品引出）必须再含 creator_s2 与 benchmark_s2 两个对象"
+        "（结构见上方：exists/merged_with_s3/module_type/handoff_met/s1_s2_compatible/product_identity_clear/product_role_clear/"
+        "excluded_or_risky_module/start_seconds/end_seconds/handoff_reason/evidence_ids）。"
+        "S2 flag 只服务衔接契约，不评卖点细节；S1 提过的钩子关键词不得在 S2 重复分析，S2 已分析的引出方式不得在 S3 重复。"
+    )
     user_text = "\n\n".join(
         [
             context,
             foundation_block,
             hook_flag_block,
+            s2_flag_block,
             s1_boundary_hint_block,
             "## S1-S6 模块结构库（判断视图：客观类型 + 适配条件，判 module_id 与类型对本品适配用；这是结构层、非判断层，不讲好坏）",
             structure_library_judgment_view(),
@@ -638,6 +663,7 @@ def build_llm_comparison_payload(
             "必须输出：one_line_verdict, one_line_summary, executive_summary, holistic_assessment（每维独立）, key_conclusions（1-5 条消费者视角）, product_visibility, category_profile, product_profile, loop_closure, video_understanding, stage_analysis[6], improvements（1-5 条，按 GMV 杠杆排序）。",
             "stage_analysis 每项必须含：stage, time_range, benchmark_time_range, creator_time_range, core_question, creator_module_id, benchmark_module_id, module_fit, module_fit_reason, task_completion, gap_type, gap_summary, voice_performance, benchmark_summary, benchmark_key_message, benchmark_evidence_ids, benchmark_visual_evidence, benchmark_support_status, benchmark_has_effect_demo, benchmark_has_usage_demo, benchmark_quote, benchmark_quote_zh, creator_summary, creator_key_message, creator_evidence_ids, creator_visual_evidence, creator_support_status, creator_has_effect_demo, creator_has_usage_demo, creator_quote, creator_quote_zh, gap, evidence, severity, creator_execution, benchmark_execution, painpoint_relevance, stage_standard_delivery。",
             hook_field_req,
+            s2_field_req,
             "task_completion 只能取 complete、partial、missing 三选一（达人侧该阶段功能完成度），禁止 both_complete、no_gap 等任何其他词；标杆侧完成情况写在 benchmark_summary。",
             "creator_execution 与 benchmark_execution 取值只能是 0、0.5、1、2 四个数字：0=未执行该阶段功能；0.5=做了但对该阶段核心功能基本无效——敷衍、平庸无感、几乎不起作用（如一句轻带的 CTA、平铺直叙毫无抓力的开场、仅口头承诺没有任何验证支撑）；1=执行合格（功能完成且对观众有效）；2=执行出色（可视化演示/铺垫到位/感染力强）。两侧按该阶段功能定义各自独立打分，先打分再对比，禁止因对比结果回调任何一侧分数。",
             "效果呈现阶段（S4）执行分以 product_profile.core_visual_proposition（本品核心视觉命题）为评判锚点，不套通用 before/after：先判该侧有没有拍出本品的决定性瞬间（定妆粉饼=粉底油光→哑光对比、面膜=逐日变化+敷后效果），并满足 product_profile.shooting_requirement（效果细微的品需正面强光+面部特写才算拍到）。拍出命题且拍摄到位才给 2；只完成动作（揭膜/擦粉/口头带过）未体现命题、或拍摄条件不支撑（暗光/无特写/wide shot 看不出效果）按敷衍计最高 0.5；做了但缺命题对比的'呈现单薄'最高 1。过长全程记录不加分（标尺是命题覆盖非完整性）。两侧各自独立打分，禁止因对比回调。",
@@ -783,6 +809,7 @@ def build_stage_review_payload(
         "painpoint_relevance": "benchmark_only | creator_only | both | none",
     }
     s1_contract = ""
+    s2_contract = ""
     if "S1" in target_codes:
         stage_update_example["stage"] = "S1 Hook"
         stage_update_example["core_question"] = "用户凭什么停下来"
@@ -809,6 +836,31 @@ def build_stage_review_payload(
             "landing_met 只能按 0 到 hook_boundary_seconds 内的三件套判：对象明确 + 张力明确 + 承诺或证据明确，"
             "缺一即 false，禁止用后续 S2/S3 补足；若 landing_reason 引用边界后内容，landing_window_leak=true 且 landing_met=false。"
         )
+    if "S2" in target_codes:
+        stage_update_example["stage"] = "S2 产品引出"
+        stage_update_example["core_question"] = "Hook 如何自然过渡到产品"
+        s2_example = {
+            "exists": True,
+            "merged_with_s3": False,
+            "module_type": "A-D 或 unknown",
+            "handoff_met": True,
+            "s1_s2_compatible": True,
+            "product_identity_clear": True,
+            "product_role_clear": True,
+            "excluded_or_risky_module": False,
+            "start_seconds": 4.5,
+            "end_seconds": 8.0,
+            "handoff_reason": "S1 提出痛点/悬念/结果，S2 用产品身份和解决方案自然接住",
+            "evidence_ids": ["C1"],
+        }
+        stage_update_example["creator_s2"] = s2_example
+        stage_update_example["benchmark_s2"] = s2_example
+        s2_contract = (
+            "目标阶段包含 S2 时，stage_update 必须同时重判 creator_s2 与 benchmark_s2；"
+            "S2 只判 S1→S2 衔接契约：是否承接 S1、产品身份是否清楚、产品是否成为解决方案/答案。"
+            "产品露出不等于产品引出完成；卖点细节/成分/认证/选购建议不要当作 S2 加分，归 S3/S4/S5。"
+            "≤15s 且 S2/S3 不可分时 merged_with_s3=true，不因没有独立 S2 扣分。"
+        )
     content: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -821,6 +873,7 @@ def build_stage_review_payload(
                     "必须先在 gap 字段写清判断依据（达人做了什么→标杆做了什么→对购买意愿影响），再给 severity。",
                     "回看后必须按主分析同一标尺重打 creator_execution 与 benchmark_execution（0=未执行；0.5=做了但基本无效/敷衍/无法有效接收；1=合格有效；2=出色。两侧独立打分，先打分再对比）和 painpoint_relevance——系统将据这些事实重推导差距等级；severity 仍需填写但仅作参考。",
                     s1_contract,
+                    s2_contract,
                     "只输出严格 JSON，不要 Markdown。",
                     "输出格式：",
                     json.dumps(
@@ -1087,6 +1140,7 @@ def build_llm_repair_payload(
                     "S1 Hook 必须补齐 creator_hook 与 benchmark_hook 两个对象，字段为 exists(bool)、type(A-G 或 unknown)、dims{camera,copy,sound,rhythm}(bool)、hook_boundary_seconds(number)、hook_boundary_reason(非空)、s2_start_signal(非空)、landing_met(bool)、landing_reason(非空)、window_evidence(非空)、landing_window_leak(bool)、anchors_proposition(bool)。"
                     "hook_boundary_seconds 按 structure_library_full.md 的 S1 留人机制→S2 产品引出/解决方案承接功能切换判断，不得写死固定秒数；S2-A 承接式引出可早于产品实物或产品名出现，不能等产品画面才切 S2。"
                     "landing_met 按 type 无关三件套判断：0 到 hook_boundary_seconds 内对象明确、张力明确、承诺或证据明确，缺一即 false；不得用后续 S2/S3 产品介绍补足 S1 landing。若引用边界后材料，landing_window_leak=true 且 landing_met=false。"
+                    "S2 产品引出必须补齐 creator_s2 与 benchmark_s2 两个对象，字段为 exists(bool)、merged_with_s3(bool)、module_type(A-D或unknown)、handoff_met(bool)、s1_s2_compatible(bool)、product_identity_clear(bool)、product_role_clear(bool)、excluded_or_risky_module(bool)、start_seconds(number)、end_seconds(number)、handoff_reason(非空)、evidence_ids(非空数组)。"
                     "提升点必须保留 benchmark_evidence_ids、base_frame_suitability、best_base_frame_time、base_frame_evidence_id、base_frame_reason 和 aigc_prompt；无可用达人素材时写 no_suitable_frame 且时间与 base_frame_evidence_id 留空。aigc_image_path 留空。"
                     "修复 improvements 时也必须遵循达人框架约束、卖点适配权重和标杆功能意图转译，不得把 benchmark_reference 直接改写成 suggestion。"
                     "健康品类建议不得声称调节激素、改善月经、治疗症状或虚构优惠。建议话术必须重新设计，不得复制标杆原句。"

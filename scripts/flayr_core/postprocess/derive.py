@@ -221,6 +221,81 @@ def _s1_bench_highlight(stage: dict[str, Any]) -> bool:
             and len(dims) == 4 and all(v is True for v in dims.values()))
 
 
+def _s2_contract_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
+    """S2 产品引出契约 flag：只校准"自然承接 + 产品身份/角色明确"，不做四维主观分。
+
+    任一侧缺 flag → 返回 None，derive 保留模型执行分。merged_with_s3=true 时不因独立 S2 短/弱扣分。
+    """
+    c = stage.get("creator_s2")
+    b = stage.get("benchmark_s2")
+    if not isinstance(c, dict) or not isinstance(b, dict):
+        return None
+
+    def side_exec(flag: dict[str, Any]) -> float:
+        if flag.get("exists") is False:
+            return 0.0
+        # S1 缺失会让 S2 没有可承接对象，但如果产品身份和解决方案角色已经清楚，
+        # 这个问题应由 S1 承担，避免在 S2 重复计罚。
+        if (
+            flag.get("merged_with_s3") is True
+            and flag.get("product_identity_clear") is True
+            and flag.get("product_role_clear") is True
+        ):
+            return 2.0
+        met = sum(
+            1
+            for key in ("handoff_met", "s1_s2_compatible", "product_identity_clear", "product_role_clear")
+            if flag.get(key) is True
+        )
+        if met >= 4:
+            return 2.0
+        if met >= 3:
+            return 1.0
+        if met >= 1:
+            return 0.5
+        return 0.0
+
+    return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
+
+
+def _s2_contract_floor(stage: dict[str, Any]) -> tuple[bool, str]:
+    """S2 下限：标杆完成承接/身份/角色，达人没完成关键契约 → 至少 medium。"""
+    c = stage.get("creator_s2")
+    b = stage.get("benchmark_s2")
+    if not isinstance(c, dict) or not isinstance(b, dict):
+        return False, ""
+    if c.get("merged_with_s3") is True:
+        return False, ""
+    benchmark_complete = (
+        b.get("handoff_met") is True
+        and b.get("product_identity_clear") is True
+        and b.get("product_role_clear") is True
+    )
+    if not benchmark_complete:
+        return False, ""
+    missing = []
+    if c.get("handoff_met") is False:
+        missing.append("未自然承接 S1")
+    if c.get("product_identity_clear") is False:
+        missing.append("产品身份不清")
+    if c.get("product_role_clear") is False:
+        missing.append("产品未成为解决方案/答案")
+    if c.get("s1_s2_compatible") is False:
+        missing.append("S1→S2 模块不兼容")
+    if not missing:
+        return False, ""
+    return True, "；S2 契约下限：" + "、".join(missing)
+
+
+def _s2_risky_module(stage: dict[str, Any]) -> bool:
+    """S2 风险模块：达人使用结构库排除/高风险引出方式而标杆没有，需放大到 medium 起。"""
+    c = stage.get("creator_s2")
+    b = stage.get("benchmark_s2")
+    if not isinstance(c, dict) or not isinstance(b, dict):
+        return False
+    return c.get("excluded_or_risky_module") is True and b.get("excluded_or_risky_module") is not True
+
+
 def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] | None,
                 painpoints: list[str], shake: dict[str, bool] | None = None,
                 endorsement: dict[str, tuple[bool, bool, bool]] | None = None) -> dict[str, Any]:
@@ -236,6 +311,10 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
                 return {"status": "derived", "severity": "large", "E": 2,
                         "reason": "S1 达人无 Hook、标杆有 Hook（hook_exists 红线）"}
             creator_exec, bench_exec = s1["creator_exec"], s1["bench_exec"]
+    elif stage_id == "S2":
+        s2 = _s2_contract_exec(stage)
+        if s2 is not None:
+            creator_exec, bench_exec = s2["creator_exec"], s2["bench_exec"]
     if creator_exec is None or bench_exec is None:
         return {"status": "skipped", "reason": "执行分缺失，保留模型 severity"}
 
@@ -302,9 +381,14 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         e, reason = max(e, 2.0), reason + "；S3 标杆把卖点演示出来(S3-A~E)、达人只口播未演示（演示即证据）"
     elif stage_id == "S1" and e > 0 and _s1_bench_anchors_only(stage, relevance):
         e, reason = max(e, 2.0), reason + "；S1 标杆钩子锚定品命题、达人未锚定（命题不止痛点）"
+    elif stage_id == "S2" and e > 0 and _s2_risky_module(stage):
+        e, reason = max(e, 1.0), reason + "；S2 达人使用结构库排除/高风险引出方式"
 
     # 极性红线：达人持平或更优 → small（达人优势记亮点，绝不是差距）
     if e <= 0:
+        if stage_id == "S1" and _s1_bench_anchors_only(stage, relevance):
+            return {"status": "derived", "severity": "medium", "E": 0,
+                    "reason": reason + "；命题锚下限：标杆钩子锚定本品核心命题、达人只做泛留人"}
         return {"status": "derived", "severity": "small", "E": 0,
                 "reason": reason + "；达人持平或更优（亮点，零差距红线）"}
 
@@ -336,6 +420,14 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
     if stage_id == "S1" and severity == "small" and _s1_landing_floor(stage):
         severity = "medium"
         reason += "；landing 下限：标杆钩子立住、达人未立住（结构件齐全但钩子没打穿）"
+    if stage_id == "S1" and severity == "small" and _s1_bench_anchors_only(stage, relevance):
+        severity = "medium"
+        reason += "；命题锚下限：标杆钩子锚定本品核心命题、达人只做泛留人"
+    if stage_id == "S2" and severity == "small":
+        floor, floor_reason = _s2_contract_floor(stage)
+        if floor:
+            severity = "medium"
+            reason += floor_reason
     trace = {"status": "derived", "severity": severity, "E": e, "W": w, "C": c_factor,
              "painpoint_relevance": relevance, "S": score, "reason": reason}
     # 残差亮点门（只进 trace 不进 severity）：标杆四维全 met 且类型明确才允许亮点描述，否则跳过
