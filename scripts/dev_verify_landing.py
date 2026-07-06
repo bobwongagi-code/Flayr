@@ -438,9 +438,29 @@ check("S3 多人使用角色清楚且互动服务卖点→可成立",
       _s3_people.get("severity") == "small" and _s3_people.get("E") == 0)
 
 
-def _s4_flag(effect=True, attribution=True, result_only=False, linked=True, tamper=False):
+def _s4_flag(
+    effect=True,
+    attribution=True,
+    result_only=False,
+    linked=True,
+    tamper=False,
+    effect_type="before_after",
+    salience="strong",
+    matched=True,
+    control=True,
+    focus=True,
+    maximized=True,
+    close_inspection=False,
+):
     return {
+        "effect_type": effect_type,
         "effect_visible": effect,
+        "effect_salience": salience,
+        "effect_proposition_matched": matched,
+        "comparison_control_met": control,
+        "closeup_or_focus_met": focus,
+        "effect_maximized": maximized,
+        "requires_close_inspection": close_inspection,
         "effect_attribution_supported": attribution,
         "result_only_without_process": result_only,
         "process_linked_effect": linked,
@@ -477,6 +497,62 @@ _s4_result_bound = _derive_one(
 )
 check("S4 只有结果但产品结果强绑定→最多中等可信",
       _s4_result_bound.get("severity") in {"small", "medium"} and _s4_result_bound.get("E") == 1)
+
+_s4_strong_same = _derive_one(
+    "S4",
+    {
+        "creator_s4": _s4_flag(),
+        "benchmark_s4": _s4_flag(),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S4": 1.4},
+    [],
+)
+check("S4 强效果：显著+命题命中+对比控制+聚焦+最大化→满执行",
+      _s4_strong_same.get("severity") == "small" and _s4_strong_same.get("E") == 0)
+
+_s4_subtle = _derive_one(
+    "S4",
+    {
+        "creator_s4": _s4_flag(salience="subtle", close_inspection=True),
+        "benchmark_s4": _s4_flag(),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S4": 1.4},
+    [],
+)
+check("S4 变化需要仔细看→封顶弱",
+      _s4_subtle.get("severity") in {"medium", "large"} and _s4_subtle.get("E") == 1.5)
+
+_s4_not_max = _derive_one(
+    "S4",
+    {
+        "creator_s4": _s4_flag(salience="clear", control=False, focus=False, maximized=False),
+        "benchmark_s4": _s4_flag(),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S4": 1.4},
+    [],
+)
+check("S4 结构存在但未最大化→不能拿满分",
+      _s4_not_max.get("severity") in {"small", "medium"} and _s4_not_max.get("E") == 1)
+
+_s4_aesthetic = _derive_one(
+    "S4",
+    {
+        "creator_s4": _s4_flag(effect_type="aesthetic_display", linked=False, control=False, focus=True, maximized=True),
+        "benchmark_s4": _s4_flag(),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S4": 1.4},
+    [],
+)
+check("S4 颜值陈列只算 aesthetic_display，不伪装强效果",
+      _s4_aesthetic.get("severity") in {"small", "medium"} and _s4_aesthetic.get("E") == 1)
 
 # parse 归一：容忍 'S1-B：反差' / 'yes' / 1 等写法
 _nh = normalize_hook_flags({"exists": "true", "type": "S1-B：反差震惊型", "dims": {"camera": "yes", "copy": 1}})
@@ -544,7 +620,14 @@ check("S3 parse 归一 usage flags（type→D, bool/时间/evidence 容错）",
       and _ns3["evidence_ids"] == ["C2"])
 
 _ns4 = normalize_s4_flags({
+    "effect_type": "process-visualization",
     "effect_visible": "yes",
+    "effect_salience": "clear",
+    "effect_proposition_matched": "true",
+    "comparison_control_met": "yes",
+    "closeup_or_focus_met": 1,
+    "effect_maximized": "no",
+    "requires_close_inspection": "false",
     "effect_attribution_supported": 0,
     "result_only_without_process": "true",
     "process_linked_effect": "false",
@@ -553,7 +636,11 @@ _ns4 = normalize_s4_flags({
     "evidence_ids": "C3",
 })
 check("S4 parse 归一 effect flags（bool/evidence 容错）",
-      _ns4["effect_visible"] is True
+      _ns4["effect_type"] == "process_visualization"
+      and _ns4["effect_visible"] is True
+      and _ns4["effect_salience"] == "clear"
+      and _ns4["effect_proposition_matched"] is True
+      and _ns4["effect_maximized"] is False
       and _ns4["effect_attribution_supported"] is False
       and _ns4["result_only_without_process"] is True
       and _ns4["evidence_ids"] == ["C3"])

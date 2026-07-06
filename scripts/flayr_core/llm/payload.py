@@ -680,7 +680,14 @@ def build_llm_comparison_payload(
     s4_flag_block = (
         "## S4 效果因果 flag（只判效果是否可见，以及是否可信地由产品造成）\n"
         "S4 阶段（且仅 S4）每侧【必须】输出 creator_s4 与 benchmark_s4 两个对象，形如：\n"
-        '{"effect_visible": bool（效果/结果是否肉眼可见）, '
+        '{"effect_type": "before_after|split_screen|person_vs_person|product_vs_alt|quantified_test|process_visualization|aesthetic_display|none", '
+        '"effect_visible": bool（效果/结果是否肉眼可见）, '
+        '"effect_salience": "none|subtle|clear|strong"（none=无效果；subtle=要仔细看才有变化；clear=普通用户能看出来；strong=一眼明显、有停留价值）, '
+        '"effect_proposition_matched": bool（是否命中 product_profile.core_visual_proposition，而不是展示了无关变化）, '
+        '"comparison_control_met": bool（前后/左右/对照是否同角度、同光线、同对象、同距离；无对比型效果时按该类型是否有公平控制判断）, '
+        '"closeup_or_focus_met": bool（是否用特写/近景/聚焦/构图把效果放大到短视频用户一眼能看见）, '
+        '"effect_maximized": bool（是否把该 S4 类型做到最大化，而不是只存在这个结构；变化明显、画面聚焦、节奏突出才 true）, '
+        '"requires_close_inspection": bool（用户是否需要停下来仔细找变化；若 true，S4 不能高分）, '
         '"effect_attribution_supported": bool（画面是否支持该效果由本产品造成，而不是剪辑、换物、灯光或口播脑补）, '
         '"result_only_without_process": bool（只给结果但没给产品导致结果的过程；这会限制 S4 上限）, '
         '"process_linked_effect": bool（能看到产品使用动作与结果变化之间的连续或可信连接）, '
@@ -689,12 +696,15 @@ def build_llm_comparison_payload(
         '"evidence_ids": ["C1"]}。\n'
         "S4 铁律：只给结果、没有过程，不等于高分效果展示。"
         "若 result_only_without_process=true 且 effect_attribution_supported=false，效果很薄弱；"
-        "若只有结果但产品和结果强绑定，也最多是中等可信；只有 process_linked_effect=true 且 effect_visible=true 才能视为强效果呈现。"
+        "若只有结果但产品和结果强绑定，也最多是中等可信；"
+        "只有 process_linked_effect=true、effect_salience=strong、effect_proposition_matched=true、comparison_control_met=true、closeup_or_focus_met=true、effect_maximized=true 时，才能视为强效果呈现。"
+        "透明包装/阳光下好看/陈列美感属于 aesthetic_display，可支撑低价熟品转化，但不要伪装成标准效果验证。"
     )
     s4_field_req = (
         "S4 强制：stage_analysis 第 4 项（S4 效果呈现）必须再含 creator_s4 与 benchmark_s4 两个对象"
-        "（结构见上方：effect_visible/effect_attribution_supported/result_only_without_process/process_linked_effect/"
-        "tamper_or_cut_risk/effect_reason/evidence_ids）。"
+        "（结构见上方：effect_type/effect_visible/effect_salience/effect_proposition_matched/comparison_control_met/"
+        "closeup_or_focus_met/effect_maximized/requires_close_inspection/effect_attribution_supported/result_only_without_process/"
+        "process_linked_effect/tamper_or_cut_risk/effect_reason/evidence_ids）。"
         "S4 flag 只服务效果因果判断；不要用 S3 的使用过程完整性替代 S4 效果可见性，也不要用单纯结果图替代因果证明。"
     )
     user_text = "\n\n".join(
@@ -973,7 +983,14 @@ def build_stage_review_payload(
         stage_update_example["stage"] = "S4 效果呈现"
         stage_update_example["core_question"] = "用户能不能看见效果并相信效果由产品造成"
         s4_example = {
+            "effect_type": "before_after|split_screen|person_vs_person|product_vs_alt|quantified_test|process_visualization|aesthetic_display|none",
             "effect_visible": True,
+            "effect_salience": "strong",
+            "effect_proposition_matched": True,
+            "comparison_control_met": True,
+            "closeup_or_focus_met": True,
+            "effect_maximized": True,
+            "requires_close_inspection": False,
             "effect_attribution_supported": True,
             "result_only_without_process": False,
             "process_linked_effect": True,
@@ -985,7 +1002,8 @@ def build_stage_review_payload(
         stage_update_example["benchmark_s4"] = s4_example
         s4_contract = (
             "目标阶段包含 S4 时，stage_update 必须同时重判 creator_s4 与 benchmark_s4；"
-            "S4 只判效果是否可见、效果是否可信地由产品造成。只有结果没有过程不能直接高分；"
+            "S4 只判效果是否可见、效果是否显著、是否命中核心视觉命题、是否可信地由产品造成。"
+            "只有结果没有过程不能直接高分；需要仔细看才有变化时 requires_close_inspection=true 且 effect_salience=subtle；"
             "没有因果桥时 effect_attribution_supported=false，有跳剪/换物/光线变化风险时 tamper_or_cut_risk=true。"
         )
     content: list[dict[str, Any]] = [
@@ -1271,7 +1289,7 @@ def build_llm_repair_payload(
                     "landing_met 按 type 无关三件套判断：0 到 hook_boundary_seconds 内对象明确、张力明确、承诺或证据明确，缺一即 false；不得用后续 S2/S3 产品介绍补足 S1 landing。若引用边界后材料，landing_window_leak=true 且 landing_met=false。"
                     "S2 产品引出必须补齐 creator_s2 与 benchmark_s2 两个对象，字段为 exists(bool)、merged_with_s3(bool)、module_type(A-D或unknown)、handoff_met(bool)、s1_s2_compatible(bool)、product_identity_clear(bool)、product_role_clear(bool)、excluded_or_risky_module(bool)、start_seconds(number)、end_seconds(number)、handoff_reason(非空)、evidence_ids(非空数组)。"
                     "S3 使用过程必须补齐 creator_s3 与 benchmark_s3 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、usage_process_visible(bool)、result_only_without_process(bool)、mouth_only_or_static(bool)、real_usage_met(bool)、core_selling_point_visible(bool)、demonstrated_selling_points(数组)、missing_selling_points(数组)、scene_mode(single_scene/multi_scene/multi_person/hybrid/unknown)、usage_context_fit(bool)、continuity_met(bool)、richness_met(bool)、single_scene_continuity_met(bool)、single_scene_variation_met(bool)、multi_scene_logic_met(bool)、multi_scene_transition_met(bool)、multi_scene_role_adaptation_met(bool)、role_design_met(bool)、role_interaction_met(bool)、presentation_overlays(数组)、fake_or_staged(bool)、start_seconds(number)、end_seconds(number)、usage_reason(非空)、evidence_ids(非空数组)。"
-                    "S4 效果呈现必须补齐 creator_s4 与 benchmark_s4 两个对象，字段为 effect_visible(bool)、effect_attribution_supported(bool)、result_only_without_process(bool)、process_linked_effect(bool)、tamper_or_cut_risk(bool)、effect_reason(非空)、evidence_ids(非空数组)。"
+                    "S4 效果呈现必须补齐 creator_s4 与 benchmark_s4 两个对象，字段为 effect_type(before_after/split_screen/person_vs_person/product_vs_alt/quantified_test/process_visualization/aesthetic_display/none)、effect_visible(bool)、effect_salience(none/subtle/clear/strong)、effect_proposition_matched(bool)、comparison_control_met(bool)、closeup_or_focus_met(bool)、effect_maximized(bool)、requires_close_inspection(bool)、effect_attribution_supported(bool)、result_only_without_process(bool)、process_linked_effect(bool)、tamper_or_cut_risk(bool)、effect_reason(非空)、evidence_ids(非空数组)。"
                     "提升点必须保留 benchmark_evidence_ids、base_frame_suitability、best_base_frame_time、base_frame_evidence_id、base_frame_reason 和 aigc_prompt；无可用达人素材时写 no_suitable_frame 且时间与 base_frame_evidence_id 留空。aigc_image_path 留空。"
                     "修复 improvements 时也必须遵循达人框架约束、卖点适配权重和标杆功能意图转译，不得把 benchmark_reference 直接改写成 suggestion。"
                     "健康品类建议不得声称调节激素、改善月经、治疗症状或虚构优惠。建议话术必须重新设计，不得复制标杆原句。"

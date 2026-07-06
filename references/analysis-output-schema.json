@@ -219,7 +219,14 @@
         ]
       },
       "creator_s4": {
+        "effect_type": "仅 S4 必填：before_after | split_screen | person_vs_person | product_vs_alt | quantified_test | process_visualization | aesthetic_display | none。",
         "effect_visible": "仅 S4 必填：达人侧效果/结果是否肉眼可见，true|false。",
+        "effect_salience": "仅 S4 必填：none | subtle | clear | strong。subtle=要仔细看才有变化；strong=一眼明显。",
+        "effect_proposition_matched": "仅 S4 必填：是否命中 product_profile.core_visual_proposition，而不是无关变化。",
+        "comparison_control_met": "仅 S4 必填：前后/左右/对照是否同角度、同光线、同对象、同距离；无对比型效果时按该类型是否有公平控制判断。",
+        "closeup_or_focus_met": "仅 S4 必填：是否用特写/近景/聚焦/构图把效果放大到短视频用户一眼能看见。",
+        "effect_maximized": "仅 S4 必填：是否把该 S4 类型做到最大化，而不是只存在这个结构。",
+        "requires_close_inspection": "仅 S4 必填：用户是否需要停下来仔细找变化；若 true，S4 不能高分。",
         "effect_attribution_supported": "仅 S4 必填：画面是否支持该效果由本产品造成，而不是剪辑、换物、灯光或口播脑补，true|false。",
         "result_only_without_process": "仅 S4 必填：只给结果但没给产品导致结果的过程，true|false。",
         "process_linked_effect": "仅 S4 必填：能看到产品使用动作与结果变化之间的连续或可信连接，true|false。",
@@ -230,7 +237,14 @@
         ]
       },
       "benchmark_s4": {
+        "effect_type": "仅 S4 必填：before_after | split_screen | person_vs_person | product_vs_alt | quantified_test | process_visualization | aesthetic_display | none。",
         "effect_visible": "仅 S4 必填：标杆侧效果/结果是否肉眼可见，true|false。",
+        "effect_salience": "仅 S4 必填：none | subtle | clear | strong。subtle=要仔细看才有变化；strong=一眼明显。",
+        "effect_proposition_matched": "仅 S4 必填：是否命中 product_profile.core_visual_proposition，而不是无关变化。",
+        "comparison_control_met": "仅 S4 必填：前后/左右/对照是否同角度、同光线、同对象、同距离；无对比型效果时按该类型是否有公平控制判断。",
+        "closeup_or_focus_met": "仅 S4 必填：是否用特写/近景/聚焦/构图把效果放大到短视频用户一眼能看见。",
+        "effect_maximized": "仅 S4 必填：是否把该 S4 类型做到最大化，而不是只存在这个结构。",
+        "requires_close_inspection": "仅 S4 必填：用户是否需要停下来仔细找变化；若 true，S4 不能高分。",
         "effect_attribution_supported": "仅 S4 必填：画面是否支持该效果由本产品造成，而不是剪辑、换物、灯光或口播脑补，true|false。",
         "result_only_without_process": "仅 S4 必填：只给结果但没给产品导致结果的过程，true|false。",
         "process_linked_effect": "仅 S4 必填：能看到产品使用动作与结果变化之间的连续或可信连接，true|false。",

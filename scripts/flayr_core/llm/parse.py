@@ -153,6 +153,17 @@ _S3_TYPE_LETTERS = {"A", "B", "C", "D", "E"}
 _HOOK_TS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*s")
 _S3_SCENE_MODES = {"single_scene", "multi_scene", "multi_person", "hybrid", "unknown"}
 _S3_PRESENTATION_OVERLAYS = {"step_breakdown", "first_person", "asmr", "closeup", "none"}
+_S4_EFFECT_TYPES = {
+    "before_after",
+    "split_screen",
+    "person_vs_person",
+    "product_vs_alt",
+    "quantified_test",
+    "process_visualization",
+    "aesthetic_display",
+    "none",
+}
+_S4_EFFECT_SALIENCE = {"none", "subtle", "clear", "strong"}
 
 
 def normalize_hook_type(value: Any) -> str:
@@ -195,6 +206,16 @@ def normalize_presentation_overlays(value: Any) -> list[str]:
         if key in _S3_PRESENTATION_OVERLAYS and key not in overlays:
             overlays.append(key)
     return overlays or ["none"]
+
+
+def normalize_s4_effect_type(value: Any) -> str:
+    effect_type = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return effect_type if effect_type in _S4_EFFECT_TYPES else "none"
+
+
+def normalize_s4_effect_salience(value: Any) -> str:
+    salience = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return salience if salience in _S4_EFFECT_SALIENCE else "none"
 
 
 def normalize_hook_boundary_seconds(value: Any) -> float | None:
@@ -321,7 +342,14 @@ def normalize_s4_flags(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     return {
+        "effect_type": normalize_s4_effect_type(value.get("effect_type")),
         "effect_visible": normalize_demo_flag(value.get("effect_visible")),
+        "effect_salience": normalize_s4_effect_salience(value.get("effect_salience")),
+        "effect_proposition_matched": normalize_demo_flag(value.get("effect_proposition_matched")),
+        "comparison_control_met": normalize_demo_flag(value.get("comparison_control_met")),
+        "closeup_or_focus_met": normalize_demo_flag(value.get("closeup_or_focus_met")),
+        "effect_maximized": normalize_demo_flag(value.get("effect_maximized")),
+        "requires_close_inspection": normalize_demo_flag(value.get("requires_close_inspection")),
         "effect_attribution_supported": normalize_demo_flag(value.get("effect_attribution_supported")),
         "result_only_without_process": normalize_demo_flag(value.get("result_only_without_process")),
         "process_linked_effect": normalize_demo_flag(value.get("process_linked_effect")),

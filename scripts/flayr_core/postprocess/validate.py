@@ -441,6 +441,11 @@ def validate_s4_effect_flags(result: dict[str, Any], analysis: dict[str, Any]) -
             continue
         for bool_key in (
             "effect_visible",
+            "effect_proposition_matched",
+            "comparison_control_met",
+            "closeup_or_focus_met",
+            "effect_maximized",
+            "requires_close_inspection",
             "effect_attribution_supported",
             "result_only_without_process",
             "process_linked_effect",
@@ -448,6 +453,19 @@ def validate_s4_effect_flags(result: dict[str, Any], analysis: dict[str, Any]) -
         ):
             if flag.get(bool_key) not in {True, False}:
                 errors.append(f"S4 {key}.{bool_key} 必须是 bool")
+        if str(flag.get("effect_type") or "").strip() not in {
+            "before_after",
+            "split_screen",
+            "person_vs_person",
+            "product_vs_alt",
+            "quantified_test",
+            "process_visualization",
+            "aesthetic_display",
+            "none",
+        }:
+            errors.append(f"S4 {key}.effect_type 非法")
+        if str(flag.get("effect_salience") or "").strip() not in {"none", "subtle", "clear", "strong"}:
+            errors.append(f"S4 {key}.effect_salience 必须是 none/subtle/clear/strong")
         if not str(flag.get("effect_reason") or "").strip():
             errors.append(f"S4 {key}.effect_reason 不能为空")
         if not flag.get("evidence_ids"):

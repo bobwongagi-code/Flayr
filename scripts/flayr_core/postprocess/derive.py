@@ -377,15 +377,32 @@ def _s4_effect_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     def side_exec(flag: dict[str, Any]) -> float:
-        if flag.get("effect_visible") is False:
+        salience = str(flag.get("effect_salience") or "none")
+        if flag.get("effect_visible") is False or salience == "none":
             return 0.0
         if flag.get("tamper_or_cut_risk") is True:
             return 0.5
-        if flag.get("process_linked_effect") is True and flag.get("effect_attribution_supported") is True:
-            return 2.0
+        if flag.get("requires_close_inspection") is True or salience == "subtle":
+            return 0.5
+        if flag.get("effect_type") == "aesthetic_display":
+            return 1.0 if flag.get("effect_proposition_matched") is True else 0.5
         if flag.get("result_only_without_process") is True:
-            return 1.0 if flag.get("effect_attribution_supported") is True else 0.5
-        return 1.0 if flag.get("effect_attribution_supported") is True else 0.5
+            if flag.get("effect_attribution_supported") is True and flag.get("effect_proposition_matched") is True:
+                return 1.0
+            return 0.5
+        if flag.get("process_linked_effect") is True and flag.get("effect_attribution_supported") is True:
+            if (
+                salience == "strong"
+                and flag.get("effect_proposition_matched") is True
+                and flag.get("comparison_control_met") is True
+                and flag.get("closeup_or_focus_met") is True
+                and flag.get("effect_maximized") is True
+            ):
+                return 2.0
+            if salience in {"clear", "strong"} and flag.get("effect_proposition_matched") is True:
+                return 1.0
+            return 0.5
+        return 1.0 if flag.get("effect_attribution_supported") is True and flag.get("effect_proposition_matched") is True else 0.5
 
     return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
 
