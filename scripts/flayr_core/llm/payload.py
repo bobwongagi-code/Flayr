@@ -265,8 +265,9 @@ def build_video_fact_payload(
         "time_range 用真实时间（如 2.5s - 4.0s）。"
         "把各维度观察到的画面事实记入 visual_fact、声音事实记入 audio_fact（BGM 在场与类型/语气/音效）、"
         "口播与画面的对齐关系（同步/提前/滞后/无关）记入 information；按实记录，不做评价；"
-        "凡 functions 含 S3_usage 的证据，visual_fact 必须明确记录使用主体是否完整可见、是否对焦、关键动作是否被遮挡/出画；"
-        "清洁类要写清目标面/污渍/刷洗区域是否完整入镜，美容类要写清上脸/涂抹区域是否清楚，不能只写'在使用'。"
+        "凡 functions 含 S3_usage 的证据，visual_fact 必须记录证据接收质量：使用对象/场景上下文是否足以理解产品作用对象、"
+        "关键动作是否连续可追踪、核心卖点发生区域是否清楚可见、是否只有局部特写且缺少必要上下文。"
+        "局部特写本身不是问题；只有当局部镜头让用户看不清产品作用对象、关键动作或证明区域时，才写证据接收不足。"
         "每条还要标 product_visible（该时段画面里能否看到产品本体，true/false）与 product_coverage"
         "（产品视觉占比 none｜low｜medium｜high，看不到写 none）：这两项用于确定性统计产品出镜，"
         "据画面如实标，产品被手遮住或只露局部按真实可见程度给 low；"
@@ -649,7 +650,7 @@ def build_llm_comparison_payload(
         '"mouth_only_or_static": bool（只拿着产品口播/静态展示/字幕讲卖点，没有真实使用动作）, '
         '"real_usage_met": bool（是否是真实可信的使用动作，而非摆拍假用、错误用法或只拿着产品说）, '
         '"core_selling_point_visible": bool（product_profile.core_selling_points 中至少一个核心卖点是否在使用动作里被看见；只口播不算）, '
-        '"process_framing_met": bool（使用过程主体是否拍全、拍清、对准；不能只露局部、跑焦、主体出画或关键动作被遮挡。清洁类要看清污渍/目标面/刷洗区域，美容类要看清上脸/涂抹区域）, '
+        '"process_framing_met": bool（S3 使用过程证据是否可接收：使用对象/场景上下文足以理解产品作用对象、关键动作连续可追踪、核心卖点发生区域清楚可见。局部特写合理时可为 true；只有局部镜头导致看不清对象/动作/证明区域，或跑焦、主体出画、关键动作被遮挡时才为 false）, '
         '"demonstrated_selling_points": ["动作里实际被证明的核心卖点，必须来自 product_profile.core_selling_points 或其同义表达"], '
         '"missing_selling_points": ["该阶段该演但没有被动作证明的核心卖点"], '
         '"scene_mode": "single_scene|multi_scene|multi_person|hybrid|unknown"（单场景/多场景/多人使用/混合；单场景和多场景无天然高低）, '
@@ -671,7 +672,8 @@ def build_llm_comparison_payload(
         "S3/S4 边界铁律：同一段画面可以同时支持 S3_usage 和 S4_effect；S3 只消费'产品如何被使用/核心卖点如何在动作中发生'，"
         "S4 消费'结果是否可见、效果是否可信地由产品造成'。"
         "S3 铁律：口播/字幕说卖点但画面没做出来，不算 core_selling_point_visible；只有结果没有过程，S3 最高只能算弱；"
-        "过程拍不全/主体没对准/关键动作出画时 process_framing_met=false，即使有使用动作也不能算强演示；"
+        "process_framing_met 只记录证据接收质量：局部特写不天然扣分；只有看不清产品作用对象、关键动作或核心证明区域时才 false。"
+        "即使有使用动作，若证据接收不足也不能算强演示；"
         "场景丰富、人物多、步骤多、ASMR/第一视角都不能补偿核心卖点没落地；独立效果结果归 S4，背书归 S5。"
     )
     s3_field_req = (
@@ -1004,9 +1006,10 @@ def build_stage_review_payload(
         s3_contract = (
             "目标阶段包含 S3 时，stage_update 必须同时重判 creator_s3 与 benchmark_s3；"
             "S3 只判真实使用过程：有没有使用过程、是否只有结果无过程、是否只口播静态、核心卖点是否在动作里可见、"
-            "使用主体是否拍全拍清对准、场景是单场景/多场景/多人/混合、场景组织是否服务卖点。"
+            "使用过程证据是否可接收、场景是单场景/多场景/多人/混合、场景组织是否服务卖点。"
             "只口播/字幕说卖点但画面没演，不算 core_selling_point_visible；只有结果没有过程，S3 最高只能算弱；"
-            "过程拍不全/主体没对准/关键动作出画时 process_framing_met=false；场景丰富、ASMR、第一视角、步骤拆解都不能补偿核心卖点没落地。效果结果归 S4，背书归 S5，不要回填到 S3。"
+            "process_framing_met 只判证据接收质量，合理局部特写不扣分；看不清对象/动作/证明区域时为 false。"
+            "场景丰富、ASMR、第一视角、步骤拆解都不能补偿核心卖点没落地。效果结果归 S4，背书归 S5，不要回填到 S3。"
         )
     if "S4" in target_codes:
         stage_update_example["stage"] = "S4 效果呈现"
