@@ -265,6 +265,8 @@ def build_video_fact_payload(
         "time_range 用真实时间（如 2.5s - 4.0s）。"
         "把各维度观察到的画面事实记入 visual_fact、声音事实记入 audio_fact（BGM 在场与类型/语气/音效）、"
         "口播与画面的对齐关系（同步/提前/滞后/无关）记入 information；按实记录，不做评价；"
+        "凡 functions 含 S3_usage 的证据，visual_fact 必须明确记录使用主体是否完整可见、是否对焦、关键动作是否被遮挡/出画；"
+        "清洁类要写清目标面/污渍/刷洗区域是否完整入镜，美容类要写清上脸/涂抹区域是否清楚，不能只写'在使用'。"
         "每条还要标 product_visible（该时段画面里能否看到产品本体，true/false）与 product_coverage"
         "（产品视觉占比 none｜low｜medium｜high，看不到写 none）：这两项用于确定性统计产品出镜，"
         "据画面如实标，产品被手遮住或只露局部按真实可见程度给 low；"
@@ -647,6 +649,7 @@ def build_llm_comparison_payload(
         '"mouth_only_or_static": bool（只拿着产品口播/静态展示/字幕讲卖点，没有真实使用动作）, '
         '"real_usage_met": bool（是否是真实可信的使用动作，而非摆拍假用、错误用法或只拿着产品说）, '
         '"core_selling_point_visible": bool（product_profile.core_selling_points 中至少一个核心卖点是否在使用动作里被看见；只口播不算）, '
+        '"process_framing_met": bool（使用过程主体是否拍全、拍清、对准；不能只露局部、跑焦、主体出画或关键动作被遮挡。清洁类要看清污渍/目标面/刷洗区域，美容类要看清上脸/涂抹区域）, '
         '"demonstrated_selling_points": ["动作里实际被证明的核心卖点，必须来自 product_profile.core_selling_points 或其同义表达"], '
         '"missing_selling_points": ["该阶段该演但没有被动作证明的核心卖点"], '
         '"scene_mode": "single_scene|multi_scene|multi_person|hybrid|unknown"（单场景/多场景/多人使用/混合；单场景和多场景无天然高低）, '
@@ -668,12 +671,13 @@ def build_llm_comparison_payload(
         "S3/S4 边界铁律：同一段画面可以同时支持 S3_usage 和 S4_effect；S3 只消费'产品如何被使用/核心卖点如何在动作中发生'，"
         "S4 消费'结果是否可见、效果是否可信地由产品造成'。"
         "S3 铁律：口播/字幕说卖点但画面没做出来，不算 core_selling_point_visible；只有结果没有过程，S3 最高只能算弱；"
+        "过程拍不全/主体没对准/关键动作出画时 process_framing_met=false，即使有使用动作也不能算强演示；"
         "场景丰富、人物多、步骤多、ASMR/第一视角都不能补偿核心卖点没落地；独立效果结果归 S4，背书归 S5。"
     )
     s3_field_req = (
         "S3 强制：stage_analysis 第 3 项（S3 使用过程）必须再含 creator_s3 与 benchmark_s3 两个对象"
         "（结构见上方：exists/module_type/usage_process_visible/result_only_without_process/mouth_only_or_static/real_usage_met/"
-        "core_selling_point_visible/demonstrated_selling_points/missing_selling_points/scene_mode/usage_context_fit/continuity_met/"
+        "core_selling_point_visible/process_framing_met/demonstrated_selling_points/missing_selling_points/scene_mode/usage_context_fit/continuity_met/"
         "richness_met/single_scene_continuity_met/single_scene_variation_met/multi_scene_logic_met/multi_scene_transition_met/"
         "multi_scene_role_adaptation_met/role_design_met/role_interaction_met/presentation_overlays/fake_or_staged/"
         "start_seconds/end_seconds/usage_reason/evidence_ids）。"
@@ -974,6 +978,7 @@ def build_stage_review_payload(
             "mouth_only_or_static": False,
             "real_usage_met": True,
             "core_selling_point_visible": True,
+            "process_framing_met": True,
             "demonstrated_selling_points": ["动作里实际证明的核心卖点"],
             "missing_selling_points": [],
             "scene_mode": "single_scene|multi_scene|multi_person|hybrid|unknown",
@@ -999,9 +1004,9 @@ def build_stage_review_payload(
         s3_contract = (
             "目标阶段包含 S3 时，stage_update 必须同时重判 creator_s3 与 benchmark_s3；"
             "S3 只判真实使用过程：有没有使用过程、是否只有结果无过程、是否只口播静态、核心卖点是否在动作里可见、"
-            "场景是单场景/多场景/多人/混合、场景组织是否服务卖点。"
+            "使用主体是否拍全拍清对准、场景是单场景/多场景/多人/混合、场景组织是否服务卖点。"
             "只口播/字幕说卖点但画面没演，不算 core_selling_point_visible；只有结果没有过程，S3 最高只能算弱；"
-            "场景丰富、ASMR、第一视角、步骤拆解都不能补偿核心卖点没落地。效果结果归 S4，背书归 S5，不要回填到 S3。"
+            "过程拍不全/主体没对准/关键动作出画时 process_framing_met=false；场景丰富、ASMR、第一视角、步骤拆解都不能补偿核心卖点没落地。效果结果归 S4，背书归 S5，不要回填到 S3。"
         )
     if "S4" in target_codes:
         stage_update_example["stage"] = "S4 效果呈现"
@@ -1312,7 +1317,7 @@ def build_llm_repair_payload(
                     "hook_boundary_seconds 按 structure_library_full.md 的 S1 留人机制→S2 产品引出/解决方案承接功能切换判断，不得写死固定秒数；S2-A 承接式引出可早于产品实物或产品名出现，不能等产品画面才切 S2。"
                     "landing_met 按 type 无关三件套判断：0 到 hook_boundary_seconds 内对象明确、张力明确、承诺或证据明确，缺一即 false；不得用后续 S2/S3 产品介绍补足 S1 landing。若引用边界后材料，landing_window_leak=true 且 landing_met=false。"
                     "S2 产品引出必须补齐 creator_s2 与 benchmark_s2 两个对象，字段为 exists(bool)、merged_with_s3(bool)、module_type(A-D或unknown)、handoff_met(bool)、s1_s2_compatible(bool)、product_identity_clear(bool)、product_role_clear(bool)、excluded_or_risky_module(bool)、start_seconds(number)、end_seconds(number)、handoff_reason(非空)、evidence_ids(非空数组)。"
-                    "S3 使用过程必须补齐 creator_s3 与 benchmark_s3 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、usage_process_visible(bool)、result_only_without_process(bool)、mouth_only_or_static(bool)、real_usage_met(bool)、core_selling_point_visible(bool)、demonstrated_selling_points(数组)、missing_selling_points(数组)、scene_mode(single_scene/multi_scene/multi_person/hybrid/unknown)、usage_context_fit(bool)、continuity_met(bool)、richness_met(bool)、single_scene_continuity_met(bool)、single_scene_variation_met(bool)、multi_scene_logic_met(bool)、multi_scene_transition_met(bool)、multi_scene_role_adaptation_met(bool)、role_design_met(bool)、role_interaction_met(bool)、presentation_overlays(数组)、fake_or_staged(bool)、start_seconds(number)、end_seconds(number)、usage_reason(非空)、evidence_ids(非空数组)。"
+                    "S3 使用过程必须补齐 creator_s3 与 benchmark_s3 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、usage_process_visible(bool)、result_only_without_process(bool)、mouth_only_or_static(bool)、real_usage_met(bool)、core_selling_point_visible(bool)、process_framing_met(bool)、demonstrated_selling_points(数组)、missing_selling_points(数组)、scene_mode(single_scene/multi_scene/multi_person/hybrid/unknown)、usage_context_fit(bool)、continuity_met(bool)、richness_met(bool)、single_scene_continuity_met(bool)、single_scene_variation_met(bool)、multi_scene_logic_met(bool)、multi_scene_transition_met(bool)、multi_scene_role_adaptation_met(bool)、role_design_met(bool)、role_interaction_met(bool)、presentation_overlays(数组)、fake_or_staged(bool)、start_seconds(number)、end_seconds(number)、usage_reason(非空)、evidence_ids(非空数组)。"
                     "S4 效果呈现必须补齐 creator_s4 与 benchmark_s4 两个对象，字段为 effect_type(before_after/split_screen/person_vs_person/product_vs_alt/quantified_test/process_visualization/aesthetic_display/none)、effect_visible(bool)、effect_salience(none/subtle/clear/strong)、effect_proposition_matched(bool)、comparison_control_met(bool)、closeup_or_focus_met(bool)、effect_maximized(bool)、requires_close_inspection(bool)、effect_attribution_supported(bool)、result_only_without_process(bool)、process_linked_effect(bool)、tamper_or_cut_risk(bool)、effect_reason(非空)、evidence_ids(非空数组)。"
                     "必须补齐 s3_s4_relationship 和 promise_chain；promise_chain.chain_closed 必须是 bool，broken_at 只能是 S2/S3/S4/none/unknown；promise_chain 只审计 S1-S4，不得把 S5/S6/CTA/促单/下单问题写成承诺链断点。"
                     "提升点必须保留 benchmark_evidence_ids、base_frame_suitability、best_base_frame_time、base_frame_evidence_id、base_frame_reason 和 aigc_prompt；无可用达人素材时写 no_suitable_frame 且时间与 base_frame_evidence_id 留空。aigc_image_path 留空。"

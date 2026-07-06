@@ -296,6 +296,29 @@ def _s2_risky_module(stage: dict[str, Any]) -> bool:
     return c.get("excluded_or_risky_module") is True and b.get("excluded_or_risky_module") is not True
 
 
+def _s3_strong_scene(flag: dict[str, Any]) -> bool:
+    """S3 场景/表现层是否把使用过程做厚。"""
+    if flag.get("process_framing_met") is False:
+        return False
+    mode = str(flag.get("scene_mode") or "unknown")
+    if mode == "single_scene":
+        return (
+            flag.get("single_scene_continuity_met") is True
+            and (flag.get("single_scene_variation_met") is True or flag.get("richness_met") is True)
+        )
+    if mode == "multi_scene":
+        return (
+            flag.get("multi_scene_logic_met") is True
+            and flag.get("multi_scene_transition_met") is True
+            and flag.get("multi_scene_role_adaptation_met") is True
+        )
+    if mode == "multi_person":
+        return flag.get("role_design_met") is True and flag.get("role_interaction_met") is True
+    if mode == "hybrid":
+        return flag.get("continuity_met") is True and flag.get("richness_met") is True
+    return flag.get("continuity_met") is True and flag.get("richness_met") is True
+
+
 def _s3_usage_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
     """S3 使用过程 flag：真实使用 + 核心卖点可见是主轴，场景组织/表现层只在主轴成立后加分。"""
     c = stage.get("creator_s3")
@@ -319,26 +342,9 @@ def _s3_usage_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
             return 0.5
         if flag.get("usage_context_fit") is not True:
             return 0.5
-
-        mode = str(flag.get("scene_mode") or "unknown")
-        if mode == "single_scene":
-            strong_scene = (
-                flag.get("single_scene_continuity_met") is True
-                and (flag.get("single_scene_variation_met") is True or flag.get("richness_met") is True)
-            )
-        elif mode == "multi_scene":
-            strong_scene = (
-                flag.get("multi_scene_logic_met") is True
-                and flag.get("multi_scene_transition_met") is True
-                and flag.get("multi_scene_role_adaptation_met") is True
-            )
-        elif mode == "multi_person":
-            strong_scene = flag.get("role_design_met") is True and flag.get("role_interaction_met") is True
-        elif mode == "hybrid":
-            strong_scene = flag.get("continuity_met") is True and flag.get("richness_met") is True
-        else:
-            strong_scene = flag.get("continuity_met") is True and flag.get("richness_met") is True
-        return 2.0 if strong_scene else 1.0
+        if flag.get("process_framing_met") is False:
+            return 1.0
+        return 2.0 if _s3_strong_scene(flag) else 1.0
 
     return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
 
@@ -367,6 +373,31 @@ def _s3_core_floor(stage: dict[str, Any]) -> tuple[bool, str]:
     if not missing:
         return False, ""
     return True, "；S3 核心演示下限：" + "、".join(missing)
+
+
+def _s3_thin_demo_floor(stage: dict[str, Any]) -> tuple[bool, str]:
+    """S3 薄演示下限：达人有基础过程，但标杆把过程做厚，不能轻易落 small。"""
+    c = stage.get("creator_s3")
+    b = stage.get("benchmark_s3")
+    if not isinstance(c, dict) or not isinstance(b, dict):
+        return False, ""
+
+    def has_basic_process(flag: dict[str, Any]) -> bool:
+        return (
+            flag.get("exists") is not False
+            and flag.get("mouth_only_or_static") is not True
+            and flag.get("result_only_without_process") is not True
+            and (flag.get("usage_process_visible") is True or flag.get("real_usage_met") is True)
+            and flag.get("fake_or_staged") is not True
+            and flag.get("core_selling_point_visible") is True
+            and flag.get("usage_context_fit") is True
+        )
+
+    if not has_basic_process(c) or not has_basic_process(b):
+        return False, ""
+    if _s3_strong_scene(b) and not _s3_strong_scene(c):
+        return True, "；S3 薄演示下限：达人有基础使用过程，但标杆通过细节/丰富度把核心卖点证明得更充分"
+    return False, ""
 
 
 def _s4_effect_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
@@ -552,6 +583,11 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         if floor:
             severity = "medium"
             reason += floor_reason
+        else:
+            thin_floor, thin_reason = _s3_thin_demo_floor(stage)
+            if thin_floor:
+                severity = "medium"
+                reason += thin_reason
     trace = {"status": "derived", "severity": severity, "E": e, "W": w, "C": c_factor,
              "painpoint_relevance": relevance, "S": score, "reason": reason}
     # 残差亮点门（只进 trace 不进 severity）：标杆四维全 met 且类型明确才允许亮点描述，否则跳过

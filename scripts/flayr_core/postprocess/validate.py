@@ -384,6 +384,7 @@ def validate_s3_usage_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
             "mouth_only_or_static",
             "real_usage_met",
             "core_selling_point_visible",
+            "process_framing_met",
             "usage_context_fit",
             "continuity_met",
             "richness_met",

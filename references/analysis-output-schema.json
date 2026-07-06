@@ -169,6 +169,7 @@
         "mouth_only_or_static": "仅 S3 必填：只拿着产品口播/静态展示/字幕讲卖点，没有真实使用动作。",
         "real_usage_met": "仅 S3 必填：是否是真实使用动作，而非静态展示、摆拍假用、只拿着产品说，true|false。",
         "core_selling_point_visible": "仅 S3 必填：product_profile.core_selling_points 中至少一个核心卖点是否在使用动作里被看见；只口播不算，true|false。",
+        "process_framing_met": "仅 S3 必填：使用过程主体是否拍全、拍清、对准；不能只露局部、跑焦、主体出画或关键动作被遮挡，true|false。",
         "demonstrated_selling_points": [
           "动作里实际被证明的核心卖点。"
         ],
@@ -205,6 +206,7 @@
         "mouth_only_or_static": "仅 S3 必填：只拿着产品口播/静态展示/字幕讲卖点，没有真实使用动作。",
         "real_usage_met": "仅 S3 必填：是否是真实使用动作，而非静态展示、摆拍假用、只拿着产品说，true|false。",
         "core_selling_point_visible": "仅 S3 必填：product_profile.core_selling_points 中至少一个核心卖点是否在使用动作里被看见；只口播不算，true|false。",
+        "process_framing_met": "仅 S3 必填：使用过程主体是否拍全、拍清、对准；不能只露局部、跑焦、主体出画或关键动作被遮挡，true|false。",
         "demonstrated_selling_points": [
           "动作里实际被证明的核心卖点。"
         ],

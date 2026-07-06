@@ -314,6 +314,7 @@ def _s3_flag(
     mouth_static=False,
     real=True,
     core=True,
+    framing=True,
     context=True,
     continuity=True,
     richness=False,
@@ -336,6 +337,7 @@ def _s3_flag(
         "mouth_only_or_static": mouth_static,
         "real_usage_met": real,
         "core_selling_point_visible": core,
+        "process_framing_met": framing,
         "demonstrated_selling_points": ["核心卖点"],
         "missing_selling_points": [] if core else ["核心卖点"],
         "scene_mode": scene,
@@ -385,7 +387,39 @@ _s3_thin = _derive_one(
     [],
 )
 check("S3 核心卖点可见但素材不丰富→小到中差距",
-      _s3_thin.get("severity") in {"small", "medium"} and _s3_thin.get("E") == 1)
+      _s3_thin.get("severity") == "medium"
+      and _s3_thin.get("E") == 1
+      and "薄演示下限" in _s3_thin.get("reason", ""))
+
+_s3_bad_framing = _derive_one(
+    "S3",
+    {
+        "creator_s3": _s3_flag(framing=False, richness=True, single_variation=True),
+        "benchmark_s3": _s3_good,
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S3": 1.0},
+    [],
+)
+check("S3 使用过程拍不全/没对准→不能拿满分且至少 medium",
+      _s3_bad_framing.get("severity") == "medium"
+      and _s3_bad_framing.get("E") == 1
+      and "薄演示下限" in _s3_bad_framing.get("reason", ""))
+
+_s3_both_thin = _derive_one(
+    "S3",
+    {
+        "creator_s3": _s3_flag(richness=False),
+        "benchmark_s3": _s3_flag(richness=False),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S3": 1.0},
+    [],
+)
+check("S3 双方都只是基础演示→不触发薄演示下限",
+      _s3_both_thin.get("severity") == "small" and _s3_both_thin.get("E") == 0)
 
 _s3_result_only = _derive_one(
     "S3",
@@ -600,6 +634,7 @@ _ns3 = normalize_s3_flags({
     "mouth_only_or_static": "no",
     "real_usage_met": 1,
     "core_selling_point_visible": "true",
+    "process_framing_met": "no",
     "demonstrated_selling_points": ["控油"],
     "missing_selling_points": "遮毛孔",
     "scene_mode": "single-scene",
@@ -623,6 +658,7 @@ _ns3 = normalize_s3_flags({
 check("S3 parse 归一 usage flags（type→D, bool/时间/evidence 容错）",
       _ns3["module_type"] == "D"
       and _ns3["exists"] is True
+      and _ns3["process_framing_met"] is False
       and _ns3["usage_context_fit"] is False
       and _ns3["scene_mode"] == "single_scene"
       and _ns3["presentation_overlays"] == ["step_breakdown", "closeup"]

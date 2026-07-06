@@ -355,6 +355,9 @@ def normalize_s3_flags(value: Any) -> dict[str, Any] | None:
     usage_process_visible = normalize_demo_flag(value.get("usage_process_visible"))
     if usage_process_visible is None:
         usage_process_visible = normalize_demo_flag(value.get("real_usage_met"))
+    process_framing_met = normalize_demo_flag(value.get("process_framing_met"))
+    if process_framing_met is None:
+        process_framing_met = True
     return {
         "exists": normalize_demo_flag(value.get("exists")),
         "module_type": normalize_s3_type(value.get("module_type")),
@@ -363,6 +366,7 @@ def normalize_s3_flags(value: Any) -> dict[str, Any] | None:
         "mouth_only_or_static": normalize_demo_flag(value.get("mouth_only_or_static")),
         "real_usage_met": normalize_demo_flag(value.get("real_usage_met")),
         "core_selling_point_visible": normalize_demo_flag(value.get("core_selling_point_visible")),
+        "process_framing_met": process_framing_met,
         "demonstrated_selling_points": normalize_evidence(value.get("demonstrated_selling_points")),
         "missing_selling_points": normalize_evidence(value.get("missing_selling_points")),
         "scene_mode": normalize_s3_scene_mode(value.get("scene_mode")),
