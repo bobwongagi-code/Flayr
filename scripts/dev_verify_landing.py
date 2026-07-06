@@ -55,6 +55,7 @@ from flayr_core.postprocess.validate import (  # noqa: E402
     validate_s2_contract_flags,
     validate_s3_usage_flags,
     validate_s4_effect_flags,
+    validate_chain_relationships,
 )
 
 
@@ -153,7 +154,15 @@ _s5_one = _derive_one("S5", {"creator_execution": 1.0, "benchmark_execution": 2.
 check("S5 一方有硬背书→进公式不判均未涉及", "均未涉及" not in _s5_one.get("reason", ""))
 
 # 4c. S1 Hook flag 化（切片 A）：四维推执行分 + hook_exists 红线 + 命题锚 + 残差亮点门
-from flayr_core.llm.parse import normalize_hook_flags, normalize_s2_flags, normalize_s3_flags, normalize_s4_flags  # noqa: E402
+from flayr_core.llm.parse import (  # noqa: E402
+    normalize_hook_flags,
+    normalize_product_profile,
+    normalize_promise_chain,
+    normalize_s2_flags,
+    normalize_s3_flags,
+    normalize_s3_s4_relationship,
+    normalize_s4_flags,
+)
 
 
 def _hook(exists, htype, cam=False, cp=False, snd=False, rhy=False, anchors=None, landing=None):
@@ -645,6 +654,37 @@ check("S4 parse 归一 effect flags（bool/evidence 容错）",
       and _ns4["result_only_without_process"] is True
       and _ns4["evidence_ids"] == ["C3"])
 
+_npp = normalize_product_profile({
+    "visualizable": "yes",
+    "proof_mode": "sensory-proxy",
+    "effect_requires_process": "yes",
+    "core_selling_points": ["香味持久"],
+})
+check("product_profile 归一 proof_mode/effect_requires_process",
+      _npp["proof_mode"] == "sensory_proxy" and _npp["effect_requires_process"] == "true")
+
+_rel = normalize_s3_s4_relationship({
+    "creator_relationship": "result-without-process",
+    "benchmark_relationship": "process_creates_effect",
+    "creator_reason": "达人只有结果图",
+    "benchmark_reason": "标杆边用边出效果",
+})
+check("S3/S4 relationship 归一",
+      _rel["creator_relationship"] == "result_without_process"
+      and _rel["benchmark_relationship"] == "process_creates_effect")
+
+_chain = normalize_promise_chain({
+    "s1_promise": "油光变哑光",
+    "s2_answer": "粉饼作为解决方案",
+    "s3_proof_target": "上脸控油",
+    "s4_outcome": "半脸哑光",
+    "chain_closed": "true",
+    "broken_at": "none",
+    "break_reason": "S1-S4 同一命题闭环",
+})
+check("promise_chain 归一",
+      _chain["chain_closed"] is True and _chain["broken_at"] == "none")
+
 _leaky = normalize_hook_flags({
     "exists": True,
     "type": "B",
@@ -1045,6 +1085,47 @@ try:
 except SystemExit as exc:
     _s4_gate_failed = "缺少 creator_s4" in str(exc) and "缺少 benchmark_s4" in str(exc)
 check("S4 effect flag 门禁：主链缺字段触发 repair", _s4_gate_failed)
+
+_valid_relationship_result = {
+    "s3_s4_relationship": {
+        "creator_relationship": "result_without_process",
+        "benchmark_relationship": "process_creates_effect",
+        "creator_reason": "达人只给出结果画面，缺少使用过程支撑。",
+        "benchmark_reason": "标杆通过连续使用动作直接产生可见效果。",
+    },
+    "promise_chain": {
+        "s1_promise": "油光脸需要快速变哑光",
+        "s2_answer": "粉饼被引出为控油解决方案",
+        "s3_proof_target": "上脸按压控油过程",
+        "s4_outcome": "半脸哑光和毛孔弱化效果",
+        "chain_closed": False,
+        "broken_at": "S3",
+        "break_reason": "达人承诺成立，但使用过程没有把控油动作证明出来。",
+    },
+}
+try:
+    validate_chain_relationships(
+        _valid_relationship_result,
+        {"s3_flags_required": True, "s4_flags_required": True},
+    )
+    _chain_gate_ok = True
+except SystemExit:
+    _chain_gate_ok = False
+check("S3/S4 关系门禁：完整字段通过", _chain_gate_ok)
+
+try:
+    validate_chain_relationships({}, {"s3_flags_required": True, "s4_flags_required": True})
+    _chain_gate_failed = False
+except SystemExit as exc:
+    _chain_gate_failed = "缺少 s3_s4_relationship" in str(exc) and "缺少 promise_chain" in str(exc)
+check("S3/S4 关系门禁：主链缺字段触发 repair", _chain_gate_failed)
+
+try:
+    validate_chain_relationships({}, {})
+    _chain_legacy_ok = True
+except SystemExit:
+    _chain_legacy_ok = False
+check("S3/S4 关系门禁：旧结果无标记不误伤", _chain_legacy_ok)
 
 # 5. 死代码已清 + 模块仍可导入
 import flayr_core.prompt as prompt_module  # noqa: E402

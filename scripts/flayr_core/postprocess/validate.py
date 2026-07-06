@@ -114,6 +114,7 @@ def validate_quality_contract(result: dict[str, Any], analysis: dict[str, Any]) 
     validate_s2_contract_flags(result, analysis)
     validate_s3_usage_flags(result, analysis)
     validate_s4_effect_flags(result, analysis)
+    validate_chain_relationships(result, analysis)
     validate_stage_time_coherence(result)
     validate_product_visibility(result, analysis)
     validate_narrative_evidence_consistency(result)
@@ -472,6 +473,46 @@ def validate_s4_effect_flags(result: dict[str, Any], analysis: dict[str, Any]) -
             errors.append(f"S4 {key}.evidence_ids 不能为空")
     if errors:
         raise SystemExit("S4 效果因果 flag 输出不完整：" + "；".join(errors))
+
+
+def validate_chain_relationships(result: dict[str, Any], analysis: dict[str, Any]) -> None:
+    """S3/S4 关系与 S1-S4 承诺闭环门禁。"""
+    if not (analysis.get("s3_flags_required") or analysis.get("s4_flags_required")):
+        return
+    errors: list[str] = []
+    rel = result.get("s3_s4_relationship")
+    allowed_rel = {
+        "process_creates_effect",
+        "process_without_effect",
+        "result_without_process",
+        "no_process_no_effect",
+        "aesthetic_no_effect",
+        "trust_substitutes_effect",
+        "unknown",
+    }
+    if not isinstance(rel, dict):
+        errors.append("缺少 s3_s4_relationship")
+    else:
+        for key in ("creator_relationship", "benchmark_relationship"):
+            if str(rel.get(key) or "").strip() not in allowed_rel:
+                errors.append(f"s3_s4_relationship.{key} 非法")
+        for key in ("creator_reason", "benchmark_reason"):
+            if not str(rel.get(key) or "").strip():
+                errors.append(f"s3_s4_relationship.{key} 不能为空")
+
+    chain = result.get("promise_chain")
+    if not isinstance(chain, dict):
+        errors.append("缺少 promise_chain")
+    else:
+        for key in ("s1_promise", "s2_answer", "s3_proof_target", "s4_outcome", "break_reason"):
+            if not str(chain.get(key) or "").strip():
+                errors.append(f"promise_chain.{key} 不能为空")
+        if chain.get("chain_closed") not in {True, False}:
+            errors.append("promise_chain.chain_closed 必须是 bool")
+        if str(chain.get("broken_at") or "").strip() not in {"S2", "S3", "S4", "none", "unknown"}:
+            errors.append("promise_chain.broken_at 必须是 S2/S3/S4/none/unknown")
+    if errors:
+        raise SystemExit("S3/S4 关系或 S1-S4 承诺链输出不完整：" + "；".join(errors))
 
 
 def validate_stage_time_coherence(result: dict[str, Any]) -> None:

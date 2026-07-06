@@ -84,6 +84,8 @@ def build_product_foundation_payload(model: str, analysis: dict[str, Any]) -> di
             "core_selling_points（S3 主轴：使用过程要演示传递的核心卖点，1-6 个）、"
             "usage_context（S3 场景层：本品典型使用场景=卖点演示的舞台）、"
             "core_visual_proposition（S4 决定性视觉瞬间=到位效果标准，按本品现推、别套通用 before/after）、"
+            "proof_mode（S4 价值证明模式：instant_visual|process_result|sensory_proxy|aesthetic_value|social_reaction|long_term_record|trust_substituted|low_decision_light_proof）、"
+            "effect_requires_process（效果是否必须依赖使用过程证明：true|false|partial）、"
             "visual_diff_dimensions（before/after 应变化的视觉维度，1-3 个）、"
             "trust_multipliers（建立专业度/信任的元素，3-6 个）、shooting_requirement（卖点显现所需拍摄条件）、"
             "confidence(high|low，小众或本地新奇特品标 low)。",
@@ -707,6 +709,25 @@ def build_llm_comparison_payload(
         "process_linked_effect/tamper_or_cut_risk/effect_reason/evidence_ids）。"
         "S4 flag 只服务效果因果判断；不要用 S3 的使用过程完整性替代 S4 效果可见性，也不要用单纯结果图替代因果证明。"
     )
+    relation_block = (
+        "## S3/S4 关系与 S1-S4 承诺闭环审计（top-level，必须输出，不直接进 severity）\n"
+        "必须输出 s3_s4_relationship："
+        '{"creator_relationship": "process_creates_effect|process_without_effect|result_without_process|no_process_no_effect|aesthetic_no_effect|trust_substitutes_effect|unknown", '
+        '"benchmark_relationship": 同上, '
+        '"creator_reason": "一句话说明达人侧 S3 使用过程和 S4 效果如何关联", '
+        '"benchmark_reason": "一句话说明标杆侧 S3 使用过程和 S4 效果如何关联"}。'
+        "关系定义：process_creates_effect=使用过程直接产生可见效果；process_without_effect=有使用但效果弱/不可见；"
+        "result_without_process=只有结果没有过程；no_process_no_effect=两者都缺；aesthetic_no_effect=颜值陈列/包装美感驱动但非标准效果；"
+        "trust_substitutes_effect=效果不可即时视觉化，主要由 S5/信任材料替代证明。\n"
+        "必须输出 promise_chain："
+        '{"s1_promise": "S1 对用户做出的停留承诺/钩子命题", '
+        '"s2_answer": "S2 如何把产品作为答案/解决方案接住", '
+        '"s3_proof_target": "S3 应该用动作证明的核心卖点", '
+        '"s4_outcome": "S4 应该兑现的结果/价值证据", '
+        '"chain_closed": bool, "broken_at": "S2|S3|S4|none|unknown", '
+        '"break_reason": "若未闭环，说明承诺在哪一环断掉；若闭环，说明如何闭环"}。'
+        "注意：S1 承诺、S2 答案、S3 证明目标、S4 结果必须尽量指向同一个产品命题；不要把不同卖点拼成假闭环。"
+    )
     user_text = "\n\n".join(
         [
             context,
@@ -715,6 +736,7 @@ def build_llm_comparison_payload(
             s2_flag_block,
             s3_flag_block,
             s4_flag_block,
+            relation_block,
             s1_boundary_hint_block,
             "## S1-S6 模块结构库（判断视图：客观类型 + 适配条件，判 module_id 与类型对本品适配用；这是结构层、非判断层，不讲好坏）",
             structure_library_judgment_view(),
@@ -734,7 +756,7 @@ def build_llm_comparison_payload(
             speech_mode_block,
             "## 输出要求",
             "只输出严格 JSON，不要 Markdown。字段必须使用 references/analysis-output-schema.json 的字段名。",
-            "必须输出：one_line_verdict, one_line_summary, executive_summary, holistic_assessment（每维独立）, key_conclusions（1-5 条消费者视角）, product_visibility, category_profile, product_profile, loop_closure, video_understanding, stage_analysis[6], improvements（1-5 条，按 GMV 杠杆排序）。",
+            "必须输出：one_line_verdict, one_line_summary, executive_summary, holistic_assessment（每维独立）, key_conclusions（1-5 条消费者视角）, product_visibility, category_profile, product_profile, loop_closure, s3_s4_relationship, promise_chain, video_understanding, stage_analysis[6], improvements（1-5 条，按 GMV 杠杆排序）。",
             "stage_analysis 每项必须含：stage, time_range, benchmark_time_range, creator_time_range, core_question, creator_module_id, benchmark_module_id, module_fit, module_fit_reason, task_completion, gap_type, gap_summary, voice_performance, benchmark_summary, benchmark_key_message, benchmark_evidence_ids, benchmark_visual_evidence, benchmark_support_status, benchmark_has_effect_demo, benchmark_has_usage_demo, benchmark_quote, benchmark_quote_zh, creator_summary, creator_key_message, creator_evidence_ids, creator_visual_evidence, creator_support_status, creator_has_effect_demo, creator_has_usage_demo, creator_quote, creator_quote_zh, gap, evidence, severity, creator_execution, benchmark_execution, painpoint_relevance, stage_standard_delivery。",
             hook_field_req,
             s2_field_req,
@@ -759,7 +781,7 @@ def build_llm_comparison_payload(
             "0.5 档同样适用于'内容存在但消费者无法有效接收'：看不清（虚焦/过曝/遮挡/一闪而过/画面晃动到观众抓不住重点）、听不清（吞字/被 BGM 压制）、读不完（字幕停留过短）——物理存在不等于有效传递，晃动按观众可看性判而非镜头美学。S5 背书孤证规则：仅口播提及背书而画面无任何佐证、或背书标志一闪而过无法辨认，执行分最高 0.5（高决策门槛品类口头孤证视为无效背书）。",
             "painpoint_relevance 只能取 benchmark_only、creator_only、both、none 四选一：该阶段双方内容是否命中 category_profile.painpoints 中的核心决策因素——只有标杆命中/只有达人命中/双方都命中/双方都未命中。按内容功能判断（讲没讲到、演没演到核心痛点），不要求字面用词一致。",
             "category_profile 必须含：category_name（品类名）, price_tier（low|mid|high 客单价档）, decision_threshold（impulse|considered）, drive_type（emotional|functional|mixed）, painpoints（该品类目标消费者最在意的决策因素关键词，每个痛点同时给中文和本地语两种表述放进同一数组，共 6-16 个词条）。只报品类事实与世界知识，不做权重判断。",
-            "打分前必须先输出 product_profile 产品商业 DNA（这是 S1-S6 打分的尺子，先立尺再量）：visualizable（yes|no，核心价值能否视觉化）、physical_task（解决的最直观尴尬）、hook_proposition（本品对目标人群最有拦截力的点=钩子命题，类型取决于本品、不限痛点——可痛点/承诺/反差/情绪/向往/视觉吸引/身份代入/场景还原等，见 structure_library S1 七型，模型按品类+视频推、运营可覆盖）、core_visual_proposition（决定性视觉瞬间=本品到位效果展示的标准，按本品现推，别套通用 before/after）、visual_diff_dimensions（本品 before/after 应在哪些视觉维度变化，从 亮度反光/纹理毛孔/色泽均匀度/水润干燥/肿胀轮廓 中选或按品自命名如去污/拉丝，1-3 个，S4 核验对比只看这些维度）、trust_multipliers（建立专业度的元素如美容仪/周期记录/专业手法/第三方检测，3-6 个）、shooting_requirement（卖点显现所需拍摄条件）、confidence（high|low，小众或本地新奇特品标 low）。只报产品事实与品类世界知识。visualizable=no（香水/保健品/隐形矫正等效果拍不出）时，S4 不强求视觉命题，把判断重心放到 S5 信任放大与达人可信度。",
+            "打分前必须先输出 product_profile 产品商业 DNA（这是 S1-S6 打分的尺子，先立尺再量）：visualizable（yes|no，核心价值能否视觉化）、physical_task（解决的最直观尴尬）、hook_proposition（本品对目标人群最有拦截力的点=钩子命题，类型取决于本品、不限痛点——可痛点/承诺/反差/情绪/向往/视觉吸引/身份代入/场景还原等，见 structure_library S1 七型，模型按品类+视频推、运营可覆盖）、core_visual_proposition（决定性视觉瞬间=本品到位效果展示的标准，按本品现推，别套通用 before/after）、proof_mode（instant_visual/process_result/sensory_proxy/aesthetic_value/social_reaction/long_term_record/trust_substituted/low_decision_light_proof）、effect_requires_process（true/false/partial：S4 效果是否必须依赖 S3 使用过程证明）、visual_diff_dimensions（本品 before/after 应在哪些视觉维度变化，从 亮度反光/纹理毛孔/色泽均匀度/水润干燥/肿胀轮廓 中选或按品自命名如去污/拉丝，1-3 个，S4 核验对比只看这些维度）、trust_multipliers（建立专业度的元素如美容仪/周期记录/专业手法/第三方检测，3-6 个）、shooting_requirement（卖点显现所需拍摄条件）、confidence（high|low，小众或本地新奇特品标 low）。只报产品事实与品类世界知识。visualizable=no（香水/保健品/隐形矫正等效果拍不出）时，S4 不强求视觉命题，把判断重心放到 S5 信任放大与达人可信度。",
             "每阶段输出 stage_standard_delivery（benchmark_only|creator_only|both|none）：该阶段双方是否有效达到本阶段的『本品到位标准』（见下条对照表锚点）。做到/展示到才算，仅口头讲到不算。先作为事实输出，暂不参与推导。",
             "S1-S6 执行分统一三层判：阶段目标(core_question) → 用了什么做法(module_id/module_fit) → 该做法在【本品】上到位没(execution)。'到位'按阶段查本品锚点、核心目标为主轴次要元素不补偿弱核心；本轮已接入的阶段锚点——S4 效果呈现→锚 core_visual_proposition（详见前述演示锚点+闭环核验+核心主轴三条）；S5 信任放大→锚 trust_multipliers：硬信任（第三方认证/检测/临床/仪器实测/官方背书）有效呈现可达 2，软信任（真实好评/社会认同/向往式对比/使用记录/达人自用）算信任但封顶 1（软不如硬），自述功效/纯参数不算；位置优先——视频开头的此类背书内容算 S1 钩子（留人）、结尾算 S6 CTA，不要按语义把开头/结尾的背书塞进 S5；判'用没用且呈现有效'非'口头说没说'，口播孤证或标志一闪而过最高 0.5；S6 促单→到位=把 structure_library S6 五型各自【适配条件】（含排除项，如价格锚定/赠品堆叠排除情感满足品=category_profile.drive_type=emotional）套上本品特征 category_profile（decision_threshold/drive_type/品类）+命题 product_profile，判达人/标杆选的 CTA 类型适配与否＋执行到位与否，gap=适配×执行差距；决策类型（冲动/高决策）是输入之一非唯一轴——冲动品需清晰指令+紧迫感、高决策品需先消顾虑再 CTA，但哪型 CTA 好仍由(五型适配条件×本品命题)结合得出。S1 钩子→到位=把 structure_library S1 七型各自【适配条件】（按品类/购买动机匹配）套上本品特征 category_profile（品类/drive_type/decision_threshold）+命题 product_profile（hook_proposition），判达人/标杆选的钩子类型适配本品与否＋执行到位与否，gap=适配×执行差距；不预设某根轴（痛点/视觉冲击/悬念）通用为好，好坏由(类型适配条件×本品命题)结合得出（潮玩配场景还原/反差、儿童牙膏配身份代入/场景还原、榨汁机配反差/场景还原）；开头的背书/认证类内容按钩子算（见位置宪法）；S2 产品引出→到位=引出自然 + 承接 S1 钩子（冲着钩子抛出的那个点去承接，痛点钩→引出冲着解痛点）+ 引出产品身份（这是什么品）；S2 只判这两件事，不判卖点本身、也不判卖点细节/选购指导/适配人群/参数/信息完整度（这些归 S3/S4）——标杆比达人多讲分肤质版/选购建议/卖点细节，不构成 S2 差距，只要达人自然引出+点明产品身份即同等到位；锚 hook_proposition 承接；S3 使用过程→主轴锚 core_selling_points（卖点传递有效性）+ 场景层 usage_context：到位=真实使用过程中把核心卖点'演示出来'被看见（清洁机吸力强/干湿分离/易倒垃圾在动作里可见，不是嘴上讲——演示即证据=打开水箱看见分层）；按 14b5 这是不可补偿主轴，场景再丰富人员再多样、卖点没在过程落地仍判弱；前置门槛真实感（显假/摆拍直接封顶低分）；S3 不评教学清晰度；场景层三看——适配度（场景给没给卖点舞台，地毯/沙发高、光洁瓷砖低）+丰富性（多场景覆盖多卖点 或 单场景做厚=多角度多卖点完整过程非一个动作反复，二选一）+连贯一致（拧成同一产品叙事且与真实用法一致，非拼贴非演错用法）；人员看配置是否强化说服非人数（单/多人/单人用+多人体验皆可，多人须带'大家都有好体验'社会化证据）；独立背书归 S5。",
             "improvements 每项必须含：title,target_stage,gmv_impact,gap_type,time_range,creator_time_range,benchmark_time_range,problem,benchmark_reference,benchmark_evidence_ids,suggestion,actions,gmv_reason,evidence,creator_script,creator_script_zh,base_frame_suitability,best_base_frame_time,base_frame_evidence_id,base_frame_reason,aigc_prompt,aigc_image_path,expected_effect,priority。",
@@ -1277,7 +1299,7 @@ def build_llm_repair_payload(
                 "role": "system",
                 "content": (
                     "你是 Flayr JSON 修复器。只输出严格 JSON，不要 Markdown，不要解释。"
-                    "必须符合 references/analysis-output-schema.json：保留 one_line_verdict、holistic_assessment（每维独立评估）、key_conclusions（1-5 条消费者视角）、product_visibility、loop_closure，6 个 stage_analysis，1-5 个 improvements（按 GMV 杠杆排序）。"
+                    "必须符合 references/analysis-output-schema.json：保留 one_line_verdict、holistic_assessment（每维独立评估）、key_conclusions（1-5 条消费者视角）、product_visibility、loop_closure、s3_s4_relationship、promise_chain，6 个 stage_analysis，1-5 个 improvements（按 GMV 杠杆排序）。"
                     "如果原始输出缺少 improvements（如 JSON 被截断），必须基于 stage_analysis 的差距分析补充 1-5 条。"
                     "severity 必须差异化：功能没完成=large，有短板=medium，做到位或持平=small。"
                     "必须保留 video_understanding 证据事实清单。stage_analysis 必须严格按 S1、S2、S3、S4、S5、S6 顺序输出六项；阶段必须保留 benchmark_time_range、creator_time_range、证据引用、核心信息、画面证据和 support_status；达人话术必须保留本地语言和中文翻译。"
@@ -1290,6 +1312,7 @@ def build_llm_repair_payload(
                     "S2 产品引出必须补齐 creator_s2 与 benchmark_s2 两个对象，字段为 exists(bool)、merged_with_s3(bool)、module_type(A-D或unknown)、handoff_met(bool)、s1_s2_compatible(bool)、product_identity_clear(bool)、product_role_clear(bool)、excluded_or_risky_module(bool)、start_seconds(number)、end_seconds(number)、handoff_reason(非空)、evidence_ids(非空数组)。"
                     "S3 使用过程必须补齐 creator_s3 与 benchmark_s3 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、usage_process_visible(bool)、result_only_without_process(bool)、mouth_only_or_static(bool)、real_usage_met(bool)、core_selling_point_visible(bool)、demonstrated_selling_points(数组)、missing_selling_points(数组)、scene_mode(single_scene/multi_scene/multi_person/hybrid/unknown)、usage_context_fit(bool)、continuity_met(bool)、richness_met(bool)、single_scene_continuity_met(bool)、single_scene_variation_met(bool)、multi_scene_logic_met(bool)、multi_scene_transition_met(bool)、multi_scene_role_adaptation_met(bool)、role_design_met(bool)、role_interaction_met(bool)、presentation_overlays(数组)、fake_or_staged(bool)、start_seconds(number)、end_seconds(number)、usage_reason(非空)、evidence_ids(非空数组)。"
                     "S4 效果呈现必须补齐 creator_s4 与 benchmark_s4 两个对象，字段为 effect_type(before_after/split_screen/person_vs_person/product_vs_alt/quantified_test/process_visualization/aesthetic_display/none)、effect_visible(bool)、effect_salience(none/subtle/clear/strong)、effect_proposition_matched(bool)、comparison_control_met(bool)、closeup_or_focus_met(bool)、effect_maximized(bool)、requires_close_inspection(bool)、effect_attribution_supported(bool)、result_only_without_process(bool)、process_linked_effect(bool)、tamper_or_cut_risk(bool)、effect_reason(非空)、evidence_ids(非空数组)。"
+                    "必须补齐 s3_s4_relationship 和 promise_chain；promise_chain.chain_closed 必须是 bool，broken_at 只能是 S2/S3/S4/none/unknown。"
                     "提升点必须保留 benchmark_evidence_ids、base_frame_suitability、best_base_frame_time、base_frame_evidence_id、base_frame_reason 和 aigc_prompt；无可用达人素材时写 no_suitable_frame 且时间与 base_frame_evidence_id 留空。aigc_image_path 留空。"
                     "修复 improvements 时也必须遵循达人框架约束、卖点适配权重和标杆功能意图转译，不得把 benchmark_reference 直接改写成 suggestion。"
                     "健康品类建议不得声称调节激素、改善月经、治疗症状或虚构优惠。建议话术必须重新设计，不得复制标杆原句。"

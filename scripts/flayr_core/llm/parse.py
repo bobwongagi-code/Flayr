@@ -164,6 +164,27 @@ _S4_EFFECT_TYPES = {
     "none",
 }
 _S4_EFFECT_SALIENCE = {"none", "subtle", "clear", "strong"}
+_PROOF_MODES = {
+    "instant_visual",
+    "process_result",
+    "sensory_proxy",
+    "aesthetic_value",
+    "social_reaction",
+    "long_term_record",
+    "trust_substituted",
+    "low_decision_light_proof",
+}
+_EFFECT_REQUIRES_PROCESS = {"true", "false", "partial"}
+_S3_S4_RELATIONSHIPS = {
+    "process_creates_effect",
+    "process_without_effect",
+    "result_without_process",
+    "no_process_no_effect",
+    "aesthetic_no_effect",
+    "trust_substitutes_effect",
+    "unknown",
+}
+_PROMISE_BREAK_POINTS = {"S2", "S3", "S4", "none", "unknown"}
 
 
 def normalize_hook_type(value: Any) -> str:
@@ -216,6 +237,33 @@ def normalize_s4_effect_type(value: Any) -> str:
 def normalize_s4_effect_salience(value: Any) -> str:
     salience = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     return salience if salience in _S4_EFFECT_SALIENCE else "none"
+
+
+def normalize_proof_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return mode if mode in _PROOF_MODES else "instant_visual"
+
+
+def normalize_effect_requires_process(value: Any) -> str:
+    token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if token in {"yes", "1", "是"}:
+        return "true"
+    if token in {"no", "0", "否"}:
+        return "false"
+    return token if token in _EFFECT_REQUIRES_PROCESS else "partial"
+
+
+def normalize_s3_s4_relationship_type(value: Any) -> str:
+    rel = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return rel if rel in _S3_S4_RELATIONSHIPS else "unknown"
+
+
+def normalize_promise_break_point(value: Any) -> str:
+    point = str(value or "").strip().upper()
+    if point in {"S2", "S3", "S4"}:
+        return point
+    point = point.lower()
+    return point if point in {"none", "unknown"} else "unknown"
 
 
 def normalize_hook_boundary_seconds(value: Any) -> float | None:
@@ -505,6 +553,9 @@ def normalize_product_profile(value: Any) -> dict[str, Any] | None:
         # S3 场景层：本品典型使用场景（卖点演示的舞台，判场景适配/丰富/连贯的基准）
         "usage_context": str(value.get("usage_context") or "").strip(),
         "core_visual_proposition": str(value.get("core_visual_proposition") or "").strip(),
+        # 证明模式：S4 如何证明价值。视觉即时效果只是其中一种，低价颜值品/长周期品/感官品要避免硬套 before-after。
+        "proof_mode": normalize_proof_mode(value.get("proof_mode")),
+        "effect_requires_process": normalize_effect_requires_process(value.get("effect_requires_process")),
         # before/after 应变化的视觉维度（S4 核验对比只看这些；未来 CV 检测层的维度钩子）
         "visual_diff_dimensions": dimensions,
         "trust_multipliers": multipliers,
@@ -577,6 +628,29 @@ def normalize_loop_closure(value: Any) -> dict[str, Any]:
         "suspense_revealed": bool(item.get("suspense_revealed", False)),
         "suspense_reveal_time": item.get("suspense_reveal_time"),
         "note": str(item.get("note") or "未完成闭环校验。").strip(),
+    }
+
+
+def normalize_s3_s4_relationship(value: Any) -> dict[str, Any]:
+    item = value if isinstance(value, dict) else {}
+    return {
+        "creator_relationship": normalize_s3_s4_relationship_type(item.get("creator_relationship")),
+        "benchmark_relationship": normalize_s3_s4_relationship_type(item.get("benchmark_relationship")),
+        "creator_reason": str(item.get("creator_reason") or "未完成 S3/S4 关系审计。").strip(),
+        "benchmark_reason": str(item.get("benchmark_reason") or "未完成 S3/S4 关系审计。").strip(),
+    }
+
+
+def normalize_promise_chain(value: Any) -> dict[str, Any]:
+    item = value if isinstance(value, dict) else {}
+    return {
+        "s1_promise": str(item.get("s1_promise") or "").strip(),
+        "s2_answer": str(item.get("s2_answer") or "").strip(),
+        "s3_proof_target": str(item.get("s3_proof_target") or "").strip(),
+        "s4_outcome": str(item.get("s4_outcome") or "").strip(),
+        "chain_closed": normalize_bool_flag(item.get("chain_closed")),
+        "broken_at": normalize_promise_break_point(item.get("broken_at")),
+        "break_reason": str(item.get("break_reason") or "未完成 S1-S4 承诺闭环审计。").strip(),
     }
 
 
@@ -833,6 +907,8 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
         "category_profile": normalize_category_profile(result.get("category_profile")),
         "product_profile": normalize_product_profile(result.get("product_profile")),
         "loop_closure": normalize_loop_closure(result.get("loop_closure")),
+        "s3_s4_relationship": normalize_s3_s4_relationship(result.get("s3_s4_relationship")),
+        "promise_chain": normalize_promise_chain(result.get("promise_chain")),
         "video_understanding": normalize_video_understanding(result.get("video_understanding")),
         "stage_analysis": normalized_stages,
         "improvements": normalized_improvements,
