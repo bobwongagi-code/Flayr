@@ -61,12 +61,32 @@ def stamp_product_foundation(normalized: dict[str, Any], analysis: dict[str, Any
     if foundation.get("category_profile"):
         normalized["category_profile"] = foundation["category_profile"]
     if foundation.get("product_profile"):
-        normalized["product_profile"] = foundation["product_profile"]
+        profile = dict(normalized.get("product_profile") or {})
+        for key, value in foundation["product_profile"].items():
+            if value not in (None, "", []):
+                profile[key] = value
+        normalized["product_profile"] = profile
+
+
+def sanitize_promise_chain_scope(normalized: dict[str, Any]) -> None:
+    """promise_chain 只管 S1-S4；CTA/促单问题归 S6，不让它污染承诺链。"""
+    chain = normalized.get("promise_chain")
+    if not isinstance(chain, dict):
+        return
+    reason = str(chain.get("break_reason") or "")
+    if not any(token in reason for token in ("S5", "S6", "CTA", "促单", "下单", "购买指令", "转化链条")):
+        return
+    if str(chain.get("broken_at") or "").strip() not in {"none", "unknown", ""}:
+        return
+    chain["chain_closed"] = True
+    chain["broken_at"] = "none"
+    chain["break_reason"] = "前四阶段的承诺、承接、证明与效果已围绕同一产品命题闭环；后续购买引导不属于本字段。"
 
 
 def apply_postprocess_chain(normalized: dict[str, Any], analysis: dict[str, Any]) -> None:
     """两个 caller 共享的中段流水线。每一步对应一个独立职责模块。"""
     stamp_product_foundation(normalized, analysis)                           # foundation  Step-0 品地基权威覆盖（须在 derive 前）
+    sanitize_promise_chain_scope(normalized)                                  # repair      S1-S4 承诺链不接收 S6/CTA 断点
     validate_transcript_attribution(normalized, analysis)                    # validate    跨视频串证据校验
     align_clear_commerce_evidence(normalized)                                # repair      关键词归位 benchmark 事实
     bind_timed_transcript_quotes(normalized, analysis)                       # repair      SRT 时间戳回填 quote

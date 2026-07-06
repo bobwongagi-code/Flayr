@@ -511,6 +511,9 @@ def validate_chain_relationships(result: dict[str, Any], analysis: dict[str, Any
             errors.append("promise_chain.chain_closed 必须是 bool")
         if str(chain.get("broken_at") or "").strip() not in {"S2", "S3", "S4", "none", "unknown"}:
             errors.append("promise_chain.broken_at 必须是 S2/S3/S4/none/unknown")
+        break_reason = str(chain.get("break_reason") or "")
+        if any(token in break_reason for token in ("S5", "S6", "CTA", "促单", "下单", "购买指令", "转化链条")):
+            errors.append("promise_chain.break_reason 只能审计 S1-S4，不得把 S5/S6/CTA 作为断点")
     if errors:
         raise SystemExit("S3/S4 关系或 S1-S4 承诺链输出不完整：" + "；".join(errors))
 

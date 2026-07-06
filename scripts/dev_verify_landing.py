@@ -57,6 +57,7 @@ from flayr_core.postprocess.validate import (  # noqa: E402
     validate_s4_effect_flags,
     validate_chain_relationships,
 )
+from flayr_core.postprocess.chain import sanitize_promise_chain_scope, stamp_product_foundation  # noqa: E402
 
 
 def mk(gap: str, c_quote: str, b_quote: str = "") -> dict:
@@ -1126,6 +1127,66 @@ try:
 except SystemExit:
     _chain_legacy_ok = False
 check("S3/S4 关系门禁：旧结果无标记不误伤", _chain_legacy_ok)
+
+_cta_polluted_result = json.loads(json.dumps(_valid_relationship_result, ensure_ascii=False))
+_cta_polluted_result["promise_chain"]["break_reason"] = "S1-S4 已证明产品好用，但购买指令不清晰导致转化链条弱。"
+try:
+    validate_chain_relationships(
+        _cta_polluted_result,
+        {"s3_flags_required": True, "s4_flags_required": True},
+    )
+    _chain_cta_pollution_failed = False
+except SystemExit as exc:
+    _chain_cta_pollution_failed = "不得把 S5/S6/CTA 作为断点" in str(exc)
+check("S3/S4 关系门禁：CTA 不得污染 S1-S4 承诺链", _chain_cta_pollution_failed)
+
+_sanitized_chain = {
+    "promise_chain": {
+        "chain_closed": False,
+        "broken_at": "unknown",
+        "break_reason": "达人已经证明产品好用，但购买指令不清晰导致转化链条弱。",
+    }
+}
+sanitize_promise_chain_scope(_sanitized_chain)
+check("S3/S4 关系修复：未知断点中的 CTA 污染自动归回 S6",
+      _sanitized_chain["promise_chain"]["chain_closed"] is True
+      and _sanitized_chain["promise_chain"]["broken_at"] == "none")
+
+_unsanitized_chain = {
+    "promise_chain": {
+        "chain_closed": False,
+        "broken_at": "S4",
+        "break_reason": "S4 没有兑现结果，同时 CTA 不清晰。",
+    }
+}
+sanitize_promise_chain_scope(_unsanitized_chain)
+check("S3/S4 关系修复：明确 S4 断点不被 CTA 清洗",
+      _unsanitized_chain["promise_chain"]["chain_closed"] is False
+      and _unsanitized_chain["promise_chain"]["broken_at"] == "S4")
+
+_stamped = {
+    "product_profile": {
+        "proof_mode": "instant_visual",
+        "effect_requires_process": "partial",
+        "core_visual_proposition": "模型新字段默认值应保留",
+    }
+}
+stamp_product_foundation(
+    _stamped,
+    {
+        "product_foundation": {
+            "product_profile": {
+                "core_visual_proposition": "旧地基核心视觉命题仍权威覆盖",
+                "proof_mode": None,
+                "effect_requires_process": None,
+            }
+        }
+    },
+)
+check("Step-0 旧地基覆盖：空新字段不清掉 normalized 默认值",
+      _stamped["product_profile"]["core_visual_proposition"] == "旧地基核心视觉命题仍权威覆盖"
+      and _stamped["product_profile"]["proof_mode"] == "instant_visual"
+      and _stamped["product_profile"]["effect_requires_process"] == "partial")
 
 # 5. 死代码已清 + 模块仍可导入
 import flayr_core.prompt as prompt_module  # noqa: E402
