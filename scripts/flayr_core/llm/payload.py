@@ -635,12 +635,36 @@ def build_llm_comparison_payload(
         "excluded_or_risky_module/start_seconds/end_seconds/handoff_reason/evidence_ids）。"
         "S2 flag 只服务衔接契约，不评卖点细节；S1 提过的钩子关键词不得在 S2 重复分析，S2 已分析的引出方式不得在 S3 重复。"
     )
+    s3_flag_block = (
+        "## S3 使用过程 flag（只判真实使用中核心卖点是否被动作演示出来）\n"
+        "S3 阶段（且仅 S3）每侧【必须】输出 creator_s3 与 benchmark_s3 两个对象，形如：\n"
+        '{"exists": bool（该侧是否存在使用过程功能；S2/S3 合并时也算存在）, '
+        '"module_type": "A"~"E" 或 "unknown"（按 structure_library S3 五型判：A单场景全流程/B多场景拼接/C多人像使用/D步骤拆解/E沉浸第一视角）, '
+        '"real_usage_met": bool（是否是真实使用动作，而非静态展示、摆拍假用、只拿着产品说）, '
+        '"core_selling_point_visible": bool（product_profile.core_selling_points 中至少一个核心卖点是否在使用动作里被看见；只口播不算）, '
+        '"usage_context_fit": bool（使用场景是否给核心卖点提供合适舞台，如去污在脏污面、控油在出油/补妆场景）, '
+        '"continuity_met": bool（过程是否连贯且符合真实用法，不是无关镜头拼贴或错误用法）, '
+        '"richness_met": bool（多场景覆盖多卖点，或单场景做厚：多角度、多步骤、多卖点完整过程；必须在 core_selling_point_visible=true 后才有意义）, '
+        '"fake_or_staged": bool（显假摆拍/错误使用/画面无法相信时 true）, '
+        '"start_seconds": number, "end_seconds": number, '
+        '"usage_reason": "一句话说明实际使用了什么、哪个核心卖点被动作证明；没证明要直说", '
+        '"evidence_ids": ["C1"]}。\n'
+        "S3 铁律：演示即证据。口播/字幕说卖点但画面没做出来，不算 core_selling_point_visible；"
+        "场景丰富、人物多、步骤多都不能补偿核心卖点没落地；独立效果结果归 S4，背书归 S5。"
+    )
+    s3_field_req = (
+        "S3 强制：stage_analysis 第 3 项（S3 使用过程）必须再含 creator_s3 与 benchmark_s3 两个对象"
+        "（结构见上方：exists/module_type/real_usage_met/core_selling_point_visible/usage_context_fit/continuity_met/"
+        "richness_met/fake_or_staged/start_seconds/end_seconds/usage_reason/evidence_ids）。"
+        "S3 flag 只服务真实使用过程判断，不评效果结果，不把 S4/S5 内容回填到 S3。"
+    )
     user_text = "\n\n".join(
         [
             context,
             foundation_block,
             hook_flag_block,
             s2_flag_block,
+            s3_flag_block,
             s1_boundary_hint_block,
             "## S1-S6 模块结构库（判断视图：客观类型 + 适配条件，判 module_id 与类型对本品适配用；这是结构层、非判断层，不讲好坏）",
             structure_library_judgment_view(),
@@ -664,6 +688,7 @@ def build_llm_comparison_payload(
             "stage_analysis 每项必须含：stage, time_range, benchmark_time_range, creator_time_range, core_question, creator_module_id, benchmark_module_id, module_fit, module_fit_reason, task_completion, gap_type, gap_summary, voice_performance, benchmark_summary, benchmark_key_message, benchmark_evidence_ids, benchmark_visual_evidence, benchmark_support_status, benchmark_has_effect_demo, benchmark_has_usage_demo, benchmark_quote, benchmark_quote_zh, creator_summary, creator_key_message, creator_evidence_ids, creator_visual_evidence, creator_support_status, creator_has_effect_demo, creator_has_usage_demo, creator_quote, creator_quote_zh, gap, evidence, severity, creator_execution, benchmark_execution, painpoint_relevance, stage_standard_delivery。",
             hook_field_req,
             s2_field_req,
+            s3_field_req,
             "task_completion 只能取 complete、partial、missing 三选一（达人侧该阶段功能完成度），禁止 both_complete、no_gap 等任何其他词；标杆侧完成情况写在 benchmark_summary。",
             "creator_execution 与 benchmark_execution 取值只能是 0、0.5、1、2 四个数字：0=未执行该阶段功能；0.5=做了但对该阶段核心功能基本无效——敷衍、平庸无感、几乎不起作用（如一句轻带的 CTA、平铺直叙毫无抓力的开场、仅口头承诺没有任何验证支撑）；1=执行合格（功能完成且对观众有效）；2=执行出色（可视化演示/铺垫到位/感染力强）。两侧按该阶段功能定义各自独立打分，先打分再对比，禁止因对比结果回调任何一侧分数。",
             "效果呈现阶段（S4）执行分以 product_profile.core_visual_proposition（本品核心视觉命题）为评判锚点，不套通用 before/after：先判该侧有没有拍出本品的决定性瞬间（定妆粉饼=粉底油光→哑光对比、面膜=逐日变化+敷后效果），并满足 product_profile.shooting_requirement（效果细微的品需正面强光+面部特写才算拍到）。拍出命题且拍摄到位才给 2；只完成动作（揭膜/擦粉/口头带过）未体现命题、或拍摄条件不支撑（暗光/无特写/wide shot 看不出效果）按敷衍计最高 0.5；做了但缺命题对比的'呈现单薄'最高 1。过长全程记录不加分（标尺是命题覆盖非完整性）。两侧各自独立打分，禁止因对比回调。",
@@ -810,6 +835,7 @@ def build_stage_review_payload(
     }
     s1_contract = ""
     s2_contract = ""
+    s3_contract = ""
     if "S1" in target_codes:
         stage_update_example["stage"] = "S1 Hook"
         stage_update_example["core_question"] = "用户凭什么停下来"
@@ -861,6 +887,31 @@ def build_stage_review_payload(
             "产品露出不等于产品引出完成；卖点细节/成分/认证/选购建议不要当作 S2 加分，归 S3/S4/S5。"
             "≤15s 且 S2/S3 不可分时 merged_with_s3=true，不因没有独立 S2 扣分。"
         )
+    if "S3" in target_codes:
+        stage_update_example["stage"] = "S3 使用过程"
+        stage_update_example["core_question"] = "用户能不能看见产品如何使用并理解核心卖点"
+        s3_example = {
+            "exists": True,
+            "module_type": "A-E 或 unknown",
+            "real_usage_met": True,
+            "core_selling_point_visible": True,
+            "usage_context_fit": True,
+            "continuity_met": True,
+            "richness_met": False,
+            "fake_or_staged": False,
+            "start_seconds": 8.0,
+            "end_seconds": 18.0,
+            "usage_reason": "真实使用动作中能看见核心卖点如何发生；若只口播卖点则写未被动作证明",
+            "evidence_ids": ["C1"],
+        }
+        stage_update_example["creator_s3"] = s3_example
+        stage_update_example["benchmark_s3"] = s3_example
+        s3_contract = (
+            "目标阶段包含 S3 时，stage_update 必须同时重判 creator_s3 与 benchmark_s3；"
+            "S3 只判真实使用过程：是否真实操作、核心卖点是否在动作里可见、场景是否适配、过程是否连贯、素材是否足够丰富。"
+            "只口播/字幕说卖点但画面没演，不算 core_selling_point_visible；场景丰富不能补偿核心卖点没落地。"
+            "效果结果归 S4，背书归 S5，不要回填到 S3。"
+        )
     content: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -874,6 +925,7 @@ def build_stage_review_payload(
                     "回看后必须按主分析同一标尺重打 creator_execution 与 benchmark_execution（0=未执行；0.5=做了但基本无效/敷衍/无法有效接收；1=合格有效；2=出色。两侧独立打分，先打分再对比）和 painpoint_relevance——系统将据这些事实重推导差距等级；severity 仍需填写但仅作参考。",
                     s1_contract,
                     s2_contract,
+                    s3_contract,
                     "只输出严格 JSON，不要 Markdown。",
                     "输出格式：",
                     json.dumps(
@@ -1088,7 +1140,7 @@ def build_llm_payload(
                     "4. 商业权重必须按品类自适应：Hook 恒高权重；儿童牙膏这类低客单但需说服的功能理性品类，Hook、核心卖点、效果验证和清晰 CTA 优先于调性/BGM。"
                     "关键结论和 improvements 中，Hook/卖点/效果验证/CTA 不得被低权重调性问题排到后面。\n"
                     "5. 达人有效、标杆弱时要记为达人亮点，不判达人差距；例如达人有明确购买指令而标杆没有独立 CTA，S6 应判达人略优或 small，不得判差距中等。\n"
-                    "6. S3 只判 how-to 是否看懂；闻香、口味、质感等感官体验归 S4 效果验证。给理由归 S5，给下单指令归 S6。\n"
+                    "6. S3 只判真实使用过程中核心卖点是否被动作演示出来；闻香、口味、质感等感官体验归 S4 效果验证。给理由归 S5，给下单指令归 S6。\n"
                     "7. 使用目标市场知识库做文化视角校准：马来/东南亚语境下，真实生活感、轻语气、本地口语、划算/省/方便、节日紧迫感等可能是正向信号；"
                     "但知识库只用于判断有效性，不得替代视频证据，不得在报告中直接展开。\n"
                     "8. gap_type 判断：模块不同=structural，模块同但执行差=execution，资源条件限制=resource。\n"
@@ -1141,6 +1193,7 @@ def build_llm_repair_payload(
                     "hook_boundary_seconds 按 structure_library_full.md 的 S1 留人机制→S2 产品引出/解决方案承接功能切换判断，不得写死固定秒数；S2-A 承接式引出可早于产品实物或产品名出现，不能等产品画面才切 S2。"
                     "landing_met 按 type 无关三件套判断：0 到 hook_boundary_seconds 内对象明确、张力明确、承诺或证据明确，缺一即 false；不得用后续 S2/S3 产品介绍补足 S1 landing。若引用边界后材料，landing_window_leak=true 且 landing_met=false。"
                     "S2 产品引出必须补齐 creator_s2 与 benchmark_s2 两个对象，字段为 exists(bool)、merged_with_s3(bool)、module_type(A-D或unknown)、handoff_met(bool)、s1_s2_compatible(bool)、product_identity_clear(bool)、product_role_clear(bool)、excluded_or_risky_module(bool)、start_seconds(number)、end_seconds(number)、handoff_reason(非空)、evidence_ids(非空数组)。"
+                    "S3 使用过程必须补齐 creator_s3 与 benchmark_s3 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、real_usage_met(bool)、core_selling_point_visible(bool)、usage_context_fit(bool)、continuity_met(bool)、richness_met(bool)、fake_or_staged(bool)、start_seconds(number)、end_seconds(number)、usage_reason(非空)、evidence_ids(非空数组)。"
                     "提升点必须保留 benchmark_evidence_ids、base_frame_suitability、best_base_frame_time、base_frame_evidence_id、base_frame_reason 和 aigc_prompt；无可用达人素材时写 no_suitable_frame 且时间与 base_frame_evidence_id 留空。aigc_image_path 留空。"
                     "修复 improvements 时也必须遵循达人框架约束、卖点适配权重和标杆功能意图转译，不得把 benchmark_reference 直接改写成 suggestion。"
                     "健康品类建议不得声称调节激素、改善月经、治疗症状或虚构优惠。建议话术必须重新设计，不得复制标杆原句。"

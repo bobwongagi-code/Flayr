@@ -149,6 +149,7 @@ def normalize_demo_flag(value: Any) -> bool | None:
 
 _HOOK_TYPE_LETTERS = {"A", "B", "C", "D", "E", "F", "G"}
 _S2_TYPE_LETTERS = {"A", "B", "C", "D"}
+_S3_TYPE_LETTERS = {"A", "B", "C", "D", "E"}
 _HOOK_TS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*s")
 
 
@@ -165,6 +166,13 @@ def normalize_s2_type(value: Any) -> str:
     s = str(value or "").strip().upper().replace("S2-", "").replace("S2_", "")
     s = s[:1]
     return s if s in _S2_TYPE_LETTERS else "unknown"
+
+
+def normalize_s3_type(value: Any) -> str:
+    """归一 S3 使用过程类型到 A-E（结构库 S3-A~E），无法识别→unknown。"""
+    s = str(value or "").strip().upper().replace("S3-", "").replace("S3_", "")
+    s = s[:1]
+    return s if s in _S3_TYPE_LETTERS else "unknown"
 
 
 def normalize_hook_boundary_seconds(value: Any) -> float | None:
@@ -245,6 +253,26 @@ def normalize_s2_flags(value: Any) -> dict[str, Any] | None:
         "start_seconds": normalize_hook_boundary_seconds(value.get("start_seconds")),
         "end_seconds": normalize_hook_boundary_seconds(value.get("end_seconds")),
         "handoff_reason": str(value.get("handoff_reason") or "").strip(),
+        "evidence_ids": normalize_evidence(value.get("evidence_ids")),
+    }
+
+
+def normalize_s3_flags(value: Any) -> dict[str, Any] | None:
+    """归一 S3 使用过程 flag。缺失返回 None，derive/validate 按主链标记决定是否消费。"""
+    if not isinstance(value, dict):
+        return None
+    return {
+        "exists": normalize_demo_flag(value.get("exists")),
+        "module_type": normalize_s3_type(value.get("module_type")),
+        "real_usage_met": normalize_demo_flag(value.get("real_usage_met")),
+        "core_selling_point_visible": normalize_demo_flag(value.get("core_selling_point_visible")),
+        "usage_context_fit": normalize_demo_flag(value.get("usage_context_fit")),
+        "continuity_met": normalize_demo_flag(value.get("continuity_met")),
+        "richness_met": normalize_demo_flag(value.get("richness_met")),
+        "fake_or_staged": normalize_demo_flag(value.get("fake_or_staged")),
+        "start_seconds": normalize_hook_boundary_seconds(value.get("start_seconds")),
+        "end_seconds": normalize_hook_boundary_seconds(value.get("end_seconds")),
+        "usage_reason": str(value.get("usage_reason") or "").strip(),
         "evidence_ids": normalize_evidence(value.get("evidence_ids")),
     }
 
@@ -658,6 +686,10 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 # 不做四维执行分，缺失为 None → derive 保守降级。
                 "creator_s2": normalize_s2_flags(item.get("creator_s2")),
                 "benchmark_s2": normalize_s2_flags(item.get("benchmark_s2")),
+                # S3 使用过程 flag：只判真实使用中核心卖点是否被动作演示出来。
+                # 缺失为 None → derive 保守降级。
+                "creator_s3": normalize_s3_flags(item.get("creator_s3")),
+                "benchmark_s3": normalize_s3_flags(item.get("benchmark_s3")),
             }
         )
 

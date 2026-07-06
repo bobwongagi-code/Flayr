@@ -112,6 +112,7 @@ def validate_quality_contract(result: dict[str, Any], analysis: dict[str, Any]) 
     validate_module_ids(result)
     validate_s1_hook_flags(result, analysis)
     validate_s2_contract_flags(result, analysis)
+    validate_s3_usage_flags(result, analysis)
     validate_stage_time_coherence(result)
     validate_product_visibility(result, analysis)
     validate_narrative_evidence_consistency(result)
@@ -352,6 +353,55 @@ def validate_s2_contract_flags(result: dict[str, Any], analysis: dict[str, Any])
             errors.append(f"S2 {key}.evidence_ids 不能为空")
     if errors:
         raise SystemExit("S2 产品引出契约 flag 输出不完整：" + "；".join(errors))
+
+
+def validate_s3_usage_flags(result: dict[str, Any], analysis: dict[str, Any]) -> None:
+    """S3 使用过程 flag 门禁。
+
+    历史结果可能没有 creator_s3/benchmark_s3，因此只在主链显式要求或结果已含字段时校验。
+    """
+    stages = result.get("stage_analysis", [])
+    if len(stages) < 3 or not isinstance(stages[2], dict):
+        return
+    s3 = stages[2]
+    has_any_s3 = isinstance(s3.get("creator_s3"), dict) or isinstance(s3.get("benchmark_s3"), dict)
+    if not analysis.get("s3_flags_required") and not has_any_s3:
+        return
+
+    errors: list[str] = []
+    for role in ("creator", "benchmark"):
+        key = f"{role}_s3"
+        flag = s3.get(key)
+        if not isinstance(flag, dict):
+            errors.append(f"S3 缺少 {key}")
+            continue
+        for bool_key in (
+            "exists",
+            "real_usage_met",
+            "core_selling_point_visible",
+            "usage_context_fit",
+            "continuity_met",
+            "richness_met",
+            "fake_or_staged",
+        ):
+            if flag.get(bool_key) not in {True, False}:
+                errors.append(f"S3 {key}.{bool_key} 必须是 bool")
+        if str(flag.get("module_type") or "").strip() not in {"A", "B", "C", "D", "E", "unknown"}:
+            errors.append(f"S3 {key}.module_type 必须是 A-E 或 unknown")
+        start = flag.get("start_seconds")
+        end = flag.get("end_seconds")
+        if not isinstance(start, (int, float)) or isinstance(start, bool) or start < 0:
+            errors.append(f"S3 {key}.start_seconds 必须是非负数字")
+        if not isinstance(end, (int, float)) or isinstance(end, bool) or end < 0:
+            errors.append(f"S3 {key}.end_seconds 必须是非负数字")
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)) and not isinstance(start, bool) and not isinstance(end, bool) and end < start:
+            errors.append(f"S3 {key}.end_seconds 必须大于等于 start_seconds")
+        if not str(flag.get("usage_reason") or "").strip():
+            errors.append(f"S3 {key}.usage_reason 不能为空")
+        if not flag.get("evidence_ids"):
+            errors.append(f"S3 {key}.evidence_ids 不能为空")
+    if errors:
+        raise SystemExit("S3 使用过程 flag 输出不完整：" + "；".join(errors))
 
 
 def validate_stage_time_coherence(result: dict[str, Any]) -> None:

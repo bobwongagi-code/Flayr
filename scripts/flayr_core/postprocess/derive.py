@@ -296,6 +296,46 @@ def _s2_risky_module(stage: dict[str, Any]) -> bool:
     return c.get("excluded_or_risky_module") is True and b.get("excluded_or_risky_module") is not True
 
 
+def _s3_usage_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
+    """S3 使用过程 flag：真实使用 + 核心卖点可见是主轴，场景/连续/丰富只在主轴成立后加分。"""
+    c = stage.get("creator_s3")
+    b = stage.get("benchmark_s3")
+    if not isinstance(c, dict) or not isinstance(b, dict):
+        return None
+
+    def side_exec(flag: dict[str, Any]) -> float:
+        if flag.get("exists") is False:
+            return 0.0
+        if flag.get("real_usage_met") is False or flag.get("fake_or_staged") is True:
+            return 0.0
+        if flag.get("core_selling_point_visible") is not True:
+            return 0.5
+        if flag.get("usage_context_fit") is True and flag.get("continuity_met") is True:
+            return 2.0 if flag.get("richness_met") is True else 1.0
+        return 0.5
+
+    return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
+
+
+def _s3_core_floor(stage: dict[str, Any]) -> tuple[bool, str]:
+    """S3 下限：标杆把核心卖点演出来而达人没演出来时，不应因小分差落成 small。"""
+    c = stage.get("creator_s3")
+    b = stage.get("benchmark_s3")
+    if not isinstance(c, dict) or not isinstance(b, dict):
+        return False, ""
+    benchmark_core = b.get("real_usage_met") is True and b.get("core_selling_point_visible") is True
+    if not benchmark_core:
+        return False, ""
+    missing = []
+    if c.get("real_usage_met") is False or c.get("fake_or_staged") is True:
+        missing.append("缺少真实使用过程")
+    if c.get("core_selling_point_visible") is not True:
+        missing.append("核心卖点未在动作里可见")
+    if not missing:
+        return False, ""
+    return True, "；S3 核心演示下限：" + "、".join(missing)
+
+
 def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] | None,
                 painpoints: list[str], shake: dict[str, bool] | None = None,
                 endorsement: dict[str, tuple[bool, bool, bool]] | None = None) -> dict[str, Any]:
@@ -315,6 +355,10 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         s2 = _s2_contract_exec(stage)
         if s2 is not None:
             creator_exec, bench_exec = s2["creator_exec"], s2["bench_exec"]
+    elif stage_id == "S3":
+        s3 = _s3_usage_exec(stage)
+        if s3 is not None:
+            creator_exec, bench_exec = s3["creator_exec"], s3["bench_exec"]
     if creator_exec is None or bench_exec is None:
         return {"status": "skipped", "reason": "执行分缺失，保留模型 severity"}
 
@@ -425,6 +469,11 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         reason += "；命题锚下限：标杆钩子锚定本品核心命题、达人只做泛留人"
     if stage_id == "S2" and severity == "small":
         floor, floor_reason = _s2_contract_floor(stage)
+        if floor:
+            severity = "medium"
+            reason += floor_reason
+    if stage_id == "S3" and severity == "small":
+        floor, floor_reason = _s3_core_floor(stage)
         if floor:
             severity = "medium"
             reason += floor_reason

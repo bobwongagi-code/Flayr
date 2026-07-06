@@ -53,6 +53,7 @@ from flayr_core.postprocess.validate import (  # noqa: E402
     validate_narrative_evidence_consistency,
     validate_s1_hook_flags,
     validate_s2_contract_flags,
+    validate_s3_usage_flags,
 )
 
 
@@ -151,7 +152,7 @@ _s5_one = _derive_one("S5", {"creator_execution": 1.0, "benchmark_execution": 2.
 check("S5 一方有硬背书→进公式不判均未涉及", "均未涉及" not in _s5_one.get("reason", ""))
 
 # 4c. S1 Hook flag 化（切片 A）：四维推执行分 + hook_exists 红线 + 命题锚 + 残差亮点门
-from flayr_core.llm.parse import normalize_hook_flags, normalize_s2_flags  # noqa: E402
+from flayr_core.llm.parse import normalize_hook_flags, normalize_s2_flags, normalize_s3_flags  # noqa: E402
 
 
 def _hook(exists, htype, cam=False, cp=False, snd=False, rhy=False, anchors=None, landing=None):
@@ -293,6 +294,53 @@ _s2_risky = _derive_one(
 check("S2 风险引出方式→reason 标注风险模块",
       "高风险引出方式" in _s2_risky.get("reason", ""))
 
+# S3 使用过程 flag：真实使用 + 核心卖点可见是主轴，场景丰富只做加分
+def _s3_flag(exists=True, module="A", real=True, core=True, context=True, continuity=True, richness=False, fake=False):
+    return {
+        "exists": exists,
+        "module_type": module,
+        "real_usage_met": real,
+        "core_selling_point_visible": core,
+        "usage_context_fit": context,
+        "continuity_met": continuity,
+        "richness_met": richness,
+        "fake_or_staged": fake,
+        "start_seconds": 8.0,
+        "end_seconds": 18.0,
+        "usage_reason": "真实使用动作中演示核心卖点",
+        "evidence_ids": ["C2"],
+    }
+
+
+_s3_good = _s3_flag(richness=True)
+_s3_no_core = _s3_flag(core=False, richness=True)
+_s3_trace = _derive_one(
+    "S3",
+    {"creator_s3": _s3_no_core, "benchmark_s3": _s3_good, "creator_summary": "x", "benchmark_summary": "y"},
+    {"S3": 1.6},
+    [],
+)
+check("S3 核心卖点没在动作里可见→至少 medium",
+      _s3_trace.get("severity") in {"medium", "large"})
+
+_s3_fake = _derive_one(
+    "S3",
+    {"creator_s3": _s3_flag(fake=True), "benchmark_s3": _s3_good, "creator_summary": "x", "benchmark_summary": "y"},
+    {"S3": 1.6},
+    [],
+)
+check("S3 显假摆拍→执行分按 0 处理",
+      _s3_fake.get("severity") == "large" and _s3_fake.get("E") == 2)
+
+_s3_thin = _derive_one(
+    "S3",
+    {"creator_s3": _s3_flag(richness=False), "benchmark_s3": _s3_good, "creator_summary": "x", "benchmark_summary": "y"},
+    {"S3": 1.0},
+    [],
+)
+check("S3 核心卖点可见但素材不丰富→小到中差距",
+      _s3_thin.get("severity") in {"small", "medium"} and _s3_thin.get("E") == 1)
+
 # parse 归一：容忍 'S1-B：反差' / 'yes' / 1 等写法
 _nh = normalize_hook_flags({"exists": "true", "type": "S1-B：反差震惊型", "dims": {"camera": "yes", "copy": 1}})
 check("S1 parse 归一 hook_flags（type→B, dims 容错）",
@@ -320,6 +368,27 @@ check("S2 parse 归一 contract flags（type→B, bool/时间/evidence 容错）
       and _ns2["product_role_clear"] is False
       and _ns2["start_seconds"] == 3.7
       and _ns2["evidence_ids"] == ["C1"])
+
+_ns3 = normalize_s3_flags({
+    "exists": "yes",
+    "module_type": "S3-D：步骤拆解式",
+    "real_usage_met": 1,
+    "core_selling_point_visible": "true",
+    "usage_context_fit": "no",
+    "continuity_met": "yes",
+    "richness_met": 0,
+    "fake_or_staged": "false",
+    "start_seconds": "8.5",
+    "end_seconds": 18,
+    "usage_reason": "分步演示用法",
+    "evidence_ids": "C2",
+})
+check("S3 parse 归一 usage flags（type→D, bool/时间/evidence 容错）",
+      _ns3["module_type"] == "D"
+      and _ns3["exists"] is True
+      and _ns3["usage_context_fit"] is False
+      and _ns3["start_seconds"] == 8.5
+      and _ns3["evidence_ids"] == ["C2"])
 
 _leaky = normalize_hook_flags({
     "exists": True,
@@ -666,6 +735,33 @@ try:
 except SystemExit as exc:
     _s2_gate_failed = "缺少 creator_s2" in str(exc) and "缺少 benchmark_s2" in str(exc)
 check("S2 contract flag 门禁：主链缺字段触发 repair", _s2_gate_failed)
+
+_valid_s3 = _s3_flag()
+try:
+    validate_s3_usage_flags(
+        {
+            "stage_analysis": [
+                {"stage": "S1 Hook"},
+                {"stage": "S2 产品引出"},
+                {"stage": "S3 使用过程", "creator_s3": _valid_s3, "benchmark_s3": dict(_valid_s3)},
+            ]
+        },
+        {"s3_flags_required": True},
+    )
+    _s3_gate_ok = True
+except SystemExit:
+    _s3_gate_ok = False
+check("S3 usage flag 门禁：完整字段通过", _s3_gate_ok)
+
+try:
+    validate_s3_usage_flags(
+        {"stage_analysis": [{"stage": "S1 Hook"}, {"stage": "S2 产品引出"}, {"stage": "S3 使用过程"}]},
+        {"s3_flags_required": True},
+    )
+    _s3_gate_failed = False
+except SystemExit as exc:
+    _s3_gate_failed = "缺少 creator_s3" in str(exc) and "缺少 benchmark_s3" in str(exc)
+check("S3 usage flag 门禁：主链缺字段触发 repair", _s3_gate_failed)
 
 # 5. 死代码已清 + 模块仍可导入
 import flayr_core.prompt as prompt_module  # noqa: E402
