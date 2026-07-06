@@ -402,10 +402,10 @@ _s3_bad_framing = _derive_one(
     {"S3": 1.0},
     [],
 )
-check("S3 使用过程拍不全/没对准→不能拿满分且至少 medium",
-      _s3_bad_framing.get("severity") == "medium"
-      and _s3_bad_framing.get("E") == 1
-      and "薄演示下限" in _s3_bad_framing.get("reason", ""))
+check("S3 使用过程拍不全/没对准→先记 trace，不单独改 severity",
+      _s3_bad_framing.get("severity") == "small"
+      and _s3_bad_framing.get("E") == 0
+      and _s3_bad_framing.get("s3_process_framing") == {"creator": False, "benchmark": True})
 
 _s3_both_thin = _derive_one(
     "S3",

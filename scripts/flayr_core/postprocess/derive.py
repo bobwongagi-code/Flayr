@@ -298,8 +298,6 @@ def _s2_risky_module(stage: dict[str, Any]) -> bool:
 
 def _s3_strong_scene(flag: dict[str, Any]) -> bool:
     """S3 场景/表现层是否把使用过程做厚。"""
-    if flag.get("process_framing_met") is False:
-        return False
     mode = str(flag.get("scene_mode") or "unknown")
     if mode == "single_scene":
         return (
@@ -342,11 +340,25 @@ def _s3_usage_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
             return 0.5
         if flag.get("usage_context_fit") is not True:
             return 0.5
-        if flag.get("process_framing_met") is False:
-            return 1.0
         return 2.0 if _s3_strong_scene(flag) else 1.0
 
     return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
+
+
+def _attach_s3_process_framing_trace(stage_id: str, stage: dict[str, Any], trace: dict[str, Any]) -> dict[str, Any]:
+    """S3 拍摄对准质量先作为审计信息输出，不直接参与 severity。"""
+    if stage_id != "S3":
+        return trace
+    c = stage.get("creator_s3")
+    b = stage.get("benchmark_s3")
+    framing: dict[str, Any] = {}
+    if isinstance(c, dict) and "process_framing_met" in c:
+        framing["creator"] = c.get("process_framing_met")
+    if isinstance(b, dict) and "process_framing_met" in b:
+        framing["benchmark"] = b.get("process_framing_met")
+    if framing:
+        trace["s3_process_framing"] = framing
+    return trace
 
 
 def _s3_core_floor(stage: dict[str, Any]) -> tuple[bool, str]:
@@ -466,7 +478,11 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         if s4 is not None:
             creator_exec, bench_exec = s4["creator_exec"], s4["bench_exec"]
     if creator_exec is None or bench_exec is None:
-        return {"status": "skipped", "reason": "执行分缺失，保留模型 severity"}
+        return _attach_s3_process_framing_trace(
+            stage_id,
+            stage,
+            {"status": "skipped", "reason": "执行分缺失，保留模型 severity"},
+        )
 
     # 晃动确定性封顶（2026-06-12 用户判例：晃动=无法有效接收）：severe 侧在视觉依赖阶段
     # 执行分封顶 0.5，只降不升、双侧对称。指标由 flayr_core.motion 在预处理算出（零 LLM）。
@@ -484,8 +500,12 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
 
     # 原则④：事实不支撑则不判断
     if creator_exec == 0 and bench_exec == 0:
-        return {"status": "derived", "severity": "small", "E": 0,
-                "reason": "双方均未涉及（执行分均为 0），不进公式"}
+        return _attach_s3_process_framing_trace(
+            stage_id,
+            stage,
+            {"status": "derived", "severity": "small", "E": 0,
+             "reason": "双方均未涉及（执行分均为 0），不进公式"},
+        )
     if stage_id == "S5":
         b = (endorsement or {}).get("benchmark") or _NO_ENDORSEMENT
         c = (endorsement or {}).get("creator") or _NO_ENDORSEMENT
@@ -539,8 +559,12 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         if stage_id == "S1" and _s1_bench_anchors_only(stage, relevance):
             return {"status": "derived", "severity": "medium", "E": 0,
                     "reason": reason + "；命题锚下限：标杆钩子锚定本品核心命题、达人只做泛留人"}
-        return {"status": "derived", "severity": "small", "E": 0,
-                "reason": reason + "；达人持平或更优（亮点，零差距红线）"}
+        return _attach_s3_process_framing_trace(
+            stage_id,
+            stage,
+            {"status": "derived", "severity": "small", "E": 0,
+             "reason": reason + "；达人持平或更优（亮点，零差距红线）"},
+        )
 
     w = (weights or {}).get(stage_id, 1.0)
     # 痛点命中系数：差距落在核心决策因素上 → 放大；与痛点无关 → 衰减；事实完全缺失 → 中性。
@@ -593,7 +617,7 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
     # 残差亮点门（只进 trace 不进 severity）：标杆四维全 met 且类型明确才允许亮点描述，否则跳过
     if stage_id == "S1" and _s1_bench_highlight(stage):
         trace["hook_highlight_allowed"] = True
-    return trace
+    return _attach_s3_process_framing_trace(stage_id, stage, trace)
 
 
 CRITICAL_BAND = 0.2
