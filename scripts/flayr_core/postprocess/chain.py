@@ -51,6 +51,7 @@ from .claims_my import (
 
 # 4d：severity 确定性推导（执行分 + 品类权重表；事实缺失自动跳过，绝不抛错）
 from .derive import derive_severity_from_facts
+from .proposition import materialize_cross_stage_inputs, materialize_quality_audits
 
 
 def stamp_product_foundation(normalized: dict[str, Any], analysis: dict[str, Any] | None) -> None:
@@ -101,6 +102,8 @@ def apply_postprocess_chain(normalized: dict[str, Any], analysis: dict[str, Any]
     fill_missing_evidence_references(normalized)                             # repair      引用错位时补占位或就近匹配
     derive_product_visibility(normalized, analysis)                          # repair      达人产品出镜标记确定性累加 product_visibility
     repair_s1_hook_boundaries(normalized, analysis)                           # repair      S1/S2 边界按 SRT/facts 候选收敛，防 Hook 吃掉产品引出
+    materialize_cross_stage_inputs(normalized, analysis)                       # proposition 品命题矩阵 + S1→S2/S4→S6 跨阶段输入
     stabilize_stage_severity(normalized)                                      # repair      severity 阶段归属漂移校准
     derive_severity_from_facts(normalized, analysis)                          # derive      4d 执行分+权重表确定性推导（成功则覆盖，缺事实保留上游结果；含晃动封顶）
+    materialize_quality_audits(normalized, analysis)                           # proposition 绝对质量层 + S5/S6 命题审计（不覆盖 gap severity）
     stabilize_improvement_priorities(normalized)                              # repair      Top 改进跟随最终商业判断

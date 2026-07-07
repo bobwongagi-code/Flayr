@@ -1,6 +1,6 @@
 """flayr_core.postprocess.derive：severity 确定性推导（4d 架构落地）。
 
-设计依据（2026-06-11，两轮门禁 + 离线校验 dev_derive_severity.py r1 14/18 / r2 16/18）：
+设计依据（2026-06-11，两轮门禁 + 历史离线校验 r1 14/18 / r2 16/18）：
 模型直出 severity 不收敛（prompt 两轮校准 11/18→9/18），但事实层稳定。
 分工改为：模型供事实（两侧独立执行分 + 品类画像 + 证据文本），代码定政策（权重表 + 推导）。
 
@@ -30,7 +30,7 @@ from .repair import has_hard_endorsement
 # ── 品类原型 → 阶段权重表 W（政策数据，待数据积累渐进拟合）──────────────────────
 ARCHETYPE_W: dict[str, dict[str, float]] = {
     # 高决策门槛 + 功能理性（口服保健品/护肤等）：信任背书与效果验证是说服核心
-    # 2026-06-12 任务5 首次重拟合（60 标签，dev_refit_weights.py，S1 锁框架红线不进搜索）：
+    # 2026-06-12 任务5 首次重拟合（60 标签，S1 锁框架红线不进搜索）：
     # 理性 S3 1.0→1.2、感官 S2/S3 1.0→1.6——中段呈现权重整体上调，36/60→40/60 severe 7→5
     # 2026-06-12 晃动信号上线后二次拟合：理性 S2/S3 1.2→1.4（45/60 severe 2）
     # 2026-06-13 repeat5 稳定口径三次拟合：理性 S3 1.4→1.6（众数语料 43→44/60 severe 2）
@@ -242,10 +242,13 @@ def _s2_contract_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
             and flag.get("product_role_clear") is True
         ):
             return 2.0
+        s1_s2_compatible = flag.get("computed_s1_s2_compatible")
+        if s1_s2_compatible not in {True, False}:
+            s1_s2_compatible = flag.get("s1_s2_compatible")
         met = sum(
             1
             for key in ("handoff_met", "s1_s2_compatible", "product_identity_clear", "product_role_clear")
-            if flag.get(key) is True
+            if (s1_s2_compatible if key == "s1_s2_compatible" else flag.get(key)) is True
         )
         if met >= 4:
             return 2.0
@@ -280,7 +283,10 @@ def _s2_contract_floor(stage: dict[str, Any]) -> tuple[bool, str]:
         missing.append("产品身份不清")
     if c.get("product_role_clear") is False:
         missing.append("产品未成为解决方案/答案")
-    if c.get("s1_s2_compatible") is False:
+    creator_compatible = c.get("computed_s1_s2_compatible")
+    if creator_compatible not in {True, False}:
+        creator_compatible = c.get("s1_s2_compatible")
+    if creator_compatible is False:
         missing.append("S1→S2 模块不兼容")
     if not missing:
         return False, ""
@@ -297,13 +303,18 @@ def _s2_risky_module(stage: dict[str, Any]) -> bool:
 
 
 def _s3_strong_scene(flag: dict[str, Any]) -> bool:
-    """S3 场景/表现层是否把使用过程做厚。"""
+    """S3 场景/表现层是否把使用过程做厚。
+
+    S3 主轴是"动作里证明核心卖点"。多场景/丰富度只是表现层，不能补偿核心卖点缺口；
+    单场景全流程如果动作链完整且核心卖点无缺口，也可以成立为强 S3。
+    """
+    missing = flag.get("missing_selling_points")
+    has_missing_core = isinstance(missing, list) and any(str(item).strip() for item in missing)
+    if has_missing_core:
+        return False
     mode = str(flag.get("scene_mode") or "unknown")
     if mode == "single_scene":
-        return (
-            flag.get("single_scene_continuity_met") is True
-            and (flag.get("single_scene_variation_met") is True or flag.get("richness_met") is True)
-        )
+        return flag.get("single_scene_continuity_met") is True or flag.get("continuity_met") is True
     if mode == "multi_scene":
         return (
             flag.get("multi_scene_logic_met") is True
@@ -340,6 +351,9 @@ def _s3_usage_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
             return 0.5
         if flag.get("usage_context_fit") is not True:
             return 0.5
+        missing = flag.get("missing_selling_points")
+        if isinstance(missing, list) and any(str(item).strip() for item in missing):
+            return 1.0
         return 2.0 if _s3_strong_scene(flag) else 1.0
 
     return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
@@ -402,13 +416,48 @@ def _s3_thin_demo_floor(stage: dict[str, Any]) -> tuple[bool, str]:
             and (flag.get("usage_process_visible") is True or flag.get("real_usage_met") is True)
             and flag.get("fake_or_staged") is not True
             and flag.get("core_selling_point_visible") is True
-            and flag.get("usage_context_fit") is True
         )
 
     if not has_basic_process(c) or not has_basic_process(b):
         return False, ""
     if _s3_strong_scene(b) and not _s3_strong_scene(c):
         return True, "；S3 薄演示下限：达人有基础使用过程，但标杆通过细节/丰富度把核心卖点证明得更充分"
+    return False, ""
+
+
+def _s4_thin_effect_floor(stage: dict[str, Any]) -> tuple[bool, str]:
+    """S4 薄效果下限：达人拍到了效果，但标杆把效果更显著、更聚焦地放大。"""
+    c = stage.get("creator_s4")
+    b = stage.get("benchmark_s4")
+    if not isinstance(c, dict) or not isinstance(b, dict):
+        return False, ""
+
+    def has_credible_effect(flag: dict[str, Any]) -> bool:
+        salience = str(flag.get("effect_salience") or "none")
+        return (
+            flag.get("effect_visible") is True
+            and salience in {"clear", "strong"}
+            and flag.get("effect_proposition_matched") is True
+            and flag.get("effect_attribution_supported") is True
+            and flag.get("requires_close_inspection") is not True
+            and flag.get("tamper_or_cut_risk") is not True
+        )
+
+    if not has_credible_effect(c) or not has_credible_effect(b):
+        return False, ""
+
+    benchmark_stronger = (
+        str(b.get("effect_salience") or "") == "strong"
+        and b.get("effect_maximized") is True
+    )
+    creator_thinner = (
+        str(c.get("effect_salience") or "") != "strong"
+        or c.get("effect_maximized") is not True
+        or c.get("comparison_control_met") is not True
+        or c.get("closeup_or_focus_met") is not True
+    )
+    if benchmark_stronger and creator_thinner:
+        return True, "；S4 薄效果下限：达人拍到效果，但标杆把效果做得更显著、更聚焦"
     return False, ""
 
 
@@ -435,6 +484,14 @@ def _s4_effect_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
             return 0.5
         if flag.get("process_linked_effect") is True and flag.get("effect_attribution_supported") is True:
             if (
+                flag.get("effect_type") == "process_visualization"
+                and salience == "strong"
+                and flag.get("effect_proposition_matched") is True
+                and flag.get("closeup_or_focus_met") is True
+                and flag.get("effect_maximized") is True
+            ):
+                return 2.0
+            if (
                 salience == "strong"
                 and flag.get("effect_proposition_matched") is True
                 and flag.get("comparison_control_met") is True
@@ -446,6 +503,98 @@ def _s4_effect_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
                 return 1.0
             return 0.5
         return 1.0 if flag.get("effect_attribution_supported") is True and flag.get("effect_proposition_matched") is True else 0.5
+
+    return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
+
+
+def _s5_trust_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
+    """S5 信任放大 flag：硬信任可到 2，软信任封顶 1，口播孤证封顶 0.5。"""
+    c = stage.get("creator_s5")
+    b = stage.get("benchmark_s5")
+    if not isinstance(c, dict) or not isinstance(b, dict):
+        return None
+
+    def side_exec(flag: dict[str, Any]) -> float:
+        if flag.get("exists") is False:
+            return 0.0
+        trust_type = str(flag.get("trust_evidence_type") or "unknown")
+        if trust_type in {"none", "unknown"}:
+            return 0.0
+        if flag.get("independent_trust_purpose") is not True or flag.get("duplicates_other_stage") is True:
+            return 0.0
+        if flag.get("risky_or_unsupported") is True:
+            return 0.5
+        if flag.get("product_relevance_met") is not True:
+            return 0.5
+        if trust_type == "soft":
+            return 1.0
+        if flag.get("voice_only") is True:
+            return 0.5
+        if flag.get("trust_source_credible") is True and flag.get("trust_claim_specific") is True:
+            return 2.0 if flag.get("trust_source_visible") is True else 1.0
+        if flag.get("trust_source_credible") is True or flag.get("trust_claim_specific") is True:
+            return 1.0
+        return 0.5
+
+    return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
+
+
+def _s5_has_any_trust(stage: dict[str, Any]) -> bool:
+    """S5 flag 已输出时，软信任也算设计了信任环节，避免硬背书闸误杀。"""
+    for key in ("creator_s5", "benchmark_s5"):
+        flag = stage.get(key)
+        if not isinstance(flag, dict):
+            continue
+        if (
+            flag.get("exists") is not False
+            and str(flag.get("trust_evidence_type") or "unknown") not in {"none", "unknown"}
+            and flag.get("independent_trust_purpose") is True
+            and flag.get("duplicates_other_stage") is not True
+        ):
+            return True
+    return False
+
+
+def _s6_cta_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
+    """S6 CTA flag：购买指令和行动路径是主轴，利益/紧迫/保障是转化放大。"""
+    c = stage.get("creator_s6")
+    b = stage.get("benchmark_s6")
+    if not isinstance(c, dict) or not isinstance(b, dict):
+        return None
+
+    def side_exec(flag: dict[str, Any]) -> float:
+        if flag.get("exists") is False:
+            return 0.0
+        if flag.get("ending_position_met") is not True:
+            return 0.0
+        met = sum(
+            1
+            for key in (
+                "direct_order_met",
+                "action_path_clear",
+                "offer_or_incentive_clear",
+                "urgency_met",
+                "product_value_recalled",
+                "module_fit_met",
+            )
+            if flag.get(key) is True
+        )
+        if flag.get("compliance_risk") is True:
+            return min(0.5, met / 6 * 2)
+        if flag.get("direct_order_met") is not True and flag.get("action_path_clear") is not True:
+            return 0.5 if met else 0.0
+        depends_on_valid_s4 = flag.get("computed_depends_on_valid_s4")
+        if depends_on_valid_s4 not in {True, False}:
+            depends_on_valid_s4 = flag.get("depends_on_valid_s4")
+        if flag.get("module_type") == "D" and depends_on_valid_s4 is False:
+            return min(1.0, met / 6 * 2)
+        if met >= 5:
+            return 2.0
+        if met >= 3:
+            return 1.0
+        if met >= 1:
+            return 0.5
+        return 0.0
 
     return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
 
@@ -477,6 +626,14 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         s4 = _s4_effect_exec(stage)
         if s4 is not None:
             creator_exec, bench_exec = s4["creator_exec"], s4["bench_exec"]
+    elif stage_id == "S5":
+        s5 = _s5_trust_exec(stage)
+        if s5 is not None:
+            creator_exec, bench_exec = s5["creator_exec"], s5["bench_exec"]
+    elif stage_id == "S6":
+        s6 = _s6_cta_exec(stage)
+        if s6 is not None:
+            creator_exec, bench_exec = s6["creator_exec"], s6["bench_exec"]
     if creator_exec is None or bench_exec is None:
         return _attach_s3_process_framing_trace(
             stage_id,
@@ -515,7 +672,7 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         else:  # 老 facts 无 flag → 硬背书正则兜底（软背书不算，与 flag 口径一致：双方均无硬背书→small）
             b_has, c_has = has_hard_endorsement(bench_text), has_hard_endorsement(creator_text)
             src = "硬背书正则兜底"
-        if not b_has and not c_has:
+        if not b_has and not c_has and not _s5_has_any_trust(stage):
             return {"status": "derived", "severity": "small", "E": 0,
                     "reason": f"S5 双方均无硬背书 → 均未涉及（{src}）"}
 
@@ -612,6 +769,11 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
             if thin_floor:
                 severity = "medium"
                 reason += thin_reason
+    if stage_id == "S4" and severity == "small":
+        thin_floor, thin_reason = _s4_thin_effect_floor(stage)
+        if thin_floor:
+            severity = "medium"
+            reason += thin_reason
     trace = {"status": "derived", "severity": severity, "E": e, "W": w, "C": c_factor,
              "painpoint_relevance": relevance, "S": score, "reason": reason}
     # 残差亮点门（只进 trace 不进 severity）：标杆四维全 met 且类型明确才允许亮点描述，否则跳过

@@ -31,6 +31,50 @@ from .utils import evidence_overlaps_range
 ROOT = Path(__file__).resolve().parents[3]
 
 
+def _role_claim_payload(stage: dict[str, Any], role: str) -> dict[str, Any]:
+    """提取某侧真正的阶段主张文本，排除只描述阶段边界的元信息。"""
+    payload: dict[str, Any] = {}
+    for key, value in stage.items():
+        if not key.startswith(role):
+            continue
+        if key.endswith("_hook") and isinstance(value, dict):
+            hook = {
+                nested_key: nested_value
+                for nested_key, nested_value in value.items()
+                if nested_key not in {"hook_boundary_reason", "s2_start_signal"}
+            }
+            payload[key] = hook
+            continue
+        payload[key] = value
+    return payload
+
+
+def _role_claim_references(stage: dict[str, Any], role: str) -> list[str]:
+    """收集某侧阶段主引用和结构化 flag 自带引用，用于校验证据支撑。"""
+    references: list[str] = []
+
+    def append_many(items: Any) -> None:
+        for item in items if isinstance(items, list) else []:
+            ref = str(item).strip()
+            if ref and ref not in references:
+                references.append(ref)
+
+    append_many(stage.get(f"{role}_evidence_ids"))
+    for key, value in stage.items():
+        if key.startswith(role) and isinstance(value, dict):
+            append_many(value.get("evidence_ids"))
+    return references
+
+
+def _role_report_payload(stage: dict[str, Any], role: str) -> dict[str, Any]:
+    """提取报告可见的某侧阶段主张，用于阶段归属判断。"""
+    return {
+        key: value
+        for key, value in stage.items()
+        if key.startswith(role) and not isinstance(value, dict)
+    }
+
+
 def validate_evidence_alignment(result: dict[str, Any]) -> None:
     """阶段顺序 + evidence_ids 引用合法性 + 认证主张需证据支撑。"""
     understanding = result.get("video_understanding", {})
@@ -59,15 +103,13 @@ def validate_evidence_alignment(result: dict[str, Any]) -> None:
             ):
                 raise SystemExit(f"S{index} 的 {role} 证据不在对应阶段时间内，需补充该时段事实单元。")
             stage_text = json.dumps(
-                {
-                    key: value
-                    for key, value in stage.items()
-                    if key.startswith(role)
-                },
+                _role_claim_payload(stage, role),
                 ensure_ascii=False,
             )
             if re.search(r"KKM|KKMA|认证|kelulusan", stage_text, flags=re.IGNORECASE):
-                source_text = json.dumps(referenced, ensure_ascii=False)
+                claim_references = set(_role_claim_references(stage, role))
+                claim_referenced = [unit for unit in units if str(unit.get("id")) in claim_references]
+                source_text = json.dumps(claim_referenced or referenced, ensure_ascii=False)
                 if not re.search(r"KKM|KKMA|认证|kelulusan", source_text, flags=re.IGNORECASE):
                     raise SystemExit(f"S{index} 的 {role} 认证结论没有被所引用事实单元支持。")
 
@@ -114,6 +156,8 @@ def validate_quality_contract(result: dict[str, Any], analysis: dict[str, Any]) 
     validate_s2_contract_flags(result, analysis)
     validate_s3_usage_flags(result, analysis)
     validate_s4_effect_flags(result, analysis)
+    validate_s5_trust_flags(result, analysis)
+    validate_s6_cta_flags(result, analysis)
     validate_chain_relationships(result, analysis)
     validate_stage_time_coherence(result)
     validate_product_visibility(result, analysis)
@@ -418,7 +462,13 @@ def validate_s3_usage_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
             errors.append(f"S3 {key}.end_seconds 必须大于等于 start_seconds")
         if not str(flag.get("usage_reason") or "").strip():
             errors.append(f"S3 {key}.usage_reason 不能为空")
-        if not flag.get("evidence_ids"):
+        needs_evidence = (
+            flag.get("exists") is not False
+            or flag.get("usage_process_visible") is True
+            or flag.get("real_usage_met") is True
+            or flag.get("core_selling_point_visible") is True
+        )
+        if needs_evidence and not flag.get("evidence_ids"):
             errors.append(f"S3 {key}.evidence_ids 不能为空")
     if errors:
         raise SystemExit("S3 使用过程 flag 输出不完整：" + "；".join(errors))
@@ -470,10 +520,112 @@ def validate_s4_effect_flags(result: dict[str, Any], analysis: dict[str, Any]) -
             errors.append(f"S4 {key}.effect_salience 必须是 none/subtle/clear/strong")
         if not str(flag.get("effect_reason") or "").strip():
             errors.append(f"S4 {key}.effect_reason 不能为空")
-        if not flag.get("evidence_ids"):
+        effect_type = str(flag.get("effect_type") or "").strip()
+        needs_evidence = flag.get("effect_visible") is True or effect_type not in {"", "none", "unknown"}
+        if needs_evidence and not flag.get("evidence_ids"):
             errors.append(f"S4 {key}.evidence_ids 不能为空")
     if errors:
         raise SystemExit("S4 效果因果 flag 输出不完整：" + "；".join(errors))
+
+
+def validate_s5_trust_flags(result: dict[str, Any], analysis: dict[str, Any]) -> None:
+    """S5 信任放大 flag 门禁。"""
+    stages = result.get("stage_analysis", [])
+    if len(stages) < 5 or not isinstance(stages[4], dict):
+        return
+    s5 = stages[4]
+    has_any_s5 = isinstance(s5.get("creator_s5"), dict) or isinstance(s5.get("benchmark_s5"), dict)
+    if not analysis.get("s5_flags_required") and not has_any_s5:
+        return
+
+    errors: list[str] = []
+    for role in ("creator", "benchmark"):
+        key = f"{role}_s5"
+        flag = s5.get(key)
+        if not isinstance(flag, dict):
+            errors.append(f"S5 缺少 {key}")
+            continue
+        for bool_key in (
+            "exists",
+            "trust_source_visible",
+            "trust_source_credible",
+            "trust_claim_specific",
+            "product_relevance_met",
+            "independent_trust_purpose",
+            "duplicates_other_stage",
+            "voice_only",
+            "risky_or_unsupported",
+        ):
+            if flag.get(bool_key) not in {True, False}:
+                errors.append(f"S5 {key}.{bool_key} 必须是 bool")
+        if str(flag.get("module_type") or "").strip() not in {"A", "B", "C", "D", "E", "unknown"}:
+            errors.append(f"S5 {key}.module_type 必须是 A-E 或 unknown")
+        if str(flag.get("trust_evidence_type") or "").strip() not in {"hard", "soft", "mixed", "none", "unknown"}:
+            errors.append(f"S5 {key}.trust_evidence_type 非法")
+        start = flag.get("start_seconds")
+        end = flag.get("end_seconds")
+        if not isinstance(start, (int, float)) or isinstance(start, bool) or start < 0:
+            errors.append(f"S5 {key}.start_seconds 必须是非负数字")
+        if not isinstance(end, (int, float)) or isinstance(end, bool) or end < 0:
+            errors.append(f"S5 {key}.end_seconds 必须是非负数字")
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)) and not isinstance(start, bool) and not isinstance(end, bool) and end < start:
+            errors.append(f"S5 {key}.end_seconds 必须大于等于 start_seconds")
+        if not str(flag.get("trust_reason") or "").strip():
+            errors.append(f"S5 {key}.trust_reason 不能为空")
+        needs_evidence = flag.get("exists") is not False and str(flag.get("trust_evidence_type") or "unknown") not in {"none", "unknown"}
+        if needs_evidence and not flag.get("evidence_ids"):
+            errors.append(f"S5 {key}.evidence_ids 不能为空")
+    if errors:
+        raise SystemExit("S5 信任放大 flag 输出不完整：" + "；".join(errors))
+
+
+def validate_s6_cta_flags(result: dict[str, Any], analysis: dict[str, Any]) -> None:
+    """S6 CTA flag 门禁。"""
+    stages = result.get("stage_analysis", [])
+    if len(stages) < 6 or not isinstance(stages[5], dict):
+        return
+    s6 = stages[5]
+    has_any_s6 = isinstance(s6.get("creator_s6"), dict) or isinstance(s6.get("benchmark_s6"), dict)
+    if not analysis.get("s6_flags_required") and not has_any_s6:
+        return
+
+    errors: list[str] = []
+    for role in ("creator", "benchmark"):
+        key = f"{role}_s6"
+        flag = s6.get(key)
+        if not isinstance(flag, dict):
+            errors.append(f"S6 缺少 {key}")
+            continue
+        for bool_key in (
+            "exists",
+            "direct_order_met",
+            "action_path_clear",
+            "offer_or_incentive_clear",
+            "urgency_met",
+            "product_value_recalled",
+            "module_fit_met",
+            "ending_position_met",
+            "depends_on_valid_s4",
+            "compliance_risk",
+        ):
+            if flag.get(bool_key) not in {True, False}:
+                errors.append(f"S6 {key}.{bool_key} 必须是 bool")
+        if str(flag.get("module_type") or "").strip() not in {"A", "B", "C", "D", "E", "unknown"}:
+            errors.append(f"S6 {key}.module_type 必须是 A-E 或 unknown")
+        start = flag.get("start_seconds")
+        end = flag.get("end_seconds")
+        if not isinstance(start, (int, float)) or isinstance(start, bool) or start < 0:
+            errors.append(f"S6 {key}.start_seconds 必须是非负数字")
+        if not isinstance(end, (int, float)) or isinstance(end, bool) or end < 0:
+            errors.append(f"S6 {key}.end_seconds 必须是非负数字")
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)) and not isinstance(start, bool) and not isinstance(end, bool) and end < start:
+            errors.append(f"S6 {key}.end_seconds 必须大于等于 start_seconds")
+        if not str(flag.get("cta_reason") or "").strip():
+            errors.append(f"S6 {key}.cta_reason 不能为空")
+        if flag.get("exists") is not False and not flag.get("evidence_ids"):
+            errors.append(f"S6 {key}.evidence_ids 不能为空")
+    if errors:
+        raise SystemExit("S6 CTA flag 输出不完整：" + "；".join(errors))
 
 
 def validate_chain_relationships(result: dict[str, Any], analysis: dict[str, Any]) -> None:
@@ -627,7 +779,13 @@ def validate_stage_ownership(result: dict[str, Any]) -> None:
     stages = result.get("stage_analysis", [])
     if not stages:
         return
-    hook_text = json.dumps(stages[0], ensure_ascii=False)
+    hook_text = json.dumps(
+        {
+            "benchmark": _role_report_payload(stages[0], "benchmark"),
+            "creator": _role_report_payload(stages[0], "creator"),
+        },
+        ensure_ascii=False,
+    )
     if re.search(r"KKM|KKMA|认证|kelulusan", hook_text, flags=re.IGNORECASE):
         raise SystemExit("S1 Hook 不得承载 KKM/认证信息；第三方认证是外部背书，按功能归入 S5 信任放大，并标明画面是否验证。")
     certification_stages = [
@@ -636,11 +794,7 @@ def validate_stage_ownership(result: dict[str, Any]) -> None:
         if re.search(
             r"KKM|KKMA|认证|kelulusan",
             json.dumps(
-                {
-                    key: value
-                    for key, value in stage.items()
-                    if key.startswith("benchmark")
-                },
+                _role_report_payload(stage, "benchmark"),
                 ensure_ascii=False,
             ),
             flags=re.IGNORECASE,

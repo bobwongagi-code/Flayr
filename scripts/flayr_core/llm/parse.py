@@ -150,6 +150,8 @@ def normalize_demo_flag(value: Any) -> bool | None:
 _HOOK_TYPE_LETTERS = {"A", "B", "C", "D", "E", "F", "G"}
 _S2_TYPE_LETTERS = {"A", "B", "C", "D"}
 _S3_TYPE_LETTERS = {"A", "B", "C", "D", "E"}
+_S5_TYPE_LETTERS = {"A", "B", "C", "D", "E"}
+_S6_TYPE_LETTERS = {"A", "B", "C", "D", "E"}
 _HOOK_TS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*s")
 _S3_SCENE_MODES = {"single_scene", "multi_scene", "multi_person", "hybrid", "unknown"}
 _S3_PRESENTATION_OVERLAYS = {"step_breakdown", "first_person", "asmr", "closeup", "none"}
@@ -164,6 +166,7 @@ _S4_EFFECT_TYPES = {
     "none",
 }
 _S4_EFFECT_SALIENCE = {"none", "subtle", "clear", "strong"}
+_S5_TRUST_TYPES = {"hard", "soft", "mixed", "none", "unknown"}
 _PROOF_MODES = {
     "instant_visual",
     "process_result",
@@ -209,6 +212,20 @@ def normalize_s3_type(value: Any) -> str:
     return s if s in _S3_TYPE_LETTERS else "unknown"
 
 
+def normalize_s5_type(value: Any) -> str:
+    """归一 S5 信任放大类型到 A-E（结构库 S5-A~E），无法识别→unknown。"""
+    s = str(value or "").strip().upper().replace("S5-", "").replace("S5_", "")
+    s = s[:1]
+    return s if s in _S5_TYPE_LETTERS else "unknown"
+
+
+def normalize_s6_type(value: Any) -> str:
+    """归一 S6 CTA 类型到 A-E（结构库 S6-A~E），无法识别→unknown。"""
+    s = str(value or "").strip().upper().replace("S6-", "").replace("S6_", "")
+    s = s[:1]
+    return s if s in _S6_TYPE_LETTERS else "unknown"
+
+
 def normalize_s3_scene_mode(value: Any) -> str:
     mode = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     return mode if mode in _S3_SCENE_MODES else "unknown"
@@ -237,6 +254,11 @@ def normalize_s4_effect_type(value: Any) -> str:
 def normalize_s4_effect_salience(value: Any) -> str:
     salience = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     return salience if salience in _S4_EFFECT_SALIENCE else "none"
+
+
+def normalize_s5_trust_type(value: Any) -> str:
+    trust_type = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return trust_type if trust_type in _S5_TRUST_TYPES else "unknown"
 
 
 def normalize_proof_mode(value: Any) -> str:
@@ -407,6 +429,52 @@ def normalize_s4_flags(value: Any) -> dict[str, Any] | None:
         "process_linked_effect": normalize_demo_flag(value.get("process_linked_effect")),
         "tamper_or_cut_risk": normalize_demo_flag(value.get("tamper_or_cut_risk")),
         "effect_reason": str(value.get("effect_reason") or "").strip(),
+        "evidence_ids": normalize_evidence(value.get("evidence_ids")),
+    }
+
+
+def normalize_s5_flags(value: Any) -> dict[str, Any] | None:
+    """归一 S5 信任放大 flag。缺失返回 None，derive 回退旧执行分。"""
+    if not isinstance(value, dict):
+        return None
+    return {
+        "exists": normalize_demo_flag(value.get("exists")),
+        "module_type": normalize_s5_type(value.get("module_type")),
+        "trust_evidence_type": normalize_s5_trust_type(value.get("trust_evidence_type")),
+        "trust_source_visible": normalize_demo_flag(value.get("trust_source_visible")),
+        "trust_source_credible": normalize_demo_flag(value.get("trust_source_credible")),
+        "trust_claim_specific": normalize_demo_flag(value.get("trust_claim_specific")),
+        "product_relevance_met": normalize_demo_flag(value.get("product_relevance_met")),
+        "independent_trust_purpose": normalize_demo_flag(value.get("independent_trust_purpose")),
+        "duplicates_other_stage": normalize_demo_flag(value.get("duplicates_other_stage")),
+        "voice_only": normalize_demo_flag(value.get("voice_only")),
+        "risky_or_unsupported": normalize_demo_flag(value.get("risky_or_unsupported")),
+        "start_seconds": normalize_hook_boundary_seconds(value.get("start_seconds")),
+        "end_seconds": normalize_hook_boundary_seconds(value.get("end_seconds")),
+        "trust_reason": str(value.get("trust_reason") or "").strip(),
+        "evidence_ids": normalize_evidence(value.get("evidence_ids")),
+    }
+
+
+def normalize_s6_flags(value: Any) -> dict[str, Any] | None:
+    """归一 S6 CTA flag。缺失返回 None，derive 回退旧执行分。"""
+    if not isinstance(value, dict):
+        return None
+    return {
+        "exists": normalize_demo_flag(value.get("exists")),
+        "module_type": normalize_s6_type(value.get("module_type")),
+        "direct_order_met": normalize_demo_flag(value.get("direct_order_met")),
+        "action_path_clear": normalize_demo_flag(value.get("action_path_clear")),
+        "offer_or_incentive_clear": normalize_demo_flag(value.get("offer_or_incentive_clear")),
+        "urgency_met": normalize_demo_flag(value.get("urgency_met")),
+        "product_value_recalled": normalize_demo_flag(value.get("product_value_recalled")),
+        "module_fit_met": normalize_demo_flag(value.get("module_fit_met")),
+        "ending_position_met": normalize_demo_flag(value.get("ending_position_met")),
+        "depends_on_valid_s4": normalize_demo_flag(value.get("depends_on_valid_s4")),
+        "compliance_risk": normalize_demo_flag(value.get("compliance_risk")),
+        "start_seconds": normalize_hook_boundary_seconds(value.get("start_seconds")),
+        "end_seconds": normalize_hook_boundary_seconds(value.get("end_seconds")),
+        "cta_reason": str(value.get("cta_reason") or "").strip(),
         "evidence_ids": normalize_evidence(value.get("evidence_ids")),
     }
 
@@ -648,10 +716,10 @@ def normalize_s3_s4_relationship(value: Any) -> dict[str, Any]:
 def normalize_promise_chain(value: Any) -> dict[str, Any]:
     item = value if isinstance(value, dict) else {}
     return {
-        "s1_promise": str(item.get("s1_promise") or "").strip(),
-        "s2_answer": str(item.get("s2_answer") or "").strip(),
-        "s3_proof_target": str(item.get("s3_proof_target") or "").strip(),
-        "s4_outcome": str(item.get("s4_outcome") or "").strip(),
+        "s1_promise": str(item.get("s1_promise") or "未完成 S1 承诺审计。").strip(),
+        "s2_answer": str(item.get("s2_answer") or "未完成 S2 接应审计。").strip(),
+        "s3_proof_target": str(item.get("s3_proof_target") or "未完成 S3 证明目标审计。").strip(),
+        "s4_outcome": str(item.get("s4_outcome") or "未完成 S4 结果兑现审计。").strip(),
         "chain_closed": normalize_bool_flag(item.get("chain_closed")),
         "broken_at": normalize_promise_break_point(item.get("broken_at")),
         "break_reason": str(item.get("break_reason") or "未完成 S1-S4 承诺闭环审计。").strip(),
@@ -853,6 +921,12 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 # S4 效果因果 flag：只约束"效果是否可信地由产品造成"，缺失则保留旧 S4 判断。
                 "creator_s4": normalize_s4_flags(item.get("creator_s4")),
                 "benchmark_s4": normalize_s4_flags(item.get("benchmark_s4")),
+                # S5 信任放大 flag：只判信任材料是否可见、可信、与本品相关；缺失则保留旧 S5 判断。
+                "creator_s5": normalize_s5_flags(item.get("creator_s5")),
+                "benchmark_s5": normalize_s5_flags(item.get("benchmark_s5")),
+                # S6 CTA flag：只判购买指令、路径、利益/紧迫/保障是否成立；缺失则保留旧 S6 判断。
+                "creator_s6": normalize_s6_flags(item.get("creator_s6")),
+                "benchmark_s6": normalize_s6_flags(item.get("benchmark_s6")),
             }
         )
 

@@ -20,6 +20,9 @@ from .api import audio_to_mp3_data_url, video_to_data_url
 from .media import build_evidence_sensory_inputs
 
 ROOT = Path(__file__).resolve().parents[3]
+PHASE_C_WINDOW_PADDING_SECONDS = 2.0
+PHASE_C_REVIEW_FPS = 3.0
+PHASE_C_REVIEW_MAX_WIDTH = 480
 
 
 def read_text_if_exists(path: Path) -> str:
@@ -692,7 +695,8 @@ def build_llm_comparison_payload(
         '"effect_visible": bool（效果/结果是否肉眼可见）, '
         '"effect_salience": "none|subtle|clear|strong"（none=无效果；subtle=要仔细看才有变化；clear=普通用户能看出来；strong=一眼明显、有停留价值）, '
         '"effect_proposition_matched": bool（是否命中 product_profile.core_visual_proposition，而不是展示了无关变化）, '
-        '"comparison_control_met": bool（前后/左右/对照是否同角度、同光线、同对象、同距离；无对比型效果时按该类型是否有公平控制判断）, '
+        '"comparison_control_met": bool（仅对 S4-A/B/C/D/E 等对比/量化型效果判前后/左右/对照是否同角度、同光线、同对象、同距离；'
+        'S4-F process_visualization 不靠对照控制，若没有前后/替代/参照物对比可填 false，不因此否定强效果）, '
         '"closeup_or_focus_met": bool（是否用特写/近景/聚焦/构图把效果放大到短视频用户一眼能看见）, '
         '"effect_maximized": bool（是否把该 S4 类型做到最大化，而不是只存在这个结构；变化明显、画面聚焦、节奏突出才 true）, '
         '"requires_close_inspection": bool（用户是否需要停下来仔细找变化；若 true，S4 不能高分）, '
@@ -705,7 +709,9 @@ def build_llm_comparison_payload(
         "S4 铁律：只给结果、没有过程，不等于高分效果展示。"
         "若 result_only_without_process=true 且 effect_attribution_supported=false，效果很薄弱；"
         "若只有结果但产品和结果强绑定，也最多是中等可信；"
-        "只有 process_linked_effect=true、effect_salience=strong、effect_proposition_matched=true、comparison_control_met=true、closeup_or_focus_met=true、effect_maximized=true 时，才能视为强效果呈现。"
+        "强效果按 effect_type 分型判断：S4-A/B/C/D/E 对比/量化型需要 comparison_control_met=true；"
+        "S4-F process_visualization 不要求 comparison_control_met=true，但必须看到产品作用过程（泡沫扩散/液体渗透/粉质覆盖/机械运转等），"
+        "并满足 effect_salience=strong、effect_proposition_matched=true、closeup_or_focus_met=true、effect_maximized=true、process_linked_effect=true、effect_attribution_supported=true。"
         "透明包装/阳光下好看/陈列美感属于 aesthetic_display，可支撑低价熟品转化，但不要伪装成标准效果验证。"
     )
     s4_field_req = (
@@ -714,6 +720,63 @@ def build_llm_comparison_payload(
         "closeup_or_focus_met/effect_maximized/requires_close_inspection/effect_attribution_supported/result_only_without_process/"
         "process_linked_effect/tamper_or_cut_risk/effect_reason/evidence_ids）。"
         "S4 flag 只服务效果因果判断；不要用 S3 的使用过程完整性替代 S4 效果可见性，也不要用单纯结果图替代因果证明。"
+    )
+    s5_flag_block = (
+        "## S5 信任放大 flag（只判信任材料是否可见、可信、与本品相关）\n"
+        "S5 阶段（且仅 S5）每侧【必须】输出 creator_s5 与 benchmark_s5 两个对象，形如：\n"
+        '{"exists": bool（是否有独立信任放大环节；S5 可跳过，低决策短视频没有独立信任环节可为 false）, '
+        '"module_type": "A"~"E" 或 "unknown"（按 structure_library S5 五型：A数据/B权威/C用户证言/D场景广度/E过程透明）, '
+        '"trust_evidence_type": "hard|soft|mixed|none|unknown"（hard=认证/检测/数据/权威/官方/报告等；soft=评论/回购/达人自用/社会认同等；mixed=两者都有）, '
+        '"trust_source_visible": bool（画面是否清楚呈现信任来源，如证书/检测报告/平台截图/评论截图/官方标识；只口播不算可见）, '
+        '"trust_source_credible": bool（来源是否像真实外部来源或可核验材料；自述功效/纯参数/包装小标一闪而过不算）, '
+        '"trust_claim_specific": bool（是否有具体数字、认证名、报告、评价原话、回购次数、可验证主张；泛泛说好用不算）, '
+        '"product_relevance_met": bool（信任材料是否证明本产品/本卖点，而不是泛品牌、泛人设、无关荣誉）, '
+        '"independent_trust_purpose": bool（该段是否独立承担建立信任的功能；若只是 Hook、使用演示、效果展示或结尾保障 CTA 的一部分，填 false）, '
+        '"duplicates_other_stage": bool（是否重复计入了其他阶段功能：开头评论/粉丝提问钩子归 S1，S3/S4 多场景归使用/效果，结尾保障承诺归 S6；这些情况 true）, '
+        '"voice_only": bool（只有口播/字幕说信任点、画面无佐证时 true）, '
+        '"risky_or_unsupported": bool（保健/美妆等出现未证实治疗、夸大功效、无来源数据时 true）, '
+        '"start_seconds": number, "end_seconds": number, '
+        '"trust_reason": "一句话说明用了什么信任材料、是否能证明本品；若只是口播孤证要直说", '
+        '"evidence_ids": ["C1"]}。\n'
+        "S5 铁律：开头的认证/背书按 S1 钩子判断，结尾的保障/承诺按 S6 CTA 判断；"
+        "只有独立用来建立可信度的材料才归 S5。硬信任优于软信任；软信任可以算信任，但不能当作硬背书。"
+        "S5-C 用户证言若用于开头回答粉丝问题/评论钩子，只归 S1，不要重复算 S5；"
+        "S5-D 场景广度必须是为了扩大可信人群/适用范围，不是 S3 使用多场景或 S4 效果多场景；"
+        "S5-E 只在探厂、原料、生产、质检、供应链等过程透明中成立，不要把 S4-F 产品作用过程误判为 S5-E。"
+    )
+    s5_field_req = (
+        "S5 强制：stage_analysis 第 5 项（S5 信任放大）必须再含 creator_s5 与 benchmark_s5 两个对象"
+        "（结构见上方：exists/module_type/trust_evidence_type/trust_source_visible/trust_source_credible/"
+        "trust_claim_specific/product_relevance_met/independent_trust_purpose/duplicates_other_stage/voice_only/"
+        "risky_or_unsupported/start_seconds/end_seconds/trust_reason/evidence_ids）。"
+        "S5 flag 只服务信任材料判断，不把 S4 效果、S6 保障 CTA 或达人普通口播回填成信任放大。"
+    )
+    s6_flag_block = (
+        "## S6 CTA flag（只判临门购买动作是否清楚、有力、适配本品）\n"
+        "S6 阶段（且仅 S6）每侧【必须】输出 creator_s6 与 benchmark_s6 两个对象，形如：\n"
+        '{"exists": bool（是否有独立 CTA/购买引导；若视频结束前没有购买指令或购买路径则 false）, '
+        '"module_type": "A"~"E" 或 "unknown"（按 structure_library S6 五型：A价格/B限时限量/C赠品/D效果总结/E保障承诺）, '
+        '"direct_order_met": bool（是否明确让用户购买/下单/点链接/进购物车/checkout，而不只是泛泛喜欢/看看）, '
+        '"action_path_clear": bool（购买路径是否清楚，如 bag kuning/购物车/link/按钮/橱窗/评论区等）, '
+        '"offer_or_incentive_clear": bool（价格、优惠、赠品、保障、包邮、组合装等利益是否清楚；没有就 false）, '
+        '"urgency_met": bool（限时、限量、库存、今天、现在等紧迫理由是否清楚；没有就 false）, '
+        '"product_value_recalled": bool（CTA 前是否快速回扣本品核心价值/效果/痛点，而非孤立喊下单）, '
+        '"module_fit_met": bool（所选 CTA 类型是否适配本品决策门槛和购买动机；情感满足品硬打低价可为 false）, '
+        '"ending_position_met": bool（是否发生在视频结尾促单位置；开头价格/优惠用于留人时归 S1，不算 S6）, '
+        '"depends_on_valid_s4": bool（仅 S6-D 效果总结型关键：是否复用了已成立的 S4 效果输出；非 S6-D 可按是否有关联效果填写 true/false）, '
+        '"compliance_risk": bool（夸大收益/疗效/虚构优惠/无法核实承诺/平台风险表述时 true）, '
+        '"start_seconds": number, "end_seconds": number, '
+        '"cta_reason": "一句话说明购买指令、路径、利益点和适配性；没有 CTA 要直说", '
+        '"evidence_ids": ["C1"]}。\n'
+        "S6 铁律：S6 只判结尾购买动作，不重判 S1-S4 的卖点证明；价格/赠品/保障在开头出现时是 Hook 或铺垫，不是 S6；"
+        "S6 类型之间没有天然优劣，强弱看该类型的画面、文案、声音和路径是否做到位；"
+        "组合 CTA 通常强于单一 CTA，但不能虚构优惠；S6-D 必须依赖有效 S4 输出。达人 CTA 强于标杆时必须记为达人亮点，不得硬判差距。"
+    )
+    s6_field_req = (
+        "S6 强制：stage_analysis 第 6 项（S6 CTA）必须再含 creator_s6 与 benchmark_s6 两个对象"
+        "（结构见上方：exists/module_type/direct_order_met/action_path_clear/offer_or_incentive_clear/urgency_met/"
+        "product_value_recalled/module_fit_met/ending_position_met/depends_on_valid_s4/compliance_risk/start_seconds/end_seconds/cta_reason/evidence_ids）。"
+        "S6 flag 只服务购买引导判断，不把 S5 信任材料或 S4 效果展示回填成 CTA。"
     )
     relation_block = (
         "## S3/S4 关系与 S1-S4 承诺闭环审计（top-level，必须输出，不直接进 severity）\n"
@@ -744,6 +807,8 @@ def build_llm_comparison_payload(
             s2_flag_block,
             s3_flag_block,
             s4_flag_block,
+            s5_flag_block,
+            s6_flag_block,
             relation_block,
             s1_boundary_hint_block,
             "## S1-S6 模块结构库（判断视图：客观类型 + 适配条件，判 module_id 与类型对本品适配用；这是结构层、非判断层，不讲好坏）",
@@ -770,6 +835,8 @@ def build_llm_comparison_payload(
             s2_field_req,
             s3_field_req,
             s4_field_req,
+            s5_field_req,
+            s6_field_req,
             "task_completion 只能取 complete、partial、missing 三选一（达人侧该阶段功能完成度），禁止 both_complete、no_gap 等任何其他词；标杆侧完成情况写在 benchmark_summary。",
             "creator_execution 与 benchmark_execution 取值只能是 0、0.5、1、2 四个数字：0=未执行该阶段功能；0.5=做了但对该阶段核心功能基本无效——敷衍、平庸无感、几乎不起作用（如一句轻带的 CTA、平铺直叙毫无抓力的开场、仅口头承诺没有任何验证支撑）；1=执行合格（功能完成且对观众有效）；2=执行出色（可视化演示/铺垫到位/感染力强）。两侧按该阶段功能定义各自独立打分，先打分再对比，禁止因对比结果回调任何一侧分数。",
             "效果呈现阶段（S4）执行分以 product_profile.core_visual_proposition（本品核心视觉命题）为评判锚点，不套通用 before/after：先判该侧有没有拍出本品的决定性瞬间（定妆粉饼=粉底油光→哑光对比、面膜=逐日变化+敷后效果），并满足 product_profile.shooting_requirement（效果细微的品需正面强光+面部特写才算拍到）。拍出命题且拍摄到位才给 2；只完成动作（揭膜/擦粉/口头带过）未体现命题、或拍摄条件不支撑（暗光/无特写/wide shot 看不出效果）按敷衍计最高 0.5；做了但缺命题对比的'呈现单薄'最高 1。过长全程记录不加分（标尺是命题覆盖非完整性）。两侧各自独立打分，禁止因对比回调。",
@@ -918,6 +985,8 @@ def build_stage_review_payload(
     s2_contract = ""
     s3_contract = ""
     s4_contract = ""
+    s5_contract = ""
+    s6_contract = ""
     if "S1" in target_codes:
         stage_update_example["stage"] = "S1 Hook"
         stage_update_example["core_question"] = "用户凭什么停下来"
@@ -1038,14 +1107,73 @@ def build_stage_review_payload(
             "只有结果没有过程不能直接高分；需要仔细看才有变化时 requires_close_inspection=true 且 effect_salience=subtle；"
             "没有因果桥时 effect_attribution_supported=false，有跳剪/换物/光线变化风险时 tamper_or_cut_risk=true。"
         )
+    if "S5" in target_codes:
+        stage_update_example["stage"] = "S5 信任放大"
+        stage_update_example["core_question"] = "用户凭什么相信"
+        s5_example = {
+            "exists": True,
+            "module_type": "A-E 或 unknown",
+            "trust_evidence_type": "hard|soft|mixed|none|unknown",
+            "trust_source_visible": True,
+            "trust_source_credible": True,
+            "trust_claim_specific": True,
+            "product_relevance_met": True,
+            "independent_trust_purpose": True,
+            "duplicates_other_stage": False,
+            "voice_only": False,
+            "risky_or_unsupported": False,
+            "start_seconds": 20.0,
+            "end_seconds": 24.0,
+            "trust_reason": "画面/口播中出现了可验证信任材料；若只是口播孤证要直说",
+            "evidence_ids": ["C1"],
+        }
+        stage_update_example["creator_s5"] = s5_example
+        stage_update_example["benchmark_s5"] = s5_example
+        s5_contract = (
+            "目标阶段包含 S5 时，stage_update 必须同时重判 creator_s5 与 benchmark_s5；"
+            "S5 只判独立信任材料：数据背书、权威背书、用户证言、场景广度、过程透明。"
+            "硬信任可到 2，软信任封顶 1，口播孤证封顶 0.5；开头背书归 S1，结尾保障承诺归 S6。"
+            "S5-C 开头评论/粉丝问答归 S1；S5-D 不得重复 S3/S4 多场景；S5-E 只认探厂/原料/生产/质检/供应链。"
+            "保健/美妆等高风险品类不得把无来源疗效承诺判为可信信任。"
+        )
+    if "S6" in target_codes:
+        stage_update_example["stage"] = "S6 CTA"
+        stage_update_example["core_question"] = "用户为什么现在下单"
+        s6_example = {
+            "exists": True,
+            "module_type": "A-E 或 unknown",
+            "direct_order_met": True,
+            "action_path_clear": True,
+            "offer_or_incentive_clear": True,
+            "urgency_met": True,
+            "product_value_recalled": True,
+            "module_fit_met": True,
+            "ending_position_met": True,
+            "depends_on_valid_s4": True,
+            "compliance_risk": False,
+            "start_seconds": 25.0,
+            "end_seconds": 30.0,
+            "cta_reason": "明确购买指令、行动路径和利益点；没有 CTA 要直说",
+            "evidence_ids": ["C1"],
+        }
+        stage_update_example["creator_s6"] = s6_example
+        stage_update_example["benchmark_s6"] = s6_example
+        s6_contract = (
+            "目标阶段包含 S6 时，stage_update 必须同时重判 creator_s6 与 benchmark_s6；"
+            "S6 只判购买动作：是否明确下单/点链接/进购物车，路径是否清楚，利益/紧迫/保障是否适配本品。"
+            "不要把 S4 效果或 S5 信任回填成 CTA；达人 CTA 强于标杆时必须如实记为达人亮点。"
+            "价格/优惠出现在开头时归 S1，不算 S6；S6-D 效果总结必须依赖有效 S4 输出。"
+        )
     content: list[dict[str, Any]] = [
         {
             "type": "text",
             "text": "\n\n".join(
                 [
                     "# Phase C 低置信阶段回看",
-                    "你将看到低置信阶段对应的原生视频切片（含画面和声音）。",
-                    "切片边界可能有 ±2 秒误差，可能混入相邻阶段内容；判断按功能归属，不要把相邻阶段内容算进本阶段。",
+                    "你将看到低置信阶段对应的 focused window 原生视频切片（含画面和声音）。",
+                    f"detail_mode=focused_window：每个目标阶段只附阶段时间窗±{PHASE_C_WINDOW_PADDING_SECONDS:g}s 的片段，采样约 {PHASE_C_REVIEW_FPS:g}fps、宽度≤{PHASE_C_REVIEW_MAX_WIDTH}px。",
+                    "切片边界可能有缓冲误差，可能混入相邻阶段内容；判断按功能归属，不要把相邻阶段内容算进本阶段。",
+                    "若切片内证据不足、画面过稀或关键动作跨出窗口，必须在 review_notes 写明 sparse_window，而不是用主分析旧结论或邻近阶段补证。",
                     "只重判 target_stages 中列出的阶段；不要改写 video_understanding，不要新增 evidence_unit。",
                     "必须先在 gap 字段写清判断依据（达人做了什么→标杆做了什么→对购买意愿影响），再给 severity。",
                     "回看后必须按主分析同一标尺重打 creator_execution 与 benchmark_execution（0=未执行；0.5=做了但基本无效/敷衍/无法有效接收；1=合格有效；2=出色。两侧独立打分，先打分再对比）和 painpoint_relevance——系统将据这些事实重推导差距等级；severity 仍需填写但仅作参考。",
@@ -1053,6 +1181,8 @@ def build_stage_review_payload(
                     s2_contract,
                     s3_contract,
                     s4_contract,
+                    s5_contract,
+                    s6_contract,
                     "只输出严格 JSON，不要 Markdown。",
                     "输出格式：",
                     json.dumps(
@@ -1117,13 +1247,13 @@ def build_stage_review_video_inputs(
                 continue
             time_range = str(stage.get(f"{role}_time_range") or stage.get("time_range") or "")
             start, end = parse_time_range_seconds(time_range, info.get("duration_seconds"))
-            # ±2s 缓冲：阶段 time_range 是模型估计，边界偏差常见；prompt 已告知按功能归属判断。
-            padded_start = max(0.0, start - 2.0)
-            padded_end = min(float(info.get("duration_seconds") or end), end + 2.0)
+            # focused window：阶段 time_range 是模型估计，保留固定缓冲但不回传全片，避免把相邻阶段误当证据。
+            padded_start = max(0.0, start - PHASE_C_WINDOW_PADDING_SECONDS)
+            padded_end = min(float(info.get("duration_seconds") or end), end + PHASE_C_WINDOW_PADDING_SECONDS)
             data_url = video_to_data_url(
                 video_path,
-                fps=3.0,
-                max_width=480,
+                fps=PHASE_C_REVIEW_FPS,
+                max_width=PHASE_C_REVIEW_MAX_WIDTH,
                 start=padded_start,
                 duration=max(0.5, padded_end - padded_start),
             )
@@ -1134,7 +1264,8 @@ def build_stage_review_video_inputs(
                     "type": "text",
                     "text": (
                         f"【Phase C 回看视频｜{role}｜{code}｜"
-                        f"{format_seconds(padded_start)} - {format_seconds(padded_end)}】"
+                        f"{format_seconds(padded_start)} - {format_seconds(padded_end)}｜"
+                        f"detail=focused_window｜fps≈{PHASE_C_REVIEW_FPS:g}｜max_width={PHASE_C_REVIEW_MAX_WIDTH}】"
                     ),
                 }
             )
@@ -1322,6 +1453,8 @@ def build_llm_repair_payload(
                     "S2 产品引出必须补齐 creator_s2 与 benchmark_s2 两个对象，字段为 exists(bool)、merged_with_s3(bool)、module_type(A-D或unknown)、handoff_met(bool)、s1_s2_compatible(bool)、product_identity_clear(bool)、product_role_clear(bool)、excluded_or_risky_module(bool)、start_seconds(number)、end_seconds(number)、handoff_reason(非空)、evidence_ids(非空数组)。"
                     "S3 使用过程必须补齐 creator_s3 与 benchmark_s3 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、usage_process_visible(bool)、result_only_without_process(bool)、mouth_only_or_static(bool)、real_usage_met(bool)、core_selling_point_visible(bool)、process_framing_met(bool)、demonstrated_selling_points(数组)、missing_selling_points(数组)、scene_mode(single_scene/multi_scene/multi_person/hybrid/unknown)、usage_context_fit(bool)、continuity_met(bool)、richness_met(bool)、single_scene_continuity_met(bool)、single_scene_variation_met(bool)、multi_scene_logic_met(bool)、multi_scene_transition_met(bool)、multi_scene_role_adaptation_met(bool)、role_design_met(bool)、role_interaction_met(bool)、presentation_overlays(数组)、fake_or_staged(bool)、start_seconds(number)、end_seconds(number)、usage_reason(非空)、evidence_ids(非空数组)。"
                     "S4 效果呈现必须补齐 creator_s4 与 benchmark_s4 两个对象，字段为 effect_type(before_after/split_screen/person_vs_person/product_vs_alt/quantified_test/process_visualization/aesthetic_display/none)、effect_visible(bool)、effect_salience(none/subtle/clear/strong)、effect_proposition_matched(bool)、comparison_control_met(bool)、closeup_or_focus_met(bool)、effect_maximized(bool)、requires_close_inspection(bool)、effect_attribution_supported(bool)、result_only_without_process(bool)、process_linked_effect(bool)、tamper_or_cut_risk(bool)、effect_reason(非空)、evidence_ids(非空数组)。"
+                    "S5 信任放大必须补齐 creator_s5 与 benchmark_s5 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、trust_evidence_type(hard/soft/mixed/none/unknown)、trust_source_visible(bool)、trust_source_credible(bool)、trust_claim_specific(bool)、product_relevance_met(bool)、independent_trust_purpose(bool)、duplicates_other_stage(bool)、voice_only(bool)、risky_or_unsupported(bool)、start_seconds(number)、end_seconds(number)、trust_reason(非空)、evidence_ids(数组；exists=false 或 trust_evidence_type=none/unknown 可为空)。"
+                    "S6 CTA 必须补齐 creator_s6 与 benchmark_s6 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、direct_order_met(bool)、action_path_clear(bool)、offer_or_incentive_clear(bool)、urgency_met(bool)、product_value_recalled(bool)、module_fit_met(bool)、ending_position_met(bool)、depends_on_valid_s4(bool)、compliance_risk(bool)、start_seconds(number)、end_seconds(number)、cta_reason(非空)、evidence_ids(数组；exists=false 可为空)。"
                     "必须补齐 s3_s4_relationship 和 promise_chain；promise_chain.chain_closed 必须是 bool，broken_at 只能是 S2/S3/S4/none/unknown；promise_chain 只审计 S1-S4，不得把 S5/S6/CTA/促单/下单问题写成承诺链断点。"
                     "提升点必须保留 benchmark_evidence_ids、base_frame_suitability、best_base_frame_time、base_frame_evidence_id、base_frame_reason 和 aigc_prompt；无可用达人素材时写 no_suitable_frame 且时间与 base_frame_evidence_id 留空。aigc_image_path 留空。"
                     "修复 improvements 时也必须遵循达人框架约束、卖点适配权重和标杆功能意图转译，不得把 benchmark_reference 直接改写成 suggestion。"

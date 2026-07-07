@@ -317,6 +317,8 @@ def main() -> None:
     analysis["s2_flags_required"] = True
     analysis["s3_flags_required"] = True
     analysis["s4_flags_required"] = True
+    analysis["s5_flags_required"] = True
+    analysis["s6_flags_required"] = True
     analysis_input = (run / "analysis_input.md").read_text(encoding="utf-8")
 
     payload = build_llm_comparison_payload(MODEL, analysis_input, facts, analysis)

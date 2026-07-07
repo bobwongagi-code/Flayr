@@ -170,6 +170,8 @@ def run_large_model_analysis(
         analysis["s2_flags_required"] = True
         analysis["s3_flags_required"] = True
         analysis["s4_flags_required"] = True
+        analysis["s5_flags_required"] = True
+        analysis["s6_flags_required"] = True
         analysis_input = analysis_input_path.read_text(encoding="utf-8")
         payload = build_llm_comparison_payload(args.llm_model, analysis_input, facts, analysis)
     else:

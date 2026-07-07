@@ -50,12 +50,16 @@ except ValueError as exc:
 
 # 3. Q19 叙事一致性四用例
 from flayr_core.postprocess.validate import (  # noqa: E402
+    validate_evidence_alignment,
     validate_narrative_evidence_consistency,
     validate_s1_hook_flags,
     validate_s2_contract_flags,
     validate_s3_usage_flags,
     validate_s4_effect_flags,
+    validate_s5_trust_flags,
+    validate_s6_cta_flags,
     validate_chain_relationships,
+    validate_stage_ownership,
 )
 from flayr_core.postprocess.chain import sanitize_promise_chain_scope, stamp_product_foundation  # noqa: E402
 
@@ -120,6 +124,89 @@ check(
     str(r6_warnings)[:90],
 )
 
+
+def mk_cert_boundary_result(summary: str, hook_extra: dict | None = None) -> dict:
+    """构造认证校验用最小 6 阶段结果。"""
+    hook_extra = hook_extra or {}
+    stages = []
+    for i in range(1, 7):
+        stage = {
+            "stage": f"S{i} " + ["Hook", "产品引出", "使用过程", "效果呈现", "信任放大", "CTA"][i - 1],
+            "benchmark_time_range": "0s - 1s",
+            "creator_time_range": "0s - 1s",
+            "benchmark_evidence_ids": ["B1"],
+            "creator_evidence_ids": ["C1"],
+            "benchmark_summary": "普通阶段说明",
+            "creator_summary": "普通阶段说明",
+        }
+        if i == 1:
+            stage["benchmark_summary"] = summary
+            stage["benchmark_hook"] = {
+                "hook_boundary_reason": "10.4秒后开始介绍产品属性和 KKM 认证。",
+                "s2_start_signal": "画面出现 Certified by Halal & KKM 字样。",
+                **hook_extra,
+            }
+        stages.append(stage)
+    return {
+        "stage_analysis": stages,
+        "video_understanding": {
+            "benchmark": {
+                "evidence_units": [
+                    {"id": "B1", "time_range": "0s - 1s", "information": "只展示经期痛点和腹痛画面。"}
+                ]
+            },
+            "creator": {
+                "evidence_units": [
+                    {"id": "C1", "time_range": "0s - 1s", "information": "达人开场介绍人群。"}
+                ]
+            },
+        },
+    }
+
+
+_cert_boundary_only = mk_cert_boundary_result("通过痛点画面建立共鸣。")
+try:
+    validate_evidence_alignment(_cert_boundary_only)
+    validate_stage_ownership(_cert_boundary_only)
+    _cert_boundary_ok = True
+except SystemExit as exc:
+    _cert_boundary_ok = False
+    _cert_boundary_error = str(exc)
+else:
+    _cert_boundary_error = ""
+check("认证校验：S1 hook 边界字段提到 S2 认证不误杀", _cert_boundary_ok, _cert_boundary_error[:100])
+
+_cert_real_claim = mk_cert_boundary_result("通过 KKM 认证建立开场信任。")
+try:
+    validate_evidence_alignment(_cert_real_claim)
+    _cert_claim_failed = False
+except SystemExit as exc:
+    _cert_claim_failed = "认证结论没有被所引用事实单元支持" in str(exc)
+check("认证校验：S1 正文认证主张仍需证据支撑", _cert_claim_failed)
+
+_cert_nested_flag = mk_cert_boundary_result("通过痛点画面建立共鸣。")
+_cert_nested_flag["stage_analysis"][1]["benchmark_evidence_ids"] = ["B4"]
+_cert_nested_flag["stage_analysis"][1]["benchmark_s2"] = {
+    "handoff_reason": "承接 S1 痛点，给出 KKM 认证解决方案。",
+    "evidence_ids": ["B2"],
+}
+_cert_nested_flag["video_understanding"]["benchmark"]["evidence_units"].append(
+    {"id": "B2", "time_range": "1s - 2s", "information": "画面展示 KKM 批准和 Halal 标识。"}
+)
+_cert_nested_flag["video_understanding"]["benchmark"]["evidence_units"].append(
+    {"id": "B4", "time_range": "2s - 3s", "information": "画面展示产品成分。"}
+)
+try:
+    validate_evidence_alignment(_cert_nested_flag)
+    validate_stage_ownership(_cert_nested_flag)
+    _cert_nested_ok = True
+except SystemExit as exc:
+    _cert_nested_ok = False
+    _cert_nested_error = str(exc)
+else:
+    _cert_nested_error = ""
+check("认证校验：结构化 flag 自带证据可支撑认证主张", _cert_nested_ok, _cert_nested_error[:100])
+
 # 4. endorsement tag 两条归一化路径透传
 from flayr_core.llm.parse import normalize_video_understanding  # noqa: E402
 
@@ -132,6 +219,7 @@ check("背书双信道透传 normalize_video_understanding",
 
 # 4b. F项背书接管线：全unit聚合 + hard-only口径 + S5闸（软背书/无硬背书→small）
 from flayr_core.postprocess.derive import _side_endorsement, _derive_one, _Endorsement  # noqa: E402
+from flayr_core.postprocess.proposition import materialize_cross_stage_inputs, materialize_quality_audits  # noqa: E402
 from flayr_core.postprocess.repair_stages import has_hard_endorsement, repair_s1_hook_boundaries  # noqa: E402
 
 # 聚合作用域=全unit：背书落在非S5_trust的unit（如S2_intro）也算，不漏检
@@ -154,6 +242,236 @@ _s5_one = _derive_one("S5", {"creator_execution": 1.0, "benchmark_execution": 2.
                       {"S5": 1.0}, [], None, {"benchmark": _Endorsement(False, True, True), "creator": _Endorsement(False, False, True)})
 check("S5 一方有硬背书→进公式不判均未涉及", "均未涉及" not in _s5_one.get("reason", ""))
 
+
+def _s5_flag(
+    exists=True,
+    module="A",
+    trust_type="hard",
+    visible=True,
+    credible=True,
+    specific=True,
+    relevance=True,
+    independent=True,
+    duplicate=False,
+    voice_only=False,
+    risky=False,
+):
+    return {
+        "exists": exists,
+        "module_type": module,
+        "trust_evidence_type": trust_type,
+        "trust_source_visible": visible,
+        "trust_source_credible": credible,
+        "trust_claim_specific": specific,
+        "product_relevance_met": relevance,
+        "independent_trust_purpose": independent,
+        "duplicates_other_stage": duplicate,
+        "voice_only": voice_only,
+        "risky_or_unsupported": risky,
+        "start_seconds": 20.0,
+        "end_seconds": 24.0,
+        "trust_reason": "认证/检测材料证明本品可信",
+        "evidence_ids": ["C5"],
+    }
+
+
+def _s6_flag(
+    exists=True,
+    module="B",
+    direct=True,
+    path=True,
+    offer=True,
+    urgency=True,
+    recall=True,
+    fit=True,
+    ending=True,
+    s4_depends=True,
+    risk=False,
+):
+    return {
+        "exists": exists,
+        "module_type": module,
+        "direct_order_met": direct,
+        "action_path_clear": path,
+        "offer_or_incentive_clear": offer,
+        "urgency_met": urgency,
+        "product_value_recalled": recall,
+        "module_fit_met": fit,
+        "ending_position_met": ending,
+        "depends_on_valid_s4": s4_depends,
+        "compliance_risk": risk,
+        "start_seconds": 25.0,
+        "end_seconds": 30.0,
+        "cta_reason": "明确下单路径和限时利益点",
+        "evidence_ids": ["C6"],
+    }
+
+
+_s5_hard_vs_voice = _derive_one(
+    "S5",
+    {
+        "creator_s5": _s5_flag(voice_only=True),
+        "benchmark_s5": _s5_flag(),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S5": 1.6},
+    [],
+    None,
+    {"benchmark": _Endorsement(False, True, True), "creator": _Endorsement(True, False, True)},
+)
+check("S5 硬信任画面佐证强于口播孤证→至少 medium",
+      _s5_hard_vs_voice.get("severity") in {"medium", "large"} and _s5_hard_vs_voice.get("E") == 1.5)
+
+_s5_soft_not_killed = _derive_one(
+    "S5",
+    {
+        "creator_s5": _s5_flag(trust_type="soft", visible=True, credible=True, specific=True),
+        "benchmark_s5": _s5_flag(trust_type="soft", visible=True, credible=True, specific=True),
+        "creator_summary": "用户好评",
+        "benchmark_summary": "用户好评",
+    },
+    {"S5": 1.0},
+    [],
+    None,
+    {"benchmark": _Endorsement(False, False, True), "creator": _Endorsement(False, False, True)},
+)
+check("S5 软信任 flag 存在→不被双方无硬背书闸误杀",
+      "均无硬背书" not in _s5_soft_not_killed.get("reason", "")
+      and _s5_soft_not_killed.get("severity") == "small")
+
+_s5_opening_comment_not_trust = _derive_one(
+    "S5",
+    {
+        "creator_s5": _s5_flag(trust_type="soft", independent=False, duplicate=True),
+        "benchmark_s5": _s5_flag(trust_type="soft", independent=True, duplicate=False),
+        "creator_summary": "开头回答粉丝评论作为 Hook",
+        "benchmark_summary": "独立用户证言",
+    },
+    {"S5": 1.0},
+    [],
+    None,
+    {"benchmark": _Endorsement(False, False, True), "creator": _Endorsement(False, False, True)},
+)
+check("S5-C 开头评论/粉丝问答归 S1，不重复算 S5",
+      _s5_opening_comment_not_trust.get("severity") == "small"
+      and _s5_opening_comment_not_trust.get("E") == 1)
+
+_s5_scene_duplicate_not_trust = _derive_one(
+    "S5",
+    {
+        "creator_s5": _s5_flag(module="D", trust_type="soft", independent=False, duplicate=True),
+        "benchmark_s5": _s5_flag(module="D", trust_type="soft", independent=True, duplicate=False),
+        "creator_summary": "S3/S4 的多场景使用被误写为场景广度",
+        "benchmark_summary": "独立适用人群/场景标签建立信任",
+    },
+    {"S5": 1.0},
+    [],
+    None,
+    {"benchmark": _Endorsement(False, False, True), "creator": _Endorsement(False, False, True)},
+)
+check("S5-D 场景广度不得重复 S3/S4 多场景",
+      _s5_scene_duplicate_not_trust.get("severity") == "small"
+      and _s5_scene_duplicate_not_trust.get("E") == 1)
+
+_s6_missing = _derive_one(
+    "S6",
+    {
+        "creator_s6": _s6_flag(exists=False, direct=False, path=False, offer=False, urgency=False, recall=False, fit=False),
+        "benchmark_s6": _s6_flag(),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S6": 1.8},
+    [],
+)
+check("S6 达人无 CTA 标杆有明确 CTA→large 红线",
+      _s6_missing.get("severity") == "large" and _s6_missing.get("E") == 2)
+
+_s6_opening_price_not_cta = _derive_one(
+    "S6",
+    {
+        "creator_s6": _s6_flag(ending=False),
+        "benchmark_s6": _s6_flag(),
+        "creator_summary": "开头用低价做 Hook",
+        "benchmark_summary": "结尾明确促单",
+    },
+    {"S6": 1.8},
+    [],
+)
+check("S6-A 价格出现在开头归 S1，不算结尾 CTA",
+      _s6_opening_price_not_cta.get("severity") == "large"
+      and _s6_opening_price_not_cta.get("E") == 2)
+
+_s6_invalid_effect_summary = _derive_one(
+    "S6",
+    {
+        "creator_s6": _s6_flag(module="D", s4_depends=False),
+        "benchmark_s6": _s6_flag(module="D", s4_depends=True),
+        "creator_summary": "效果总结但 S4 未成立",
+        "benchmark_summary": "复用有效 S4 效果催单",
+    },
+    {"S6": 1.8},
+    [],
+)
+check("S6-D 效果总结必须依赖有效 S4 输出",
+      _s6_invalid_effect_summary.get("severity") in {"medium", "large"}
+      and _s6_invalid_effect_summary.get("E") >= 1)
+
+_s6_creator_better = _derive_one(
+    "S6",
+    {
+        "creator_s6": _s6_flag(),
+        "benchmark_s6": _s6_flag(direct=True, path=True, offer=False, urgency=False, recall=False, fit=True),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S6": 1.8},
+    [],
+)
+check("S6 达人 CTA 更强→零差距红线保持 small",
+      _s6_creator_better.get("severity") == "small" and _s6_creator_better.get("E") == 0)
+
+_matrix_result = {
+    "category_profile": {"decision_threshold": "impulse", "drive_type": "functional", "painpoints": ["油光"]},
+    "product_profile": {
+        "hook_proposition": "油光变哑光",
+        "physical_task": "补妆不花",
+        "core_selling_points": ["强力吸油不拔干"],
+        "usage_context": "出门补妆",
+        "core_visual_proposition": "油光脸变哑光脸",
+        "visual_diff_dimensions": ["亮度反光"],
+        "trust_multipliers": ["真人实测"],
+    },
+    "stage_analysis": [
+        {"stage": "S1 Hook", "creator_hook": {"type": "B", "anchors_proposition": True}, "benchmark_hook": {"type": "A", "anchors_proposition": True}},
+        {"stage": "S2 产品引出", "creator_s2": {"exists": True, "module_type": "A", "s1_s2_compatible": True, "handoff_met": True, "product_identity_clear": True, "product_role_clear": True}, "benchmark_s2": {"exists": True, "module_type": "A", "s1_s2_compatible": True, "handoff_met": True, "product_identity_clear": True, "product_role_clear": True}},
+        {"stage": "S3 使用过程", "creator_s3": {"exists": True, "core_selling_point_visible": True, "demonstrated_selling_points": ["强力吸油不拔干"]}, "benchmark_s3": {"exists": True, "core_selling_point_visible": True, "demonstrated_selling_points": ["强力吸油不拔干"]}},
+        {"stage": "S4 效果呈现", "creator_s4": {"effect_visible": True, "effect_salience": "strong", "effect_proposition_matched": True, "effect_attribution_supported": True}, "benchmark_s4": {"effect_visible": True, "effect_salience": "strong", "effect_proposition_matched": True, "effect_attribution_supported": True}},
+        {"stage": "S5 信任放大", "creator_s5": {"exists": False}, "benchmark_s5": {"exists": False}},
+        {"stage": "S6 CTA", "creator_s6": {"exists": True, "module_type": "D", "depends_on_valid_s4": False}, "benchmark_s6": {"exists": True, "module_type": "D", "depends_on_valid_s4": False}},
+    ],
+}
+materialize_cross_stage_inputs(_matrix_result, {"brand_proposition": {"propositions": ["柔焦隐形毛孔"], "painpoints": ["油光"]}})
+materialize_quality_audits(_matrix_result, {})
+check(
+    "命题矩阵：S1 用冻结命题，S3/S4/S5/S6 用 product_profile",
+    _matrix_result["product_proposition_matrix"]["S1"]["hook_propositions"] == ["柔焦隐形毛孔"]
+    and _matrix_result["product_proposition_matrix"]["S3"]["core_selling_points"] == ["强力吸油不拔干"]
+    and _matrix_result["product_proposition_matrix"]["S4"]["core_visual_proposition"] == "油光脸变哑光脸"
+    and bool(_matrix_result["product_proposition_matrix"]["S6"]["cta_value_hooks"]),
+)
+check(
+    "S1→S2 兼容矩阵代码化：B→A 覆盖模型 true 为 false",
+    _matrix_result["stage_analysis"][1]["creator_s2"].get("computed_s1_s2_compatible") is False
+    and _matrix_result["stage_analysis"][1].get("creator_absolute_status") == "incompatible",
+)
+check(
+    "S4→S6-D 跨阶段依赖代码化：有效 S4 使 S6-D 可复用",
+    _matrix_result["stage_analysis"][5]["creator_s6"].get("computed_depends_on_valid_s4") is True
+    and _matrix_result["cross_stage_state"]["roles"]["creator"]["s4_output_available"] is True,
+)
+
 # 4c. S1 Hook flag 化（切片 A）：四维推执行分 + hook_exists 红线 + 命题锚 + 残差亮点门
 from flayr_core.llm.parse import (  # noqa: E402
     normalize_hook_flags,
@@ -163,6 +481,8 @@ from flayr_core.llm.parse import (  # noqa: E402
     normalize_s3_flags,
     normalize_s3_s4_relationship,
     normalize_s4_flags,
+    normalize_s5_flags,
+    normalize_s6_flags,
 )
 
 
@@ -380,16 +700,36 @@ _s3_fake = _derive_one(
 check("S3 显假摆拍→执行分按 0 处理",
       _s3_fake.get("severity") == "large" and _s3_fake.get("E") == 2)
 
-_s3_thin = _derive_one(
+_s3_core_incomplete = _derive_one(
     "S3",
-    {"creator_s3": _s3_flag(richness=False), "benchmark_s3": _s3_good, "creator_summary": "x", "benchmark_summary": "y"},
+    {
+        "creator_s3": {**_s3_flag(richness=False), "missing_selling_points": ["核心卖点"]},
+        "benchmark_s3": _s3_good,
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
     {"S3": 1.0},
     [],
 )
-check("S3 核心卖点可见但素材不丰富→小到中差距",
-      _s3_thin.get("severity") == "medium"
-      and _s3_thin.get("E") == 1
-      and "薄演示下限" in _s3_thin.get("reason", ""))
+check("S3 核心卖点有缺口→多余表现层不能抵消标杆完整证明",
+      _s3_core_incomplete.get("severity") == "medium"
+      and _s3_core_incomplete.get("E") == 1
+      and "薄演示下限" in _s3_core_incomplete.get("reason", ""))
+
+_s3_context_thin = _derive_one(
+    "S3",
+    {
+        "creator_s3": _s3_flag(richness=False, context=False),
+        "benchmark_s3": _s3_good,
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S3": 1.0},
+    [],
+)
+check("S3 基础演示成立但场景/丰富度弱于标杆→至少 medium",
+      _s3_context_thin.get("severity") == "medium"
+      and _s3_context_thin.get("E") == 1.5)
 
 _s3_bad_framing = _derive_one(
     "S3",
@@ -481,6 +821,45 @@ _s3_people = _derive_one(
 check("S3 多人使用角色清楚且互动服务卖点→可成立",
       _s3_people.get("severity") == "small" and _s3_people.get("E") == 0)
 
+_s3_single_full = _derive_one(
+    "S3",
+    {
+        "creator_s3": _s3_flag(scene="single_scene", single_continuity=True, richness=False),
+        "benchmark_s3": _s3_flag(scene="single_scene", single_continuity=True, richness=False),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S3": 1.2},
+    [],
+)
+check("S3 单场景完整证明核心卖点→不因缺少多场景/变化被降级",
+      _s3_single_full.get("severity") == "small" and _s3_single_full.get("E") == 0)
+
+_s3_creator_multi_missing = _s3_flag(
+    scene="multi_scene",
+    single_continuity=False,
+    multi_logic=True,
+    multi_transition=True,
+    multi_role=True,
+    richness=True,
+)
+_s3_creator_multi_missing["missing_selling_points"] = ["高载液量"]
+_s3_benchmark_single_complete = _s3_flag(scene="single_scene", single_continuity=True, richness=False)
+_s3_benchmark_single_complete["missing_selling_points"] = []
+_s3_colorkey_like = _derive_one(
+    "S3",
+    {
+        "creator_s3": _s3_creator_multi_missing,
+        "benchmark_s3": _s3_benchmark_single_complete,
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S3": 1.2},
+    [],
+)
+check("S3 多场景但漏核心卖点→不因丰富度抵消标杆完整证明",
+      _s3_colorkey_like.get("severity") == "medium" and _s3_colorkey_like.get("E") == 1)
+
 
 def _s4_flag(
     effect=True,
@@ -556,6 +935,21 @@ _s4_strong_same = _derive_one(
 check("S4 强效果：显著+命题命中+对比控制+聚焦+最大化→满执行",
       _s4_strong_same.get("severity") == "small" and _s4_strong_same.get("E") == 0)
 
+_s4_process_visual = _derive_one(
+    "S4",
+    {
+        "creator_s4": _s4_flag(effect_type="process_visualization", salience="clear", control=False, maximized=False),
+        "benchmark_s4": _s4_flag(effect_type="process_visualization", salience="strong", control=False, focus=True, maximized=True),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S4": 1.0},
+    [],
+)
+check("S4 过程可视化不要求 comparison_control 才能满执行",
+      _s4_process_visual.get("severity") == "medium"
+      and _s4_process_visual.get("E") == 1)
+
 _s4_subtle = _derive_one(
     "S4",
     {
@@ -583,6 +977,22 @@ _s4_not_max = _derive_one(
 )
 check("S4 结构存在但未最大化→不能拿满分",
       _s4_not_max.get("severity") in {"small", "medium"} and _s4_not_max.get("E") == 1)
+
+_s4_thin_effect = _derive_one(
+    "S4",
+    {
+        "creator_s4": _s4_flag(salience="clear", control=False, focus=False, maximized=False),
+        "benchmark_s4": _s4_flag(salience="strong", control=True, focus=True, maximized=True),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S4": 1.0},
+    [],
+)
+check("S4 效果可见但未最大化，标杆更显著→至少 medium",
+      _s4_thin_effect.get("severity") == "medium"
+      and _s4_thin_effect.get("E") == 1
+      and "薄效果下限" in _s4_thin_effect.get("reason", ""))
 
 _s4_aesthetic = _derive_one(
     "S4",
@@ -691,6 +1101,57 @@ check("S4 parse 归一 effect flags（bool/evidence 容错）",
       and _ns4["result_only_without_process"] is True
       and _ns4["evidence_ids"] == ["C3"])
 
+_ns5 = normalize_s5_flags({
+    "module_type": "S5-B",
+    "exists": "yes",
+    "trust_evidence_type": "mixed",
+    "trust_source_visible": "true",
+    "trust_source_credible": "true",
+    "trust_claim_specific": "false",
+    "product_relevance_met": "true",
+    "independent_trust_purpose": "true",
+    "duplicates_other_stage": "false",
+    "voice_only": "false",
+    "risky_or_unsupported": "false",
+    "start_seconds": "20.5",
+    "end_seconds": "24",
+    "trust_reason": "画面出现认证和用户评价",
+    "evidence_ids": ["C5"],
+})
+check("S5 parse 归一 trust flags",
+      _ns5["module_type"] == "B"
+      and _ns5["trust_evidence_type"] == "mixed"
+      and _ns5["trust_source_visible"] is True
+      and _ns5["trust_claim_specific"] is False
+      and _ns5["independent_trust_purpose"] is True
+      and _ns5["duplicates_other_stage"] is False
+      and _ns5["evidence_ids"] == ["C5"])
+
+_ns6 = normalize_s6_flags({
+    "module_type": "S6-B",
+    "exists": "yes",
+    "direct_order_met": "true",
+    "action_path_clear": "true",
+    "offer_or_incentive_clear": "false",
+    "urgency_met": "true",
+    "product_value_recalled": "true",
+    "module_fit_met": "true",
+    "ending_position_met": "true",
+    "depends_on_valid_s4": "false",
+    "compliance_risk": "false",
+    "start_seconds": "25",
+    "end_seconds": "30",
+    "cta_reason": "明确让用户点击购物车",
+    "evidence_ids": ["C6"],
+})
+check("S6 parse 归一 CTA flags",
+      _ns6["module_type"] == "B"
+      and _ns6["direct_order_met"] is True
+      and _ns6["offer_or_incentive_clear"] is False
+      and _ns6["ending_position_met"] is True
+      and _ns6["depends_on_valid_s4"] is False
+      and _ns6["evidence_ids"] == ["C6"])
+
 _npp = normalize_product_profile({
     "visualizable": "yes",
     "proof_mode": "sensory-proxy",
@@ -721,6 +1182,20 @@ _chain = normalize_promise_chain({
 })
 check("promise_chain 归一",
       _chain["chain_closed"] is True and _chain["broken_at"] == "none")
+
+_fallback_chain = {
+    "s3_s4_relationship": normalize_s3_s4_relationship(None),
+    "promise_chain": normalize_promise_chain(None),
+}
+try:
+    validate_chain_relationships(
+        _fallback_chain,
+        {"s3_flags_required": True, "s4_flags_required": True},
+    )
+    _fallback_chain_ok = True
+except SystemExit:
+    _fallback_chain_ok = False
+check("S3/S4 关系归一：模型漏整块时 fallback 不拖垮主链", _fallback_chain_ok)
 
 _leaky = normalize_hook_flags({
     "exists": True,
@@ -1095,6 +1570,54 @@ except SystemExit as exc:
     _s3_gate_failed = "缺少 creator_s3" in str(exc) and "缺少 benchmark_s3" in str(exc)
 check("S3 usage flag 门禁：主链缺字段触发 repair", _s3_gate_failed)
 
+_absent_s3 = _s3_flag(
+    exists=False,
+    module="unknown",
+    usage=False,
+    result_only=True,
+    mouth_static=True,
+    real=False,
+    core=False,
+    framing=False,
+    context=False,
+    continuity=False,
+    overlays=["none"],
+)
+_absent_s3["evidence_ids"] = []
+try:
+    validate_s3_usage_flags(
+        {
+            "stage_analysis": [
+                {"stage": "S1 Hook"},
+                {"stage": "S2 产品引出"},
+                {"stage": "S3 使用过程", "creator_s3": _absent_s3, "benchmark_s3": dict(_valid_s3)},
+            ]
+        },
+        {"s3_flags_required": True},
+    )
+    _s3_absent_empty_evidence_ok = True
+except SystemExit:
+    _s3_absent_empty_evidence_ok = False
+check("S3 usage flag 门禁：确认无使用过程时允许空 evidence_ids", _s3_absent_empty_evidence_ok)
+
+_present_s3_no_evidence = _s3_flag()
+_present_s3_no_evidence["evidence_ids"] = []
+try:
+    validate_s3_usage_flags(
+        {
+            "stage_analysis": [
+                {"stage": "S1 Hook"},
+                {"stage": "S2 产品引出"},
+                {"stage": "S3 使用过程", "creator_s3": _present_s3_no_evidence, "benchmark_s3": dict(_valid_s3)},
+            ]
+        },
+        {"s3_flags_required": True},
+    )
+    _s3_present_empty_evidence_failed = False
+except SystemExit as exc:
+    _s3_present_empty_evidence_failed = "creator_s3.evidence_ids" in str(exc)
+check("S3 usage flag 门禁：存在使用过程时仍要求 evidence_ids", _s3_present_empty_evidence_failed)
+
 _valid_s4 = _s4_flag()
 try:
     validate_s4_effect_flags(
@@ -1122,6 +1645,196 @@ try:
 except SystemExit as exc:
     _s4_gate_failed = "缺少 creator_s4" in str(exc) and "缺少 benchmark_s4" in str(exc)
 check("S4 effect flag 门禁：主链缺字段触发 repair", _s4_gate_failed)
+
+_absent_s4 = _s4_flag(
+    effect=False,
+    attribution=False,
+    result_only=True,
+    linked=False,
+    effect_type="none",
+    salience="none",
+    matched=False,
+    control=False,
+    focus=False,
+    maximized=False,
+)
+_absent_s4["evidence_ids"] = []
+try:
+    validate_s4_effect_flags(
+        {
+            "stage_analysis": [
+                {"stage": "S1 Hook"},
+                {"stage": "S2 产品引出"},
+                {"stage": "S3 使用过程"},
+                {"stage": "S4 效果呈现", "creator_s4": _absent_s4, "benchmark_s4": dict(_valid_s4)},
+            ]
+        },
+        {"s4_flags_required": True},
+    )
+    _s4_absent_empty_evidence_ok = True
+except SystemExit:
+    _s4_absent_empty_evidence_ok = False
+check("S4 effect flag 门禁：确认无效果时允许空 evidence_ids", _s4_absent_empty_evidence_ok)
+
+_visible_s4_no_evidence = _s4_flag()
+_visible_s4_no_evidence["evidence_ids"] = []
+try:
+    validate_s4_effect_flags(
+        {
+            "stage_analysis": [
+                {"stage": "S1 Hook"},
+                {"stage": "S2 产品引出"},
+                {"stage": "S3 使用过程"},
+                {"stage": "S4 效果呈现", "creator_s4": _visible_s4_no_evidence, "benchmark_s4": dict(_valid_s4)},
+            ]
+        },
+        {"s4_flags_required": True},
+    )
+    _s4_visible_empty_evidence_failed = False
+except SystemExit as exc:
+    _s4_visible_empty_evidence_failed = "creator_s4.evidence_ids" in str(exc)
+check("S4 effect flag 门禁：存在效果时仍要求 evidence_ids", _s4_visible_empty_evidence_failed)
+
+_valid_s5 = _s5_flag()
+try:
+    validate_s5_trust_flags(
+        {
+            "stage_analysis": [
+                {"stage": "S1 Hook"},
+                {"stage": "S2 产品引出"},
+                {"stage": "S3 使用过程"},
+                {"stage": "S4 效果呈现"},
+                {"stage": "S5 信任放大", "creator_s5": _valid_s5, "benchmark_s5": dict(_valid_s5)},
+            ]
+        },
+        {"s5_flags_required": True},
+    )
+    _s5_gate_ok = True
+except SystemExit:
+    _s5_gate_ok = False
+check("S5 trust flag 门禁：完整字段通过", _s5_gate_ok)
+
+try:
+    validate_s5_trust_flags(
+        {"stage_analysis": [{"stage": "S1 Hook"}, {"stage": "S2 产品引出"}, {"stage": "S3 使用过程"}, {"stage": "S4 效果呈现"}, {"stage": "S5 信任放大"}]},
+        {"s5_flags_required": True},
+    )
+    _s5_gate_failed = False
+except SystemExit as exc:
+    _s5_gate_failed = "缺少 creator_s5" in str(exc) and "缺少 benchmark_s5" in str(exc)
+check("S5 trust flag 门禁：主链缺字段触发 repair", _s5_gate_failed)
+
+_absent_s5 = _s5_flag(exists=False, trust_type="none", visible=False, credible=False, specific=False, relevance=False)
+_absent_s5["evidence_ids"] = []
+try:
+    validate_s5_trust_flags(
+        {
+            "stage_analysis": [
+                {"stage": "S1 Hook"},
+                {"stage": "S2 产品引出"},
+                {"stage": "S3 使用过程"},
+                {"stage": "S4 效果呈现"},
+                {"stage": "S5 信任放大", "creator_s5": _absent_s5, "benchmark_s5": dict(_valid_s5)},
+            ]
+        },
+        {"s5_flags_required": True},
+    )
+    _s5_absent_empty_evidence_ok = True
+except SystemExit:
+    _s5_absent_empty_evidence_ok = False
+check("S5 trust flag 门禁：确认无信任环节时允许空 evidence_ids", _s5_absent_empty_evidence_ok)
+
+_present_s5_no_evidence = _s5_flag()
+_present_s5_no_evidence["evidence_ids"] = []
+try:
+    validate_s5_trust_flags(
+        {
+            "stage_analysis": [
+                {"stage": "S1 Hook"},
+                {"stage": "S2 产品引出"},
+                {"stage": "S3 使用过程"},
+                {"stage": "S4 效果呈现"},
+                {"stage": "S5 信任放大", "creator_s5": _present_s5_no_evidence, "benchmark_s5": dict(_valid_s5)},
+            ]
+        },
+        {"s5_flags_required": True},
+    )
+    _s5_present_empty_evidence_failed = False
+except SystemExit as exc:
+    _s5_present_empty_evidence_failed = "creator_s5.evidence_ids" in str(exc)
+check("S5 trust flag 门禁：存在信任环节时仍要求 evidence_ids", _s5_present_empty_evidence_failed)
+
+_valid_s6 = _s6_flag()
+try:
+    validate_s6_cta_flags(
+        {
+            "stage_analysis": [
+                {"stage": "S1 Hook"},
+                {"stage": "S2 产品引出"},
+                {"stage": "S3 使用过程"},
+                {"stage": "S4 效果呈现"},
+                {"stage": "S5 信任放大"},
+                {"stage": "S6 CTA", "creator_s6": _valid_s6, "benchmark_s6": dict(_valid_s6)},
+            ]
+        },
+        {"s6_flags_required": True},
+    )
+    _s6_gate_ok = True
+except SystemExit:
+    _s6_gate_ok = False
+check("S6 CTA flag 门禁：完整字段通过", _s6_gate_ok)
+
+try:
+    validate_s6_cta_flags(
+        {"stage_analysis": [{"stage": "S1 Hook"}, {"stage": "S2 产品引出"}, {"stage": "S3 使用过程"}, {"stage": "S4 效果呈现"}, {"stage": "S5 信任放大"}, {"stage": "S6 CTA"}]},
+        {"s6_flags_required": True},
+    )
+    _s6_gate_failed = False
+except SystemExit as exc:
+    _s6_gate_failed = "缺少 creator_s6" in str(exc) and "缺少 benchmark_s6" in str(exc)
+check("S6 CTA flag 门禁：主链缺字段触发 repair", _s6_gate_failed)
+
+_absent_s6 = _s6_flag(exists=False, direct=False, path=False, offer=False, urgency=False, recall=False, fit=False)
+_absent_s6["evidence_ids"] = []
+try:
+    validate_s6_cta_flags(
+        {
+            "stage_analysis": [
+                {"stage": "S1 Hook"},
+                {"stage": "S2 产品引出"},
+                {"stage": "S3 使用过程"},
+                {"stage": "S4 效果呈现"},
+                {"stage": "S5 信任放大"},
+                {"stage": "S6 CTA", "creator_s6": _absent_s6, "benchmark_s6": dict(_valid_s6)},
+            ]
+        },
+        {"s6_flags_required": True},
+    )
+    _s6_absent_empty_evidence_ok = True
+except SystemExit:
+    _s6_absent_empty_evidence_ok = False
+check("S6 CTA flag 门禁：确认无 CTA 时允许空 evidence_ids", _s6_absent_empty_evidence_ok)
+
+_present_s6_no_evidence = _s6_flag()
+_present_s6_no_evidence["evidence_ids"] = []
+try:
+    validate_s6_cta_flags(
+        {
+            "stage_analysis": [
+                {"stage": "S1 Hook"},
+                {"stage": "S2 产品引出"},
+                {"stage": "S3 使用过程"},
+                {"stage": "S4 效果呈现"},
+                {"stage": "S5 信任放大"},
+                {"stage": "S6 CTA", "creator_s6": _present_s6_no_evidence, "benchmark_s6": dict(_valid_s6)},
+            ]
+        },
+        {"s6_flags_required": True},
+    )
+    _s6_present_empty_evidence_failed = False
+except SystemExit as exc:
+    _s6_present_empty_evidence_failed = "creator_s6.evidence_ids" in str(exc)
+check("S6 CTA flag 门禁：存在 CTA 时仍要求 evidence_ids", _s6_present_empty_evidence_failed)
 
 _valid_relationship_result = {
     "s3_s4_relationship": {
@@ -1298,13 +2011,81 @@ _content = _payload["messages"][1]["content"]
 _user_text = _content[0]["text"] if isinstance(_content, list) else str(_content)
 check("S1 hook flags 无冻结品库仍强制输出", "S1 强制" in _user_text and "creator_hook" in _user_text)
 
-from dev_s1_b2_matrix import classify_issues, hook_summary  # noqa: E402
+from collections import Counter  # noqa: E402
 
-_jitter_side = hook_summary([
+
+def _agreement(values):
+    vals = [str(v) for v in values if v is not None]
+    if not vals:
+        return "", 0.0
+    top, count = Counter(vals).most_common(1)[0]
+    return top, round(count / len(vals), 2)
+
+
+def _hook_summary(hooks):
+    if not hooks:
+        return {}
+    dims = {}
+    for key in ("camera", "copy", "sound", "rhythm"):
+        _, ratio = _agreement([(hook.get("dims") or {}).get(key) for hook in hooks])
+        dims[key] = ratio
+    boundary_values = [
+        float(value)
+        for hook in hooks
+        for value in [hook.get("hook_boundary_seconds")]
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
+    boundary_mode, boundary_agree = _agreement(boundary_values)
+    boundary_span = round(max(boundary_values) - min(boundary_values), 2) if len(boundary_values) >= 2 else 0.0
+    return {
+        "exists": {"mode": _agreement([hook.get("exists") for hook in hooks])[0], "agreement": _agreement([hook.get("exists") for hook in hooks])[1]},
+        "landing": {"mode": _agreement([hook.get("landing_met") for hook in hooks])[0], "agreement": _agreement([hook.get("landing_met") for hook in hooks])[1]},
+        "boundary": {
+            "mode": boundary_mode,
+            "agreement": boundary_agree,
+            "span_seconds": boundary_span,
+            "jitter_tolerated": boundary_span <= 1.0,
+        },
+        "dims_agreement": dims,
+        "anchors": {
+            "mode": _agreement([hook.get("anchors_proposition") for hook in hooks])[0],
+            "agreement": _agreement([hook.get("anchors_proposition") for hook in hooks])[1],
+        },
+    }
+
+
+def _classify_hook_issues(requested, successful, s1_values, creator, benchmark):
+    issues = []
+    if successful < min(2, requested):
+        issues.append("api_failure")
+    if len(set(s1_values)) > 1:
+        issues.append("s1_severity_unstable")
+    for side_name, side in (("creator", creator), ("benchmark", benchmark)):
+        if not side:
+            issues.append(f"{side_name}_hook_missing")
+            continue
+        boundary = side.get("boundary") or {}
+        if boundary.get("agreement", 0) < 0.67 and not boundary.get("jitter_tolerated"):
+            issues.append(f"{side_name}_boundary_unstable")
+        if side.get("landing", {}).get("agreement", 0) < 0.67:
+            issues.append(f"{side_name}_landing_unstable")
+        if side.get("exists", {}).get("agreement", 0) < 0.67:
+            issues.append(f"{side_name}_exists_unstable")
+        if side.get("anchors", {}).get("agreement", 0) < 0.67:
+            issues.append(f"{side_name}_anchors_unstable")
+        weak_dims = [
+            dim for dim, ratio in (side.get("dims_agreement") or {}).items()
+            if ratio < 0.67
+        ]
+        if weak_dims:
+            issues.append(f"{side_name}_dims_unstable:{','.join(weak_dims)}")
+    return issues
+
+_jitter_side = _hook_summary([
     {"hook_boundary_seconds": 16.9, "landing_met": True, "exists": True, "anchors_proposition": True, "dims": {"camera": True, "copy": True, "sound": True, "rhythm": True}},
     {"hook_boundary_seconds": 17.7, "landing_met": True, "exists": True, "anchors_proposition": True, "dims": {"camera": True, "copy": True, "sound": True, "rhythm": True}},
 ])
-_jitter_issues = classify_issues(2, 2, ["medium", "medium"], _jitter_side, _jitter_side)
+_jitter_issues = _classify_hook_issues(2, 2, ["medium", "medium"], _jitter_side, _jitter_side)
 check("S1 B2 审计：1秒内边界 jitter 不算 unstable",
       _jitter_side["boundary"]["jitter_tolerated"] is True
       and "creator_boundary_unstable" not in _jitter_issues
@@ -1329,6 +2110,24 @@ _review_payload = build_stage_review_payload(
 )
 _review_user = _review_payload["messages"][1]["content"][0]["text"]
 check("Phase C S1 回看强制重判 hook flags", "creator_hook" in _review_user and "benchmark_hook" in _review_user)
+check("Phase C 回看使用 focused window detail mode", "detail_mode=focused_window" in _review_user and "sparse_window" in _review_user)
+
+_review_s5s6_payload = build_stage_review_payload(
+    "test-model",
+    {"videos": {}},
+    {"benchmark": {"evidence_units": []}, "creator": {"evidence_units": []}},
+    {
+        "stage_analysis": [
+            {"stage": "S5 信任放大", "creator_time_range": "20s - 24s", "benchmark_time_range": "20s - 24s"},
+            {"stage": "S6 CTA", "creator_time_range": "25s - 30s", "benchmark_time_range": "25s - 30s"},
+        ]
+    },
+    ["S5", "S6"],
+)
+_review_s5s6_user = _review_s5s6_payload["messages"][1]["content"][0]["text"]
+check("Phase C S5/S6 回看强制重判 trust/CTA flags",
+      "creator_s5" in _review_s5s6_user and "benchmark_s5" in _review_s5s6_user
+      and "creator_s6" in _review_s5s6_user and "benchmark_s6" in _review_s5s6_user)
 
 _skip, _reason = stage_skipped({"stage": "S2 产品引出", "severity": "medium", "gap": "达人未涉及产品身份，标杆有明确引出"})
 check("报告折叠：medium/large 差距不因'未涉及'被隐藏", not _skip)

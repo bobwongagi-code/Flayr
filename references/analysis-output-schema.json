@@ -320,7 +320,11 @@
       "creator_execution": "0 | 0.5 | 1 | 2。达人侧独立执行分：0=未执行该阶段功能；0.5=做了但对核心功能基本无效（敷衍、平庸无感，或画面晃动/模糊到无法有效接收）；1=合格（功能完成且有效；S2-S4 仅口头/文字、场景单一、缺效果对比的'呈现单薄'封顶 1）；2=出色（S2-S4 要求关键环节可视化+效果对比+场景丰富，过长全程记录不加分）。先独立打分再对比，禁止因对比回调。",
       "benchmark_execution": "0 | 0.5 | 1 | 2。标杆侧独立执行分，标尺同上。两个执行分是系统确定性推导差距等级的事实输入。",
       "painpoint_relevance": "benchmark_only | creator_only | both | none。该阶段双方内容是否命中 category_profile.painpoints 的核心决策因素；按内容功能判断，不要求字面用词一致。系统据此定痛点命中系数。",
-      "stage_standard_delivery": "benchmark_only | creator_only | both | none。该阶段双方是否有效达到本阶段的『本品到位标准』（按阶段查产品锚点：S1 钩子→hook_proposition、S2 引出→承接钩子的自然引出、S3 使用过程→core_selling_points+usage_context（使用中传卖点）、S4 效果→core_visual_proposition、S5 信任→trust_multipliers、S6 促单→decision_threshold 匹配的 CTA）。做到/展示到才算，仅口头讲到不算。先作为事实收集，暂不参与推导。"
+      "stage_standard_delivery": "benchmark_only | creator_only | both | none。该阶段双方是否有效达到本阶段的『本品到位标准』（按阶段查产品锚点：S1 钩子→hook_proposition、S2 引出→承接钩子的自然引出、S3 使用过程→core_selling_points+usage_context（使用中传卖点）、S4 效果→core_visual_proposition、S5 信任→trust_multipliers、S6 促单→decision_threshold 匹配的 CTA）。做到/展示到才算，仅口头讲到不算。先作为事实收集，暂不参与推导。",
+      "creator_s5": "仅 S5 需输出。对象字段：exists、module_type(A-E/unknown)、trust_evidence_type(hard/soft/mixed/none/unknown)、trust_source_visible、trust_source_credible、trust_claim_specific、product_relevance_met、independent_trust_purpose、duplicates_other_stage、voice_only、risky_or_unsupported、start_seconds、end_seconds、trust_reason、evidence_ids。",
+      "benchmark_s5": "仅 S5 需输出。字段同 creator_s5。",
+      "creator_s6": "仅 S6 需输出。对象字段：exists、module_type(A-E/unknown)、direct_order_met、action_path_clear、offer_or_incentive_clear、urgency_met、product_value_recalled、module_fit_met、ending_position_met、depends_on_valid_s4、compliance_risk、start_seconds、end_seconds、cta_reason、evidence_ids。",
+      "benchmark_s6": "仅 S6 需输出。字段同 creator_s6。"
     }
   ],
   "category_profile": {
