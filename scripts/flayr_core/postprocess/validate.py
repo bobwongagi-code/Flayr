@@ -496,6 +496,8 @@ def validate_s4_effect_flags(result: dict[str, Any], analysis: dict[str, Any]) -
             "effect_proposition_matched",
             "comparison_control_met",
             "closeup_or_focus_met",
+            "visual_difference_observed",
+            "module_constraints_met",
             "effect_maximized",
             "requires_close_inspection",
             "effect_attribution_supported",

@@ -422,6 +422,8 @@ def normalize_s4_flags(value: Any) -> dict[str, Any] | None:
         "effect_proposition_matched": normalize_demo_flag(value.get("effect_proposition_matched")),
         "comparison_control_met": normalize_demo_flag(value.get("comparison_control_met")),
         "closeup_or_focus_met": normalize_demo_flag(value.get("closeup_or_focus_met")),
+        "visual_difference_observed": normalize_demo_flag(value.get("visual_difference_observed")),
+        "module_constraints_met": normalize_demo_flag(value.get("module_constraints_met")),
         "effect_maximized": normalize_demo_flag(value.get("effect_maximized")),
         "requires_close_inspection": normalize_demo_flag(value.get("requires_close_inspection")),
         "effect_attribution_supported": normalize_demo_flag(value.get("effect_attribution_supported")),

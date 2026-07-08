@@ -36,6 +36,7 @@ from .payload import (
     build_video_fact_payload,
     load_brand_proposition,
 )
+from .s4_visual_verifier import maybe_apply_s4_visual_verifier
 from .media import select_role_visual_inputs
 from ..postprocess import apply_postprocess_chain
 from ..postprocess.derive import critical_severity_stages
@@ -219,7 +220,7 @@ def parse_and_validate_llm_result(
             analysis_input,
             locked_video_understanding,
         )
-        return maybe_refine_low_confidence_stages(
+        refined = maybe_refine_low_confidence_stages(
             args=args,
             api_key=api_key,
             raw_result=raw_result,
@@ -228,6 +229,13 @@ def parse_and_validate_llm_result(
             run_dir=run_dir,
             analysis=analysis,
             locked_video_understanding=locked_video_understanding,
+        )
+        return maybe_apply_s4_visual_verifier(
+            args=args,
+            api_key=api_key,
+            result=refined,
+            analysis=analysis,
+            run_dir=run_dir,
         )
     except SystemExit as exc:
         first_error = str(exc)
@@ -254,7 +262,7 @@ def parse_and_validate_llm_result(
             analysis_input,
             locked_video_understanding,
         )
-        return maybe_refine_low_confidence_stages(
+        refined = maybe_refine_low_confidence_stages(
             args=args,
             api_key=api_key,
             raw_result=raw_repair_result,
@@ -263,6 +271,13 @@ def parse_and_validate_llm_result(
             run_dir=run_dir,
             analysis=analysis,
             locked_video_understanding=locked_video_understanding,
+        )
+        return maybe_apply_s4_visual_verifier(
+            args=args,
+            api_key=api_key,
+            result=refined,
+            analysis=analysis,
+            run_dir=run_dir,
         )
     except SystemExit as exc:
         raise SystemExit(f"LLM output repair failed. First error: {first_error}. Repair error: {exc}") from exc

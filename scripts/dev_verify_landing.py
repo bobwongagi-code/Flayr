@@ -876,6 +876,8 @@ def _s4_flag(
     matched=True,
     control=True,
     focus=True,
+    visual_diff=True,
+    module_constraints=True,
     maximized=True,
     close_inspection=False,
 ):
@@ -886,6 +888,8 @@ def _s4_flag(
         "effect_proposition_matched": matched,
         "comparison_control_met": control,
         "closeup_or_focus_met": focus,
+        "visual_difference_observed": visual_diff,
+        "module_constraints_met": module_constraints,
         "effect_maximized": maximized,
         "requires_close_inspection": close_inspection,
         "effect_attribution_supported": attribution,
@@ -982,6 +986,34 @@ _s4_not_max = _derive_one(
 check("S4 结构存在但未最大化→不能拿满分",
       _s4_not_max.get("severity") in {"small", "medium"} and _s4_not_max.get("E") == 1)
 
+_s4_no_visual_diff = _derive_one(
+    "S4",
+    {
+        "creator_s4": _s4_flag(salience="strong", visual_diff=False, module_constraints=True),
+        "benchmark_s4": _s4_flag(),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S4": 1.4},
+    [],
+)
+check("S4 看不出指定视觉差异→不能拿满分",
+      _s4_no_visual_diff.get("severity") in {"small", "medium"} and _s4_no_visual_diff.get("E") == 1)
+
+_s4_module_broken = _derive_one(
+    "S4",
+    {
+        "creator_s4": _s4_flag(salience="strong", visual_diff=True, module_constraints=False),
+        "benchmark_s4": _s4_flag(),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S4": 1.4},
+    [],
+)
+check("S4 模块硬约束不成立→不能拿满分",
+      _s4_module_broken.get("severity") in {"small", "medium"} and _s4_module_broken.get("E") == 1)
+
 _s4_thin_effect = _derive_one(
     "S4",
     {
@@ -1011,6 +1043,90 @@ _s4_aesthetic = _derive_one(
 )
 check("S4 颜值陈列只算 aesthetic_display，不伪装强效果",
       _s4_aesthetic.get("severity") in {"small", "medium"} and _s4_aesthetic.get("E") == 1)
+
+from types import SimpleNamespace  # noqa: E402
+import flayr_core.llm.s4_visual_verifier as s4_visual_verifier_module  # noqa: E402
+from flayr_core.llm.s4_visual_verifier import apply_s4_visual_verifier_result, maybe_apply_s4_visual_verifier  # noqa: E402
+
+_s4_verifier_result = {
+    "stage_analysis": [
+        {"stage": "S1 Hook"},
+        {"stage": "S2 产品引出"},
+        {"stage": "S3 使用过程"},
+        {
+            "stage": "S4 效果呈现",
+            "creator_s4": _s4_flag(salience="strong", visual_diff=True, module_constraints=True),
+            "benchmark_s4": _s4_flag(salience="strong", visual_diff=True, module_constraints=True),
+            "creator_summary": "x",
+            "benchmark_summary": "y",
+            "severity": "small",
+        },
+    ],
+    "improvements": [],
+}
+_s4_verifier_applied = apply_s4_visual_verifier_result(
+    _s4_verifier_result,
+    {
+        "creator": {
+            "visual_difference_observed": False,
+            "module_constraints_met": True,
+            "effect_salience": "subtle",
+            "requires_close_inspection": True,
+            "effect_maximized": False,
+            "reason": "前后变化需要仔细找。",
+        },
+        "benchmark": {
+            "visual_difference_observed": True,
+            "module_constraints_met": True,
+            "effect_salience": "strong",
+            "requires_close_inspection": False,
+            "effect_maximized": True,
+            "reason": "前后差异一眼可见。",
+        },
+    },
+    {},
+)
+_s4_verifier_stage = _s4_verifier_result["stage_analysis"][3]
+check("S4 独立视觉复核覆盖字段并重推 severity",
+      _s4_verifier_applied
+      and _s4_verifier_stage["creator_s4"]["effect_visible"] is False
+      and _s4_verifier_stage["creator_s4"]["effect_proposition_matched"] is False
+      and _s4_verifier_stage["creator_s4"]["visual_difference_observed"] is False
+      and _s4_verifier_stage["creator_s4"]["effect_salience"] == "subtle"
+      and _s4_verifier_stage["creator_s4"]["effect_reason"] == "前后变化需要仔细找。"
+      and _s4_verifier_stage["severity"] in {"medium", "large"}
+      and _s4_verifier_stage.get("severity_derivation", {}).get("status") == "derived")
+
+_orig_build_s4_payload = s4_visual_verifier_module.build_s4_visual_verifier_payload
+_orig_call_s4_api = s4_visual_verifier_module.call_llm_api
+try:
+    s4_visual_verifier_module.build_s4_visual_verifier_payload = lambda *_args, **_kwargs: {"messages": []}
+
+    def _raise_system_exit(*_args, **_kwargs):
+        raise SystemExit("boom")
+
+    s4_visual_verifier_module.call_llm_api = _raise_system_exit
+    _s4_verifier_fail_result = {
+        "stage_analysis": [
+            {"stage": "S1 Hook"},
+            {"stage": "S2 产品引出"},
+            {"stage": "S3 使用过程"},
+            {"stage": "S4 效果呈现", "creator_s4": _s4_flag(), "benchmark_s4": _s4_flag()},
+        ]
+    }
+    maybe_apply_s4_visual_verifier(
+        args=SimpleNamespace(llm_dry_run=False, llm_model="x", llm_api_url="http://invalid"),
+        api_key="x",
+        result=_s4_verifier_fail_result,
+        analysis={},
+        run_dir=Path(tempfile.gettempdir()),
+    )
+finally:
+    s4_visual_verifier_module.build_s4_visual_verifier_payload = _orig_build_s4_payload
+    s4_visual_verifier_module.call_llm_api = _orig_call_s4_api
+check("S4 独立视觉复核失败不拖垮主链",
+      _s4_verifier_fail_result.get("s4_visual_verifier", {}).get("applied") is False
+      and "boom" in _s4_verifier_fail_result.get("s4_visual_verifier", {}).get("reason", ""))
 
 # parse 归一：容忍 'S1-B：反差' / 'yes' / 1 等写法
 _nh = normalize_hook_flags({"exists": "true", "type": "S1-B：反差震惊型", "dims": {"camera": "yes", "copy": 1}})
@@ -1086,6 +1202,8 @@ _ns4 = normalize_s4_flags({
     "effect_proposition_matched": "true",
     "comparison_control_met": "yes",
     "closeup_or_focus_met": 1,
+    "visual_difference_observed": "true",
+    "module_constraints_met": "no",
     "effect_maximized": "no",
     "requires_close_inspection": "false",
     "effect_attribution_supported": 0,
@@ -1100,6 +1218,8 @@ check("S4 parse 归一 effect flags（bool/evidence 容错）",
       and _ns4["effect_visible"] is True
       and _ns4["effect_salience"] == "clear"
       and _ns4["effect_proposition_matched"] is True
+      and _ns4["visual_difference_observed"] is True
+      and _ns4["module_constraints_met"] is False
       and _ns4["effect_maximized"] is False
       and _ns4["effect_attribution_supported"] is False
       and _ns4["result_only_without_process"] is True
@@ -1660,6 +1780,8 @@ _absent_s4 = _s4_flag(
     matched=False,
     control=False,
     focus=False,
+    visual_diff=False,
+    module_constraints=False,
     maximized=False,
 )
 _absent_s4["evidence_ids"] = []

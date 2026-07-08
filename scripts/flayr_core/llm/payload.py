@@ -700,6 +700,8 @@ def build_llm_comparison_payload(
         '"comparison_control_met": bool（仅对 S4-A/B/C/D/E 等对比/量化型效果判前后/左右/对照是否同角度、同光线、同对象、同距离；'
         'S4-F process_visualization 不靠对照控制，若没有前后/替代/参照物对比可填 false，不因此否定强效果）, '
         '"closeup_or_focus_met": bool（是否用特写/近景/聚焦/构图把效果放大到短视频用户一眼能看见）, '
+        '"visual_difference_observed": bool（是否能在 product_profile.visual_diff_dimensions 指定维度上直接看见变化/差异/量化结果；只看到结构、动作、字幕或口播但看不出指定维度变化时 false）, '
+        '"module_constraints_met": bool（所选 S4 模块是否满足 structure_library_full.md 的硬约束：A/B 同对象同光线同构图或同细节区域，C 人物条件可比，D 本品与替代方案对照，E 日常参照物量化，F 特写/慢镜/微距可视化过程）, '
         '"effect_maximized": bool（是否把该 S4 类型做到最大化，而不是只存在这个结构；变化明显、画面聚焦、节奏突出才 true）, '
         '"requires_close_inspection": bool（用户是否需要停下来仔细找变化；若 true，S4 不能高分）, '
         '"effect_attribution_supported": bool（画面是否支持该效果由本产品造成，而不是剪辑、换物、灯光或口播脑补）, '
@@ -711,7 +713,8 @@ def build_llm_comparison_payload(
         "S4 铁律：只给结果、没有过程，不等于高分效果展示。"
         "若 result_only_without_process=true 且 effect_attribution_supported=false，效果很薄弱；"
         "若只有结果但产品和结果强绑定，也最多是中等可信；"
-        "强效果按 effect_type 分型判断：S4-A/B/C/D/E 对比/量化型需要 comparison_control_met=true；"
+        "强效果按 effect_type 分型判断：所有强效果都必须 visual_difference_observed=true 且 module_constraints_met=true；"
+        "S4-A/B/C/D/E 对比/量化型还需要 comparison_control_met=true；"
         "S4-F process_visualization 不要求 comparison_control_met=true，但必须看到产品作用过程（泡沫扩散/液体渗透/粉质覆盖/机械运转等），"
         "并满足 effect_salience=strong、effect_proposition_matched=true、closeup_or_focus_met=true、effect_maximized=true、process_linked_effect=true、effect_attribution_supported=true。"
         "透明包装/阳光下好看/陈列美感属于 aesthetic_display，可支撑低价熟品转化，但不要伪装成标准效果验证。"
@@ -719,7 +722,7 @@ def build_llm_comparison_payload(
     s4_field_req = (
         "S4 强制：stage_analysis 第 4 项（S4 效果呈现）必须再含 creator_s4 与 benchmark_s4 两个对象"
         "（结构见上方：effect_type/effect_visible/effect_salience/effect_proposition_matched/comparison_control_met/"
-        "closeup_or_focus_met/effect_maximized/requires_close_inspection/effect_attribution_supported/result_only_without_process/"
+        "closeup_or_focus_met/visual_difference_observed/module_constraints_met/effect_maximized/requires_close_inspection/effect_attribution_supported/result_only_without_process/"
         "process_linked_effect/tamper_or_cut_risk/effect_reason/evidence_ids）。"
         "S4 flag 只服务效果因果判断；不要用 S3 的使用过程完整性替代 S4 效果可见性，也不要用单纯结果图替代因果证明。"
     )
@@ -842,7 +845,8 @@ def build_llm_comparison_payload(
             "task_completion 只能取 complete、partial、missing 三选一（达人侧该阶段功能完成度），禁止 both_complete、no_gap 等任何其他词；标杆侧完成情况写在 benchmark_summary。",
             "creator_execution 与 benchmark_execution 取值只能是 0、0.5、1、2 四个数字：0=未执行该阶段功能；0.5=做了但对该阶段核心功能基本无效——敷衍、平庸无感、几乎不起作用（如一句轻带的 CTA、平铺直叙毫无抓力的开场、仅口头承诺没有任何验证支撑）；1=执行合格（功能完成且对观众有效）；2=执行出色（可视化演示/铺垫到位/感染力强）。两侧按该阶段功能定义各自独立打分，先打分再对比，禁止因对比结果回调任何一侧分数。",
             "效果呈现阶段（S4）执行分以 product_profile.core_visual_proposition（本品核心视觉命题）为评判锚点，不套通用 before/after：先判该侧有没有拍出本品的决定性瞬间（定妆粉饼=粉底油光→哑光对比、面膜=逐日变化+敷后效果），并满足 product_profile.shooting_requirement（效果细微的品需正面强光+面部特写才算拍到）。拍出命题且拍摄到位才给 2；只完成动作（揭膜/擦粉/口头带过）未体现命题、或拍摄条件不支撑（暗光/无特写/wide shot 看不出效果）按敷衍计最高 0.5；做了但缺命题对比的'呈现单薄'最高 1。过长全程记录不加分（标尺是命题覆盖非完整性）。两侧各自独立打分，禁止因对比回调。",
-            "S4 给执行分前必须做一次闭环核验：回到该侧关键帧，对照 core_visual_proposition 与 visual_diff_dimensions，在画面上实际确认那个视觉对比肉眼可见——'存在 before/after 结构'不等于'对比拍出来了'。若该侧前后帧在指定维度上看不出明显差异（如油光帧与哑光帧看起来差不多、敷膜前后肤质无变化），即命题未被有效呈现，该侧执行分最高 1（只完成动作未呈现效果）；几乎完全无差异则 0.5。这是把你自己定的命题当检查清单逐帧核对，不许凭结构臆断。两侧同此核验。",
+            "S4 给执行分前必须做一次闭环核验：回到该侧关键帧，对照 core_visual_proposition 与 visual_diff_dimensions，在画面上实际确认那个视觉对比肉眼可见——'存在 before/after 结构'不等于'对比拍出来了'。若该侧前后帧在指定维度上看不出明显差异（如油光帧与哑光帧看起来差不多、敷膜前后肤质无变化），即命题未被有效呈现，visual_difference_observed=false，该侧执行分最高 1（只完成动作未呈现效果）；几乎完全无差异则 0.5。这是把你自己定的命题当检查清单逐帧核对，不许凭结构臆断。两侧同此核验。",
+            "S4 还必须按 structure_library_full.md 的模块硬约束输出 module_constraints_met：S4-A/B 必须同对象同光线同构图或同细节区域，S4-C 必须人物条件可比，S4-D 必须本品与替代方案形成结果对照，S4-E 必须借日常参照物量化，S4-F 必须用特写/慢镜/微距让过程可视化。模块硬约束不成立，即使口播说有效或字幕写 before/after，也不能给满执行。",
             "S4 执行分主轴只有一个：core_visual_proposition（核心命题）的有效呈现。trust_multipliers（防水/防汗测试、美容仪、周期记录、专业手法等）是加分项，只能在核心命题已有效呈现（该侧≥1）时把分抬向 2；不能替代、也不能补偿弱核心命题。若某侧核心命题没拍出来（对比弱/不可见），哪怕它有很强的次要演示，该侧执行分仍封顶 1——严禁用次要演示把分顶上去。判分先看核心命题达没达到，再决定加分项加不加。",
             "S4 还要逐侧输出布尔字段 benchmark_has_effect_demo / creator_has_effect_demo（非 S4 阶段填 null）——针对本卖点，该侧视频里有没有出现『效果呈现』。"
             "判 true 当且仅当满足结构库 S4-A~F 任意一种：①前后状态对比（同机位/分屏/左右 before/after，S4-A/B）；②人物差异对比（用了的人 vs 没用的人，视觉差可见，S4-C）；"
@@ -1094,6 +1098,8 @@ def build_stage_review_payload(
             "effect_proposition_matched": True,
             "comparison_control_met": True,
             "closeup_or_focus_met": True,
+            "visual_difference_observed": True,
+            "module_constraints_met": True,
             "effect_maximized": True,
             "requires_close_inspection": False,
             "effect_attribution_supported": True,
@@ -1110,6 +1116,9 @@ def build_stage_review_payload(
             "S4 只判效果是否可见、效果是否显著、是否命中核心视觉命题、是否可信地由产品造成。"
             "只有结果没有过程不能直接高分；需要仔细看才有变化时 requires_close_inspection=true 且 effect_salience=subtle；"
             "没有因果桥时 effect_attribution_supported=false，有跳剪/换物/光线变化风险时 tamper_or_cut_risk=true。"
+            "必须按 structure_library_full.md 的 S4-A~F 硬约束判 module_constraints_met：A/B 要同对象同光线同构图或同细节区域，"
+            "C 要两组人物条件可比，D 要本品与替代方案对照，E 要有日常参照物量化，F 要用特写/慢镜/微距把过程可视化。"
+            "必须对照 product_profile.visual_diff_dimensions 判 visual_difference_observed；只看到结构/动作/字幕/口播、但看不出指定维度变化时为 false。"
         )
     if "S5" in target_codes:
         stage_update_example["stage"] = "S5 信任放大"
@@ -1456,7 +1465,7 @@ def build_llm_repair_payload(
                     "landing_met 按 type 无关三件套判断：0 到 hook_boundary_seconds 内对象明确、张力明确、承诺或证据明确，缺一即 false；不得用后续 S2/S3 产品介绍补足 S1 landing。若引用边界后材料，landing_window_leak=true 且 landing_met=false。"
                     "S2 产品引出必须补齐 creator_s2 与 benchmark_s2 两个对象，字段为 exists(bool)、merged_with_s3(bool)、module_type(A-D或unknown)、handoff_met(bool)、s1_s2_compatible(bool)、product_identity_clear(bool)、product_role_clear(bool)、excluded_or_risky_module(bool)、start_seconds(number)、end_seconds(number)、handoff_reason(非空)、evidence_ids(非空数组)。"
                     "S3 使用过程必须补齐 creator_s3 与 benchmark_s3 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、usage_process_visible(bool)、result_only_without_process(bool)、mouth_only_or_static(bool)、real_usage_met(bool)、core_selling_point_visible(bool)、process_framing_met(bool)、demonstrated_selling_points(数组)、missing_selling_points(数组)、scene_mode(single_scene/multi_scene/multi_person/hybrid/unknown)、usage_context_fit(bool)、continuity_met(bool)、richness_met(bool)、single_scene_continuity_met(bool)、single_scene_variation_met(bool)、multi_scene_logic_met(bool)、multi_scene_transition_met(bool)、multi_scene_role_adaptation_met(bool)、role_design_met(bool)、role_interaction_met(bool)、presentation_overlays(数组)、fake_or_staged(bool)、start_seconds(number)、end_seconds(number)、usage_reason(非空)、evidence_ids(非空数组)。"
-                    "S4 效果呈现必须补齐 creator_s4 与 benchmark_s4 两个对象，字段为 effect_type(before_after/split_screen/person_vs_person/product_vs_alt/quantified_test/process_visualization/aesthetic_display/none)、effect_visible(bool)、effect_salience(none/subtle/clear/strong)、effect_proposition_matched(bool)、comparison_control_met(bool)、closeup_or_focus_met(bool)、effect_maximized(bool)、requires_close_inspection(bool)、effect_attribution_supported(bool)、result_only_without_process(bool)、process_linked_effect(bool)、tamper_or_cut_risk(bool)、effect_reason(非空)、evidence_ids(非空数组)。"
+                    "S4 效果呈现必须补齐 creator_s4 与 benchmark_s4 两个对象，字段为 effect_type(before_after/split_screen/person_vs_person/product_vs_alt/quantified_test/process_visualization/aesthetic_display/none)、effect_visible(bool)、effect_salience(none/subtle/clear/strong)、effect_proposition_matched(bool)、comparison_control_met(bool)、closeup_or_focus_met(bool)、visual_difference_observed(bool)、module_constraints_met(bool)、effect_maximized(bool)、requires_close_inspection(bool)、effect_attribution_supported(bool)、result_only_without_process(bool)、process_linked_effect(bool)、tamper_or_cut_risk(bool)、effect_reason(非空)、evidence_ids(非空数组)。"
                     "S5 信任放大必须补齐 creator_s5 与 benchmark_s5 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、trust_evidence_type(hard/soft/mixed/none/unknown)、trust_source_visible(bool)、trust_source_credible(bool)、trust_claim_specific(bool)、product_relevance_met(bool)、independent_trust_purpose(bool)、duplicates_other_stage(bool)、voice_only(bool)、risky_or_unsupported(bool)、start_seconds(number)、end_seconds(number)、trust_reason(非空)、evidence_ids(数组；exists=false 或 trust_evidence_type=none/unknown 可为空)。"
                     "S6 CTA 必须补齐 creator_s6 与 benchmark_s6 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、direct_order_met(bool)、action_path_clear(bool)、offer_or_incentive_clear(bool)、urgency_met(bool)、product_value_recalled(bool)、module_fit_met(bool)、ending_position_met(bool)、depends_on_valid_s4(bool)、compliance_risk(bool)、start_seconds(number)、end_seconds(number)、cta_reason(非空)、evidence_ids(数组；exists=false 可为空)。"
                     "必须补齐 s3_s4_relationship 和 promise_chain；promise_chain.chain_closed 必须是 bool，broken_at 只能是 S2/S3/S4/none/unknown；promise_chain 只审计 S1-S4，不得把 S5/S6/CTA/促单/下单问题写成承诺链断点。"

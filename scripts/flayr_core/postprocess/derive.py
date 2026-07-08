@@ -484,6 +484,14 @@ def _s4_effect_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(c, dict) or not isinstance(b, dict):
         return None
 
+    def explicit_quality_keys(flag: dict[str, Any]) -> bool:
+        return flag.get("visual_difference_observed") in {True, False} or flag.get("module_constraints_met") in {True, False}
+
+    def quality_met(flag: dict[str, Any]) -> bool:
+        if not explicit_quality_keys(flag):
+            return True
+        return flag.get("visual_difference_observed") is True and flag.get("module_constraints_met") is True
+
     def side_exec(flag: dict[str, Any]) -> float:
         salience = str(flag.get("effect_salience") or "none")
         if flag.get("effect_visible") is False or salience == "none":
@@ -505,6 +513,7 @@ def _s4_effect_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
                 and flag.get("effect_proposition_matched") is True
                 and flag.get("closeup_or_focus_met") is True
                 and flag.get("effect_maximized") is True
+                and quality_met(flag)
             ):
                 return 2.0
             if (
@@ -513,6 +522,7 @@ def _s4_effect_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
                 and flag.get("comparison_control_met") is True
                 and flag.get("closeup_or_focus_met") is True
                 and flag.get("effect_maximized") is True
+                and quality_met(flag)
             ):
                 return 2.0
             if salience in {"clear", "strong"} and flag.get("effect_proposition_matched") is True:
