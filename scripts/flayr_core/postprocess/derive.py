@@ -306,15 +306,21 @@ def _s3_strong_scene(flag: dict[str, Any]) -> bool:
     """S3 场景/表现层是否把使用过程做厚。
 
     S3 主轴是"动作里证明核心卖点"。多场景/丰富度只是表现层，不能补偿核心卖点缺口；
-    单场景全流程如果动作链完整且核心卖点无缺口，也可以成立为强 S3。
+    单场景全流程如果只有动作链完整，只能算合格；要到强 S3，必须把同一卖点做厚
+    （多角度/多卖点/时间变化/角色互动等），避免把"结构存在"误当"执行出色"。
     """
     missing = flag.get("missing_selling_points")
     has_missing_core = isinstance(missing, list) and any(str(item).strip() for item in missing)
     if has_missing_core:
         return False
+    if flag.get("process_framing_met") is not True:
+        return False
     mode = str(flag.get("scene_mode") or "unknown")
     if mode == "single_scene":
-        return flag.get("single_scene_continuity_met") is True or flag.get("continuity_met") is True
+        return (
+            (flag.get("single_scene_continuity_met") is True or flag.get("continuity_met") is True)
+            and (flag.get("richness_met") is True or flag.get("single_scene_variation_met") is True)
+        )
     if mode == "multi_scene":
         return (
             flag.get("multi_scene_logic_met") is True
@@ -349,6 +355,8 @@ def _s3_usage_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
             return 0.0
         if flag.get("core_selling_point_visible") is not True:
             return 0.5
+        if flag.get("process_framing_met") is False:
+            return 0.5
         if flag.get("usage_context_fit") is not True:
             return 0.5
         missing = flag.get("missing_selling_points")
@@ -360,7 +368,7 @@ def _s3_usage_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _attach_s3_process_framing_trace(stage_id: str, stage: dict[str, Any], trace: dict[str, Any]) -> dict[str, Any]:
-    """S3 拍摄对准质量先作为审计信息输出，不直接参与 severity。"""
+    """S3 拍摄对准质量进入执行分，同时在 trace 中留审计信息。"""
     if stage_id != "S3":
         return trace
     c = stage.get("creator_s3")
@@ -420,8 +428,16 @@ def _s3_thin_demo_floor(stage: dict[str, Any]) -> tuple[bool, str]:
 
     if not has_basic_process(c) or not has_basic_process(b):
         return False, ""
-    if _s3_strong_scene(b) and not _s3_strong_scene(c):
-        return True, "；S3 薄演示下限：达人有基础使用过程，但标杆通过细节/丰富度把核心卖点证明得更充分"
+    benchmark_strong = b.get("process_framing_met") is True and _s3_strong_scene(b)
+    creator_thin_reasons = []
+    if c.get("process_framing_met") is False:
+        creator_thin_reasons.append("使用过程未拍全/未对准")
+    if c.get("usage_context_fit") is False:
+        creator_thin_reasons.append("使用场景未给卖点舞台")
+    if not _s3_strong_scene(c):
+        creator_thin_reasons.append("过程呈现单薄")
+    if benchmark_strong and creator_thin_reasons:
+        return True, "；S3 薄演示下限：" + "、".join(dict.fromkeys(creator_thin_reasons))
     return False, ""
 
 

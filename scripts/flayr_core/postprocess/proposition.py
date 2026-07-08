@@ -157,6 +157,51 @@ def _valid_s4_output(flag: dict[str, Any] | None) -> bool:
     )
 
 
+def _selling_point_chain_state(
+    s2: dict[str, Any] | None,
+    s3: dict[str, Any] | None,
+    s4: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """审计 S2→S4 卖点链，不改变阶段 severity。
+
+    S2 仍只管产品引出；卖点链审计把"产品身份清楚但卖点没有被过程/效果证明"
+    单独暴露，避免把 S3/S4 的问题回填成 S2。
+    """
+    s2_ready = isinstance(s2, dict) and (
+        s2.get("product_identity_clear") is True
+        and s2.get("product_role_clear") is True
+    )
+    s3_ready = isinstance(s3, dict) and (
+        s3.get("core_selling_point_visible") is True
+        and s3.get("process_framing_met") is not False
+        and s3.get("mouth_only_or_static") is not True
+        and s3.get("result_only_without_process") is not True
+    )
+    s4_ready = _valid_s4_output(s4)
+    if not s2_ready:
+        status = "broken_at_s2"
+        reason = "产品身份或解决方案角色不清，卖点链无法启动"
+    elif not s3_ready and not s4_ready:
+        status = "broken_mid_chain"
+        reason = "产品已引出，但核心卖点缺少使用过程或效果证明"
+    elif not s3_ready:
+        status = "weak_process"
+        reason = "效果/结果可能存在，但使用过程没有把核心卖点演示成证据"
+    elif not s4_ready:
+        status = "weak_effect"
+        reason = "使用过程成立，但效果证明不足或不够可见"
+    else:
+        status = "closed"
+        reason = "产品身份、卖点演示和效果证明形成闭环"
+    return {
+        "status": status,
+        "s2_ready": s2_ready,
+        "s3_core_process_ready": s3_ready,
+        "s4_effect_ready": s4_ready,
+        "reason": reason,
+    }
+
+
 def materialize_cross_stage_inputs(result: dict[str, Any], analysis: dict[str, Any] | None) -> None:
     """把跨阶段依赖计算成字段，供 derive 消费与报告审计。"""
     materialize_product_proposition_matrix(result, analysis)
@@ -191,6 +236,11 @@ def materialize_cross_stage_inputs(result: dict[str, Any], analysis: dict[str, A
             "resolved_core_selling_points_shown": (s3 or {}).get("demonstrated_selling_points") if isinstance(s3, dict) else [],
             "resolved_s4_effect_validity": s4_available,
             "s4_output_available": s4_available,
+            "selling_point_chain": _selling_point_chain_state(
+                s2 if isinstance(s2, dict) else None,
+                s3 if isinstance(s3, dict) else None,
+                s4 if isinstance(s4, dict) else None,
+            ),
         }
     result["cross_stage_state"] = state
 

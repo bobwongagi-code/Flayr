@@ -471,6 +471,10 @@ check(
     _matrix_result["stage_analysis"][5]["creator_s6"].get("computed_depends_on_valid_s4") is True
     and _matrix_result["cross_stage_state"]["roles"]["creator"]["s4_output_available"] is True,
 )
+check(
+    "卖点链审计不回填 S2：S2/S3/S4 闭环状态单独暴露",
+    _matrix_result["cross_stage_state"]["roles"]["creator"]["selling_point_chain"]["status"] == "closed",
+)
 
 # 4c. S1 Hook flag 化（切片 A）：四维推执行分 + hook_exists 红线 + 命题锚 + 残差亮点门
 from flayr_core.llm.parse import (  # noqa: E402
@@ -742,9 +746,9 @@ _s3_bad_framing = _derive_one(
     {"S3": 1.0},
     [],
 )
-check("S3 使用过程拍不全/没对准→先记 trace，不单独改 severity",
-      _s3_bad_framing.get("severity") == "small"
-      and _s3_bad_framing.get("E") == 0
+check("S3 使用过程拍不全/没对准→执行分封顶并触发 medium 下限",
+      _s3_bad_framing.get("severity") == "medium"
+      and _s3_bad_framing.get("E") == 1.5
       and _s3_bad_framing.get("s3_process_framing") == {"creator": False, "benchmark": True})
 
 _s3_both_thin = _derive_one(
@@ -844,7 +848,7 @@ _s3_creator_multi_missing = _s3_flag(
     richness=True,
 )
 _s3_creator_multi_missing["missing_selling_points"] = ["高载液量"]
-_s3_benchmark_single_complete = _s3_flag(scene="single_scene", single_continuity=True, richness=False)
+_s3_benchmark_single_complete = _s3_flag(scene="single_scene", single_continuity=True, single_variation=True, richness=True)
 _s3_benchmark_single_complete["missing_selling_points"] = []
 _s3_colorkey_like = _derive_one(
     "S3",

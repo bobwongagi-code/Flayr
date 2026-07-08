@@ -169,7 +169,7 @@
         "mouth_only_or_static": "仅 S3 必填：只拿着产品口播/静态展示/字幕讲卖点，没有真实使用动作。",
         "real_usage_met": "仅 S3 必填：是否是真实使用动作，而非静态展示、摆拍假用、只拿着产品说，true|false。",
         "core_selling_point_visible": "仅 S3 必填：product_profile.core_selling_points 中至少一个核心卖点是否在使用动作里被看见；只口播不算，true|false。",
-        "process_framing_met": "仅 S3 必填：使用过程证据是否可接收；使用对象/场景上下文足以理解产品作用对象、关键动作连续可追踪、核心卖点发生区域清楚可见。合理局部特写可为 true；看不清对象/动作/证明区域或跑焦/主体出画/遮挡时为 false。",
+        "process_framing_met": "仅 S3 必填：使用过程证据是否可接收；使用对象/场景上下文足以理解产品作用对象、关键动作连续可追踪、核心卖点发生区域清楚可见。合理局部特写可为 true；看不清对象/动作/证明区域或跑焦/主体出画/遮挡时为 false。false 时该侧 S3 不能算强演示。",
         "demonstrated_selling_points": [
           "动作里实际被证明的核心卖点。"
         ],
@@ -179,7 +179,7 @@
         "scene_mode": "仅 S3 必填：single_scene | multi_scene | multi_person | hybrid | unknown。",
         "usage_context_fit": "仅 S3 必填：使用场景是否给核心卖点提供合适舞台，true|false。",
         "continuity_met": "仅 S3 必填：过程是否连贯且符合真实用法，非无关镜头拼贴或错误用法，true|false。",
-        "richness_met": "仅 S3 必填：多场景覆盖多卖点，或单场景做厚；必须在 core_selling_point_visible=true 后才有意义，true|false。",
+        "richness_met": "仅 S3 必填：多场景覆盖多卖点，或单场景做厚；必须在 core_selling_point_visible=true 且 process_framing_met=true 后才有意义。单场景连续展示不自动等于 richness=true，true|false。",
         "single_scene_continuity_met": "仅 S3 必填：单场景内是否连续展示产品使用；非单场景填 false。",
         "single_scene_variation_met": "仅 S3 必填：单场景内人物状态/服装/角度/时间感是否有合理变化；非单场景填 false。",
         "multi_scene_logic_met": "仅 S3 必填：多场景是否组成清楚卖点链条/生活逻辑；非多场景填 false。",
@@ -206,7 +206,7 @@
         "mouth_only_or_static": "仅 S3 必填：只拿着产品口播/静态展示/字幕讲卖点，没有真实使用动作。",
         "real_usage_met": "仅 S3 必填：是否是真实使用动作，而非静态展示、摆拍假用、只拿着产品说，true|false。",
         "core_selling_point_visible": "仅 S3 必填：product_profile.core_selling_points 中至少一个核心卖点是否在使用动作里被看见；只口播不算，true|false。",
-        "process_framing_met": "仅 S3 必填：使用过程证据是否可接收；使用对象/场景上下文足以理解产品作用对象、关键动作连续可追踪、核心卖点发生区域清楚可见。合理局部特写可为 true；看不清对象/动作/证明区域或跑焦/主体出画/遮挡时为 false。",
+        "process_framing_met": "仅 S3 必填：使用过程证据是否可接收；使用对象/场景上下文足以理解产品作用对象、关键动作连续可追踪、核心卖点发生区域清楚可见。合理局部特写可为 true；看不清对象/动作/证明区域或跑焦/主体出画/遮挡时为 false。false 时该侧 S3 不能算强演示。",
         "demonstrated_selling_points": [
           "动作里实际被证明的核心卖点。"
         ],
@@ -216,7 +216,7 @@
         "scene_mode": "仅 S3 必填：single_scene | multi_scene | multi_person | hybrid | unknown。",
         "usage_context_fit": "仅 S3 必填：使用场景是否给核心卖点提供合适舞台，true|false。",
         "continuity_met": "仅 S3 必填：过程是否连贯且符合真实用法，非无关镜头拼贴或错误用法，true|false。",
-        "richness_met": "仅 S3 必填：多场景覆盖多卖点，或单场景做厚；必须在 core_selling_point_visible=true 后才有意义，true|false。",
+        "richness_met": "仅 S3 必填：多场景覆盖多卖点，或单场景做厚；必须在 core_selling_point_visible=true 且 process_framing_met=true 后才有意义。单场景连续展示不自动等于 richness=true，true|false。",
         "single_scene_continuity_met": "仅 S3 必填：单场景内是否连续展示产品使用；非单场景填 false。",
         "single_scene_variation_met": "仅 S3 必填：单场景内人物状态/服装/角度/时间感是否有合理变化；非单场景填 false。",
         "multi_scene_logic_met": "仅 S3 必填：多场景是否组成清楚卖点链条/生活逻辑；非多场景填 false。",
@@ -317,7 +317,7 @@
         "必须至少 1 条，引用时间段、画面证据或口播证据。"
       ],
       "severity": "large | medium | small",
-      "creator_execution": "0 | 0.5 | 1 | 2。达人侧独立执行分：0=未执行该阶段功能；0.5=做了但对核心功能基本无效（敷衍、平庸无感，或画面晃动/模糊到无法有效接收）；1=合格（功能完成且有效；S2-S4 仅口头/文字、场景单一、缺效果对比的'呈现单薄'封顶 1）；2=出色（S2-S4 要求关键环节可视化+效果对比+场景丰富，过长全程记录不加分）。先独立打分再对比，禁止因对比回调。",
+      "creator_execution": "0 | 0.5 | 1 | 2。达人侧独立执行分：0=未执行该阶段功能；0.5=做了但对核心功能基本无效（敷衍、平庸无感，或画面晃动/模糊到无法有效接收）；1=合格（功能完成且有效；S2-S4 仅口头/文字、场景单一、缺效果对比的'呈现单薄'封顶 1）；2=出色（S3 要求核心卖点在动作里清楚可见+证据可接收+过程做厚，S4 要求关键效果可视化+效果对比+场景聚焦，过长全程记录不加分）。先独立打分再对比，禁止因对比回调。",
       "benchmark_execution": "0 | 0.5 | 1 | 2。标杆侧独立执行分，标尺同上。两个执行分是系统确定性推导差距等级的事实输入。",
       "painpoint_relevance": "benchmark_only | creator_only | both | none。该阶段双方内容是否命中 category_profile.painpoints 的核心决策因素；按内容功能判断，不要求字面用词一致。系统据此定痛点命中系数。",
       "stage_standard_delivery": "benchmark_only | creator_only | both | none。该阶段双方是否有效达到本阶段的『本品到位标准』（按阶段查产品锚点：S1 钩子→hook_proposition、S2 引出→承接钩子的自然引出、S3 使用过程→core_selling_points+usage_context（使用中传卖点）、S4 效果→core_visual_proposition、S5 信任→trust_multipliers、S6 促单→decision_threshold 匹配的 CTA）。做到/展示到才算，仅口头讲到不算。先作为事实收集，暂不参与推导。",
