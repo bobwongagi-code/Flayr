@@ -2073,9 +2073,12 @@ from flayr_core.speech_mode import classify_speech_mode  # noqa: E402
 from flayr_core.llm.payload import (  # noqa: E402
     build_llm_comparison_payload,
     build_llm_repair_payload,
+    build_product_foundation_payload,
     build_stage_review_payload,
     hook_anchor_terms,
+    load_brand_proposition,
 )
+from flayr_core.llm.pipeline import has_product_foundation_anchor  # noqa: E402
 from flayr_core.report import stage_skipped  # noqa: E402
 from flayr import resolve_ocr_policy  # noqa: E402
 
@@ -2275,6 +2278,23 @@ os.environ["FLAYR_TEST_OPENAI_KEY"] = "not-a-dashscope-key"
 _should_ocr, _ocr_key, _ocr_reason = resolve_ocr_policy(_OcrArgs())
 check("OCR 非 DashScope 配置快速禁用", not _should_ocr and _ocr_reason == "disabled_non_dashscope_config")
 os.environ.pop("FLAYR_TEST_OPENAI_KEY", None)
+
+with tempfile.TemporaryDirectory() as tmp:
+    run_dir = Path(tmp) / "sample-colorkey-b1" / "run_01"
+    run_dir.mkdir(parents=True)
+    brand = load_brand_proposition(run_dir)
+    check("冻结命题可从 run_01 父目录解析样本名", bool(brand) and "急救修护" in (brand.get("propositions") or []))
+
+_name_only_analysis = {"product": {"name": "simplus", "category": "", "core_selling_points": "", "target_user": "", "purchase_motivation": "", "notes": ""}}
+check("Step-0 护栏：纯英文品牌名无锚点时跳过", not has_product_foundation_anchor(_name_only_analysis))
+_cn_name_analysis = {"product": {"name": "儿童牙膏", "category": "", "core_selling_points": "", "target_user": "", "purchase_motivation": "", "notes": ""}}
+check("Step-0 护栏：中文品名可作为弱锚点", has_product_foundation_anchor(_cn_name_analysis))
+_brand_analysis = {
+    "product": {"name": "colorkey b1", "category": "", "core_selling_points": "", "target_user": "", "purchase_motivation": "", "notes": ""},
+    "brand_proposition": {"propositions": ["急救修护"], "painpoints": ["补水"]},
+}
+_foundation_payload_text = build_product_foundation_payload("test-model", _brand_analysis)["messages"][1]["content"][0]["text"]
+check("Step-0 payload 注入人工冻结命题", "人工冻结命题" in _foundation_payload_text and "急救修护" in _foundation_payload_text)
 
 print()
 print("RESULT:", "PASS" if not failures else f"FAIL ({len(failures)}): {failures}")

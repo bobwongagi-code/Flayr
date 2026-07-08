@@ -154,15 +154,14 @@ def run_large_model_analysis(
         raise SystemExit(f"Missing API key: set ${args.llm_api_key_env}{keychain_hint}, or use --llm-dry-run.")
 
     if args.llm_include_images:
+        # 冻结 S1 命题尺子（人工策展）：先挂进 analysis，再跑 Step-0，避免品牌/型号空猜污染品地基。
+        brand_proposition = load_brand_proposition(run_dir)
+        if brand_proposition:
+            analysis["brand_proposition"] = brand_proposition
         # Step-0：先确立品的商业地基（特征+命题），贯穿喂给阶段1 观察 + 阶段2 判断；失败则下游内联兜底。
         foundation = establish_product_foundation(args, analysis, run_dir, api_key)
         if foundation:
             analysis["product_foundation"] = foundation
-        # 冻结 S1 命题尺子（人工策展）：按【品】解析，有则挂进 analysis 供 Stage2 判 anchors + 触发 hook flag；
-        # 无则不挂 → 优雅降级回模型执行分（Slice A 路径）。
-        brand_proposition = load_brand_proposition(run_dir)
-        if brand_proposition:
-            analysis["brand_proposition"] = brand_proposition
         facts = run_video_fact_extraction(args, analysis, run_dir, api_key)
         if args.llm_dry_run:
             print(f"LLM dry run: fact request payloads written to {run_dir}")
@@ -542,13 +541,11 @@ def establish_product_foundation(
     """Step-0：看视频前先据产品事实 + 品类世界知识确立品的商业地基（category_profile 特征 +
     product_profile 命题），存 product_foundation.json 并返回，供阶段1 观察、阶段2 判断、4d 政策消费。
     失败返回 None，下游回退到阶段2 内联产出——主分析始终能跑完出报告（架构不变量）。"""
-    # 护栏：产品 name+category 都缺失时，Step-0 无锚可依、只会编通用废话；此时让位给阶段2
-    # 视频推断（至少有真实画面信号），返回 None 触发降级。运营给了 name/category 才走 Step-0。
-    product = analysis.get("product") or {}
-    name = str(product.get("name") or "").strip()
-    category = str(product.get("category") or "").strip()
-    if name in ("", "未填写", "未提供") and category in ("", "未填写", "未提供"):
-        print("Step-0 跳过：产品 name+category 均缺失，退回阶段2 视频推断（避免无锚现编废话）", flush=True)
+    if not has_product_foundation_anchor(analysis):
+        print(
+            "Step-0 跳过：缺少品类/卖点/目标用户/人工命题等可靠锚点，退回阶段2 视频推断（避免仅凭品牌名空猜）。",
+            flush=True,
+        )
         return None
     payload = build_product_foundation_payload(args.llm_model, analysis)
     request_path = run_dir / "llm_product_foundation_request.json"
@@ -570,6 +567,21 @@ def establish_product_foundation(
         return None
     write_json(run_dir / "product_foundation.json", foundation)
     return foundation
+
+
+def has_product_foundation_anchor(analysis: dict[str, Any]) -> bool:
+    """判断 Step-0 是否有足够产品锚点；纯英文品牌/型号不算可靠锚点。"""
+    product = analysis.get("product") if isinstance(analysis.get("product"), dict) else {}
+    if isinstance(analysis.get("brand_proposition"), dict) and analysis["brand_proposition"]:
+        return True
+    for key in ("category", "core_selling_points", "target_user", "purchase_motivation", "notes"):
+        value = str(product.get(key) or "").strip()
+        if value and value not in {"未填写", "未提供", "无"}:
+            return True
+    name = str(product.get("name") or "").strip()
+    if not name or name in {"未填写", "未提供"}:
+        return False
+    return any("\u4e00" <= ch <= "\u9fff" for ch in name)
 
 
 def run_video_fact_extraction(

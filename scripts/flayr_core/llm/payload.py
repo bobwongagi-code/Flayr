@@ -62,6 +62,19 @@ def build_product_foundation_payload(model: str, analysis: dict[str, Any]) -> di
     product_profile(命题)，作为下游 S1-S6 判断的独立尺子。纯文本不附视频——地基独立于任一条
     视频，避免'阶段2 现编标尺又当场自评'的循环。运营未给的字段用品类世界知识补全。"""
     p = analysis.get("product") or {}
+    brand = analysis.get("brand_proposition") if isinstance(analysis.get("brand_proposition"), dict) else {}
+    brand_hint = ""
+    if brand:
+        props = " / ".join(str(item) for item in brand.get("propositions") or [] if str(item).strip())
+        pains = " / ".join(str(item) for item in brand.get("painpoints") or [] if str(item).strip())
+        brand_hint = "\n".join(
+            [
+                "## 人工冻结命题（高优先级）",
+                "以下命题来自人工策展，优先级高于你对品牌名/型号的世界知识猜测。若产品名与人工命题冲突，以人工命题为准。",
+                f"- propositions：{props or '无'}",
+                f"- painpoints：{pains or '无'}",
+            ]
+        )
     text = "\n\n".join(
         [
             "# 品的商业地基确立（Step-0，先于看视频）",
@@ -77,6 +90,7 @@ def build_product_foundation_payload(model: str, analysis: dict[str, Any]) -> di
             f"- 购买动机：{p.get('purchase_motivation') or '未填写（按品类推）'}",
             f"- 目标市场：{p.get('target_market') or 'auto'}",
             f"- 备注：{p.get('notes') or '无'}",
+            brand_hint,
             "## 输出严格 JSON（两个对象）",
             "category_profile（品类特征，只报事实+世界知识，不做权重判断）：category_name、price_tier(low|mid|high)、"
             "decision_threshold(impulse 冲动可买|considered 需被说服)、drive_type(emotional|functional|mixed)、"
@@ -341,7 +355,13 @@ def load_brand_proposition(run_dir: Path) -> dict[str, Any] | None:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, OSError):
         return None
-    entry = data.get(resolve_brand_key(run_dir.name)) if isinstance(data, dict) else None
+    entry = None
+    if isinstance(data, dict):
+        for dirname in (run_dir.name, run_dir.parent.name):
+            candidate = data.get(resolve_brand_key(dirname))
+            if isinstance(candidate, dict):
+                entry = candidate
+                break
     if not isinstance(entry, dict):
         return None
     props = [str(p) for p in entry.get("propositions") or [] if str(p).strip()]
