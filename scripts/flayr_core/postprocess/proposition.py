@@ -116,6 +116,7 @@ def materialize_product_proposition_matrix(result: dict[str, Any], analysis: dic
         },
         "S4": {
             "core_visual_proposition": str(profile.get("core_visual_proposition") or "").strip(),
+            "visual_proof_points": profile.get("visual_proof_points") if isinstance(profile.get("visual_proof_points"), list) else [],
             "visual_diff_dimensions": _as_list(profile.get("visual_diff_dimensions"), limit=4),
             "proof_mode": str(profile.get("proof_mode") or "").strip(),
             "effect_requires_process": str(profile.get("effect_requires_process") or "").strip(),

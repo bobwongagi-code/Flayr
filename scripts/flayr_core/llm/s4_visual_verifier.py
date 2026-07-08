@@ -73,8 +73,11 @@ def build_s4_visual_verifier_payload(
             "text": (
                 "你是独立的 S4 效果呈现视觉复核器。只根据下面给你的 S4 关键帧判断，"
                 "不要沿用主分析结论，不评价口播好坏，不改 S1/S2/S3/S5/S6。\n"
-                "任务：分别判断达人和标杆是否真的把 product_profile.core_visual_proposition 对应的视觉差异拍出来。\n"
-                "判定标准：visual_difference_observed 只看 product_profile.visual_diff_dimensions 指定维度是否肉眼可见；"
+                "任务：分别判断达人和标杆是否真的把 product_profile 的 S4 视觉证明拍出来。\n"
+                "若 product_profile.visual_proof_points 存在，必须先按 priority=primary 的证明点判断核心效果是否成立；"
+                "priority=secondary 的证明点只能作为补充说明，不能替代 primary，也不能让 primary 已成立的一侧被判为无效。"
+                "若无 visual_proof_points，则回退 core_visual_proposition + visual_diff_dimensions。\n"
+                "判定标准：visual_difference_observed 优先看 primary.visual_diff_dimensions 指定维度是否肉眼可见；"
                 "module_constraints_met 按 structure_library S4-A~F 硬约束判断；effect_maximized 只有差异明显、画面聚焦、无需停下来找变化才 true。\n"
                 "输出严格 JSON："
                 "{\"creator\":{\"visual_difference_observed\":bool,\"module_constraints_met\":bool,\"effect_salience\":\"none|subtle|clear|strong\","

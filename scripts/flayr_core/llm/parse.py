@@ -608,7 +608,7 @@ def normalize_category_profile(value: Any) -> dict[str, Any] | None:
 def normalize_product_profile(value: Any) -> dict[str, Any] | None:
     """产品商业 DNA 归一：判分前模型先立的"本品视觉命题"尺子。
 
-    core_visual_proposition 是 S2-S4 执行分锚点（"该展示成什么样才算到位"按品现推，跨品类泛化）。
+    visual_proof_points.primary 是 S4 执行分主锚；core_visual_proposition 只做旧结果回退。
     模型只报产品事实 + 品类世界知识；后续运营/DNA 库可经 postprocess 覆盖（同 price_tier 降级链）。
     """
     if not isinstance(value, dict):
@@ -616,6 +616,7 @@ def normalize_product_profile(value: Any) -> dict[str, Any] | None:
     multipliers = [str(m).strip() for m in value.get("trust_multipliers") or [] if str(m).strip()][:6]
     dimensions = [str(d).strip() for d in value.get("visual_diff_dimensions") or [] if str(d).strip()][:3]
     selling_points = [str(s).strip() for s in value.get("core_selling_points") or [] if str(s).strip()][:6]
+    visual_proof_points = normalize_visual_proof_points(value.get("visual_proof_points"))
     return {
         # 可视化分叉：no（香水/保健品等效果拍不出）时 S4 视觉审计失效，判断权重应转 S5/达人可信度
         "visualizable": normalize_choice(value.get("visualizable"), {"yes", "no"}, "yes"),
@@ -627,6 +628,7 @@ def normalize_product_profile(value: Any) -> dict[str, Any] | None:
         # S3 场景层：本品典型使用场景（卖点演示的舞台，判场景适配/丰富/连贯的基准）
         "usage_context": str(value.get("usage_context") or "").strip(),
         "core_visual_proposition": str(value.get("core_visual_proposition") or "").strip(),
+        "visual_proof_points": visual_proof_points,
         # 证明模式：S4 如何证明价值。视觉即时效果只是其中一种，低价颜值品/长周期品/感官品要避免硬套 before-after。
         "proof_mode": normalize_proof_mode(value.get("proof_mode")),
         "effect_requires_process": normalize_effect_requires_process(value.get("effect_requires_process")),
@@ -638,6 +640,36 @@ def normalize_product_profile(value: Any) -> dict[str, Any] | None:
         "dna_source": "model_inferred",
         "confidence": normalize_choice(value.get("confidence"), {"high", "low"}, "high"),
     }
+
+
+def normalize_visual_proof_points(value: Any) -> list[dict[str, Any]]:
+    """归一 S4 多视觉证明点；兼容旧 product_profile 无此字段。"""
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        proof_target = str(item.get("proof_target") or item.get("target") or "").strip()
+        visual_standard = str(item.get("visual_standard") or item.get("standard") or "").strip()
+        if not proof_target and not visual_standard:
+            continue
+        dims = [str(dim).strip() for dim in item.get("visual_diff_dimensions") or [] if str(dim).strip()][:3]
+        related = [str(point).strip() for point in item.get("related_selling_points") or [] if str(point).strip()][:4]
+        out.append(
+            {
+                "priority": normalize_choice(item.get("priority"), {"primary", "secondary"}, "secondary"),
+                "proof_target": proof_target,
+                "visual_standard": visual_standard,
+                "visual_diff_dimensions": dims,
+                "related_selling_points": related,
+            }
+        )
+        if len(out) >= 4:
+            break
+    if out and not any(point["priority"] == "primary" for point in out):
+        out[0]["priority"] = "primary"
+    return out
 
 
 def normalize_bool_flag(value: Any) -> bool:

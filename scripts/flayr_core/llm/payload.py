@@ -101,6 +101,9 @@ def build_product_foundation_payload(model: str, analysis: dict[str, Any]) -> di
             "core_selling_points（S3 主轴：使用过程要演示传递的核心卖点，1-6 个）、"
             "usage_context（S3 场景层：本品典型使用场景=卖点演示的舞台）、"
             "core_visual_proposition（S4 决定性视觉瞬间=到位效果标准，按本品现推、别套通用 before/after）、"
+            "visual_proof_points（S4 多视觉证明点，数组 1-4 个；每项含 priority(primary|secondary)、proof_target、"
+            "visual_standard、visual_diff_dimensions、related_selling_points。primary 必须是消费者最核心的效果证明；"
+            "secondary 是附加卖点证明，不能压过 primary。例：一次性马桶刷 primary=清洁结果可见，secondary=刷头抛弃/溶解/免接触卫生）、"
             "proof_mode（S4 价值证明模式：instant_visual|process_result|sensory_proxy|aesthetic_value|social_reaction|long_term_record|trust_substituted|low_decision_light_proof）、"
             "effect_requires_process（效果是否必须依赖使用过程证明：true|false|partial）、"
             "visual_diff_dimensions（before/after 应变化的视觉维度，1-3 个）、"
@@ -158,10 +161,19 @@ def build_video_fact_payload(
     if fnd:
         csp = "、".join(fnd.get("core_selling_points") or []) or "（无）"
         vdd = "、".join(fnd.get("visual_diff_dimensions") or []) or "（无）"
+        proof_points = []
+        for point in fnd.get("visual_proof_points") or []:
+            if not isinstance(point, dict):
+                continue
+            proof_points.append(
+                f"{point.get('priority') or 'secondary'}:{point.get('proof_target') or ''}→{point.get('visual_standard') or ''}"
+            )
+        proof_points_text = "；".join(proof_points) or "（无）"
         obs_hint = "\n".join(
             [
                 "## 本品重点观察线索（据产品地基，帮你定位该盯什么；只记客观证据、不下结论）",
-                f"- 核心视觉命题：{fnd.get('core_visual_proposition') or '（无）'}——留意画面有没有出现/拍清这个决定性瞬间，按实记拍到与否、是否清晰。",
+                f"- S4 多视觉证明点：{proof_points_text}——primary 是核心效果证明，secondary 是附加卖点证明，观察时都记，但不要互相替代。",
+                f"- 旧兼容核心视觉命题：{fnd.get('core_visual_proposition') or '（无）'}——无多证明点时用它辅助定位决定性瞬间。",
                 f"- before/after 应变化的视觉维度：{vdd}——重点观察这些维度的画面证据。",
                 f"- 核心卖点：{csp}——留意使用过程中这些卖点有没有被动作演示出来。",
                 f"- 典型使用场景：{fnd.get('usage_context') or '（无）'}。",
@@ -585,8 +597,8 @@ def build_llm_comparison_payload(
         foundation_block = (
             "## 本品商业地基（Step-0 已确立，作为 S1-S6 判断的尺子，直接采用）\n"
             "以下 category_profile（特征）与 product_profile（命题）已在看视频前据产品事实+品类世界知识确立。"
-            "S1-S6 的锚点（hook_proposition/core_selling_points/usage_context/core_visual_proposition/"
-            "trust_multipliers/decision_threshold 等）一律以此为准，直接用它判断达人/标杆，不要另起炉灶重推；"
+            "S1-S6 的锚点（hook_proposition/core_selling_points/usage_context/visual_proof_points.primary/"
+            "core_visual_proposition fallback/trust_multipliers/decision_threshold 等）一律以此为准，直接用它判断达人/标杆，不要另起炉灶重推；"
             "你输出的 category_profile/product_profile 必须原样回填这套地基。\n"
             + json.dumps(fnd, ensure_ascii=False, indent=2)
         )
@@ -716,7 +728,7 @@ def build_llm_comparison_payload(
         '{"effect_type": "before_after|split_screen|person_vs_person|product_vs_alt|quantified_test|process_visualization|aesthetic_display|none", '
         '"effect_visible": bool（效果/结果是否肉眼可见）, '
         '"effect_salience": "none|subtle|clear|strong"（none=无效果；subtle=要仔细看才有变化；clear=普通用户能看出来；strong=一眼明显、有停留价值）, '
-        '"effect_proposition_matched": bool（是否命中 product_profile.core_visual_proposition，而不是展示了无关变化）, '
+        '"effect_proposition_matched": bool（是否命中 product_profile.visual_proof_points.primary；旧结果无该字段时回退 core_visual_proposition，不得用 secondary 或无关变化替代）, '
         '"comparison_control_met": bool（仅对 S4-A/B/C/D/E 等对比/量化型效果判前后/左右/对照是否同角度、同光线、同对象、同距离；'
         'S4-F process_visualization 不靠对照控制，若没有前后/替代/参照物对比可填 false，不因此否定强效果）, '
         '"closeup_or_focus_met": bool（是否用特写/近景/聚焦/构图把效果放大到短视频用户一眼能看见）, '
@@ -864,10 +876,10 @@ def build_llm_comparison_payload(
             s6_field_req,
             "task_completion 只能取 complete、partial、missing 三选一（达人侧该阶段功能完成度），禁止 both_complete、no_gap 等任何其他词；标杆侧完成情况写在 benchmark_summary。",
             "creator_execution 与 benchmark_execution 取值只能是 0、0.5、1、2 四个数字：0=未执行该阶段功能；0.5=做了但对该阶段核心功能基本无效——敷衍、平庸无感、几乎不起作用（如一句轻带的 CTA、平铺直叙毫无抓力的开场、仅口头承诺没有任何验证支撑）；1=执行合格（功能完成且对观众有效）；2=执行出色（可视化演示/铺垫到位/感染力强）。两侧按该阶段功能定义各自独立打分，先打分再对比，禁止因对比结果回调任何一侧分数。",
-            "效果呈现阶段（S4）执行分以 product_profile.core_visual_proposition（本品核心视觉命题）为评判锚点，不套通用 before/after：先判该侧有没有拍出本品的决定性瞬间（定妆粉饼=粉底油光→哑光对比、面膜=逐日变化+敷后效果），并满足 product_profile.shooting_requirement（效果细微的品需正面强光+面部特写才算拍到）。拍出命题且拍摄到位才给 2；只完成动作（揭膜/擦粉/口头带过）未体现命题、或拍摄条件不支撑（暗光/无特写/wide shot 看不出效果）按敷衍计最高 0.5；做了但缺命题对比的'呈现单薄'最高 1。过长全程记录不加分（标尺是命题覆盖非完整性）。两侧各自独立打分，禁止因对比回调。",
-            "S4 给执行分前必须做一次闭环核验：回到该侧关键帧，对照 core_visual_proposition 与 visual_diff_dimensions，在画面上实际确认那个视觉对比肉眼可见——'存在 before/after 结构'不等于'对比拍出来了'。若该侧前后帧在指定维度上看不出明显差异（如油光帧与哑光帧看起来差不多、敷膜前后肤质无变化），即命题未被有效呈现，visual_difference_observed=false，该侧执行分最高 1（只完成动作未呈现效果）；几乎完全无差异则 0.5。这是把你自己定的命题当检查清单逐帧核对，不许凭结构臆断。两侧同此核验。",
+            "效果呈现阶段（S4）执行分以 product_profile.visual_proof_points 的 primary 证明点为主锚；若旧结果无该字段，回退 product_profile.core_visual_proposition。不套通用 before/after：先判该侧有没有拍出本品 primary 效果证明（定妆粉饼=粉底油光→哑光对比、面膜=逐日变化+敷后效果、清洁工具=清洁结果可见），并满足 product_profile.shooting_requirement。secondary 证明点（如防水/防汗测试、美容仪、刷头抛弃/溶解、周期记录、专业手法等）只能作为补充，不得替代 primary，也不得让 primary 缺失的一侧直接归零。拍出 primary 且拍摄到位才给 2；只完成动作未体现 primary、或拍摄条件不支撑，按敷衍计最高 0.5；做了但 primary 呈现单薄最高 1。两侧各自独立打分，禁止因对比回调。",
+            "S4 给执行分前必须做一次闭环核验：回到该侧关键帧，对照 visual_proof_points.primary.visual_standard/visual_diff_dimensions（无该字段则用 core_visual_proposition 与 visual_diff_dimensions），在画面上实际确认那个视觉对比肉眼可见——'存在 before/after 结构'不等于'对比拍出来了'。若该侧前后帧在指定维度上看不出明显差异，即命题未被有效呈现，visual_difference_observed=false，该侧执行分最高 1；几乎完全无差异则 0.5。不许用 secondary 证明点补偿 primary 缺失。",
             "S4 还必须按 structure_library_full.md 的模块硬约束输出 module_constraints_met：S4-A/B 必须同对象同光线同构图或同细节区域，S4-C 必须人物条件可比，S4-D 必须本品与替代方案形成结果对照，S4-E 必须借日常参照物量化，S4-F 必须用特写/慢镜/微距让过程可视化。模块硬约束不成立，即使口播说有效或字幕写 before/after，也不能给满执行。",
-            "S4 执行分主轴只有一个：core_visual_proposition（核心命题）的有效呈现。trust_multipliers（防水/防汗测试、美容仪、周期记录、专业手法等）是加分项，只能在核心命题已有效呈现（该侧≥1）时把分抬向 2；不能替代、也不能补偿弱核心命题。若某侧核心命题没拍出来（对比弱/不可见），哪怕它有很强的次要演示，该侧执行分仍封顶 1——严禁用次要演示把分顶上去。判分先看核心命题达没达到，再决定加分项加不加。",
+            "S4 执行分主轴是 primary visual proof 的有效呈现。trust_multipliers 与 visual_proof_points.secondary 是加分项或补充说明，只能在 primary 已有效呈现（该侧≥1）时把分抬向 2；不能替代、也不能补偿弱 primary。若某侧 primary 没拍出来（对比弱/不可见），哪怕它有很强的次要演示，该侧执行分仍封顶 1。",
             "S4 还要逐侧输出布尔字段 benchmark_has_effect_demo / creator_has_effect_demo（非 S4 阶段填 null）——针对本卖点，该侧视频里有没有出现『效果呈现』。"
             "判 true 当且仅当满足结构库 S4-A~F 任意一种：①前后状态对比（同机位/分屏/左右 before/after，S4-A/B）；②人物差异对比（用了的人 vs 没用的人，视觉差可见，S4-C）；"
             "③本品 vs 替代方案效果对比（结果侧有差异，S4-D）；④借物量化（硬币/纸巾/水珠等参照物展示可量化效果，S4-E）；"
@@ -883,9 +895,9 @@ def build_llm_comparison_payload(
             "0.5 档同样适用于'内容存在但消费者无法有效接收'：看不清（虚焦/过曝/遮挡/一闪而过/画面晃动到观众抓不住重点）、听不清（吞字/被 BGM 压制）、读不完（字幕停留过短）——物理存在不等于有效传递，晃动按观众可看性判而非镜头美学。S5 背书孤证规则：仅口播提及背书而画面无任何佐证、或背书标志一闪而过无法辨认，执行分最高 0.5（高决策门槛品类口头孤证视为无效背书）。",
             "painpoint_relevance 只能取 benchmark_only、creator_only、both、none 四选一：该阶段双方内容是否命中 category_profile.painpoints 中的核心决策因素——只有标杆命中/只有达人命中/双方都命中/双方都未命中。按内容功能判断（讲没讲到、演没演到核心痛点），不要求字面用词一致。",
             "category_profile 必须含：category_name（品类名）, price_tier（low|mid|high 客单价档）, decision_threshold（impulse|considered）, drive_type（emotional|functional|mixed）, painpoints（该品类目标消费者最在意的决策因素关键词，每个痛点同时给中文和本地语两种表述放进同一数组，共 6-16 个词条）。只报品类事实与世界知识，不做权重判断。",
-            "打分前必须先输出 product_profile 产品商业 DNA（这是 S1-S6 打分的尺子，先立尺再量）：visualizable（yes|no，核心价值能否视觉化）、physical_task（解决的最直观尴尬）、hook_proposition（本品对目标人群最有拦截力的点=钩子命题，类型取决于本品、不限痛点——可痛点/承诺/反差/情绪/向往/视觉吸引/身份代入/场景还原等，见 structure_library S1 七型，模型按品类+视频推、运营可覆盖）、core_visual_proposition（决定性视觉瞬间=本品到位效果展示的标准，按本品现推，别套通用 before/after）、proof_mode（instant_visual/process_result/sensory_proxy/aesthetic_value/social_reaction/long_term_record/trust_substituted/low_decision_light_proof）、effect_requires_process（true/false/partial：S4 效果是否必须依赖 S3 使用过程证明）、visual_diff_dimensions（本品 before/after 应在哪些视觉维度变化，从 亮度反光/纹理毛孔/色泽均匀度/水润干燥/肿胀轮廓 中选或按品自命名如去污/拉丝，1-3 个，S4 核验对比只看这些维度）、trust_multipliers（建立专业度的元素如美容仪/周期记录/专业手法/第三方检测，3-6 个）、shooting_requirement（卖点显现所需拍摄条件）、confidence（high|low，小众或本地新奇特品标 low）。只报产品事实与品类世界知识。visualizable=no（香水/保健品/隐形矫正等效果拍不出）时，S4 不强求视觉命题，把判断重心放到 S5 信任放大与达人可信度。",
+            "打分前必须先输出 product_profile 产品商业 DNA（这是 S1-S6 打分的尺子，先立尺再量）：visualizable（yes|no，核心价值能否视觉化）、physical_task（解决的最直观尴尬）、hook_proposition（本品对目标人群最有拦截力的点=钩子命题）、core_visual_proposition（旧兼容字段：决定性视觉瞬间=本品到位效果展示的标准）、visual_proof_points（S4 多视觉证明点，数组 1-4 个；每项含 priority primary|secondary、proof_target、visual_standard、visual_diff_dimensions、related_selling_points；primary 是用户最核心效果证明，secondary 是附加卖点证明，不能压过 primary）、proof_mode（instant_visual/process_result/sensory_proxy/aesthetic_value/social_reaction/long_term_record/trust_substituted/low_decision_light_proof）、effect_requires_process（true/false/partial）、visual_diff_dimensions（旧兼容字段，本品 before/after 应在哪些视觉维度变化，1-3 个）、trust_multipliers（建立专业度的元素，3-6 个）、shooting_requirement、confidence（high|low）。只报产品事实与品类世界知识。visualizable=no 时 S4 不强求视觉命题，把判断重心放到 S5 信任放大与达人可信度。",
             "每阶段输出 stage_standard_delivery（benchmark_only|creator_only|both|none）：该阶段双方是否有效达到本阶段的『本品到位标准』（见下条对照表锚点）。做到/展示到才算，仅口头讲到不算。先作为事实输出，暂不参与推导。",
-            "S1-S6 执行分统一三层判：阶段目标(core_question) → 用了什么做法(module_id/module_fit) → 该做法在【本品】上到位没(execution)。'到位'按阶段查本品锚点、核心目标为主轴次要元素不补偿弱核心；本轮已接入的阶段锚点——S4 效果呈现→锚 core_visual_proposition（详见前述演示锚点+闭环核验+核心主轴三条）；S5 信任放大→锚 trust_multipliers：硬信任（第三方认证/检测/临床/仪器实测/官方背书）有效呈现可达 2，软信任（真实好评/社会认同/向往式对比/使用记录/达人自用）算信任但封顶 1（软不如硬），自述功效/纯参数不算；位置优先——视频开头的此类背书内容算 S1 钩子（留人）、结尾算 S6 CTA，不要按语义把开头/结尾的背书塞进 S5；判'用没用且呈现有效'非'口头说没说'，口播孤证或标志一闪而过最高 0.5；S6 促单→到位=把 structure_library S6 五型各自【适配条件】（含排除项，如价格锚定/赠品堆叠排除情感满足品=category_profile.drive_type=emotional）套上本品特征 category_profile（decision_threshold/drive_type/品类）+命题 product_profile，判达人/标杆选的 CTA 类型适配与否＋执行到位与否，gap=适配×执行差距；决策类型（冲动/高决策）是输入之一非唯一轴——冲动品需清晰指令+紧迫感、高决策品需先消顾虑再 CTA，但哪型 CTA 好仍由(五型适配条件×本品命题)结合得出。S1 钩子→到位=把 structure_library S1 七型各自【适配条件】（按品类/购买动机匹配）套上本品特征 category_profile（品类/drive_type/decision_threshold）+命题 product_profile（hook_proposition），判达人/标杆选的钩子类型适配本品与否＋执行到位与否，gap=适配×执行差距；不预设某根轴（痛点/视觉冲击/悬念）通用为好，好坏由(类型适配条件×本品命题)结合得出（潮玩配场景还原/反差、儿童牙膏配身份代入/场景还原、榨汁机配反差/场景还原）；开头的背书/认证类内容按钩子算（见位置宪法）；S2 产品引出→到位=引出自然 + 承接 S1 钩子（冲着钩子抛出的那个点去承接，痛点钩→引出冲着解痛点）+ 引出产品身份（这是什么品）；S2 只判这两件事，不判卖点本身、也不判卖点细节/选购指导/适配人群/参数/信息完整度（这些归 S3/S4）——标杆比达人多讲分肤质版/选购建议/卖点细节，不构成 S2 差距，只要达人自然引出+点明产品身份即同等到位；锚 hook_proposition 承接；S3 使用过程→主轴锚 core_selling_points（卖点传递有效性）+ 场景层 usage_context：到位=真实使用过程中把核心卖点'演示出来'被看见（清洁机吸力强/干湿分离/易倒垃圾在动作里可见，不是嘴上讲——演示即证据=打开水箱看见分层）；按 14b5 这是不可补偿主轴，场景再丰富人员再多样、卖点没在过程落地仍判弱；前置门槛真实感与证据接收质量（显假/摆拍/看不清对象动作证明区域直接封顶低分）；S3 不评教学清晰度；场景层三看——适配度（场景给没给卖点舞台，地毯/沙发高、光洁瓷砖低）+丰富性（多场景覆盖多卖点 或 单场景做厚=多角度多卖点完整过程非一个动作反复，二选一）+连贯一致（拧成同一产品叙事且与真实用法一致，非拼贴非演错用法）；单场景连续展示只算合格，给 2 还必须体现丰富性或变化；人员看配置是否强化说服非人数（单/多人/单人用+多人体验皆可，多人须带'大家都有好体验'社会化证据）；独立背书归 S5。",
+            "S1-S6 执行分统一三层判：阶段目标(core_question) → 用了什么做法(module_id/module_fit) → 该做法在【本品】上到位没(execution)。'到位'按阶段查本品锚点、核心目标为主轴次要元素不补偿弱核心；本轮已接入的阶段锚点——S4 效果呈现→锚 visual_proof_points.primary（旧结果回退 core_visual_proposition）；S5 信任放大→锚 trust_multipliers：硬信任（第三方认证/检测/临床/仪器实测/官方背书）有效呈现可达 2，软信任（真实好评/社会认同/向往式对比/使用记录/达人自用）算信任但封顶 1（软不如硬），自述功效/纯参数不算；位置优先——视频开头的此类背书内容算 S1 钩子（留人）、结尾算 S6 CTA，不要按语义把开头/结尾的背书塞进 S5；判'用没用且呈现有效'非'口头说没说'，口播孤证或标志一闪而过最高 0.5；S6 促单→到位=把 structure_library S6 五型各自【适配条件】套上本品特征 category_profile + 命题 product_profile；S1 钩子→到位=把 structure_library S1 七型各自【适配条件】套上本品特征 category_profile + hook_proposition；S2 产品引出→到位=引出自然 + 承接 S1 钩子 + 引出产品身份；S3 使用过程→主轴锚 core_selling_points + 场景层 usage_context：到位=真实使用过程中把核心卖点'演示出来'被看见，场景再丰富人员再多样、卖点没在过程落地仍判弱。",
             "improvements 每项必须含：title,target_stage,gmv_impact,gap_type,time_range,creator_time_range,benchmark_time_range,problem,benchmark_reference,benchmark_evidence_ids,suggestion,actions,gmv_reason,evidence,creator_script,creator_script_zh,base_frame_suitability,best_base_frame_time,base_frame_evidence_id,base_frame_reason,aigc_prompt,aigc_image_path,expected_effect,priority。",
             "可额外输出 top-level low_confidence_stages，数组元素只能是 S1-S6；只有当该阶段现有帧/音频不足以支撑 severity 时才填写，最多 2 个。",
             "除 stage_analysis、improvements、video_understanding.evidence_units、low_confidence_stages 和 category_profile.painpoints 外，所有数组最多 1 条。所有描述字段最多一句且不超过 40 个汉字。video_understanding 必须原样使用事实清单，不得新增、改写或跨视频移动 evidence_units。",

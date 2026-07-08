@@ -239,7 +239,7 @@
         "effect_type": "仅 S4 必填：before_after | split_screen | person_vs_person | product_vs_alt | quantified_test | process_visualization | aesthetic_display | none。",
         "effect_visible": "仅 S4 必填：达人侧效果/结果是否肉眼可见，true|false。",
         "effect_salience": "仅 S4 必填：none | subtle | clear | strong。subtle=要仔细看才有变化；strong=一眼明显。",
-        "effect_proposition_matched": "仅 S4 必填：是否命中 product_profile.core_visual_proposition，而不是无关变化。",
+        "effect_proposition_matched": "仅 S4 必填：是否命中 product_profile.visual_proof_points 的 primary 证明点；旧结果无该字段时回退 core_visual_proposition；不得用无关变化或 secondary 证明点替代 primary。",
         "comparison_control_met": "仅 S4 必填：前后/左右/对照是否同角度、同光线、同对象、同距离；无对比型效果时按该类型是否有公平控制判断。",
         "closeup_or_focus_met": "仅 S4 必填：是否用特写/近景/聚焦/构图把效果放大到短视频用户一眼能看见。",
         "visual_difference_observed": "仅 S4 必填：是否能在 product_profile.visual_diff_dimensions 指定维度上直接看见变化/差异/量化结果；只看见结构、动作、字幕或口播但看不出变化时为 false。",
@@ -259,7 +259,7 @@
         "effect_type": "仅 S4 必填：before_after | split_screen | person_vs_person | product_vs_alt | quantified_test | process_visualization | aesthetic_display | none。",
         "effect_visible": "仅 S4 必填：标杆侧效果/结果是否肉眼可见，true|false。",
         "effect_salience": "仅 S4 必填：none | subtle | clear | strong。subtle=要仔细看才有变化；strong=一眼明显。",
-        "effect_proposition_matched": "仅 S4 必填：是否命中 product_profile.core_visual_proposition，而不是无关变化。",
+        "effect_proposition_matched": "仅 S4 必填：是否命中 product_profile.visual_proof_points 的 primary 证明点；旧结果无该字段时回退 core_visual_proposition；不得用无关变化或 secondary 证明点替代 primary。",
         "comparison_control_met": "仅 S4 必填：前后/左右/对照是否同角度、同光线、同对象、同距离；无对比型效果时按该类型是否有公平控制判断。",
         "closeup_or_focus_met": "仅 S4 必填：是否用特写/近景/聚焦/构图把效果放大到短视频用户一眼能看见。",
         "visual_difference_observed": "仅 S4 必填：是否能在 product_profile.visual_diff_dimensions 指定维度上直接看见变化/差异/量化结果；只看见结构、动作、字幕或口播但看不出变化时为 false。",
@@ -324,7 +324,7 @@
       "creator_execution": "0 | 0.5 | 1 | 2。达人侧独立执行分：0=未执行该阶段功能；0.5=做了但对核心功能基本无效（敷衍、平庸无感，或画面晃动/模糊到无法有效接收）；1=合格（功能完成且有效；S2-S4 仅口头/文字、场景单一、缺效果对比的'呈现单薄'封顶 1）；2=出色（S3 要求核心卖点在动作里清楚可见+证据可接收+过程做厚，S4 要求关键效果可视化+效果对比+场景聚焦+模块硬约束成立+视觉差异真被观察到，过长全程记录不加分）。先独立打分再对比，禁止因对比回调。",
       "benchmark_execution": "0 | 0.5 | 1 | 2。标杆侧独立执行分，标尺同上。两个执行分是系统确定性推导差距等级的事实输入。",
       "painpoint_relevance": "benchmark_only | creator_only | both | none。该阶段双方内容是否命中 category_profile.painpoints 的核心决策因素；按内容功能判断，不要求字面用词一致。系统据此定痛点命中系数。",
-      "stage_standard_delivery": "benchmark_only | creator_only | both | none。该阶段双方是否有效达到本阶段的『本品到位标准』（按阶段查产品锚点：S1 钩子→hook_proposition、S2 引出→承接钩子的自然引出、S3 使用过程→core_selling_points+usage_context（使用中传卖点）、S4 效果→core_visual_proposition、S5 信任→trust_multipliers、S6 促单→decision_threshold 匹配的 CTA）。做到/展示到才算，仅口头讲到不算。先作为事实收集，暂不参与推导。",
+      "stage_standard_delivery": "benchmark_only | creator_only | both | none。该阶段双方是否有效达到本阶段的『本品到位标准』（按阶段查产品锚点：S1 钩子→hook_proposition、S2 引出→承接钩子的自然引出、S3 使用过程→core_selling_points+usage_context（使用中传卖点）、S4 效果→visual_proof_points.primary（旧结果回退 core_visual_proposition）、S5 信任→trust_multipliers、S6 促单→decision_threshold 匹配的 CTA）。做到/展示到才算，仅口头讲到不算。先作为事实收集，暂不参与推导。",
       "creator_s5": "仅 S5 需输出。对象字段：exists、module_type(A-E/unknown)、trust_evidence_type(hard/soft/mixed/none/unknown)、trust_source_visible、trust_source_credible、trust_claim_specific、product_relevance_met、independent_trust_purpose、duplicates_other_stage、voice_only、risky_or_unsupported、start_seconds、end_seconds、trust_reason、evidence_ids。",
       "benchmark_s5": "仅 S5 需输出。字段同 creator_s5。",
       "creator_s6": "仅 S6 需输出。对象字段：exists、module_type(A-E/unknown)、direct_order_met、action_path_clear、offer_or_incentive_clear、urgency_met、product_value_recalled、module_fit_met、ending_position_met、depends_on_valid_s4、compliance_risk、start_seconds、end_seconds、cta_reason、evidence_ids。",
@@ -350,7 +350,20 @@
       "S3 主轴：本品核心卖点（使用过程中要被『演示出来』传递的对象）。例：定妆粉饼=控油持妆/遮毛孔/粉质细腻；清洁机=吸力强/干湿分离/易倒垃圾。1-6 个，模型按品类+产品事实推，运营可供给。"
     ],
     "usage_context": "S3 场景层：本品典型使用场景（卖点演示的舞台，判场景适配/丰富/连贯的基准）。例：定妆粉饼=补妆/出油时段补涂；清洁机=客厅地毯/厨房瓷砖清洁。模型按品类+产品事实推。",
-    "core_visual_proposition": "★核心视觉命题★ 哪个决定性画面瞬间让消费者瞬间信服，即本品『到位效果展示』的标准。例：强光下半脸反光 vs 半脸哑光的对比；面膜逐日肤质变化 + 敷后透亮。这是 S2-S4 执行分的评判锚点，按本品现推、不要套通用 before/after。",
+    "core_visual_proposition": "旧兼容字段：本品到位效果展示的核心视觉命题。新结果优先使用 visual_proof_points.primary 作为 S4 评判锚点；旧结果无 visual_proof_points 时才回退此字段。",
+    "visual_proof_points": [
+      {
+        "priority": "primary | secondary。primary 是消费者最核心的效果证明；secondary 是附加卖点证明，不能压过 primary。",
+        "proof_target": "这个视觉证明点要证明什么产品价值。例：清洁结果可见、刷头抛弃/溶解、油光变哑光。",
+        "visual_standard": "画面做到什么程度才算证明成立。例：马桶污渍被刷洗/冲走并露出干净内壁。",
+        "visual_diff_dimensions": [
+          "该证明点要看的视觉变化维度，1-3 个。"
+        ],
+        "related_selling_points": [
+          "关联 core_selling_points 中的卖点或同义表达。"
+        ]
+      }
+    ],
     "proof_mode": "S4 价值证明模式：instant_visual | process_result | sensory_proxy | aesthetic_value | social_reaction | long_term_record | trust_substituted | low_decision_light_proof。",
     "effect_requires_process": "S4 效果是否必须依赖 S3 使用过程证明：true | false | partial。",
     "visual_diff_dimensions": [

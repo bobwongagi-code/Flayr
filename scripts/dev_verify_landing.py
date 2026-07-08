@@ -440,6 +440,15 @@ _matrix_result = {
         "core_selling_points": ["强力吸油不拔干"],
         "usage_context": "出门补妆",
         "core_visual_proposition": "油光脸变哑光脸",
+        "visual_proof_points": [
+            {
+                "priority": "primary",
+                "proof_target": "油光变哑光",
+                "visual_standard": "强光下反光明显下降",
+                "visual_diff_dimensions": ["亮度反光"],
+                "related_selling_points": ["强力吸油不拔干"],
+            }
+        ],
         "visual_diff_dimensions": ["亮度反光"],
         "trust_multipliers": ["真人实测"],
     },
@@ -459,6 +468,7 @@ check(
     _matrix_result["product_proposition_matrix"]["S1"]["hook_propositions"] == ["柔焦隐形毛孔"]
     and _matrix_result["product_proposition_matrix"]["S3"]["core_selling_points"] == ["强力吸油不拔干"]
     and _matrix_result["product_proposition_matrix"]["S4"]["core_visual_proposition"] == "油光脸变哑光脸"
+    and _matrix_result["product_proposition_matrix"]["S4"]["visual_proof_points"][0]["priority"] == "primary"
     and bool(_matrix_result["product_proposition_matrix"]["S6"]["cta_value_hooks"]),
 )
 check(
@@ -1281,9 +1291,25 @@ _npp = normalize_product_profile({
     "proof_mode": "sensory-proxy",
     "effect_requires_process": "yes",
     "core_selling_points": ["香味持久"],
+    "visual_proof_points": [
+        {
+            "priority": "primary",
+            "proof_target": "香味体验",
+            "visual_standard": "儿童闻香后主动靠近",
+            "visual_diff_dimensions": ["表情反应"],
+        },
+        {
+            "priority": "secondary",
+            "proof_target": "泡沫形态",
+            "visual_standard": "按压后泡沫稳定成型",
+        },
+    ],
 })
 check("product_profile 归一 proof_mode/effect_requires_process",
       _npp["proof_mode"] == "sensory_proxy" and _npp["effect_requires_process"] == "true")
+check("product_profile 归一 visual_proof_points",
+      _npp["visual_proof_points"][0]["priority"] == "primary"
+      and _npp["visual_proof_points"][1]["proof_target"] == "泡沫形态")
 
 _rel = normalize_s3_s4_relationship({
     "creator_relationship": "result-without-process",
@@ -2295,6 +2321,7 @@ _brand_analysis = {
 }
 _foundation_payload_text = build_product_foundation_payload("test-model", _brand_analysis)["messages"][1]["content"][0]["text"]
 check("Step-0 payload 注入人工冻结命题", "人工冻结命题" in _foundation_payload_text and "急救修护" in _foundation_payload_text)
+check("Step-0 payload 要求 S4 多视觉证明点", "visual_proof_points" in _foundation_payload_text and "primary" in _foundation_payload_text)
 
 print()
 print("RESULT:", "PASS" if not failures else f"FAIL ({len(failures)}): {failures}")
