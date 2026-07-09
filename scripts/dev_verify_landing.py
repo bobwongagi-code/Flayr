@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import os
 import py_compile
 import sys
@@ -1310,6 +1311,34 @@ check("product_profile 归一 proof_mode/effect_requires_process",
 check("product_profile 归一 visual_proof_points",
       _npp["visual_proof_points"][0]["priority"] == "primary"
       and _npp["visual_proof_points"][1]["proof_target"] == "泡沫形态")
+_compound_vpp = normalize_product_profile({
+    "visual_proof_points": [
+        {
+            "priority": "primary",
+            "proof_target": "清洁力与溶解性双重验证",
+            "visual_standard": "污渍被擦除后，刷头在水中迅速崩解并随水流冲走",
+            "visual_diff_dimensions": ["污渍存在vs污渍消失", "固体刷头vs完全溶解"],
+            "related_selling_points": ["自带清洁剂遇水即溶", "刷头可降解直接冲走"],
+        }
+    ],
+})
+check("product_profile 拆分复合 primary",
+      _compound_vpp["visual_proof_points"][0]["priority"] == "primary"
+      and _compound_vpp["visual_proof_points"][0]["proof_target"] == "清洁力"
+      and _compound_vpp["visual_proof_points"][0]["visual_diff_dimensions"] == ["污渍存在vs污渍消失"]
+      and _compound_vpp["visual_proof_points"][1]["priority"] == "secondary")
+_process_polluted_vpp = normalize_product_profile({
+    "visual_proof_points": [
+        {
+            "priority": "primary",
+            "proof_target": "清洁效果",
+            "visual_standard": "刷头入水即刻起泡",
+            "visual_diff_dimensions": ["污渍存在 vs 洁净如新"],
+        }
+    ],
+})
+check("product_profile 修正结果型 primary 的机制标准",
+      _process_polluted_vpp["visual_proof_points"][0]["visual_standard"] == "污渍存在 vs 洁净如新")
 
 _rel = normalize_s3_s4_relationship({
     "creator_relationship": "result-without-process",
@@ -2322,6 +2351,11 @@ _brand_analysis = {
 _foundation_payload_text = build_product_foundation_payload("test-model", _brand_analysis)["messages"][1]["content"][0]["text"]
 check("Step-0 payload 注入人工冻结命题", "人工冻结命题" in _foundation_payload_text and "急救修护" in _foundation_payload_text)
 check("Step-0 payload 要求 S4 多视觉证明点", "visual_proof_points" in _foundation_payload_text and "primary" in _foundation_payload_text)
+check("Step-0 payload 禁止复合 primary",
+      "all-of" in _foundation_payload_text and "一次性马桶刷 primary=清洁结果可见" in _foundation_payload_text)
+check("S4 verifier 兜底复合 primary",
+      "复合条件" in inspect.getsource(s4_visual_verifier_module.build_s4_visual_verifier_payload)
+      and "不能直接把 primary 判 false" in inspect.getsource(s4_visual_verifier_module.build_s4_visual_verifier_payload))
 
 print()
 print("RESULT:", "PASS" if not failures else f"FAIL ({len(failures)}): {failures}")

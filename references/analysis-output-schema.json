@@ -353,7 +353,7 @@
     "core_visual_proposition": "旧兼容字段：本品到位效果展示的核心视觉命题。新结果优先使用 visual_proof_points.primary 作为 S4 评判锚点；旧结果无 visual_proof_points 时才回退此字段。",
     "visual_proof_points": [
       {
-        "priority": "primary | secondary。primary 是消费者最核心的效果证明；secondary 是附加卖点证明，不能压过 primary。",
+        "priority": "primary | secondary。primary 是消费者最核心的效果证明且只能证明一个最终结果，不得把多个卖点合并成 all-of 条件；secondary 是附加卖点证明，不能压过 primary。",
         "proof_target": "这个视觉证明点要证明什么产品价值。例：清洁结果可见、刷头抛弃/溶解、油光变哑光。",
         "visual_standard": "画面做到什么程度才算证明成立。例：马桶污渍被刷洗/冲走并露出干净内壁。",
         "visual_diff_dimensions": [

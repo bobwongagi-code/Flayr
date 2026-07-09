@@ -76,6 +76,8 @@ def build_s4_visual_verifier_payload(
                 "任务：分别判断达人和标杆是否真的把 product_profile 的 S4 视觉证明拍出来。\n"
                 "若 product_profile.visual_proof_points 存在，必须先按 priority=primary 的证明点判断核心效果是否成立；"
                 "priority=secondary 的证明点只能作为补充说明，不能替代 primary，也不能让 primary 已成立的一侧被判为无效。"
+                "若 primary 文本误把多个卖点写成复合条件（例如清洁结果+刷头溶解），按最核心的消费者最终结果判断 primary；"
+                "机制/附加卖点缺失只能写进 reason，不能直接把 primary 判 false。"
                 "若无 visual_proof_points，则回退 core_visual_proposition + visual_diff_dimensions。\n"
                 "判定标准：visual_difference_observed 优先看 primary.visual_diff_dimensions 指定维度是否肉眼可见；"
                 "module_constraints_met 按 structure_library S4-A~F 硬约束判断；effect_maximized 只有差异明显、画面聚焦、无需停下来找变化才 true。\n"

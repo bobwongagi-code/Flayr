@@ -656,20 +656,127 @@ def normalize_visual_proof_points(value: Any) -> list[dict[str, Any]]:
             continue
         dims = [str(dim).strip() for dim in item.get("visual_diff_dimensions") or [] if str(dim).strip()][:3]
         related = [str(point).strip() for point in item.get("related_selling_points") or [] if str(point).strip()][:4]
-        out.append(
-            {
-                "priority": normalize_choice(item.get("priority"), {"primary", "secondary"}, "secondary"),
-                "proof_target": proof_target,
-                "visual_standard": visual_standard,
-                "visual_diff_dimensions": dims,
-                "related_selling_points": related,
-            }
-        )
+        point = {
+            "priority": normalize_choice(item.get("priority"), {"primary", "secondary"}, "secondary"),
+            "proof_target": proof_target,
+            "visual_standard": visual_standard,
+            "visual_diff_dimensions": dims,
+            "related_selling_points": related,
+        }
+        for normalized_point in _split_compound_primary_visual_proof(point):
+            out.append(_repair_result_primary_visual_standard(normalized_point))
         if len(out) >= 4:
             break
     if out and not any(point["priority"] == "primary" for point in out):
         out[0]["priority"] = "primary"
-    return out
+    return out[:4]
+
+
+def _split_compound_primary_visual_proof(point: dict[str, Any]) -> list[dict[str, Any]]:
+    """把模型误写成 all-of 的 primary 拆回单一 primary + secondary。
+
+    S4 primary 是消费者最终结果；机制、附加卖点、处置方式不能和最终结果焊成同一个
+    all-of 条件，否则任一附加卖点没拍到都会误杀核心效果。
+    """
+    if point.get("priority") != "primary":
+        return [point]
+    target = str(point.get("proof_target") or "")
+    standard = str(point.get("visual_standard") or "")
+    dims = [str(d).strip() for d in point.get("visual_diff_dimensions") or [] if str(d).strip()]
+    related = [str(r).strip() for r in point.get("related_selling_points") or [] if str(r).strip()]
+    if not _looks_like_compound_primary(target, dims, related):
+        return [point]
+
+    head_target, tail_target = _split_first_compound_piece(target)
+    head_standard, tail_standard = _split_first_compound_piece(standard)
+    primary = dict(point)
+    primary["proof_target"] = _clean_proof_phrase(head_target) or target
+    primary["visual_standard"] = _clean_proof_phrase(head_standard) or standard
+    primary["visual_diff_dimensions"] = dims[:1] or dims
+    primary_related = _filter_related_points(
+        related,
+        " ".join([primary["proof_target"], primary["visual_standard"], " ".join(primary["visual_diff_dimensions"])]),
+    )
+    primary["related_selling_points"] = primary_related[:4]
+
+    secondary_dims = dims[1:]
+    secondary_related = [r for r in related if r not in primary_related]
+    secondary_target = _clean_proof_phrase(tail_target)
+    secondary_standard = _clean_proof_phrase(tail_standard)
+    secondary: dict[str, Any] | None = None
+    if secondary_target or secondary_standard or secondary_dims or secondary_related:
+        secondary = {
+            "priority": "secondary",
+            "proof_target": secondary_target or "附加视觉证明",
+            "visual_standard": secondary_standard or secondary_target or "补充证明点有效呈现",
+            "visual_diff_dimensions": secondary_dims[:3],
+            "related_selling_points": secondary_related[:4],
+        }
+    return [primary, secondary] if secondary else [primary]
+
+
+def _looks_like_compound_primary(target: str, dims: list[str], related: list[str]) -> bool:
+    text = target.strip()
+    markers = ("与", "及", "和", "同时", "+", "/", "、", "双重", "多重")
+    return any(marker in text for marker in markers) or (len(dims) > 1 and len(related) > 1 and ("双重" in text or "多重" in text))
+
+
+def _split_first_compound_piece(text: str) -> tuple[str, str]:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return "", ""
+    separators = ("；", ";", "，", ",", "并", "且", "同时", "与", "及", "和", "+", "/", "、")
+    positions = [(normalized.find(sep), sep) for sep in separators if normalized.find(sep) > 0]
+    if not positions:
+        return normalized, ""
+    index, sep = min(positions, key=lambda item: item[0])
+    return normalized[:index], normalized[index + len(sep):]
+
+
+def _clean_proof_phrase(text: str) -> str:
+    cleaned = str(text or "").strip(" ，,；;。")
+    for suffix in ("双重验证", "多重验证", "验证", "证明"):
+        if cleaned.endswith(suffix):
+            cleaned = cleaned[: -len(suffix)]
+            break
+    return cleaned.strip(" ，,；;。")
+
+
+def _filter_related_points(related: list[str], proof_text: str) -> list[str]:
+    """只保留与 primary 文字直接相交的卖点，避免拆分后仍被附加卖点污染。"""
+    compact = str(proof_text or "").replace(" ", "")
+    if not compact:
+        return []
+    tokens = {compact[i:i + 2] for i in range(max(len(compact) - 1, 0)) if compact[i:i + 2].strip()}
+    matched = []
+    for item in related:
+        item_text = str(item or "")
+        if any(token and token in item_text for token in tokens):
+            matched.append(item)
+    return matched
+
+
+def _repair_result_primary_visual_standard(point: dict[str, Any]) -> dict[str, Any]:
+    """结果型 primary 的 visual_standard 不应被机制触发词替代。"""
+    if point.get("priority") != "primary":
+        return point
+    target = str(point.get("proof_target") or "")
+    standard = str(point.get("visual_standard") or "")
+    dims = [str(dim).strip() for dim in point.get("visual_diff_dimensions") or [] if str(dim).strip()]
+    if not target or not standard or not dims:
+        return point
+    result_hints = ("效果", "清洁", "洁净", "去污", "美白", "控油", "遮瑕", "修复", "提亮", "补水", "除皱", "除毛", "定妆", "防漏", "防水")
+    process_hints = ("入水", "起泡", "释放", "接触", "按压", "打开", "启动", "喷出", "涂抹")
+    dimension = dims[0]
+    if (
+        any(hint in target for hint in result_hints)
+        and any(hint in standard for hint in process_hints)
+        and ("vs" in dimension.lower() or "→" in dimension or "->" in dimension)
+    ):
+        repaired = dict(point)
+        repaired["visual_standard"] = dimension
+        return repaired
+    return point
 
 
 def normalize_bool_flag(value: Any) -> bool:
