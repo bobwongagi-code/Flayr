@@ -91,7 +91,7 @@ def apply_postprocess_chain(normalized: dict[str, Any], analysis: dict[str, Any]
     validate_transcript_attribution(normalized, analysis)                    # validate    跨视频串证据校验
     align_clear_commerce_evidence(normalized)                                # repair      关键词归位 benchmark 事实
     bind_timed_transcript_quotes(normalized, analysis)                       # repair      SRT 时间戳回填 quote
-    reconcile_certification_ownership(normalized)                            # claims_my   KKM/认证统一归 S2
+    reconcile_certification_ownership(normalized)                            # claims_my   KKM/认证统一归 S5
     discard_unreferenced_certification_claims(normalized)                    # claims_my   删除未支撑认证主张
     align_timed_cta_from_transcript(normalized, analysis)                    # repair      尾段 CTA 时间对齐
     reconcile_unsupported_cta(normalized)                                    # repair      无 CTA 时补占位 evidence

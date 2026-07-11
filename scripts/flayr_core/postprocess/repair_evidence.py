@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -118,14 +119,40 @@ def bind_improvement_base_material(item: dict[str, Any], creator_units: list[Any
 # region reconcile -----------------------------------------------------------
 
 def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
-    """S6 没有可识别的购买指令时，写入占位 evidence_unit，避免后续校验把缺失误判为通过。"""
+    """S6 没有可识别的购买指令时写占位；字幕/画面驱动 CTA 不得被空 quote 覆盖。"""
     stages = result.get("stage_analysis", [])
     if len(stages) < 6:
         return
     cta = stages[5]
     for role, code in (("benchmark", "B"), ("creator", "C")):
         quote = str(cta.get(f"{role}_quote") or "")
-        if re.search(r"\b(beli|troli|klik|cart|checkout|order|link|shop)\b|购买|下单|购物车|点击", quote, flags=re.IGNORECASE):
+        flag = cta.get(f"{role}_s6") if isinstance(cta.get(f"{role}_s6"), dict) else {}
+        units = result.get("video_understanding", {}).get(role, {}).get("evidence_units", [])
+        flag_ids = [str(value) for value in flag.get("evidence_ids", []) if str(value).strip()]
+        referenced = [
+            unit for unit in units
+            if isinstance(unit, dict) and str(unit.get("id")) in flag_ids and "_NO_CTA" not in str(unit.get("id"))
+        ]
+        referenced_text = json.dumps(referenced, ensure_ascii=False)
+        has_positive_flag = flag.get("exists") is True and flag.get("direct_order_met") is True and bool(referenced)
+        has_positive_text = bool(
+            re.search(
+                r"\b(beli|troli|klik|cart|checkout|order|link|shop)\b|购买|下单|购物车|点击|购买号召|购买指令",
+                quote + " " + referenced_text,
+                flags=re.IGNORECASE,
+            )
+        )
+        if has_positive_flag or has_positive_text:
+            # 旧结果可能已被本函数写过 _NO_CTA；一旦结构化 flag + 原始事实证明 CTA 存在，
+            # 恢复真实引用并移除代码生成的过期占位，避免后续建议继续引用假缺失。
+            if referenced:
+                cta[f"{role}_evidence_ids"] = flag_ids
+                cta[f"{role}_key_message"] = str(referenced[0].get("information") or "").strip()
+                cta[f"{role}_summary"] = cta[f"{role}_key_message"]
+                cta[f"{role}_quote"] = str(referenced[0].get("voiceover") or "").strip()
+                cta[f"{role}_quote_zh"] = str(referenced[0].get("voiceover_zh") or "").strip()
+                cta[f"{role}_support_status"] = "voice_only" if cta[f"{role}_quote"] else "visual_only"
+            units[:] = [unit for unit in units if str(unit.get("id") or "") != f"{code}_NO_CTA"]
             continue
         unit_id = f"{code}_NO_CTA"
         placeholder = {
@@ -137,7 +164,6 @@ def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
             "visual_fact": "结尾仅可见产品或人物表现，未见可验证的购物车或下单提示。",
             "subtitle_fact": "",
         }
-        units = result.get("video_understanding", {}).get(role, {}).get("evidence_units", [])
         ensure_evidence_unit(units, placeholder)
         cta[f"{role}_evidence_ids"] = [unit_id]
         cta[f"{role}_key_message"] = placeholder["information"]

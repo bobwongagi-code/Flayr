@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..utils import run_command
+from ..utils import run_command, write_text
 
 LLM_CURL_MAX_TIME_SECONDS = 900
 LLM_CURL_RETRIES = 2
@@ -73,7 +73,7 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
     stream_options["include_usage"] = True
     payload["stream_options"] = stream_options
     req_path = raw_path.with_name(raw_path.stem + ".stream_req.json")
-    req_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    write_text(req_path, json.dumps(payload, ensure_ascii=False))
     sse_path = raw_path.with_name(raw_path.stem + ".sse")
     # API key 不进 curl argv（否则 ps/进程列表对本机任意进程可见）：写入 0600 临时文件、
     # 用 curl `-H @file` 读，finally 删除。比内联 -H "Bearer {key}" 安全。
@@ -126,13 +126,13 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
                     if usage:
                         response["usage"] = usage
                     raw_text = json.dumps(response, ensure_ascii=False)
-                    raw_path.write_text(raw_text, encoding="utf-8")
+                    write_text(raw_path, raw_text)
                     return raw_text
                 if finish_reason == "length":
                     # length 是服务端主动截断，不是可修复的残缺 JSON。先提高同一请求的输出预算再重发。
                     old_budget, new_budget = increase_output_budget(payload)
                     if new_budget > old_budget:
-                        req_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                        write_text(req_path, json.dumps(payload, ensure_ascii=False))
                         last_error = f"输出被 max_tokens={old_budget} 截断，已提高至 {new_budget} 后重试"
                     else:
                         last_error = f"输出在 max_tokens={old_budget} 仍被截断"

@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .stage_catalog import fallback_artifact_ranges
+
 
 def get_stage_frame_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
     entries = info.get("stage_frames")
@@ -137,16 +139,7 @@ def build_stage_frame_manifest(
 
 
 def stage_time_ranges(duration: float) -> list[tuple[str, str, float, float]]:
-    end = max(0.0, duration)
-    cta_start = max(0.0, end - 5.0)
-    return [
-        ("S1 Hook", "Hook", 0.0, min(3.0, end)),
-        ("S2 产品引出", "Product intro", min(3.0, end), min(6.0, end)),
-        ("S3 使用过程", "Usage", min(6.0, end), min(15.0, end)),
-        ("S4 效果呈现", "Result", min(15.0, end), min(23.0, end)),
-        ("S5 信任放大", "Trust", min(23.0, end), min(27.0, end)),
-        ("S6 CTA", "CTA", cta_start, end),
-    ]
+    return fallback_artifact_ranges(duration)
 
 
 def select_frame_for_time_range(info: dict[str, Any], time_range: str) -> dict[str, Any] | None:

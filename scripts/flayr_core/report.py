@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import format_seconds, select_frame_near_timestamp, select_frames_for_time_range
+from .utils import write_text
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -28,7 +29,7 @@ def write_report(run_dir: Path, analysis: dict[str, Any], plan: dict[str, Any] |
     report = report.replace("{{improvement_cards}}", render_improvement_cards(analysis))
 
     report_path = run_dir / "report.html"
-    report_path.write_text(report, encoding="utf-8")
+    write_text(report_path, report)
     return report_path
 
 

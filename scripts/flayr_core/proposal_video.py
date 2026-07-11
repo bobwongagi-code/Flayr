@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -355,16 +357,35 @@ def read_json_response(request: urllib.request.Request) -> dict[str, Any]:
 
 
 def download_file(url: str, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{output_path.name}.",
+        suffix=".part",
+        dir=output_path.parent,
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
     request = urllib.request.Request(url, method="GET")
     try:
         with urllib.request.urlopen(request, timeout=180) as response:
-            output_path.write_bytes(response.read())
+            with temporary_path.open("wb") as target:
+                shutil.copyfileobj(response, target)
+            os.replace(temporary_path, output_path)
     except urllib.error.URLError as exc:
         if not should_fallback_to_curl(RuntimeError(str(exc))):
+            temporary_path.unlink(missing_ok=True)
             raise RuntimeError(str(exc)) from exc
-        completed = run_command(["curl", "-L", "-sS", "--fail-with-body", url, "-o", str(output_path)])
+        completed = run_command([
+            "curl", "-L", "-sS", "--fail-with-body", "--connect-timeout", "30", "--max-time", "300",
+            url, "-o", str(temporary_path),
+        ])
         if completed.returncode != 0:
+            temporary_path.unlink(missing_ok=True)
             raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "curl download failed") from exc
+        os.replace(temporary_path, output_path)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
 
 
 def curl_json(
@@ -376,9 +397,15 @@ def curl_json(
 ) -> dict[str, Any]:
     if not shutil.which("curl"):
         raise RuntimeError("SSL certificate verification failed and curl is unavailable.")
-    with NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=True) as payload_file, NamedTemporaryFile(
-        "r", encoding="utf-8", suffix=".json", delete=True
-    ) as response_file:
+    with NamedTemporaryFile("w", encoding="utf-8", suffix=".headers", delete=True) as auth_file, NamedTemporaryFile(
+        "w", encoding="utf-8", suffix=".json", delete=True
+    ) as payload_file, NamedTemporaryFile("r", encoding="utf-8", suffix=".json", delete=True) as response_file:
+        auth_file.write(f"Authorization: Bearer {api_key}\n")
+        auth_file.flush()
+        try:
+            os.chmod(auth_file.name, 0o600)
+        except OSError:
+            pass
         command = [
             "curl",
             "-sS",
@@ -386,7 +413,7 @@ def curl_json(
             "-X",
             method,
             "-H",
-            f"Authorization: Bearer {api_key}",
+            f"@{auth_file.name}",
         ]
         if async_call:
             command.extend(["-H", "X-DashScope-Async: enable"])

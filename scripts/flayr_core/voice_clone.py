@@ -22,9 +22,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
-from .utils import run_command
+from .utils import run_command, write_bytes
 from .voice_sample import cut_voice_sample, select_voice_sample_window
 
 
@@ -102,10 +103,7 @@ def clone_voice_and_synthesize(
 
 def _upload_to_dashscope(file_path: Path, api_key: str) -> str | None:
     """走 DashScope 临时上传，返回 oss:// URL（配合 resolve header 给后续接口用）。"""
-    policy = _curl_json([
-        f"{UPLOAD_POLICY_ENDPOINT}?action=getPolicy&model={TARGET_MODEL}",
-        "-H", f"Authorization: Bearer {api_key}",
-    ])
+    policy = _curl_json([f"{UPLOAD_POLICY_ENDPOINT}?action=getPolicy&model={TARGET_MODEL}"], api_key)
     data = policy.get("data") if isinstance(policy, dict) else None
     if not isinstance(data, dict):
         return None
@@ -137,24 +135,22 @@ def _create_voice(oss_url: str, api_key: str) -> str | None:
     """注册克隆音色，返回 voice_id。oss:// 私有文件靠 resolve header 让 DashScope 内部读取。"""
     resp = _curl_json([
         ENROLL_ENDPOINT,
-        "-H", f"Authorization: Bearer {api_key}",
         "-H", "Content-Type: application/json",
         "-H", "X-DashScope-OssResourceResolve: enable",
         "-d", json.dumps({"model": "voice-enrollment", "input": {
             "action": "create_voice", "target_model": TARGET_MODEL,
             "prefix": VOICE_PREFIX, "url": oss_url}}),
-    ])
+    ], api_key)
     return resp.get("output", {}).get("voice_id") if isinstance(resp, dict) else None
 
 
 def _delete_voice(voice_id: str, api_key: str) -> None:
     _curl_json([
         ENROLL_ENDPOINT,
-        "-H", f"Authorization: Bearer {api_key}",
         "-H", "Content-Type: application/json",
         "-d", json.dumps({"model": "voice-enrollment", "input": {
             "action": "delete_voice", "voice_id": voice_id}}),
-    ])
+    ], api_key)
 
 
 def _synthesize_lines(
@@ -191,7 +187,7 @@ def _synthesize_lines(
                 results.append({"id": line_id, "error": "合成返回空音频"})
                 continue
             audio_path = out_dir / f"{line_id}.wav"
-            audio_path.write_bytes(audio)
+            write_bytes(audio_path, audio)
             results.append({
                 "id": line_id, "text": text,
                 "audio_path": str(audio_path),
@@ -201,8 +197,16 @@ def _synthesize_lines(
     return results
 
 
-def _curl_json(args: list[str]) -> dict[str, Any]:
-    completed = run_command(["curl", "-sS", "--noproxy", "*", "-m", "60"] + args)
+def _curl_json(args: list[str], api_key: str) -> dict[str, Any]:
+    """用受限权限临时 header 文件传 API key，避免密钥出现在进程参数。"""
+    with NamedTemporaryFile("w", encoding="utf-8", suffix=".headers", delete=True) as auth_file:
+        auth_file.write(f"Authorization: Bearer {api_key}\n")
+        auth_file.flush()
+        try:
+            os.chmod(auth_file.name, 0o600)
+        except OSError:
+            pass
+        completed = run_command(["curl", "-sS", "--noproxy", "*", "-m", "60", "-H", f"@{auth_file.name}"] + args)
     try:
         return json.loads(completed.stdout)
     except (json.JSONDecodeError, ValueError):

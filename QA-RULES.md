@@ -154,6 +154,8 @@ python3 scripts/dev_test_stage2.py runs/20260531-143521-improve --dry
 后续改进：
 
 - 如果报告已稳定，可以逐步把 `Q03` 中的核心字段从警告提升为阻断。
+- 闭环是否已审计以代码生成的 `computed_loop_closure.source=proposition_trace` 为准；
+  旧 `loop_closure.note` 只做兼容展示。`audit_status=partial|broken` 表示审计发现断点，不能误报为“缺少审计”。
 
 ---
 
@@ -238,6 +240,8 @@ python3 scripts/dev_test_stage2.py runs/20260531-143521-improve --dry
 
 - 阶段、提升点、基底帧时间必须能解析为秒数。
 - 时间不得超出对应视频时长。
+- 阶段编号表示功能职责，不等于六段严格不重叠的时间轴：S1/S2 可在承接点重叠，S3/S4 可共用同段过程与效果证据，S5 信任材料可出现在任意位置但只归 S5。
+- S2/S3 大面积重叠时必须用 `merged_with_s3=true` 明确声明；否则提示复核边界。
 
 处理：已阻断 + 已警告 + 已修补。
 
@@ -308,12 +312,14 @@ python3 scripts/dev_test_stage2.py runs/20260531-143521-improve --dry
 - `improvements` 不能把达人优势阶段列为高优先级。
 - CTA 如果最终判为 `small`，不应再把 CTA 作为 Top 改进。
 - 排序优先级按最终 stage severity 和 GMV 杠杆收敛。
+- 最终为 `large` 的阶段必须至少有一条对应提升点；模型建议早于确定性推导生成而发生漏项时，先告警，不得静默让 medium 建议压过 large 缺口。
 
-处理：已修补。
+处理：已修补。排序由确定性后处理完成；最终 `large` 缺项由一次纯文本补全补齐，失败保持主分析可用并保留 Q13。
 
 实现位置：
 
 - `scripts/flayr_core/postprocess/repair.py::stabilize_improvement_priorities`
+- `scripts/flayr_core/llm/pipeline.py::maybe_reconcile_final_improvements`
 
 ---
 
@@ -445,6 +451,26 @@ PY
 实现位置：
 
 - `scripts/flayr_core/postprocess/validate.py::validate_narrative_evidence_consistency`
+
+---
+
+### Q20 产品命题引用与跨阶段关系一致性
+
+规则：
+
+- 各阶段只能引用 `product_proposition_contract.stages.Sx.allowed_ids` 中的命题 ID。
+- S2 可引用后续要由 S3/S4 证明的 selling ID，用于说明“产品为什么是答案”；这只建立承接关系，不能替代使用演示或效果证明。
+- flag 声称命中本品锚点时，必须给出至少一个有效 `proposition_ids`；旧结果缺引用只警告，不阻断。
+- `s3_s4_relationship` 必须与两侧 S3/S4 结构化 flags 一致，不能一边写“过程产生效果”一边又标无过程或无效果。
+- `stage_standard_delivery` 作为模型兼容字段保留，并与代码按单侧 flags 计算的 `computed_stage_standard_delivery` 对照；不一致只警告，不参与 severity。
+
+处理：已警告（不阻断）。
+
+实现位置：
+
+- `scripts/flayr_core/proposition_contract.py`
+- `scripts/flayr_core/postprocess/proposition.py::materialize_proposition_trace`
+- `scripts/flayr_core/postprocess/proposition.py::materialize_quality_audits`
 
 ---
 

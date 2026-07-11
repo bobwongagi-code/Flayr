@@ -5,8 +5,8 @@
   - parse_and_validate_llm_result   解析模型原始输出，必要时做一次 repair 重试
   - merge_analysis_result           把外部提供的 analysis_result.json 合并进 analysis dict
 
-merge 与 parse_and_validate 共用中段处理链 apply_postprocess_chain；
-尾部处理（sanitize / extra validate / clamp）两边略有差异，故各自显式调用。
+所有入口通过 finalize_analysis_result 走同一条完整处理链，避免外部 JSON 和实时 LLM
+因校验顺序不同而产生不同报告。
 """
 
 from __future__ import annotations
@@ -18,8 +18,9 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ..utils import write_json
+from ..utils import write_json, write_text
 from .api import call_llm_api, extract_chat_completion_text, read_llm_api_key
+from .analysis_contract import AnalysisContractError, validate_normalized_analysis_contract
 from .parse import (
     normalize_analysis_result,
     normalize_category_profile,
@@ -28,6 +29,7 @@ from .parse import (
     parse_json_text,
 )
 from .payload import (
+    build_improvement_reconciliation_payload,
     build_llm_comparison_payload,
     build_llm_payload,
     build_llm_repair_payload,
@@ -65,26 +67,13 @@ from ..postprocess.validate import (
 # 外部 JSON 合并入口
 # ---------------------------------------------------------------------------
 
-def merge_analysis_result(analysis: dict[str, Any], result_path: Path) -> None:
-    """把外部 analysis_result.json 经过 normalize + postprocess + 校验后合并入 analysis。"""
-    result = json.loads(result_path.read_text(encoding="utf-8"))
-    phase_c_review = result.get("phase_c_review")
-    normalized = normalize_analysis_result(result)
-
-    apply_postprocess_chain(normalized, analysis)
-
-    # 尾部：先 ground_improvement_evidence，再用 product 信息做品类合规重写
-    ground_improvement_evidence(normalized)
-    merge_context = json.dumps(analysis.get("product", {}), ensure_ascii=False)
-    sanitize_child_toothpaste_recommendations(normalized, merge_context)
-    stabilize_improvement_priorities(normalized)
-    sanitize_health_recommendations(normalized, merge_context)
-    validate_evidence_alignment(normalized)
-    validate_stage_ownership(normalized)
-    remove_unverified_brand_models(normalized, analysis)
-    clamp_result_time_ranges(normalized, analysis)
-    validate_quality_contract(normalized, analysis)
-
+def apply_finalized_analysis_result(
+    analysis: dict[str, Any],
+    normalized: dict[str, Any],
+    result_path: Path,
+) -> None:
+    """把已完成校验的结果写回主 analysis；此处不得再次做后处理。"""
+    phase_c_review = normalized.get("phase_c_review")
     analysis["executive_summary"] = normalized["executive_summary"]
     analysis["one_line_summary"] = normalized["one_line_summary"]
     analysis["one_line_verdict"] = normalized["one_line_verdict"]
@@ -95,15 +84,71 @@ def merge_analysis_result(analysis: dict[str, Any], result_path: Path) -> None:
     analysis["video_understanding"] = normalized["video_understanding"]
     analysis["stage_analysis"] = normalized["stage_analysis"]
     analysis["improvements"] = normalized["improvements"]
+    for key in (
+        "category_profile",
+        "product_profile",
+        "s3_s4_relationship",
+        "promise_chain",
+        "product_proposition_contract",
+        "cross_stage_state",
+        "proposition_trace",
+        "computed_loop_closure",
+        "qa_warnings",
+        "quality_audit",
+        "improvement_reconciliation",
+        "s4_visual_verifier",
+    ):
+        if key in normalized:
+            analysis[key] = normalized[key]
     if isinstance(phase_c_review, dict):
         analysis["phase_c_review"] = phase_c_review
-    # LLM 分析已成功合并，标记 status 让 report 不再渲染"未跑 LLM"警告
     analysis["improvements_status"] = "llm_completed"
     analysis["analysis_source"] = {
         "type": "large_model_json",
         "path": str(result_path),
         "merged_at": dt.datetime.now().isoformat(timespec="seconds"),
     }
+
+
+def finalize_analysis_result(
+    result: dict[str, Any],
+    analysis: dict[str, Any],
+    analysis_input: str,
+    locked_video_understanding: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """所有 LLM 结果入口共用的唯一规范化、修补和校验链。"""
+    if locked_video_understanding:
+        result["video_understanding"] = locked_video_understanding
+    normalized = normalize_analysis_result(result)
+    try:
+        validate_normalized_analysis_contract(normalized)
+    except AnalysisContractError as exc:
+        raise SystemExit(str(exc)) from exc
+    apply_postprocess_chain(normalized, analysis)
+    validate_evidence_alignment(normalized)
+    validate_stage_ownership(normalized)
+    sanitize_health_recommendations(normalized, analysis_input)
+    sanitize_child_toothpaste_recommendations(normalized, analysis_input)
+    stabilize_improvement_priorities(normalized)
+    ground_improvement_evidence(normalized)
+    stabilize_improvement_priorities(normalized)
+    validate_analysis_dimensions(normalized)
+    validate_recommendation_safety(normalized, analysis_input)
+    validate_creator_script_language(normalized, analysis_input)
+    remove_unverified_brand_models(normalized, analysis)
+    clamp_result_time_ranges(normalized, analysis)
+    validate_quality_contract(normalized, analysis)
+    return normalized
+
+
+def merge_analysis_result(analysis: dict[str, Any], result_path: Path, analysis_input: str) -> None:
+    """把外部 analysis_result.json 经唯一处理链后合并入 analysis。"""
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    phase_c_review = result.get("phase_c_review")
+    normalized = finalize_analysis_result(result, analysis, analysis_input)
+    if isinstance(phase_c_review, dict):
+        normalized["phase_c_review"] = phase_c_review
+    apply_finalized_analysis_result(analysis, normalized, result_path)
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +190,7 @@ def run_large_model_analysis(
     analysis: dict[str, Any],
     analysis_input_path: Path,
     run_dir: Path,
-) -> Path | None:
+) -> tuple[Path, dict[str, Any]] | None:
     """从 analysis_input.md 出发跑一次完整 LLM 分析，写出 analysis_result.json。"""
     api_key = read_llm_api_key(args).strip()
     if not api_key and not args.llm_dry_run:
@@ -199,7 +244,7 @@ def run_large_model_analysis(
     )
     result_path = run_dir / "analysis_result.json"
     write_json(result_path, result)
-    return result_path
+    return result_path, result
 
 
 def parse_and_validate_llm_result(
@@ -230,11 +275,20 @@ def parse_and_validate_llm_result(
             analysis=analysis,
             locked_video_understanding=locked_video_understanding,
         )
-        return maybe_apply_s4_visual_verifier(
+        visually_checked = maybe_apply_s4_visual_verifier(
             args=args,
             api_key=api_key,
             result=refined,
             analysis=analysis,
+            run_dir=run_dir,
+        )
+        return maybe_reconcile_final_improvements(
+            args=args,
+            api_key=api_key,
+            result=visually_checked,
+            analysis=analysis,
+            analysis_input=analysis_input,
+            locked_video_understanding=locked_video_understanding,
             run_dir=run_dir,
         )
     except SystemExit as exc:
@@ -246,12 +300,13 @@ def parse_and_validate_llm_result(
         first_error,
         analysis_input,
         locked_video_understanding,
+        analysis=analysis,
     )
     repair_request_path = run_dir / "llm_repair_request.json"
     repair_response_path = run_dir / "llm_repair_response.json"
     write_json(repair_request_path, repair_payload)
     repair_raw_text = call_llm_api(args.llm_api_url, api_key, repair_request_path, repair_response_path)
-    repair_response_path.write_text(repair_raw_text, encoding="utf-8")
+    write_text(repair_response_path, repair_raw_text)
 
     repair_result_text = extract_chat_completion_text(json.loads(repair_raw_text))
     try:
@@ -272,15 +327,137 @@ def parse_and_validate_llm_result(
             analysis=analysis,
             locked_video_understanding=locked_video_understanding,
         )
-        return maybe_apply_s4_visual_verifier(
+        visually_checked = maybe_apply_s4_visual_verifier(
             args=args,
             api_key=api_key,
             result=refined,
             analysis=analysis,
             run_dir=run_dir,
         )
+        return maybe_reconcile_final_improvements(
+            args=args,
+            api_key=api_key,
+            result=visually_checked,
+            analysis=analysis,
+            analysis_input=analysis_input,
+            locked_video_understanding=locked_video_understanding,
+            run_dir=run_dir,
+        )
     except SystemExit as exc:
         raise SystemExit(f"LLM output repair failed. First error: {first_error}. Repair error: {exc}") from exc
+
+
+def uncovered_large_stage_codes(result: dict[str, Any]) -> list[str]:
+    """返回最终为 large、但 Top 提升点尚未覆盖的阶段。"""
+    covered = {
+        stage_code(item.get("target_stage"))
+        for item in result.get("improvements", [])
+        if isinstance(item, dict) and stage_code(item.get("target_stage"))
+    }
+    return [
+        code
+        for stage in result.get("stage_analysis", [])
+        if isinstance(stage, dict)
+        and (code := stage_code(stage.get("stage")))
+        and str(stage.get("severity") or "").strip().lower() == "large"
+        and code not in covered
+    ]
+
+
+def merge_reconciled_improvements(
+    result: dict[str, Any],
+    additions: list[dict[str, Any]],
+    missing_stage_codes: list[str],
+) -> dict[str, Any]:
+    """把缺失阶段建议并入现有 Top 列表；最多五项，优先覆盖最终大差距。"""
+    wanted = set(missing_stage_codes)
+    valid_additions = [
+        item for item in additions
+        if isinstance(item, dict) and stage_code(item.get("target_stage")) in wanted
+    ]
+    additions_by_stage: dict[str, dict[str, Any]] = {}
+    for item in valid_additions:
+        additions_by_stage.setdefault(stage_code(item.get("target_stage")), item)
+
+    merged = json.loads(json.dumps(result, ensure_ascii=False))
+    existing = [item for item in merged.get("improvements", []) if isinstance(item, dict)]
+    stage_severity = {
+        stage_code(stage.get("stage")): str(stage.get("severity") or "medium").strip().lower()
+        for stage in merged.get("stage_analysis", [])
+        if isinstance(stage, dict)
+    }
+    combined = [*additions_by_stage.values(), *existing]
+    severity_rank = {"large": 0, "medium": 1, "small": 2}
+    combined.sort(
+        key=lambda item: (
+            severity_rank.get(stage_severity.get(stage_code(item.get("target_stage")), "medium"), 1),
+            0 if stage_code(item.get("target_stage")) in additions_by_stage else 1,
+            _safe_priority(item.get("priority")),
+        )
+    )
+    merged["improvements"] = combined[:5]
+    return merged
+
+
+def _safe_priority(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 99
+
+
+def maybe_reconcile_final_improvements(
+    *,
+    args: argparse.Namespace,
+    api_key: str,
+    result: dict[str, Any],
+    analysis: dict[str, Any],
+    analysis_input: str,
+    locked_video_understanding: dict[str, Any] | None,
+    run_dir: Path,
+) -> dict[str, Any]:
+    """最终 severity 与建议脱节时做一次纯文本补全；失败不得阻断主分析。"""
+    missing = uncovered_large_stage_codes(result)
+    if not missing or args.llm_dry_run:
+        return result
+    payload = build_improvement_reconciliation_payload(args.llm_model, result, missing, analysis)
+    request_path = run_dir / "llm_improvement_reconciliation_request.json"
+    response_path = run_dir / "llm_improvement_reconciliation_response.json"
+    write_json(request_path, payload)
+    preserved = {
+        key: result[key]
+        for key in ("phase_c_review", "s4_visual_verifier")
+        if key in result
+    }
+    try:
+        raw_text = call_llm_api(args.llm_api_url, api_key, request_path, response_path)
+        write_text(response_path, raw_text)
+        parsed = parse_json_text(extract_chat_completion_text(json.loads(raw_text)))
+        additions = parsed.get("improvements") if isinstance(parsed.get("improvements"), list) else []
+        merged = merge_reconciled_improvements(result, additions, missing)
+        reconciled = _process_llm_result(
+            merged,
+            analysis,
+            analysis_input,
+            locked_video_understanding,
+        )
+        remaining = uncovered_large_stage_codes(reconciled)
+        if any(code in remaining for code in missing):
+            raise ValueError("补全结果未覆盖全部缺失的大差距阶段")
+    except (Exception, SystemExit) as exc:  # 可选补全失败时保留主分析结果
+        result["improvement_reconciliation"] = {
+            "applied": False,
+            "requested_stages": missing,
+            "reason": f"最终提升点补全失败：{exc}",
+        }
+        return result
+    reconciled.update(preserved)
+    reconciled["improvement_reconciliation"] = {
+        "applied": True,
+        "requested_stages": missing,
+        "response_path": str(response_path),
+    }
+    return reconciled
 
 
 def maybe_refine_low_confidence_stages(
@@ -338,7 +515,7 @@ def maybe_refine_low_confidence_stages(
     write_json(review_request_path, review_payload)
     try:
         review_raw_text = call_llm_api(args.llm_api_url, api_key, review_request_path, review_response_path)
-        review_response_path.write_text(review_raw_text, encoding="utf-8")
+        write_text(review_response_path, review_raw_text)
         review_text = extract_chat_completion_text(json.loads(review_raw_text))
         review_result = parse_json_text(review_text)
         refined = apply_stage_review_updates(
@@ -501,32 +678,8 @@ def _process_llm_result(
     analysis_input: str,
     locked_video_understanding: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """parse_and_validate 主路径与 repair 路径共享的完整处理链。
-
-    与 merge_analysis_result 的区别（codex 历史选择，保持不变）：
-      - validate_evidence_alignment + validate_stage_ownership 在 sanitize 之前
-      - sanitize 顺序为 health → child_toothpaste
-      - ground_improvement_evidence 在 sanitize 之后
-      - 额外做 validate_analysis_dimensions / validate_recommendation_safety / validate_creator_script_language
-    """
-    if locked_video_understanding:
-        result["video_understanding"] = locked_video_understanding
-    normalized = normalize_analysis_result(result)
-    apply_postprocess_chain(normalized, analysis)
-    validate_evidence_alignment(normalized)
-    validate_stage_ownership(normalized)
-    sanitize_health_recommendations(normalized, analysis_input)
-    sanitize_child_toothpaste_recommendations(normalized, analysis_input)
-    stabilize_improvement_priorities(normalized)
-    ground_improvement_evidence(normalized)
-    stabilize_improvement_priorities(normalized)
-    validate_analysis_dimensions(normalized)
-    validate_recommendation_safety(normalized, analysis_input)
-    validate_creator_script_language(normalized, analysis_input)
-    remove_unverified_brand_models(normalized, analysis)
-    clamp_result_time_ranges(normalized, analysis)
-    validate_quality_contract(normalized, analysis)
-    return normalized
+    """兼容内部调用点；实际处理统一委托给 finalize_analysis_result。"""
+    return finalize_analysis_result(result, analysis, analysis_input, locked_video_understanding)
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +748,7 @@ def establish_product_foundation(
                         "mode": "trust_substituted",
                         "consumer_outcome": "",
                         "signal_type": "",
+                        "observable_dimension": "",
                         "observable_signal": "",
                         "before_state": "",
                         "after_state": "",

@@ -29,7 +29,19 @@
     "benefit_delivered_in_s6": false,
     "suspense_revealed": false,
     "suspense_reveal_time": null,
-    "note": "S1 到 S4/S6 的闭环判断及依据。"
+    "note": "兼容展示字段；代码最终会用 proposition_trace 的审计摘要覆盖。",
+    "source": "proposition_trace | model_legacy。新结果以 proposition_trace 为准。"
+  },
+  "computed_loop_closure": {
+    "source": "固定为 proposition_trace。",
+    "audit_status": "closed | partial | broken | unknown。表示是否闭环，不表示是否完成审计。",
+    "edges": {
+      "s1_to_s2": "命题或功能交接状态。",
+      "s2_to_s3": "产品引出到卖点演示状态。",
+      "s3_to_s4": "过程到效果证明状态。",
+      "s6_recall": "CTA 是否召回前文价值。"
+    },
+    "note": "由代码生成的闭环审计摘要。"
   },
   "s3_s4_relationship": {
     "creator_relationship": "process_creates_effect | process_without_effect | result_without_process | no_process_no_effect | aesthetic_no_effect | trust_substitutes_effect | unknown。达人侧 S3 使用过程与 S4 效果的关系。",
@@ -104,12 +116,15 @@
         },
         "hook_boundary_seconds": "仅 S1 必填：S1 Hook 结束、S2 产品引出开始的秒点。按 S1 留人机制到 S2 产品/解决方案承接的功能切换判断，不是固定秒数；S2-A 承接式引出可早于产品实物或产品名出现。",
         "hook_boundary_reason": "仅 S1 必填：一句话说明 S1 主导信息是什么、为什么此处切到 S2。",
-        "s2_start_signal": "仅 S1 必填：边界后的第一个 S2 信号，如开始回答 Hook、解决方案承接、产品名、产品揭晓、认证卖点或产品成为画面主角。",
+        "s2_start_signal": "仅 S1 必填：边界后的第一个 S2 信号，如开始回答 Hook、解决方案承接、产品名、产品揭晓或产品成为画面主角；第三方认证按 S5 信任放大归因。",
         "landing_met": "仅 S1 必填：0 到 hook_boundary_seconds 内对象明确 + 张力明确 + 承诺或证据明确，三件齐才 true。",
         "landing_reason": "仅 S1 必填：一句话只引用 0 到 hook_boundary_seconds 内证据，说明 landing_met 为何 true/false。",
         "window_evidence": "仅 S1 必填：0 到 hook_boundary_seconds 内实际出现了什么，带时间戳。",
         "landing_window_leak": "仅 S1 必填：landing 判断是否借用了 hook_boundary_seconds 之后的 S2/S3 材料，true|false；若 true，landing_met 应为 false。",
-        "anchors_proposition": "仅 S1 必填：是否锚定本品 hook_proposition / painpoints / product_profile/category_profile 概念，true|false。"
+        "anchors_proposition": "仅 S1 必填：是否锚定本品 hook_proposition / painpoints / product_profile/category_profile 概念，true|false。",
+        "proposition_ids": [
+          "该侧 S1 实际锚定的 product_proposition_contract 命题 ID；未锚定填空数组。"
+        ]
       },
       "benchmark_hook": {
         "exists": "仅 S1 必填：标杆前段是否存在抢注意力的 Hook，true|false。",
@@ -122,12 +137,15 @@
         },
         "hook_boundary_seconds": "仅 S1 必填：S1 Hook 结束、S2 产品引出开始的秒点。按 S1 留人机制到 S2 产品/解决方案承接的功能切换判断，不是固定秒数；S2-A 承接式引出可早于产品实物或产品名出现。",
         "hook_boundary_reason": "仅 S1 必填：一句话说明 S1 主导信息是什么、为什么此处切到 S2。",
-        "s2_start_signal": "仅 S1 必填：边界后的第一个 S2 信号，如开始回答 Hook、解决方案承接、产品名、产品揭晓、认证卖点或产品成为画面主角。",
+        "s2_start_signal": "仅 S1 必填：边界后的第一个 S2 信号，如开始回答 Hook、解决方案承接、产品名、产品揭晓或产品成为画面主角；第三方认证按 S5 信任放大归因。",
         "landing_met": "仅 S1 必填：0 到 hook_boundary_seconds 内对象明确 + 张力明确 + 承诺或证据明确，三件齐才 true。",
         "landing_reason": "仅 S1 必填：一句话只引用 0 到 hook_boundary_seconds 内证据，说明 landing_met 为何 true/false。",
         "window_evidence": "仅 S1 必填：0 到 hook_boundary_seconds 内实际出现了什么，带时间戳。",
         "landing_window_leak": "仅 S1 必填：landing 判断是否借用了 hook_boundary_seconds 之后的 S2/S3 材料，true|false；若 true，landing_met 应为 false。",
-        "anchors_proposition": "仅 S1 必填：是否锚定本品 hook_proposition / painpoints / product_profile/category_profile 概念，true|false。"
+        "anchors_proposition": "仅 S1 必填：是否锚定本品 hook_proposition / painpoints / product_profile/category_profile 概念，true|false。",
+        "proposition_ids": [
+          "该侧 S1 实际锚定的 product_proposition_contract 命题 ID；未锚定填空数组。"
+        ]
       },
       "creator_s2": {
         "exists": "仅 S2 必填：达人侧是否存在产品引出功能；≤15s 且 S2/S3 合并也算存在，true|false。",
@@ -143,6 +161,9 @@
         "handoff_reason": "仅 S2 必填：一句话说明 S1 提了什么、S2 如何接住；没接住要直说。",
         "evidence_ids": [
           "仅 S2 必填：支撑该侧 S2 判断的 evidence id。"
+        ],
+        "proposition_ids": [
+          "该侧 S2 实际承接或回答的合同命题 ID。"
         ]
       },
       "benchmark_s2": {
@@ -159,6 +180,9 @@
         "handoff_reason": "仅 S2 必填：一句话说明 S1 提了什么、S2 如何接住；没接住要直说。",
         "evidence_ids": [
           "仅 S2 必填：支撑该侧 S2 判断的 evidence id。"
+        ],
+        "proposition_ids": [
+          "该侧 S2 实际承接或回答的合同命题 ID。"
         ]
       },
       "creator_s3": {
@@ -196,6 +220,9 @@
         "usage_reason": "仅 S3 必填：一句话说明实际使用了什么、哪个核心卖点被动作证明；没证明要直说。",
         "evidence_ids": [
           "仅 S3 必填：支撑该侧 S3 判断的 evidence id。"
+        ],
+        "proposition_ids": [
+          "该侧 S3 使用动作实际证明的合同卖点 ID。"
         ]
       },
       "benchmark_s3": {
@@ -233,6 +260,9 @@
         "usage_reason": "仅 S3 必填：一句话说明实际使用了什么、哪个核心卖点被动作证明；没证明要直说。",
         "evidence_ids": [
           "仅 S3 必填：支撑该侧 S3 判断的 evidence id。"
+        ],
+        "proposition_ids": [
+          "该侧 S3 使用动作实际证明的合同卖点 ID。"
         ]
       },
       "creator_s4": {
@@ -253,6 +283,9 @@
         "effect_reason": "仅 S4 必填：一句话说明效果是否可见、因果是否成立；只有结果没过程要直说。",
         "evidence_ids": [
           "仅 S4 必填：支撑该侧 S4 判断的 evidence id。"
+        ],
+        "proposition_ids": [
+          "该侧 S4 效果实际证明的合同命题 ID。"
         ]
       },
       "benchmark_s4": {
@@ -273,6 +306,9 @@
         "effect_reason": "仅 S4 必填：一句话说明效果是否可见、因果是否成立；只有结果没过程要直说。",
         "evidence_ids": [
           "仅 S4 必填：支撑该侧 S4 判断的 evidence id。"
+        ],
+        "proposition_ids": [
+          "该侧 S4 效果实际证明的合同命题 ID。"
         ]
       },
       "creator_module_id": "S1-A 等结构库官方模块编号；无法识别写 unknown。",
@@ -325,9 +361,9 @@
       "benchmark_execution": "0 | 0.5 | 1 | 2。标杆侧独立执行分，标尺同上。两个执行分是系统确定性推导差距等级的事实输入。",
       "painpoint_relevance": "benchmark_only | creator_only | both | none。该阶段双方内容是否命中 category_profile.painpoints 的核心决策因素；按内容功能判断，不要求字面用词一致。系统据此定痛点命中系数。",
       "stage_standard_delivery": "benchmark_only | creator_only | both | none。该阶段双方是否有效达到本阶段的『本品到位标准』（按阶段查产品锚点：S1 钩子→hook_proposition、S2 引出→承接钩子的自然引出、S3 使用过程→core_selling_points+usage_context（使用中传卖点）、S4 效果→visual_proof_points.primary（旧结果回退 core_visual_proposition）、S5 信任→trust_multipliers、S6 促单→decision_threshold 匹配的 CTA）。做到/展示到才算，仅口头讲到不算。先作为事实收集，暂不参与推导。",
-      "creator_s5": "仅 S5 需输出。对象字段：exists、module_type(A-E/unknown)、trust_evidence_type(hard/soft/mixed/none/unknown)、trust_source_visible、trust_source_credible、trust_claim_specific、product_relevance_met、independent_trust_purpose、duplicates_other_stage、voice_only、risky_or_unsupported、start_seconds、end_seconds、trust_reason、evidence_ids。",
+      "creator_s5": "仅 S5 需输出。对象字段：exists、module_type(A-E/unknown)、trust_evidence_type(hard/soft/mixed/none/unknown)、trust_source_visible、trust_source_credible、trust_claim_specific、product_relevance_met、independent_trust_purpose、duplicates_other_stage、voice_only、risky_or_unsupported、start_seconds、end_seconds、trust_reason、evidence_ids、proposition_ids（信任材料支持的产品主张 ID，不是 trust.*）。",
       "benchmark_s5": "仅 S5 需输出。字段同 creator_s5。",
-      "creator_s6": "仅 S6 需输出。对象字段：exists、module_type(A-E/unknown)、direct_order_met、action_path_clear、offer_or_incentive_clear、urgency_met、product_value_recalled、module_fit_met、ending_position_met、depends_on_valid_s4、compliance_risk、start_seconds、end_seconds、cta_reason、evidence_ids。",
+      "creator_s6": "仅 S6 需输出。对象字段：exists、module_type(A-E/unknown)、direct_order_met、action_path_clear、offer_or_incentive_clear、urgency_met、product_value_recalled、module_fit_met、ending_position_met、depends_on_valid_s4、compliance_risk、start_seconds、end_seconds、cta_reason、evidence_ids、proposition_ids（CTA 召回的产品价值 ID）。",
       "benchmark_s6": "仅 S6 需输出。字段同 creator_s6。"
     }
   ],
@@ -374,6 +410,7 @@
       "mode": "产品价值证明模式：instant_visual | process_result | sensory_proxy | aesthetic_value | social_reaction | long_term_record | trust_substituted | low_decision_light_proof。此字段是新结果的权威合同。",
       "consumer_outcome": "选中 S4 anchor 要证明的一个消费者结果，不能直接照抄产品卖点词。",
       "signal_type": "state_change | process_event | sensory_response | aesthetic_appeal | social_response | long_term_record | trust_evidence | light_proof。必须与 mode 对应。",
+      "observable_dimension": "唯一的可复核维度名；不得并列多个卖点或维度。",
       "observable_signal": "画面或记录中实际可观察到的信号；不得填写同一光源、特写拍摄等证明条件。",
       "before_state": "仅 instant_visual/process_result 必填：使用前的可见状态。",
       "after_state": "仅 instant_visual/process_result 必填：使用后的不同可见状态。",

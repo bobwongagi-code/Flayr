@@ -14,6 +14,7 @@ import py_compile
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -63,6 +64,7 @@ from flayr_core.postprocess.validate import (  # noqa: E402
     validate_stage_ownership,
 )
 from flayr_core.postprocess.chain import sanitize_promise_chain_scope, stamp_product_foundation  # noqa: E402
+from flayr_core.postprocess.claims_my import reconcile_certification_ownership  # noqa: E402
 
 
 def mk(gap: str, c_quote: str, b_quote: str = "") -> dict:
@@ -143,8 +145,8 @@ def mk_cert_boundary_result(summary: str, hook_extra: dict | None = None) -> dic
         if i == 1:
             stage["benchmark_summary"] = summary
             stage["benchmark_hook"] = {
-                "hook_boundary_reason": "10.4秒后开始介绍产品属性和 KKM 认证。",
-                "s2_start_signal": "画面出现 Certified by Halal & KKM 字样。",
+                "hook_boundary_reason": "10.4秒后开始介绍产品属性。",
+                "s2_start_signal": "画面开始清楚展示产品。",
                 **hook_extra,
             }
         stages.append(stage)
@@ -185,28 +187,65 @@ except SystemExit as exc:
     _cert_claim_failed = "认证结论没有被所引用事实单元支持" in str(exc)
 check("认证校验：S1 正文认证主张仍需证据支撑", _cert_claim_failed)
 
-_cert_nested_flag = mk_cert_boundary_result("通过痛点画面建立共鸣。")
-_cert_nested_flag["stage_analysis"][1]["benchmark_evidence_ids"] = ["B4"]
-_cert_nested_flag["stage_analysis"][1]["benchmark_s2"] = {
+_cert_s5_flag = mk_cert_boundary_result("通过痛点画面建立共鸣。")
+_cert_s5_flag["stage_analysis"][4]["benchmark_evidence_ids"] = ["B2"]
+_cert_s5_flag["stage_analysis"][4]["benchmark_s5"] = {
+    "trust_reason": "展示 KKM 认证作为第三方信任背书。",
+    "evidence_ids": ["B2"],
+}
+_cert_s5_flag["video_understanding"]["benchmark"]["evidence_units"].append(
+    {"id": "B2", "time_range": "0s - 1s", "information": "画面展示 KKM 批准和 Halal 标识。"}
+)
+try:
+    validate_evidence_alignment(_cert_s5_flag)
+    validate_stage_ownership(_cert_s5_flag)
+    _cert_s5_ok = True
+except SystemExit as exc:
+    _cert_s5_ok = False
+    _cert_s5_error = str(exc)
+else:
+    _cert_s5_error = ""
+check("认证校验：结构化 S5 flag 自带证据可支撑认证主张", _cert_s5_ok, _cert_s5_error[:100])
+
+_cert_s2_claim = mk_cert_boundary_result("通过痛点画面建立共鸣。")
+_cert_s2_claim["stage_analysis"][1]["benchmark_s2"] = {
     "handoff_reason": "承接 S1 痛点，给出 KKM 认证解决方案。",
     "evidence_ids": ["B2"],
 }
-_cert_nested_flag["video_understanding"]["benchmark"]["evidence_units"].append(
-    {"id": "B2", "time_range": "1s - 2s", "information": "画面展示 KKM 批准和 Halal 标识。"}
-)
-_cert_nested_flag["video_understanding"]["benchmark"]["evidence_units"].append(
-    {"id": "B4", "time_range": "2s - 3s", "information": "画面展示产品成分。"}
+_cert_s2_claim["video_understanding"]["benchmark"]["evidence_units"].append(
+    {"id": "B2", "time_range": "0s - 1s", "information": "画面展示 KKM 批准和 Halal 标识。"}
 )
 try:
-    validate_evidence_alignment(_cert_nested_flag)
-    validate_stage_ownership(_cert_nested_flag)
-    _cert_nested_ok = True
+    validate_stage_ownership(_cert_s2_claim)
+    _cert_s2_rejected = False
 except SystemExit as exc:
-    _cert_nested_ok = False
-    _cert_nested_error = str(exc)
-else:
-    _cert_nested_error = ""
-check("认证校验：结构化 flag 自带证据可支撑认证主张", _cert_nested_ok, _cert_nested_error[:100])
+    _cert_s2_rejected = "只能归入 S5" in str(exc)
+check("认证校验：S2 不得承载认证主张", _cert_s2_rejected)
+
+_cert_creator_s2 = mk_cert_boundary_result("通过痛点画面建立共鸣。")
+_cert_creator_s2["stage_analysis"][1]["creator_s2"] = {
+    "handoff_reason": "承接 S1 痛点，给出 KKM 认证解决方案。",
+    "evidence_ids": ["C2"],
+}
+_cert_creator_s2["video_understanding"]["creator"]["evidence_units"].append(
+    {"id": "C2", "time_range": "0s - 1s", "information": "画面展示 KKM 批准和 Halal 标识。"}
+)
+try:
+    validate_stage_ownership(_cert_creator_s2)
+    _cert_creator_s2_rejected = False
+except SystemExit as exc:
+    _cert_creator_s2_rejected = "只能归入 S5" in str(exc)
+check("认证校验：达人 S2 不得承载认证主张", _cert_creator_s2_rejected)
+
+reconcile_certification_ownership(_cert_creator_s2)
+_creator_s2_after_move = _cert_creator_s2["stage_analysis"][1].get("creator_s2") or {}
+_creator_s5_after_move = _cert_creator_s2["stage_analysis"][4]
+check(
+    "认证归属修复：达人认证迁移到 S5 且清理 S2 flag",
+    "KKM" not in str(_creator_s2_after_move)
+    and "C_CERT_S5" in _creator_s5_after_move.get("creator_evidence_ids", [])
+    and "认证" in str(_creator_s5_after_move),
+)
 
 # 4. endorsement tag 两条归一化路径透传
 from flayr_core.llm.parse import normalize_video_understanding  # noqa: E402
@@ -1432,6 +1471,7 @@ _compound_contract = normalize_product_profile({
         "mode": "instant_visual",
         "consumer_outcome": "去油光且隐形毛孔",
         "signal_type": "state_change",
+        "observable_dimension": "油光反射强度与毛孔可见度",
         "observable_signal": "油光与毛孔同时变化",
         "before_state": "油光明显",
         "after_state": "反光减弱",
@@ -1440,7 +1480,7 @@ _compound_contract = normalize_product_profile({
 })
 check("proof_contract 拒绝复合 primary",
       _compound_contract["proof_contract"]["valid"] is False
-      and "consumer_outcome" in _compound_contract["proof_contract"]["validation_reason"])
+      and "observable_dimension" in _compound_contract["proof_contract"]["validation_reason"])
 _missing_mode_contract = normalize_product_profile({
     "proof_contract": {
         "consumer_outcome": "油光减少",
@@ -2297,10 +2337,24 @@ from flayr_core.llm.payload import (  # noqa: E402
     hook_anchor_terms,
     load_brand_proposition,
 )
-from flayr_core.llm.pipeline import has_product_foundation_anchor, product_foundation_validation_reason  # noqa: E402
+from flayr_core.llm.pipeline import (  # noqa: E402
+    _process_llm_result,
+    finalize_analysis_result,
+    has_product_foundation_anchor,
+    merge_analysis_result,
+    product_foundation_validation_reason,
+)
 from flayr_core.llm.api import LLM_MAX_OUTPUT_TOKENS, increase_output_budget, is_retryable_error  # noqa: E402
 from flayr_core.report import stage_skipped  # noqa: E402
-from flayr import resolve_ocr_policy  # noqa: E402
+from flayr import (  # noqa: E402
+    build_preprocess_fingerprint,
+    create_run_dir,
+    load_existing_video_result,
+    resolve_ocr_policy,
+)
+from flayr_core.stage_ownership import CERTIFICATION_OWNERSHIP_PROMPT  # noqa: E402
+from flayr_core.stage_catalog import DEFAULT_STAGES, fallback_artifact_ranges, stage_tuples  # noqa: E402
+from flayr_core.llm.parse import STAGES as PARSE_STAGES  # noqa: E402
 
 with tempfile.TemporaryDirectory() as tmp:
     tmp_dir = Path(tmp)
@@ -2359,6 +2413,133 @@ _payload = build_llm_comparison_payload(
 _content = _payload["messages"][1]["content"]
 _user_text = _content[0]["text"] if isinstance(_content, list) else str(_content)
 check("S1 hook flags 无冻结品库仍强制输出", "S1 强制" in _user_text and "creator_hook" in _user_text)
+_fallback_ranges = fallback_artifact_ranges(20.0)
+check(
+    "阶段目录：解析与预处理回退共用唯一来源",
+    PARSE_STAGES == stage_tuples()
+    and [item[0] for item in _fallback_ranges] == [stage.name for stage in DEFAULT_STAGES]
+    and _fallback_ranges[-1][2:] == (15.0, 20.0),
+)
+check(
+    "LLM 结果入口统一委托唯一收口链",
+    "finalize_analysis_result" in inspect.getsource(merge_analysis_result)
+    and "finalize_analysis_result" in inspect.getsource(_process_llm_result)
+    and inspect.getsource(finalize_analysis_result).count("validate_analysis_dimensions") == 1,
+)
+
+with tempfile.TemporaryDirectory() as tmp:
+    cache_root = Path(tmp)
+    video_path = cache_root / "source.mp4"
+    video_path.write_bytes(b"first-video")
+    role_dir = cache_root / "creator"
+    frames_dir = role_dir / "frames"
+    frames_dir.mkdir(parents=True)
+    transcript_path = role_dir / "transcript.txt"
+    transcript_path.write_text("cached transcript", encoding="utf-8")
+    cache_args = SimpleNamespace(
+        skip_whisper=False,
+        whisper_language="auto",
+        translate_with_llm=False,
+        translation_model="",
+        llm_model="",
+        llm_api_url="",
+        product_name="",
+        product_notes="",
+        ocr_mode="off",
+        with_ocr=False,
+        no_ocr=False,
+        llm_dry_run=True,
+    )
+    cache_deps = {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "whisper": "whisper-cli", "whisper_model": None, "whisper_model_th": None}
+    fingerprint = build_preprocess_fingerprint(video_path, cache_deps, cache_args)
+    (role_dir / "_preprocess.json").write_text(
+        json.dumps({"frames_dir": str(frames_dir), "transcript_path": str(transcript_path), "preprocess_fingerprint": fingerprint}),
+        encoding="utf-8",
+    )
+    check("预处理缓存：同视频同配置命中", load_existing_video_result(role_dir, fingerprint) is not None)
+    video_path.write_bytes(b"changed-video")
+    changed_fingerprint = build_preprocess_fingerprint(video_path, cache_deps, cache_args)
+    check("预处理缓存：视频内容变化拒绝复用", load_existing_video_result(role_dir, changed_fingerprint) is None)
+    cache_args.whisper_language = "th"
+    config_fingerprint = build_preprocess_fingerprint(video_path, cache_deps, cache_args)
+    check("预处理缓存：转写配置变化拒绝复用", load_existing_video_result(role_dir, config_fingerprint) is None)
+
+with tempfile.TemporaryDirectory() as tmp:
+    import flayr as flayr_module  # noqa: E402
+
+    original_runs_dir = flayr_module.DEFAULT_RUNS_DIR
+    flayr_module.DEFAULT_RUNS_DIR = Path(tmp)
+    try:
+        first_run = create_run_dir(SimpleNamespace(output_dir=None, mode="improve"))
+        second_run = create_run_dir(SimpleNamespace(output_dir=None, mode="improve"))
+    finally:
+        flayr_module.DEFAULT_RUNS_DIR = original_runs_dir
+    check("默认运行目录：同秒任务不复用目录", first_run != second_run and first_run.is_dir() and second_run.is_dir())
+
+from flayr_core import translation as translation_module  # noqa: E402
+from flayr_core import proposal_video as proposal_video_module  # noqa: E402
+from flayr_core import voice_clone as voice_clone_module  # noqa: E402
+
+with tempfile.TemporaryDirectory() as tmp:
+    translation_dir = Path(tmp)
+    (translation_dir / "transcript.txt").write_text("Ini contoh", encoding="utf-8")
+    translation_result = {"errors": []}
+    translation_args = SimpleNamespace(
+        translation_model="test-model",
+        llm_model="",
+        product_name="",
+        product_notes="",
+        llm_dry_run=False,
+        llm_api_url="https://example.invalid",
+    )
+    original_key_reader = translation_module.read_llm_api_key
+    original_call = translation_module.call_llm_api
+    translation_module.read_llm_api_key = lambda _args: "test-key"
+    translation_module.call_llm_api = lambda *_args: (_ for _ in ()).throw(SystemExit("network failed"))
+    try:
+        translation_module.translate_transcript_with_llm(translation_args, "creator", translation_dir, translation_result)
+    finally:
+        translation_module.read_llm_api_key = original_key_reader
+        translation_module.call_llm_api = original_call
+    check(
+        "LLM 翻译失败：记录错误且不中断主流程",
+        translation_result.get("translation_status") == "failed"
+        and any("network failed" in str(item) for item in translation_result.get("errors", [])),
+    )
+
+
+def _curl_capture(module, callback):
+    commands = []
+    original = module.run_command
+
+    def fake_run(command):
+        commands.append(command)
+        if "-o" in command:
+            Path(str(command[command.index("-o") + 1])).write_text("{}", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    module.run_command = fake_run
+    try:
+        callback()
+    finally:
+        module.run_command = original
+    return commands
+
+
+proposal_commands = _curl_capture(
+    proposal_video_module,
+    lambda: proposal_video_module.curl_json("POST", "https://example.invalid", "secret-key", {}, False),
+)
+voice_commands = _curl_capture(
+    voice_clone_module,
+    lambda: voice_clone_module._curl_json(["https://example.invalid"], "secret-key"),
+)
+all_curl_commands = [command for group in (proposal_commands, voice_commands) for command in group]
+check(
+    "可选视频/音色请求：API key 不进入 curl argv",
+    all("secret-key" not in " ".join(str(item) for item in command) for command in all_curl_commands)
+    and all(any(str(item).startswith("@") for item in command) for command in all_curl_commands),
+)
 
 from collections import Counter  # noqa: E402
 
@@ -2449,6 +2630,26 @@ _repair_payload = build_llm_repair_payload(
 )
 _repair_user = _repair_payload["messages"][1]["content"]
 check("repair payload 携带 locked facts", "已锁定单视频事实清单" in _repair_user and '"B1"' in _repair_user)
+check(
+    "认证归属策略同时注入对比与修复 prompt",
+    CERTIFICATION_OWNERSHIP_PROMPT in _user_text
+    and CERTIFICATION_OWNERSHIP_PROMPT in _repair_payload["messages"][0]["content"],
+)
+with tempfile.TemporaryDirectory() as tmp:
+    analysis_input_path = prompt_module.write_analysis_input(
+        Path(tmp),
+        {
+            "analysis_scope": {"label": "视频证据分析", "missing_context": [], "boundary": "仅按视频事实判断"},
+            "product": {"name": "测试品", "category": "", "price": "", "target_market": "auto", "core_selling_points": "", "target_user": "", "purchase_motivation": "", "creator_profile": "", "notes": ""},
+            "videos": {},
+        },
+    )
+    analysis_input_text = analysis_input_path.read_text(encoding="utf-8")
+check(
+    "认证归属策略覆盖 analysis_input 且清除旧位置规则",
+    CERTIFICATION_OWNERSHIP_PROMPT in analysis_input_text
+    and "开头的背书/认证类内容按钩子算" not in analysis_input_text,
+)
 
 _review_payload = build_stage_review_payload(
     "test-model",
@@ -2460,6 +2661,10 @@ _review_payload = build_stage_review_payload(
 _review_user = _review_payload["messages"][1]["content"][0]["text"]
 check("Phase C S1 回看强制重判 hook flags", "creator_hook" in _review_user and "benchmark_hook" in _review_user)
 check("Phase C 回看使用 focused window detail mode", "detail_mode=focused_window" in _review_user and "sparse_window" in _review_user)
+check(
+    "Phase C 回看不把认证当作 S2 起点",
+    "产品名/卖点/认证" not in _review_user and CERTIFICATION_OWNERSHIP_PROMPT not in _review_user,
+)
 
 _review_s5s6_payload = build_stage_review_payload(
     "test-model",

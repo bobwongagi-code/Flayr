@@ -14,7 +14,9 @@ import re
 from typing import Any
 
 from ..artifacts import format_seconds, parse_time_range_seconds
-from ..llm.parse import STAGES
+from ..stage_catalog import stage_tuples
+
+STAGES = stage_tuples()
 from .utils import (
     adjacent_review_range,
     assign_benchmark_unit,

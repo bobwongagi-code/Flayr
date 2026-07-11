@@ -25,6 +25,7 @@ from ..llm.parse import (
     normalized_transcript_text,
     read_transcript_text,
 )
+from ..stage_ownership import CERTIFICATION_OWNER_STAGE, contains_certification, is_certification_owner_stage
 from .utils import evidence_overlaps_range
 
 
@@ -106,11 +107,11 @@ def validate_evidence_alignment(result: dict[str, Any]) -> None:
                 _role_claim_payload(stage, role),
                 ensure_ascii=False,
             )
-            if re.search(r"KKM|KKMA|认证|kelulusan", stage_text, flags=re.IGNORECASE):
+            if contains_certification(stage_text):
                 claim_references = set(_role_claim_references(stage, role))
                 claim_referenced = [unit for unit in units if str(unit.get("id")) in claim_references]
                 source_text = json.dumps(claim_referenced or referenced, ensure_ascii=False)
-                if not re.search(r"KKM|KKMA|认证|kelulusan", source_text, flags=re.IGNORECASE):
+                if not contains_certification(source_text):
                     raise SystemExit(f"S{index} 的 {role} 认证结论没有被所引用事实单元支持。")
 
 
@@ -131,11 +132,24 @@ def validate_analysis_dimensions(result: dict[str, Any]) -> None:
     visibility = result.get("product_visibility", {})
     if visibility.get("first_appearance_sec") is None or visibility.get("ratio") is None:
         warnings.append("[Q09] 缺少第二步产品可见度统计。")
-    if result.get("loop_closure", {}).get("note") == "未完成闭环校验。":
+    computed_loop = result.get("computed_loop_closure")
+    if not isinstance(computed_loop, dict) or computed_loop.get("source") != "proposition_trace":
         warnings.append("[Q03] 缺少第二步槽位间闭环校验。")
     for stage in result.get("stage_analysis", []):
         if not stage.get("gap_summary") or not str(stage.get("module_fit_reason") or "").strip():
             warnings.append(f"[Q03] {stage.get('stage')} 缺少模块适配判断或分点差距。")
+
+    improvement_targets = {
+        match.group(1).upper()
+        for item in result.get("improvements", [])
+        if isinstance(item, dict)
+        for match in [re.search(r"\b(S[1-6])\b", str(item.get("target_stage") or ""), flags=re.IGNORECASE)]
+        if match
+    }
+    for stage in result.get("stage_analysis", []):
+        match = re.match(r"(S[1-6])", str(stage.get("stage") or ""), flags=re.IGNORECASE)
+        if match and str(stage.get("severity") or "") == "large" and match.group(1).upper() not in improvement_targets:
+            warnings.append(f"[Q13] {match.group(1).upper()} 最终为 large，但 Top 提升点未覆盖该阶段。")
 
     if warnings:
         existing = result.get("qa_warnings", [])
@@ -674,25 +688,33 @@ def validate_chain_relationships(result: dict[str, Any], analysis: dict[str, Any
 
 
 def validate_stage_time_coherence(result: dict[str, Any]) -> None:
-    """Q09/G03：阶段时间应可解析；明显重叠写 warning，避免报告证据串位静默发生。"""
+    """Q09/G03：校验时间可解析，并按功能阶段语义审计重叠。
+
+    S1/S2 可在承接点短暂重叠，S3/S4 可共用同段证据，S5 是可出现在任意位置的
+    信任支持节点；只有 S2/S3 未声明合并却明显重叠时提示复核。
+    """
     warnings: list[str] = []
     for role in ("benchmark", "creator"):
-        previous_stage = ""
-        previous_end: float | None = None
-        for stage in result.get("stage_analysis", []):
+        ranges: dict[str, tuple[float, float]] = {}
+        for index, stage in enumerate(result.get("stage_analysis", []), start=1):
             label = str(stage.get("stage") or "")
             time_range = stage.get(f"{role}_time_range")
             start, end = parse_time_range_seconds(time_range, None)
             if end <= start:
                 raise SystemExit(f"{label} 的 {role}_time_range 无法形成有效时间段：{time_range}")
-            if previous_end is not None:
-                overlap = previous_end - start
-                if overlap > 0.5:
-                    warnings.append(
-                        f"[Q09] {role} {previous_stage} 与 {label} 时间重叠 {overlap:.1f}s，需复核阶段边界。"
-                    )
-            previous_stage = label
-            previous_end = end
+            ranges[f"S{index}"] = (start, end)
+
+        if "S2" in ranges and "S3" in ranges and len(result.get("stage_analysis", [])) >= 2:
+            s2_start, s2_end = ranges["S2"]
+            s3_start, s3_end = ranges["S3"]
+            overlap = min(s2_end, s3_end) - max(s2_start, s3_start)
+            s2_stage = result["stage_analysis"][1]
+            s2_flag = s2_stage.get(f"{role}_s2") if isinstance(s2_stage, dict) else None
+            merged = isinstance(s2_flag, dict) and s2_flag.get("merged_with_s3") is True
+            if overlap > 0.5 and not merged:
+                warnings.append(
+                    f"[Q09] {role} S2/S3 重叠 {overlap:.1f}s，但 merged_with_s3=false，需复核引出与使用边界。"
+                )
     append_qa_warnings(result, warnings)
 
 
@@ -774,38 +796,23 @@ def validate_transcript_attribution(result: dict[str, Any], analysis: dict[str, 
 
 
 def validate_stage_ownership(result: dict[str, Any]) -> None:
-    """第三方认证（KKM/Halal 等）只能归 S5 信任放大；S1 Hook 不得携带认证；不得跨阶段重复。
-
-    TODO: 本函数含 MY 市场 KKM/kelulusan 硬编码，未来扩市场时应抽到 claims_xx.py 的 validate 区。
-    """
+    """校验共享阶段归属策略：认证只能归 S5，且不得跨阶段重复。"""
     stages = result.get("stage_analysis", [])
     if not stages:
         return
-    hook_text = json.dumps(
-        {
-            "benchmark": _role_report_payload(stages[0], "benchmark"),
-            "creator": _role_report_payload(stages[0], "creator"),
-        },
-        ensure_ascii=False,
-    )
-    if re.search(r"KKM|KKMA|认证|kelulusan", hook_text, flags=re.IGNORECASE):
-        raise SystemExit("S1 Hook 不得承载 KKM/认证信息；第三方认证是外部背书，按功能归入 S5 信任放大，并标明画面是否验证。")
-    certification_stages = [
-        str(stage.get("stage") or f"S{index}")
-        for index, stage in enumerate(stages, start=1)
-        if re.search(
-            r"KKM|KKMA|认证|kelulusan",
-            json.dumps(
-                _role_report_payload(stage, "benchmark"),
-                ensure_ascii=False,
-            ),
-            flags=re.IGNORECASE,
-        )
-    ]
-    if len(certification_stages) > 1:
-        raise SystemExit(
-            "标杆认证信息不得重复归入多个阶段；请选择其主要作用阶段一次呈现。"
-            f"当前重复阶段：{', '.join(certification_stages)}。"
-        )
-    if certification_stages and not certification_stages[0].startswith("S5"):
-        raise SystemExit("第三方认证是外部背书，只能归入 S5 信任放大，不得归入 S2 或其他阶段。")
+    for role, label in (("benchmark", "标杆"), ("creator", "达人")):
+        hook_text = json.dumps(_role_claim_payload(stages[0], role), ensure_ascii=False)
+        if contains_certification(hook_text):
+            raise SystemExit(f"S1 Hook 不得承载 {label}的 KKM/认证信息；第三方认证是外部背书，按功能归入 S5 信任放大，并标明画面是否验证。")
+        certification_stages = [
+            str(stage.get("stage") or f"S{index}")
+            for index, stage in enumerate(stages, start=1)
+            if contains_certification(json.dumps(_role_claim_payload(stage, role), ensure_ascii=False))
+        ]
+        if len(certification_stages) > 1:
+            raise SystemExit(
+                f"{label}认证信息不得重复归入多个阶段；请选择其主要作用阶段一次呈现。"
+                f"当前重复阶段：{', '.join(certification_stages)}。"
+            )
+        if certification_stages and not is_certification_owner_stage(certification_stages[0]):
+            raise SystemExit(f"第三方认证是外部背书，只能归入 {CERTIFICATION_OWNER_STAGE} 信任放大，不得归入其他阶段。")

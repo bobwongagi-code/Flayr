@@ -63,17 +63,28 @@ def translate_transcript_with_llm(
         result["translation_status"] = "dry_run"
         return
 
-    api_key = read_llm_api_key(args).strip()
-    if not api_key:
-        result["errors"].append("translation skipped: LLM API key missing")
+    try:
+        api_key = read_llm_api_key(args).strip()
+        if not api_key:
+            result["translation_status"] = "failed"
+            result["errors"].append("translation skipped: LLM API key missing")
+            return
+
+        raw_text = call_llm_api(args.llm_api_url, api_key, payload_path, raw_path)
+        write_text(raw_path, raw_text)
+        translated = extract_chat_completion_text(json.loads(raw_text)).strip()
+        translated = sanitize_translation_claims(translated, str(args.product_name or ""))
+    except SystemExit as exc:
+        result["translation_status"] = "failed"
+        result["errors"].append(f"translation failed: {str(exc)[:200]}")
+        return
+    except Exception as exc:  # noqa: BLE001 — 可选翻译失败不得中断主分析。
+        result["translation_status"] = "failed"
+        result["errors"].append(f"translation failed: {str(exc)[:200]}")
         return
 
-    raw_text = call_llm_api(args.llm_api_url, api_key, payload_path, raw_path)
-    raw_path.write_text(raw_text, encoding="utf-8")
-
-    translated = extract_chat_completion_text(json.loads(raw_text)).strip()
-    translated = sanitize_translation_claims(translated, str(args.product_name or ""))
     if not translated:
+        result["translation_status"] = "failed"
         result["errors"].append("translation failed: empty LLM output")
         return
 

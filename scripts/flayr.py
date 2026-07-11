@@ -5,14 +5,17 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import shutil
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
 from flayr_core.llm.api import read_llm_api_key
 from flayr_core.llm.pipeline import (
+    apply_finalized_analysis_result,
     merge_analysis_result,
     run_large_model_analysis,
 )
@@ -20,6 +23,7 @@ from flayr_core.prompt import write_analysis_input
 from flayr_core.proposal_clip import generate_proposal_clips
 from flayr_core.proposal_video import config_from_args
 from flayr_core.report import write_report
+from flayr_core.stage_catalog import DEFAULT_STAGES
 from flayr_core.motion import compute_shake_metric
 from flayr_core.shot_track import build_shot_track
 from flayr_core.speech_mode import classify_speech_mode
@@ -37,14 +41,8 @@ from flayr_core.whisper import run_whisper
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNS_DIR = ROOT / "runs"
-STAGES = [
-    ("S1 Hook", "0~3s", "用户凭什么停下来"),
-    ("S2 产品引出", "3~6s", "产品为什么现在出现"),
-    ("S3 使用过程", "6~15s", "用户能不能看懂怎么用"),
-    ("S4 效果呈现", "15~23s", "用户能不能看见价值"),
-    ("S5 信任放大", "23~27s", "用户凭什么相信"),
-    ("S6 CTA", "最后 3~5s", "用户为什么现在下单"),
-]
+PREPROCESS_CACHE_SCHEMA_VERSION = 1
+PREPROCESS_PIPELINE_VERSION = "2026-07-11.1"
 
 
 def main() -> int:
@@ -62,11 +60,12 @@ def main() -> int:
     analysis = build_analysis(args, run_dir, deps, videos)
     analysis_input_path = write_analysis_input(run_dir, analysis)
     if args.llm_model and not args.analysis_result_json:
-        llm_result_path = run_large_model_analysis(args, analysis, analysis_input_path, run_dir)
-        if llm_result_path:
-            args.analysis_result_json = llm_result_path
-    if args.analysis_result_json:
-        merge_analysis_result(analysis, args.analysis_result_json)
+        completed = run_large_model_analysis(args, analysis, analysis_input_path, run_dir)
+        if completed:
+            llm_result_path, normalized_result = completed
+            apply_finalized_analysis_result(analysis, normalized_result, llm_result_path)
+    elif args.analysis_result_json:
+        merge_analysis_result(analysis, args.analysis_result_json, analysis_input_path.read_text(encoding="utf-8"))
     if args.mode in {"compare", "improve"}:
         voice_key = read_llm_api_key(args).strip() if getattr(args, "with_voice_clone", False) else ""
         analysis["proposal_clips"] = generate_proposal_clips(
@@ -299,10 +298,11 @@ def build_parser() -> argparse.ArgumentParser:
 def create_run_dir(args: argparse.Namespace) -> Path:
     if args.output_dir:
         run_dir = args.output_dir.expanduser().resolve()
+        run_dir.mkdir(parents=True, exist_ok=True)
     else:
         stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        run_dir = DEFAULT_RUNS_DIR / f"{stamp}-{args.mode}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+        run_dir = DEFAULT_RUNS_DIR / f"{stamp}-{args.mode}-{uuid.uuid4().hex[:8]}"
+        run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
 
 
@@ -402,14 +402,79 @@ def validate_optional_file(path: Path | None, label: str) -> Path | None:
     return resolved
 
 
-def load_existing_video_result(role_dir: Path) -> dict[str, Any] | None:
-    """复用上次预处理：读 _preprocess.json，校验关键产物仍在则返回，否则 None 触发重抽。"""
+def _file_metadata(path: Any, include_sha256: bool = False) -> dict[str, Any] | None:
+    """返回缓存判定所需的文件身份；源视频额外用 SHA-256 防止同路径误复用。"""
+    if not path:
+        return None
+    candidate = Path(str(path)).expanduser().resolve()
+    if not candidate.is_file():
+        return {"path": str(candidate), "missing": True}
+    stat = candidate.stat()
+    metadata: dict[str, Any] = {
+        "path": str(candidate),
+        "size_bytes": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+    if include_sha256:
+        digest = hashlib.sha256()
+        with candidate.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        metadata["sha256"] = digest.hexdigest()
+    return metadata
+
+
+def build_preprocess_fingerprint(
+    video_path: Path,
+    deps: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """缓存只在源视频与所有会改变预处理产物的配置完全一致时命中。"""
+    return {
+        "cache_schema_version": PREPROCESS_CACHE_SCHEMA_VERSION,
+        "pipeline_version": PREPROCESS_PIPELINE_VERSION,
+        "source_video": _file_metadata(video_path, include_sha256=True),
+        "media_tools": {
+            "ffmpeg": str(deps.get("ffmpeg") or ""),
+            "ffprobe": str(deps.get("ffprobe") or ""),
+        },
+        "transcription": {
+            "skip_whisper": bool(getattr(args, "skip_whisper", False)),
+            "requested_language": str(getattr(args, "whisper_language", "auto") or "auto"),
+            "command": str(deps.get("whisper") or ""),
+            "model": _file_metadata(deps.get("whisper_model")),
+            "thai_model": _file_metadata(deps.get("whisper_model_th")),
+        },
+        "translation": {
+            "enabled": bool(getattr(args, "translate_with_llm", False)),
+            "model": str(getattr(args, "translation_model", "") or getattr(args, "llm_model", "") or ""),
+            "api_url": str(getattr(args, "llm_api_url", "") or ""),
+            "product_name": str(getattr(args, "product_name", "") or ""),
+            "product_notes": str(getattr(args, "product_notes", "") or ""),
+        },
+        "ocr": {
+            "mode": str(getattr(args, "ocr_mode", "auto") or "auto"),
+            "with_ocr": bool(getattr(args, "with_ocr", False)),
+            "no_ocr": bool(getattr(args, "no_ocr", False)),
+            "dry_run": bool(getattr(args, "llm_dry_run", False)),
+        },
+        "frame_strategy": "base-1fps-focus-2fps-shot-track-v1",
+    }
+
+
+def load_existing_video_result(
+    role_dir: Path,
+    expected_fingerprint: dict[str, Any],
+) -> dict[str, Any] | None:
+    """复用上次预处理；缺少或不匹配指纹的缓存一律重抽。"""
     cache = role_dir / "_preprocess.json"
     if not cache.is_file():
         return None
     try:
         info = json.loads(cache.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
+        return None
+    if info.get("preprocess_fingerprint") != expected_fingerprint:
         return None
     frames_dir = Path(str(info.get("frames_dir") or ""))
     transcript = Path(str(info.get("transcript_path") or ""))
@@ -427,7 +492,8 @@ def process_video(
 ) -> dict[str, Any]:
     role_dir = run_dir / role
     if getattr(args, "reuse_preprocessing", False):
-        cached = load_existing_video_result(role_dir)
+        fingerprint = build_preprocess_fingerprint(video_path, deps, args)
+        cached = load_existing_video_result(role_dir, fingerprint)
         if cached is not None:
             ensure_video_evidence_artifacts(role_dir, cached)
             print(f"[reuse] {role}: 复用已有预处理（跳过抽帧/转写/OCR）")
@@ -523,6 +589,7 @@ def process_video(
     # 二级证据视图：去重审计、顺序联系表、packed transcript、timeline view。
     # 这些 artifact 只用于复核和后续模型证据定位，不直接改变评分。
     result["video_evidence"] = build_video_evidence_artifacts(role_dir, result)
+    result["preprocess_fingerprint"] = build_preprocess_fingerprint(video_path, deps, args)
 
     # 落盘预处理结果，供 --reuse-preprocessing 下次复用（即使本次 LLM 阶段后续失败也已写）。
     write_json(role_dir / "_preprocess.json", result)
@@ -580,7 +647,10 @@ def build_analysis(
     deps: dict[str, Any],
     videos: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    stage_analysis = [stage_placeholder(name, time_range, question) for name, time_range, question in STAGES]
+    stage_analysis = [
+        stage_placeholder(stage.name, stage.default_time_range, stage.core_question)
+        for stage in DEFAULT_STAGES
+    ]
     improvements = default_improvements(args.mode)
 
     # improvements_status 取值：

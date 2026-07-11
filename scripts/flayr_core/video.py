@@ -40,6 +40,10 @@ def extract_frames(
     focus_frames_dir: Path,
     result: dict[str, Any],
 ) -> None:
+    for stale_frame in frames_dir.glob("frame_*.jpg"):
+        stale_frame.unlink(missing_ok=True)
+    for stale_frame in focus_frames_dir.glob("*.jpg"):
+        stale_frame.unlink(missing_ok=True)
     pattern = frames_dir / "frame_%04d.jpg"
     command = [
         "ffmpeg",

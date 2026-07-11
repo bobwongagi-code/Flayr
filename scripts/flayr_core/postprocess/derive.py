@@ -593,34 +593,28 @@ def _s6_cta_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
             return 0.0
         if flag.get("ending_position_met") is not True:
             return 0.0
-        met = sum(
-            1
-            for key in (
-                "direct_order_met",
-                "action_path_clear",
-                "offer_or_incentive_clear",
-                "urgency_met",
-                "product_value_recalled",
-                "module_fit_met",
-            )
-            if flag.get(key) is True
+        direct = flag.get("direct_order_met") is True
+        path = flag.get("action_path_clear") is True
+        fit_value = flag.get("module_fit_met")
+        fit = fit_value is True
+        amplifier = any(
+            flag.get(key) is True
+            for key in ("offer_or_incentive_clear", "urgency_met", "product_value_recalled")
         )
         if flag.get("compliance_risk") is True:
-            return min(0.5, met / 6 * 2)
-        if flag.get("direct_order_met") is not True and flag.get("action_path_clear") is not True:
-            return 0.5 if met else 0.0
+            return 0.5 if direct or path else 0.0
+        if not direct and not path:
+            return 0.0
         depends_on_valid_s4 = flag.get("computed_depends_on_valid_s4")
         if depends_on_valid_s4 not in {True, False}:
             depends_on_valid_s4 = flag.get("depends_on_valid_s4")
-        if flag.get("module_type") == "D" and depends_on_valid_s4 is False:
-            return min(1.0, met / 6 * 2)
-        if met >= 5:
-            return 2.0
-        if met >= 3:
-            return 1.0
-        if met >= 1:
+        if fit_value is False or (flag.get("module_type") == "D" and depends_on_valid_s4 is False):
             return 0.5
-        return 0.0
+        if direct and path and fit and amplifier:
+            return 2.0
+        if direct and path:
+            return 1.0
+        return 1.0 if fit and amplifier else 0.5
 
     return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
 

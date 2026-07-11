@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from ..proposition_contract import build_product_proposition_contract, stage_allowed_ids
+
 
 S1_S2_COMPATIBILITY: dict[str, set[str]] = {
     "A": {"A", "C"},
@@ -131,6 +133,243 @@ def materialize_product_proposition_matrix(result: dict[str, Any], analysis: dic
             "drive_type": str(category.get("drive_type") or "").strip(),
         },
     }
+    result["product_proposition_contract"] = build_product_proposition_contract(
+        {"category_profile": category, "product_profile": profile},
+        brand,
+    )
+
+
+STAGE_FLAG_SUFFIX = {
+    "S1": "hook",
+    "S2": "s2",
+    "S3": "s3",
+    "S4": "s4",
+    "S5": "s5",
+    "S6": "s6",
+}
+
+
+def _append_qa_warning(result: dict[str, Any], warning: str) -> None:
+    warnings = result.get("qa_warnings") if isinstance(result.get("qa_warnings"), list) else []
+    result["qa_warnings"] = list(dict.fromkeys([*warnings, warning]))
+
+
+def _stage_flag(stages: list[Any], stage_id: str, role: str) -> dict[str, Any] | None:
+    index = int(stage_id[1:]) - 1
+    if index >= len(stages) or not isinstance(stages[index], dict):
+        return None
+    value = stages[index].get(f"{role}_{STAGE_FLAG_SUFFIX[stage_id]}")
+    return value if isinstance(value, dict) else None
+
+
+def _flag_claims_product_anchor(stage_id: str, flag: dict[str, Any] | None) -> bool:
+    """判断 flag 是否声称该阶段已经命中产品锚点，只用于缺引用审计。"""
+    if not isinstance(flag, dict):
+        return False
+    checks = {
+        "S1": flag.get("anchors_proposition") is True,
+        "S2": flag.get("product_role_clear") is True,
+        "S3": flag.get("core_selling_point_visible") is True,
+        "S4": flag.get("effect_proposition_matched") is True,
+        "S5": flag.get("exists") is True and flag.get("product_relevance_met") is True,
+        "S6": flag.get("exists") is True and flag.get("product_value_recalled") is True,
+    }
+    return checks.get(stage_id, False)
+
+
+def _proof_related_ids(contract: dict[str, Any]) -> dict[str, set[str]]:
+    related: dict[str, set[str]] = {}
+    for item in contract.get("propositions") or []:
+        if not isinstance(item, dict) or item.get("kind") != "proof":
+            continue
+        related[str(item.get("id") or "")] = {
+            str(value) for value in item.get("related_ids") or [] if str(value).strip()
+        }
+    return related
+
+
+def _relationship_consistency_warnings(
+    result: dict[str, Any],
+    stages: list[Any],
+    profile: dict[str, Any],
+) -> None:
+    relationship = result.get("s3_s4_relationship")
+    if not isinstance(relationship, dict):
+        return
+    for role in ("creator", "benchmark"):
+        value = str(relationship.get(f"{role}_relationship") or "unknown")
+        s3 = _stage_flag(stages, "S3", role) or {}
+        s4 = _stage_flag(stages, "S4", role) or {}
+        inconsistent = False
+        if value == "process_creates_effect":
+            inconsistent = not (
+                s3.get("usage_process_visible") is True
+                and s4.get("effect_visible") is True
+                and s4.get("process_linked_effect") is True
+            )
+        elif value == "process_without_effect":
+            inconsistent = s3.get("usage_process_visible") is not True or (
+                s4.get("effect_visible") is True and str(s4.get("effect_salience") or "") in {"clear", "strong"}
+            )
+        elif value == "result_without_process":
+            inconsistent = s3.get("usage_process_visible") is True or s4.get("result_only_without_process") is not True
+        elif value == "no_process_no_effect":
+            inconsistent = s3.get("usage_process_visible") is True or s4.get("effect_visible") is True
+        elif value == "aesthetic_no_effect":
+            inconsistent = str(s4.get("effect_type") or "") != "aesthetic_display"
+        elif value == "trust_substitutes_effect":
+            s5 = _stage_flag(stages, "S5", role) or {}
+            inconsistent = not (
+                str(profile.get("proof_mode") or "") == "trust_substituted"
+                or (str(profile.get("visualizable") or "") == "no" and s5.get("exists") is True)
+            )
+        if inconsistent:
+            _append_qa_warning(
+                result,
+                f"[Q20] {role} s3_s4_relationship={value} 与 S3/S4 结构化 flag 不一致，需复核关系结论。",
+            )
+
+
+def materialize_proposition_trace(result: dict[str, Any]) -> None:
+    """按命题 ID 派生跨阶段 trace 和一致性告警，不改变任何阶段分数。"""
+    contract = result.get("product_proposition_contract")
+    stages = result.get("stage_analysis")
+    if not isinstance(contract, dict) or not isinstance(stages, list):
+        return
+
+    proof_links = _proof_related_ids(contract)
+    profile = result.get("product_profile") if isinstance(result.get("product_profile"), dict) else {}
+    trace: dict[str, Any] = {"version": "1.0", "roles": {}}
+    for role in ("creator", "benchmark"):
+        role_stages: dict[str, Any] = {}
+        for stage_id in STAGE_FLAG_SUFFIX:
+            flag = _stage_flag(stages, stage_id, role)
+            references = [str(value) for value in (flag or {}).get("proposition_ids") or [] if str(value).strip()]
+            allowed = stage_allowed_ids(contract, stage_id)
+            valid = [value for value in references if value in allowed]
+            invalid = [value for value in references if value not in allowed]
+            role_stages[stage_id] = {
+                "proposition_ids": references,
+                "valid_ids": valid,
+                "invalid_ids": invalid,
+                "evidence_ids": [str(value) for value in (flag or {}).get("evidence_ids") or [] if str(value).strip()],
+            }
+            if invalid:
+                _append_qa_warning(
+                    result,
+                    f"[Q20] {role} {stage_id} 引用了不属于该阶段合同的命题 ID：{', '.join(invalid)}。",
+                )
+            if allowed and _flag_claims_product_anchor(stage_id, flag) and not valid:
+                _append_qa_warning(
+                    result,
+                    f"[Q20] {role} {stage_id} 声称命中本品锚点，但没有给出有效 proposition_ids。",
+                )
+
+        def ids(stage_id: str) -> set[str]:
+            return set(role_stages[stage_id]["valid_ids"])
+
+        s1_s2_shared = sorted(ids("S1") & ids("S2"))
+        s2 = _stage_flag(stages, "S2", role) or {}
+        if s1_s2_shared:
+            s1_s2_status = "same_claim_handoff"
+        elif s2.get("handoff_met") is True and ids("S1") and ids("S2"):
+            s1_s2_status = "functional_handoff_without_shared_id"
+        elif s2.get("handoff_met") is False:
+            s1_s2_status = "broken"
+        else:
+            s1_s2_status = "unknown"
+
+        s3_s4_matches: set[str] = ids("S3") & ids("S4")
+        for proof_id in ids("S4"):
+            s3_s4_matches.update(ids("S3") & proof_links.get(proof_id, set()))
+        s4 = _stage_flag(stages, "S4", role) or {}
+        if s3_s4_matches:
+            s3_s4_status = "same_claim_proven"
+        elif ids("S3") and ids("S4") and s4.get("process_linked_effect") is True:
+            s3_s4_status = "functional_link_without_contract_relation"
+        elif ids("S3") or ids("S4"):
+            s3_s4_status = "unlinked"
+        else:
+            s3_s4_status = "unknown"
+
+        upstream = ids("S1") | ids("S2") | ids("S3") | ids("S4") | ids("S5")
+        recalled = sorted(upstream & ids("S6"))
+        s6 = _stage_flag(stages, "S6", role) or {}
+        if recalled:
+            s6_status = "value_recalled"
+        elif s6.get("product_value_recalled") is True:
+            s6_status = "claimed_without_shared_id"
+            _append_qa_warning(
+                result,
+                f"[Q20] {role} S6 声称召回前文产品价值，但 proposition_ids 与 S1-S5 没有交集。",
+            )
+        elif s6.get("exists") is False:
+            s6_status = "missing_cta"
+        else:
+            s6_status = "unknown"
+
+        trace["roles"][role] = {
+            "stages": role_stages,
+            "edges": {
+                "S1_to_S2": {"status": s1_s2_status, "shared_ids": s1_s2_shared},
+                "S2_to_S3": {
+                    "status": _selling_point_chain_state(
+                        _stage_flag(stages, "S2", role),
+                        _stage_flag(stages, "S3", role),
+                        _stage_flag(stages, "S4", role),
+                        profile,
+                    )["status"],
+                    "s2_ids": sorted(ids("S2")),
+                    "s3_ids": sorted(ids("S3")),
+                },
+                "S3_to_S4": {"status": s3_s4_status, "matched_selling_ids": sorted(s3_s4_matches)},
+                "S5_support": {"status": "supported_claims" if ids("S5") else "none", "claim_ids": sorted(ids("S5"))},
+                "S6_recall": {"status": s6_status, "recalled_ids": recalled},
+            },
+        }
+    result["proposition_trace"] = trace
+    materialize_computed_loop_closure(result, trace)
+    _relationship_consistency_warnings(result, stages, profile)
+
+
+def materialize_computed_loop_closure(result: dict[str, Any], trace: dict[str, Any]) -> None:
+    """以命题 trace 生成唯一闭环审计状态；旧 loop_closure 只保留兼容字段。"""
+    creator = ((trace.get("roles") or {}).get("creator") or {}) if isinstance(trace, dict) else {}
+    edges = creator.get("edges") if isinstance(creator.get("edges"), dict) else {}
+    statuses = {
+        "s1_to_s2": str((edges.get("S1_to_S2") or {}).get("status") or "unknown"),
+        "s2_to_s3": str((edges.get("S2_to_S3") or {}).get("status") or "unknown"),
+        "s3_to_s4": str((edges.get("S3_to_S4") or {}).get("status") or "unknown"),
+        "s6_recall": str((edges.get("S6_recall") or {}).get("status") or "unknown"),
+    }
+    if "unknown" in statuses.values():
+        audit_status = "unknown"
+    elif statuses["s1_to_s2"] == "broken" or statuses["s2_to_s3"].startswith("broken") or statuses["s6_recall"] == "missing_cta":
+        audit_status = "broken"
+    elif (
+        statuses["s1_to_s2"] in {"same_claim_handoff", "functional_handoff_without_shared_id"}
+        and statuses["s2_to_s3"] == "closed"
+        and statuses["s3_to_s4"] in {"same_claim_proven", "functional_link_without_contract_relation"}
+        and statuses["s6_recall"] == "value_recalled"
+    ):
+        audit_status = "closed"
+    else:
+        audit_status = "partial"
+    note = (
+        "命题链审计："
+        f"S1→S2={statuses['s1_to_s2']}，S2→S3={statuses['s2_to_s3']}，"
+        f"S3→S4={statuses['s3_to_s4']}，S6召回={statuses['s6_recall']}。"
+    )
+    result["computed_loop_closure"] = {
+        "source": "proposition_trace",
+        "audit_status": audit_status,
+        "edges": statuses,
+        "note": note,
+    }
+    legacy = result.get("loop_closure") if isinstance(result.get("loop_closure"), dict) else {}
+    legacy["source"] = "proposition_trace"
+    legacy["note"] = note
+    result["loop_closure"] = legacy
 
 
 def _computed_s1_s2_compatible(hook_type: Any, s2_type: Any) -> bool | None:
@@ -145,9 +384,15 @@ def _computed_s1_s2_compatible(hook_type: Any, s2_type: Any) -> bool | None:
     return s in allowed
 
 
-def _valid_s4_output(flag: dict[str, Any] | None) -> bool:
+def _valid_s4_output(
+    flag: dict[str, Any] | None,
+    product_profile: dict[str, Any] | None = None,
+) -> bool:
     """S4 是否有可被 S6-D 复用的有效效果输出。"""
     if not isinstance(flag, dict):
+        return False
+    proof_contract = product_profile.get("proof_contract") if isinstance(product_profile, dict) else None
+    if isinstance(proof_contract, dict) and proof_contract.get("valid") is not True:
         return False
     return (
         flag.get("effect_visible") is True
@@ -163,6 +408,7 @@ def _selling_point_chain_state(
     s2: dict[str, Any] | None,
     s3: dict[str, Any] | None,
     s4: dict[str, Any] | None,
+    product_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """审计 S2→S4 卖点链，不改变阶段 severity。
 
@@ -179,7 +425,7 @@ def _selling_point_chain_state(
         and s3.get("mouth_only_or_static") is not True
         and s3.get("result_only_without_process") is not True
     )
-    s4_ready = _valid_s4_output(s4)
+    s4_ready = _valid_s4_output(s4, product_profile)
     if not s2_ready:
         status = "broken_at_s2"
         reason = "产品身份或解决方案角色不清，卖点链无法启动"
@@ -211,7 +457,15 @@ def materialize_cross_stage_inputs(result: dict[str, Any], analysis: dict[str, A
     if not isinstance(stages, list) or len(stages) < 6:
         return
 
-    state: dict[str, Any] = {"roles": {}}
+    profile = result.get("product_profile") if isinstance(result.get("product_profile"), dict) else {}
+    state: dict[str, Any] = {
+        "proof_route": {
+            "visualizable": str(profile.get("visualizable") or "unknown"),
+            "proof_mode": str(profile.get("proof_mode") or "unknown"),
+            "effect_requires_process": str(profile.get("effect_requires_process") or "partial"),
+        },
+        "roles": {},
+    }
     for role in ("creator", "benchmark"):
         s1 = stages[0].get(f"{role}_hook") if isinstance(stages[0], dict) else None
         s2 = stages[1].get(f"{role}_s2") if isinstance(stages[1], dict) else None
@@ -226,7 +480,7 @@ def materialize_cross_stage_inputs(result: dict[str, Any], analysis: dict[str, A
         if isinstance(s2, dict) and compat is not None:
             s2["computed_s1_s2_compatible"] = compat
 
-        s4_available = _valid_s4_output(s4 if isinstance(s4, dict) else None)
+        s4_available = _valid_s4_output(s4 if isinstance(s4, dict) else None, profile)
         if isinstance(s6, dict) and s6.get("module_type") == "D":
             s6["computed_depends_on_valid_s4"] = s4_available
 
@@ -242,9 +496,11 @@ def materialize_cross_stage_inputs(result: dict[str, Any], analysis: dict[str, A
                 s2 if isinstance(s2, dict) else None,
                 s3 if isinstance(s3, dict) else None,
                 s4 if isinstance(s4, dict) else None,
+                profile,
             ),
         }
     result["cross_stage_state"] = state
+    materialize_proposition_trace(result)
 
 
 def _absolute_status(stage_id: str, flag: dict[str, Any] | None) -> tuple[str, str]:
@@ -306,6 +562,10 @@ def _absolute_status(stage_id: str, flag: dict[str, Any] | None) -> tuple[str, s
             return "misplaced", "CTA 不在结尾促单位置"
         if flag.get("direct_order_met") is not True and flag.get("action_path_clear") is not True:
             return "weak", "缺少明确购买指令或路径"
+        if flag.get("module_fit_met") is False:
+            return "weak", "CTA 类型或表达不适配本品决策路径"
+        if flag.get("compliance_risk") is True:
+            return "risky", "CTA 存在夸大或无法核实的承诺"
         if flag.get("module_type") == "D" and flag.get("computed_depends_on_valid_s4", flag.get("depends_on_valid_s4")) is False:
             return "weak", "效果总结型 CTA 缺少有效 S4 输出支撑"
         return "complete", "结尾购买动作成立"
@@ -342,6 +602,26 @@ def materialize_quality_audits(result: dict[str, Any], analysis: dict[str, Any] 
             stage[f"{role}_absolute_status"] = status
             stage[f"{role}_absolute_reason"] = reason
             absolute[stage_id][role] = {"status": status, "reason": reason}
+
+        delivered = {
+            role: absolute[stage_id][role]["status"] in {"complete", "soft_trust"}
+            for role in ("creator", "benchmark")
+        }
+        if delivered["creator"] and delivered["benchmark"]:
+            computed_delivery = "both"
+        elif delivered["benchmark"]:
+            computed_delivery = "benchmark_only"
+        elif delivered["creator"]:
+            computed_delivery = "creator_only"
+        else:
+            computed_delivery = "none"
+        stage["computed_stage_standard_delivery"] = computed_delivery
+        declared_delivery = str(stage.get("stage_standard_delivery") or "").strip()
+        if declared_delivery in {"benchmark_only", "creator_only", "both", "none"} and declared_delivery != computed_delivery:
+            _append_qa_warning(
+                result,
+                f"[Q20] {stage_id} stage_standard_delivery={declared_delivery} 与结构化 flags 计算值 {computed_delivery} 不一致。",
+            )
 
     if len(stages) >= 5 and isinstance(stages[4], dict):
         anchors = ((matrix.get("S5") or {}).get("trust_multipliers") or []) if isinstance(matrix.get("S5"), dict) else []

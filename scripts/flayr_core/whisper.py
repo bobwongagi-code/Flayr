@@ -78,7 +78,7 @@ def run_whisper(
         return
 
     if generated.exists():
-        transcript_path.write_text(generated.read_text(encoding="utf-8"), encoding="utf-8")
+        write_text(transcript_path, generated.read_text(encoding="utf-8"))
     else:
         write_text(transcript_path, completed.stdout.strip() + "\n")
     result["transcription_status"] = "completed"

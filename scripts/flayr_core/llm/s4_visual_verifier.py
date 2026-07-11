@@ -13,7 +13,7 @@ from typing import Any
 from ..artifacts import format_seconds, select_frames_for_time_range
 from ..postprocess.derive import derive_severity_from_facts
 from ..postprocess.repair import stabilize_improvement_priorities
-from ..utils import write_json
+from ..utils import write_json, write_text
 from .api import call_llm_api, extract_chat_completion_text, image_to_data_url
 from .parse import normalize_demo_flag, normalize_s4_effect_salience, parse_json_text
 
@@ -46,7 +46,7 @@ def maybe_apply_s4_visual_verifier(
     write_json(request_path, payload)
     try:
         raw_text = call_llm_api(getattr(args, "llm_api_url"), api_key, request_path, response_path)
-        response_path.write_text(raw_text, encoding="utf-8")
+        write_text(response_path, raw_text)
         parsed = parse_json_text(extract_chat_completion_text(json.loads(raw_text)))
         applied = apply_s4_visual_verifier_result(result, parsed, analysis)
     except (Exception, SystemExit) as exc:  # verifier 是降级增强，不允许拖垮主链
