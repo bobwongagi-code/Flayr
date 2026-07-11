@@ -1311,6 +1311,170 @@ check("product_profile 归一 proof_mode/effect_requires_process",
 check("product_profile 归一 visual_proof_points",
       _npp["visual_proof_points"][0]["priority"] == "primary"
       and _npp["visual_proof_points"][1]["proof_target"] == "泡沫形态")
+_contract_profile = normalize_product_profile({
+    "proof_contract": {
+        "mode": "instant_visual",
+        "consumer_outcome": "油光明显减少",
+        "signal_type": "state_change",
+        "observable_signal": "同一脸颊的油光反光强度",
+        "before_state": "油光明显",
+        "after_state": "反光减弱",
+        "proof_condition": "同一脸颊、同一光线、同一距离的前后对比",
+    },
+    "visual_proof_points": [
+        {"priority": "primary", "proof_target": "柔焦隐形", "visual_standard": "同一光源下"},
+        {"priority": "secondary", "proof_target": "防蹭", "visual_standard": "纸巾按压无转移"},
+    ],
+})
+check("proof_contract 生成可观察 S4 primary",
+      _contract_profile["proof_contract"]["valid"] is True
+      and _contract_profile["visual_proof_points"][0]["proof_target"] == "油光明显减少"
+      and _contract_profile["visual_proof_points"][0]["visual_standard"] == "油光明显 vs 反光减弱"
+      and _contract_profile["visual_proof_points"][0]["visual_diff_dimensions"] == ["同一脸颊的油光反光强度"])
+_proof_plan_profile = normalize_product_profile({
+    "short_video_proof_plan": {
+        "candidates": [
+            {"id": "P1", "selling_point": "控油定妆", "visual_space": "high", "functional_centrality": "high", "comprehension_cost": "low", "delivery_stage": "S4", "proof_mode": "instant_visual", "reason": "可直接展示油光到哑光"},
+            {"id": "P2", "selling_point": "防蹭稳定", "visual_space": "high", "functional_centrality": "medium", "comprehension_cost": "low", "delivery_stage": "S4", "proof_mode": "process_result", "reason": "可做按压测试"},
+            {"id": "P3", "selling_point": "粉质细腻", "visual_space": "medium", "functional_centrality": "medium", "comprehension_cost": "medium", "delivery_stage": "S3", "proof_mode": "", "reason": "适合上脸过程说明"},
+        ],
+        "s4_anchor_candidate_id": "P1",
+        "selection_source": "model_category_default",
+        "anchor_confidence": "high",
+    },
+    "proof_contract": {
+        "anchor_candidate_id": "P1",
+        "mode": "instant_visual",
+        "consumer_outcome": "妆面由油亮变均匀哑光",
+        "signal_type": "state_change",
+        "observable_signal": "同一脸颊的反光强度变化",
+        "before_state": "油亮反光明显",
+        "after_state": "反光减弱为均匀哑光",
+        "proof_condition": "同一脸颊同光线同距离前后对比",
+    },
+})
+check("短视频证明计划：保留多卖点但只选一个 S4 anchor",
+      _proof_plan_profile["short_video_proof_plan"]["valid"] is True
+      and _proof_plan_profile["proof_contract"]["valid"] is True
+      and len(_proof_plan_profile["short_video_proof_plan"]["candidates"]) == 3
+      and _proof_plan_profile["short_video_proof_plan"]["s4_anchor_candidate_id"] == "P1"
+      and _proof_plan_profile["visual_proof_points"][0]["proof_target"] == "妆面由油亮变均匀哑光")
+_bad_rank_plan = normalize_product_profile({
+    "short_video_proof_plan": {
+        "candidates": [
+            {"id": "P1", "selling_point": "控油定妆", "visual_space": "high", "functional_centrality": "high", "comprehension_cost": "low", "delivery_stage": "S4", "proof_mode": "instant_visual"},
+            {"id": "P2", "selling_point": "防蹭稳定", "visual_space": "high", "functional_centrality": "medium", "comprehension_cost": "low", "delivery_stage": "S4", "proof_mode": "process_result"},
+        ],
+        "s4_anchor_candidate_id": "P2",
+        "selection_source": "model_category_default",
+        "anchor_confidence": "high",
+    },
+    "proof_contract": {
+        "anchor_candidate_id": "P2", "mode": "process_result", "consumer_outcome": "转移减少", "signal_type": "process_event",
+        "observable_signal": "纸巾上的粉底残留量", "before_state": "按压后残留明显", "after_state": "按压后残留减少", "proof_condition": "同一纸巾同等压力按压",
+    },
+})
+check("短视频证明计划：较弱 S4 候选不能越级成为 anchor",
+      _bad_rank_plan["short_video_proof_plan"]["valid"] is False
+      and _bad_rank_plan["proof_contract"]["valid"] is False
+      and "最高候选" in _bad_rank_plan["proof_contract"]["validation_reason"])
+_cup_plan = normalize_product_profile({
+    "short_video_proof_plan": {
+        "candidates": [
+            {"id": "P1", "selling_point": "温显功能", "visual_space": "high", "functional_centrality": "high", "comprehension_cost": "low", "delivery_stage": "S4", "proof_mode": "instant_visual"},
+            {"id": "P2", "selling_point": "316 不锈钢材质", "visual_space": "low", "functional_centrality": "medium", "comprehension_cost": "high", "delivery_stage": "S2", "proof_mode": ""},
+        ],
+        "s4_anchor_candidate_id": "P1", "selection_source": "model_category_default", "anchor_confidence": "high",
+    },
+    "proof_contract": {
+        "anchor_candidate_id": "P1", "mode": "instant_visual", "consumer_outcome": "杯身温度一眼可知", "signal_type": "state_change",
+        "observable_signal": "杯身温显数字变化", "before_state": "温度未显示", "after_state": "温度数字清楚显示", "proof_condition": "近景固定拍摄杯盖显示区",
+    },
+})
+check("短视频证明计划：重要但低可视卖点分流而非丢弃",
+      _cup_plan["short_video_proof_plan"]["valid"] is True
+      and any(item["id"] == "P2" and item["delivery_stage"] == "S2" for item in _cup_plan["short_video_proof_plan"]["candidates"]))
+_trust_plan = normalize_product_profile({
+    "short_video_proof_plan": {
+        "candidates": [
+            {"id": "P1", "selling_point": "本地认证", "visual_space": "low", "functional_centrality": "high", "comprehension_cost": "medium", "delivery_stage": "S5", "proof_mode": ""},
+            {"id": "P2", "selling_point": "长期营养补充", "visual_space": "low", "functional_centrality": "high", "comprehension_cost": "high", "delivery_stage": "S5", "proof_mode": ""},
+        ],
+        "s4_anchor_candidate_id": "", "selection_source": "model_category_default", "anchor_confidence": "low",
+    },
+    "proof_contract": {
+        "anchor_candidate_id": "", "mode": "trust_substituted", "consumer_outcome": "长期补充更值得信任", "signal_type": "trust_evidence",
+        "observable_signal": "包装上的本地认证标识", "before_state": "", "after_state": "", "proof_condition": "认证名称与产品信息同框清楚可读",
+    },
+    "visual_proof_points": [{"priority": "primary", "proof_target": "气色变化", "visual_standard": "肤色更红润"}],
+})
+check("短视频证明计划：无 S4 候选不伪造视觉 anchor",
+      _trust_plan["short_video_proof_plan"]["valid"] is True
+      and _trust_plan["proof_contract"]["valid"] is True
+      and _trust_plan["visual_proof_points"] == [])
+_invalid_contract = normalize_product_profile({
+    "proof_contract": {
+        "mode": "instant_visual",
+        "consumer_outcome": "柔焦效果",
+        "signal_type": "state_change",
+        "observable_signal": "同一光源下",
+        "before_state": "油光明显",
+        "after_state": "妆面哑光",
+        "proof_condition": "面部特写",
+    },
+})
+check("proof_contract 拒绝只有拍摄条件的直接视觉合同",
+      _invalid_contract["proof_contract"]["valid"] is False
+      and "拍摄条件" in _invalid_contract["proof_contract"]["validation_reason"]
+      and _invalid_contract["visual_proof_points"] == [])
+_compound_contract = normalize_product_profile({
+    "proof_contract": {
+        "mode": "instant_visual",
+        "consumer_outcome": "去油光且隐形毛孔",
+        "signal_type": "state_change",
+        "observable_signal": "油光与毛孔同时变化",
+        "before_state": "油光明显",
+        "after_state": "反光减弱",
+        "proof_condition": "同一脸颊同光线前后对比",
+    },
+})
+check("proof_contract 拒绝复合 primary",
+      _compound_contract["proof_contract"]["valid"] is False
+      and "consumer_outcome" in _compound_contract["proof_contract"]["validation_reason"])
+_missing_mode_contract = normalize_product_profile({
+    "proof_contract": {
+        "consumer_outcome": "油光减少",
+        "signal_type": "state_change",
+        "observable_signal": "皮肤反光强度变化",
+        "before_state": "油光明显",
+        "after_state": "反光减弱",
+        "proof_condition": "同一脸颊同光线前后对比",
+    },
+})
+check("proof_contract 缺 mode 触发重答",
+      _missing_mode_contract["proof_contract"]["valid"] is False
+      and "mode" in _missing_mode_contract["proof_contract"]["validation_reason"])
+_trust_contract = normalize_product_profile({
+    "proof_contract": {
+        "mode": "trust_substituted",
+        "consumer_outcome": "长期营养补充更值得信任",
+        "signal_type": "trust_evidence",
+        "observable_signal": "可核验的本地认证标识",
+        "before_state": "",
+        "after_state": "",
+        "proof_condition": "认证来源与产品关联清楚可读，并在包装上完整展示",
+    },
+    "visual_proof_points": [{"priority": "primary", "proof_target": "气色改善", "visual_standard": "肤色变红润"}],
+})
+check("非直接视觉合同不保留伪 S4 primary",
+      _trust_contract["proof_contract"]["valid"] is True
+      and not any(point["priority"] == "primary" for point in _trust_contract["visual_proof_points"]))
+_trust_skip_result = {
+    "product_profile": _trust_contract,
+    "stage_analysis": [{"stage": "S4 效果呈现"}],
+}
+check("非直接视觉合同跳过 S4 视觉复核",
+      "trust_substituted" in s4_visual_verifier_module._visual_verifier_skip_reason(_trust_skip_result))
 _compound_vpp = normalize_product_profile({
     "visual_proof_points": [
         {
@@ -2133,7 +2297,8 @@ from flayr_core.llm.payload import (  # noqa: E402
     hook_anchor_terms,
     load_brand_proposition,
 )
-from flayr_core.llm.pipeline import has_product_foundation_anchor  # noqa: E402
+from flayr_core.llm.pipeline import has_product_foundation_anchor, product_foundation_validation_reason  # noqa: E402
+from flayr_core.llm.api import LLM_MAX_OUTPUT_TOKENS, increase_output_budget, is_retryable_error  # noqa: E402
 from flayr_core.report import stage_skipped  # noqa: E402
 from flayr import resolve_ocr_policy  # noqa: E402
 
@@ -2351,11 +2516,29 @@ _brand_analysis = {
 _foundation_payload_text = build_product_foundation_payload("test-model", _brand_analysis)["messages"][1]["content"][0]["text"]
 check("Step-0 payload 注入人工冻结命题", "人工冻结命题" in _foundation_payload_text and "急救修护" in _foundation_payload_text)
 check("Step-0 payload 要求 S4 多视觉证明点", "visual_proof_points" in _foundation_payload_text and "primary" in _foundation_payload_text)
+check("Step-0 payload 要求先做卖点分流再选 S4 anchor",
+      "short_video_proof_plan" in _foundation_payload_text and "visual_space" in _foundation_payload_text
+      and "functional_centrality" in _foundation_payload_text)
+check("Step-0 payload 明确计划和合同为同级对象",
+      "严禁嵌入 short_video_proof_plan 内" in _foundation_payload_text)
 check("Step-0 payload 禁止复合 primary",
       "all-of" in _foundation_payload_text and "一次性马桶刷 primary=清洁结果可见" in _foundation_payload_text)
+check("Step-0 payload 要求 proof_contract",
+      "proof_contract" in _foundation_payload_text and "before_state" in _foundation_payload_text
+      and "保健品不得把气色/体感变化伪装成直接视觉" in _foundation_payload_text)
+check("Step-0 地基门禁同时要求计划和合同",
+      product_foundation_validation_reason(_proof_plan_profile) == ""
+      and "short_video_proof_plan" in product_foundation_validation_reason(_contract_profile))
 check("S4 verifier 兜底复合 primary",
       "复合条件" in inspect.getsource(s4_visual_verifier_module.build_s4_visual_verifier_payload)
       and "不能直接把 primary 判 false" in inspect.getsource(s4_visual_verifier_module.build_s4_visual_verifier_payload))
+_length_payload = {"max_tokens": 16384}
+_old_budget, _new_budget = increase_output_budget(_length_payload)
+_capped_old, _capped_new = increase_output_budget({"max_tokens": LLM_MAX_OUTPUT_TOKENS})
+check("LLM length 重试提高输出预算并封顶",
+      (_old_budget, _new_budget, _length_payload["max_tokens"]) == (16384, 32768, 32768)
+      and (_capped_old, _capped_new) == (32768, 32768))
+check("LLM TLS 瞬断进入重试", is_retryable_error("LibreSSL SSL_connect: SSL_ERROR_SYSCALL"))
 
 print()
 print("RESULT:", "PASS" if not failures else f"FAIL ({len(failures)}): {failures}")

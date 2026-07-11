@@ -32,6 +32,7 @@ from .payload import (
     build_llm_payload,
     build_llm_repair_payload,
     build_product_foundation_payload,
+    build_product_foundation_repair_payload,
     build_stage_review_payload,
     build_video_fact_payload,
     load_brand_proposition,
@@ -560,6 +561,48 @@ def establish_product_foundation(
             "category_profile": normalize_category_profile(raw.get("category_profile")),
             "product_profile": normalize_product_profile(raw.get("product_profile")),
         }
+        validation_reason = product_foundation_validation_reason(foundation.get("product_profile"))
+        if validation_reason:
+            repair_payload = build_product_foundation_repair_payload(
+                args.llm_model,
+                analysis,
+                raw.get("product_profile") if isinstance(raw.get("product_profile"), dict) else {},
+                validation_reason,
+            )
+            repair_request_path = run_dir / "llm_product_foundation_repair_request.json"
+            repair_response_path = run_dir / "llm_product_foundation_repair_response.json"
+            write_json(repair_request_path, repair_payload)
+            repair_text = fetch_json_completion(args, api_key, repair_request_path, repair_response_path)
+            repaired_raw = parse_json_text(repair_text)
+            foundation = {
+                "category_profile": normalize_category_profile(repaired_raw.get("category_profile")),
+                "product_profile": normalize_product_profile(repaired_raw.get("product_profile")),
+            }
+            repaired_reason = product_foundation_validation_reason(foundation.get("product_profile"))
+            if repaired_reason:
+                # 二次回答仍不合格时保留地基，但显式降级，禁止下游把旧视觉字段当强证据。
+                if foundation["product_profile"] is not None:
+                    foundation["product_profile"]["short_video_proof_plan"] = {
+                        "candidates": [],
+                        "s4_anchor_candidate_id": "",
+                        "selection_source": "model_category_default",
+                        "anchor_confidence": "low",
+                        "valid": False,
+                        "validation_reason": f"Step-0 重答后仍无有效 short_video_proof_plan：{repaired_reason}",
+                    }
+                    foundation["product_profile"]["proof_contract"] = {
+                        "anchor_candidate_id": "",
+                        "mode": "trust_substituted",
+                        "consumer_outcome": "",
+                        "signal_type": "",
+                        "observable_signal": "",
+                        "before_state": "",
+                        "after_state": "",
+                        "proof_condition": "",
+                        "valid": False,
+                        "validation_reason": f"Step-0 重答后仍无有效产品证明合同：{repaired_reason}",
+                    }
+                    foundation["product_profile"]["visual_proof_points"] = []
         if not foundation["category_profile"] and not foundation["product_profile"]:
             raise ValueError("category_profile 与 product_profile 均为空")
     except Exception as exc:  # noqa: BLE001
@@ -567,6 +610,19 @@ def establish_product_foundation(
         return None
     write_json(run_dir / "product_foundation.json", foundation)
     return foundation
+
+
+def product_foundation_validation_reason(product_profile: Any) -> str:
+    """新 Step-0 必须同时产出卖点分流计划与可校验合同；历史分析结果仍由 normalize 层兼容。"""
+    if not isinstance(product_profile, dict):
+        return "缺少 product_profile"
+    plan = product_profile.get("short_video_proof_plan")
+    if not isinstance(plan, dict) or plan.get("valid") is not True:
+        return str(plan.get("validation_reason") or "缺少有效 short_video_proof_plan") if isinstance(plan, dict) else "缺少 short_video_proof_plan"
+    contract = product_profile.get("proof_contract")
+    if not isinstance(contract, dict) or contract.get("valid") is not True:
+        return str(contract.get("validation_reason") or "证明合同不合法") if isinstance(contract, dict) else "缺少 proof_contract"
+    return ""
 
 
 def has_product_foundation_anchor(analysis: dict[str, Any]) -> bool:

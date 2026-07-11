@@ -32,6 +32,10 @@ def maybe_apply_s4_visual_verifier(
     s4 = _s4_stage(result)
     if not s4:
         return result
+    contract_reason = _visual_verifier_skip_reason(result)
+    if contract_reason:
+        result["s4_visual_verifier"] = {"applied": False, "reason": contract_reason}
+        return result
     payload = build_s4_visual_verifier_payload(getattr(args, "llm_model", ""), result, analysis)
     if payload is None:
         result["s4_visual_verifier"] = {"applied": False, "reason": "缺少 S4 帧证据，跳过视觉复核。"}
@@ -74,7 +78,7 @@ def build_s4_visual_verifier_payload(
                 "你是独立的 S4 效果呈现视觉复核器。只根据下面给你的 S4 关键帧判断，"
                 "不要沿用主分析结论，不评价口播好坏，不改 S1/S2/S3/S5/S6。\n"
                 "任务：分别判断达人和标杆是否真的把 product_profile 的 S4 视觉证明拍出来。\n"
-                "若 product_profile.visual_proof_points 存在，必须先按 priority=primary 的证明点判断核心效果是否成立；"
+                "若 product_profile.short_video_proof_plan 存在，先确认 S4 anchor，再按由该 anchor 生成的 priority=primary 证明点判断核心效果是否成立；"
                 "priority=secondary 的证明点只能作为补充说明，不能替代 primary，也不能让 primary 已成立的一侧被判为无效。"
                 "若 primary 文本误把多个卖点写成复合条件（例如清洁结果+刷头溶解），按最核心的消费者最终结果判断 primary；"
                 "机制/附加卖点缺失只能写进 reason，不能直接把 primary 判 false。"
@@ -119,6 +123,20 @@ def build_s4_visual_verifier_payload(
         ],
         "temperature": 0,
     }
+
+
+def _visual_verifier_skip_reason(result: dict[str, Any]) -> str:
+    """直接视觉复核只消费通过合同校验的 instant_visual/process_result。"""
+    profile = result.get("product_profile") if isinstance(result.get("product_profile"), dict) else {}
+    contract = profile.get("proof_contract") if isinstance(profile.get("proof_contract"), dict) else None
+    if contract is None:
+        return ""
+    if contract.get("valid") is not True:
+        reason = str(contract.get("validation_reason") or "证明合同未通过校验")
+        return f"proof_contract 无效，跳过直接视觉复核：{reason}。"
+    if contract.get("mode") not in {"instant_visual", "process_result"}:
+        return f"proof_contract={contract.get('mode')}，不适用直接视觉差异复核。"
+    return ""
 
 
 def apply_s4_visual_verifier_result(

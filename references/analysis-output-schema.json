@@ -350,10 +350,41 @@
       "S3 主轴：本品核心卖点（使用过程中要被『演示出来』传递的对象）。例：定妆粉饼=控油持妆/遮毛孔/粉质细腻；清洁机=吸力强/干湿分离/易倒垃圾。1-6 个，模型按品类+产品事实推，运营可供给。"
     ],
     "usage_context": "S3 场景层：本品典型使用场景（卖点演示的舞台，判场景适配/丰富/连贯的基准）。例：定妆粉饼=补妆/出油时段补涂；清洁机=客厅地毯/厨房瓷砖清洁。模型按品类+产品事实推。",
-    "core_visual_proposition": "旧兼容字段：本品到位效果展示的核心视觉命题。新结果优先使用 visual_proof_points.primary 作为 S4 评判锚点；旧结果无 visual_proof_points 时才回退此字段。",
+    "short_video_proof_plan": {
+      "candidates": [
+        {
+          "id": "卖点候选唯一标识，如 P1。",
+          "selling_point": "完整商业卖点。所有重要卖点都保留在候选中，不因未成为 S4 anchor 而删除。",
+          "visual_space": "high | medium | low。该卖点在短视频中可被连续、清楚、直观展示的空间。",
+          "functional_centrality": "high | medium | low。该卖点对产品主要购买任务的中心性。",
+          "comprehension_cost": "low | medium | high。普通用户看懂该卖点需要的解释成本。",
+          "delivery_stage": "S2 | S3 | S4 | S5。该卖点最适合被传递/证明的主要阶段。",
+          "proof_mode": "仅 delivery_stage=S4 时必填：instant_visual | process_result | sensory_proxy | aesthetic_value | social_reaction | long_term_record | trust_substituted | low_decision_light_proof；其他阶段为空。",
+          "reason": "一句话说明阶段分流或排序依据。"
+        }
+      ],
+      "s4_anchor_candidate_id": "单一 S4 测量锚点。必须是 candidates 中 delivery_stage=S4 的最高优先候选；按 visual_space、functional_centrality、comprehension_cost 依次排序。没有适合 S4 的候选则为空。",
+      "selection_source": "model_category_default | operator_priority | curated_priority。无运营明确排序时用 model_category_default。",
+      "anchor_confidence": "high | low。模型对该品类默认排序的置信度。",
+      "valid": "代码根据结构、排序和锚点引用计算。",
+      "validation_reason": "代码校验未通过时的原因。"
+    },
+    "proof_contract": {
+      "anchor_candidate_id": "proof_contract 消费的 short_video_proof_plan.s4_anchor_candidate_id。直接视觉合同必须填写并一致。",
+      "mode": "产品价值证明模式：instant_visual | process_result | sensory_proxy | aesthetic_value | social_reaction | long_term_record | trust_substituted | low_decision_light_proof。此字段是新结果的权威合同。",
+      "consumer_outcome": "选中 S4 anchor 要证明的一个消费者结果，不能直接照抄产品卖点词。",
+      "signal_type": "state_change | process_event | sensory_response | aesthetic_appeal | social_response | long_term_record | trust_evidence | light_proof。必须与 mode 对应。",
+      "observable_signal": "画面或记录中实际可观察到的信号；不得填写同一光源、特写拍摄等证明条件。",
+      "before_state": "仅 instant_visual/process_result 必填：使用前的可见状态。",
+      "after_state": "仅 instant_visual/process_result 必填：使用后的不同可见状态。",
+      "proof_condition": "让可观察信号可信的拍摄、记录或外部证据条件。",
+      "valid": "代码根据字段职责计算，true | false。",
+      "validation_reason": "代码校验未通过时的原因。"
+    },
+    "core_visual_proposition": "旧兼容字段：本品到位效果展示的核心视觉命题。新结果优先使用 short_video_proof_plan 选中 anchor 所生成的 visual_proof_points.primary 作为 S4 评判锚点；旧结果无 visual_proof_points 时才回退此字段。",
     "visual_proof_points": [
       {
-        "priority": "primary | secondary。primary 是消费者最核心的效果证明且只能证明一个最终结果，不得把多个卖点合并成 all-of 条件；secondary 是附加卖点证明，不能压过 primary。",
+        "priority": "primary | secondary。primary 是 short_video_proof_plan 选中的 S4 anchor 的单一视觉测量信号，不代表产品只有一个商业卖点；secondary 是该 anchor 的附加画面证明，不能替代 primary。",
         "proof_target": "这个视觉证明点要证明什么产品价值。例：清洁结果可见、刷头抛弃/溶解、油光变哑光。",
         "visual_standard": "画面做到什么程度才算证明成立。例：马桶污渍被刷洗/冲走并露出干净内壁。",
         "visual_diff_dimensions": [

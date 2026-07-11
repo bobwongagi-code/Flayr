@@ -100,7 +100,28 @@ def build_product_foundation_payload(model: str, analysis: dict[str, Any]) -> di
             "可痛点/承诺/反差/情绪/向往/视觉吸引/身份代入/场景还原，见 structure_library S1 七型）、"
             "core_selling_points（S3 主轴：使用过程要演示传递的核心卖点，1-6 个）、"
             "usage_context（S3 场景层：本品典型使用场景=卖点演示的舞台）、"
-            "core_visual_proposition（S4 决定性视觉瞬间=到位效果标准，按本品现推、别套通用 before/after）、"
+            "short_video_proof_plan（短视频卖点证明计划，先列全候选卖点，再决定各自最适合在哪一阶段传递；"
+            "candidates 数组 1-6 项，每项必须含 id、selling_point、visual_space(high|medium|low)、"
+            "functional_centrality(high|medium|low)、comprehension_cost(low|medium|high)、delivery_stage(S2|S3|S4|S5)、"
+            "proof_mode（仅 delivery_stage=S4 时填 instant_visual|process_result|sensory_proxy|aesthetic_value|social_reaction|long_term_record|trust_substituted|low_decision_light_proof，其他阶段留空）、reason；"
+            "s4_anchor_candidate_id=选中的单一 S4 candidate id（没有适合 S4 的候选则留空）；"
+            "selection_source=model_category_default|operator_priority|curated_priority（没有运营明确排序时只能填 model_category_default）；"
+            "anchor_confidence=high|low。选择 S4 anchor 的固定顺序：①可视展示空间最高；②若同级，产品主要功能中心性最高；③仍同级，普通用户理解成本最低。"
+            "这不是删掉其他卖点：不可直接视觉化但重要的卖点应按信息/使用/信任价值分流到 S2/S3/S5，不能为了凑 S4 伪造视觉锚点。"
+            "重要 JSON 层级：short_video_proof_plan 在 product_profile 下是一个到 candidates/s4_anchor_candidate_id/selection_source/anchor_confidence 为止的独立对象；"
+            "proof_contract、core_visual_proposition、visual_proof_points、proof_mode 等都必须与 short_video_proof_plan 同级，严禁嵌入 short_video_proof_plan 内。"
+            "proof_contract（只消费 short_video_proof_plan 已选的 S4 anchor；必须含 anchor_candidate_id，必须等于 s4_anchor_candidate_id；"
+            "必须先选 mode，再填各字段：mode=instant_visual|process_result|sensory_proxy|"
+            "aesthetic_value|social_reaction|long_term_record|trust_substituted|low_decision_light_proof；"
+            "consumer_outcome=这个 S4 anchor 要证明的一个消费者结果，不能直接照抄卖点词，且只能写一个结果，不得并列去油光/柔焦/无粉感等多个卖点；"
+            "signal_type 必须与 mode 一一匹配：instant_visual=state_change，process_result=state_change|process_event，"
+            "sensory_proxy=sensory_response，aesthetic_value=aesthetic_appeal，social_reaction=social_response，"
+            "long_term_record=long_term_record，trust_substituted=trust_evidence，low_decision_light_proof=light_proof；"
+            "observable_signal=画面/记录中实际可观察到的一个信号，只能有一个维度；产品的其他卖点仍保留在 short_video_proof_plan 的其它 candidate，不是被删除；before_state/after_state=仅 direct visual（instant_visual/process_result）必填的两种不同状态；"
+            "proof_condition=使信号可信的拍摄/记录条件。拍摄条件不能写进 observable_signal 或 before/after。"
+            "结构库约束：S4-A~F 的直接效果模块对保健品均排除；保健品不得把气色/体感变化伪装成直接视觉 state_change，"
+            "应选 trust_substituted 或 long_term_record，并把认证/记录留给 S5 或对应记录证据。"
+            "core_visual_proposition（旧兼容字段；S4 决定性视觉瞬间=选中 anchor 的到位效果标准，按本品现推、别套通用 before/after）、"
             "visual_proof_points（S4 多视觉证明点，数组 1-4 个；每项含 priority(primary|secondary)、proof_target、"
             "visual_standard、visual_diff_dimensions、related_selling_points。primary 必须是消费者最核心的效果证明；"
             "secondary 是附加卖点证明，不能压过 primary。primary 必须只证明一个消费者最终结果，不得用'与/及/同时/+'把多个卖点焊成一个 all-of 条件；"
@@ -111,6 +132,9 @@ def build_product_foundation_payload(model: str, analysis: dict[str, Any]) -> di
             "visual_diff_dimensions（before/after 应变化的视觉维度，1-3 个）、"
             "trust_multipliers（建立专业度/信任的元素，3-6 个）、shooting_requirement（卖点显现所需拍摄条件）、"
             "confidence(high|low，小众或本地新奇特品标 low)。",
+            "proof_contract 是选中 S4 anchor 的权威合同：后续 visual_proof_points.primary 必须由它生成。若 mode 是直接视觉，primary 必须等于 consumer_outcome，"
+            "visual_standard 必须等于 before_state vs after_state，visual_diff_dimensions 必须等于 observable_signal；"
+            "若 mode 非直接视觉，不得输出 visual_proof_points.primary 来冒充 before/after。"
             "只报产品事实与品类世界知识，不臆造具体功效数据/检测数字/价格优惠。",
         ]
     )
@@ -126,6 +150,25 @@ def build_product_foundation_payload(model: str, analysis: dict[str, Any]) -> di
         ],
         "temperature": 0.0,
     }
+
+
+def build_product_foundation_repair_payload(
+    model: str,
+    analysis: dict[str, Any],
+    rejected_profile: dict[str, Any],
+    validation_reason: str,
+) -> dict[str, Any]:
+    """Step-0 证明合同违规时，只重答产品地基，不让错误合同进入阶段判断。"""
+    payload = build_product_foundation_payload(model, analysis)
+    content = payload["messages"][1]["content"]
+    content[0]["text"] += (
+        "\n\n## 上次输出被拒绝，必须重答\n"
+        f"proof_contract 校验失败：{validation_reason}。\n"
+        "不要修辞性改写；先重建 short_video_proof_plan，再在 product_profile 同级输出 proof_contract（不得嵌入 plan），让合同只引用选中的 S4 anchor，最后让 visual_proof_points 与合同一致。\n"
+        "被拒绝的 product_profile：\n"
+        + json.dumps(rejected_profile, ensure_ascii=False, indent=2)
+    )
+    return payload
 
 
 def build_video_fact_payload(
@@ -171,9 +214,17 @@ def build_video_fact_payload(
                 f"{point.get('priority') or 'secondary'}:{point.get('proof_target') or ''}→{point.get('visual_standard') or ''}"
             )
         proof_points_text = "；".join(proof_points) or "（无）"
+        proof_plan = fnd.get("short_video_proof_plan") if isinstance(fnd.get("short_video_proof_plan"), dict) else {}
+        proof_candidates = proof_plan.get("candidates") if isinstance(proof_plan.get("candidates"), list) else []
+        proof_plan_text = "；".join(
+            f"{item.get('id') or '?'}:{item.get('selling_point') or ''}→{item.get('delivery_stage') or '?'}"
+            for item in proof_candidates
+            if isinstance(item, dict)
+        ) or "（无）"
         obs_hint = "\n".join(
             [
                 "## 本品重点观察线索（据产品地基，帮你定位该盯什么；只记客观证据、不下结论）",
+                f"- 短视频卖点分流：{proof_plan_text}；S4 选中锚点={proof_plan.get('s4_anchor_candidate_id') or '（无）'}。",
                 f"- S4 多视觉证明点：{proof_points_text}——primary 是核心效果证明，secondary 是附加卖点证明，观察时都记，但不要互相替代。",
                 f"- 旧兼容核心视觉命题：{fnd.get('core_visual_proposition') or '（无）'}——无多证明点时用它辅助定位决定性瞬间。",
                 f"- before/after 应变化的视觉维度：{vdd}——重点观察这些维度的画面证据。",
@@ -599,7 +650,7 @@ def build_llm_comparison_payload(
         foundation_block = (
             "## 本品商业地基（Step-0 已确立，作为 S1-S6 判断的尺子，直接采用）\n"
             "以下 category_profile（特征）与 product_profile（命题）已在看视频前据产品事实+品类世界知识确立。"
-            "S1-S6 的锚点（hook_proposition/core_selling_points/usage_context/visual_proof_points.primary/"
+            "S1-S6 的锚点（hook_proposition/core_selling_points/usage_context/short_video_proof_plan.s4_anchor_candidate_id/visual_proof_points.primary/"
             "core_visual_proposition fallback/trust_multipliers/decision_threshold 等）一律以此为准，直接用它判断达人/标杆，不要另起炉灶重推；"
             "你输出的 category_profile/product_profile 必须原样回填这套地基。\n"
             + json.dumps(fnd, ensure_ascii=False, indent=2)
@@ -745,6 +796,11 @@ def build_llm_comparison_payload(
         '"effect_reason": "一句话说明效果是否可见、因果是否成立；只有结果没过程要直说", '
         '"evidence_ids": ["C1"]}。\n'
         "S4 铁律：只给结果、没有过程，不等于高分效果展示。"
+        "先读 product_profile.proof_contract：mode=instant_visual/process_result 时，才按合同里的 before_state→after_state 与 observable_signal 判直接视觉效果；"
+        "mode=sensory_proxy 时，只能把可见的品尝/闻香/触感等真实反应作为感知代理，不能升级成产品功效；"
+        "mode=long_term_record/trust_substituted 时，不得伪造直接视觉前后差异，记录/认证等分别按其所属证据与 S5 判断；"
+        "proof_contract.valid=false 时，标为低置信，不得用泛化的画面变化判 S4 已完成。"
+        "proof_contract.valid=false 时，也不得回退 core_visual_proposition 或旧 visual_proof_points 给 S4 补强。"
         "若 result_only_without_process=true 且 effect_attribution_supported=false，效果很薄弱；"
         "若只有结果但产品和结果强绑定，也最多是中等可信；"
         "强效果按 effect_type 分型判断：所有强效果都必须 visual_difference_observed=true 且 module_constraints_met=true；"
@@ -878,10 +934,10 @@ def build_llm_comparison_payload(
             s6_field_req,
             "task_completion 只能取 complete、partial、missing 三选一（达人侧该阶段功能完成度），禁止 both_complete、no_gap 等任何其他词；标杆侧完成情况写在 benchmark_summary。",
             "creator_execution 与 benchmark_execution 取值只能是 0、0.5、1、2 四个数字：0=未执行该阶段功能；0.5=做了但对该阶段核心功能基本无效——敷衍、平庸无感、几乎不起作用（如一句轻带的 CTA、平铺直叙毫无抓力的开场、仅口头承诺没有任何验证支撑）；1=执行合格（功能完成且对观众有效）；2=执行出色（可视化演示/铺垫到位/感染力强）。两侧按该阶段功能定义各自独立打分，先打分再对比，禁止因对比结果回调任何一侧分数。",
-            "效果呈现阶段（S4）执行分以 product_profile.visual_proof_points 的 primary 证明点为主锚；若旧结果无该字段，回退 product_profile.core_visual_proposition。不套通用 before/after：先判该侧有没有拍出本品 primary 效果证明（定妆粉饼=粉底油光→哑光对比、面膜=逐日变化+敷后效果、清洁工具=清洁结果可见），并满足 product_profile.shooting_requirement。secondary 证明点（如防水/防汗测试、美容仪、刷头抛弃/溶解、周期记录、专业手法等）只能作为补充，不得替代 primary，也不得让 primary 缺失的一侧直接归零。若 primary 文本误把多个卖点写成复合条件，按最核心的消费者最终结果判断 primary，把机制/附加卖点缺失记为 secondary 不足。拍出 primary 且拍摄到位才给 2；只完成动作未体现 primary、或拍摄条件不支撑，按敷衍计最高 0.5；做了但 primary 呈现单薄最高 1。两侧各自独立打分，禁止因对比回调。",
+            "效果呈现阶段（S4）执行分只锚 product_profile.short_video_proof_plan 选中的 S4 candidate 所生成的 visual_proof_points.primary；它是单一可测视觉信号，不代表产品只有这一个商业卖点。若旧结果无该计划/字段，回退 product_profile.core_visual_proposition。S2/S3/S5 已分流的卖点不能拿来替代 S4 anchor，也不因未在 S4 出现被判为产品价值缺失。拍出 S4 anchor 且拍摄到位才给 2；只完成动作未体现 anchor、或拍摄条件不支撑，按敷衍计最高 0.5；做了但 anchor 呈现单薄最高 1。两侧各自独立打分，禁止因对比回调。",
             "S4 给执行分前必须做一次闭环核验：回到该侧关键帧，对照 visual_proof_points.primary.visual_standard/visual_diff_dimensions（无该字段则用 core_visual_proposition 与 visual_diff_dimensions），在画面上实际确认那个视觉对比肉眼可见——'存在 before/after 结构'不等于'对比拍出来了'。若该侧前后帧在指定维度上看不出明显差异，即命题未被有效呈现，visual_difference_observed=false，该侧执行分最高 1；几乎完全无差异则 0.5。不许用 secondary 证明点补偿 primary 缺失。",
             "S4 还必须按 structure_library_full.md 的模块硬约束输出 module_constraints_met：S4-A/B 必须同对象同光线同构图或同细节区域，S4-C 必须人物条件可比，S4-D 必须本品与替代方案形成结果对照，S4-E 必须借日常参照物量化，S4-F 必须用特写/慢镜/微距让过程可视化。模块硬约束不成立，即使口播说有效或字幕写 before/after，也不能给满执行。",
-            "S4 执行分主轴是 primary visual proof 的有效呈现。trust_multipliers 与 visual_proof_points.secondary 是加分项或补充说明，只能在 primary 已有效呈现（该侧≥1）时把分抬向 2；不能替代、也不能补偿弱 primary。若某侧 primary 没拍出来（对比弱/不可见），哪怕它有很强的次要演示，该侧执行分仍封顶 1。",
+            "S4 执行分主轴是选中 anchor 的有效呈现。其他 S4 补充画面只能在 anchor 已有效呈现（该侧≥1）时把分抬向 2；不能替代、也不能补偿弱 anchor。若某侧 anchor 没拍出来（对比弱/不可见），哪怕它有很强的其它展示，执行分仍封顶 1。",
             "S4 还要逐侧输出布尔字段 benchmark_has_effect_demo / creator_has_effect_demo（非 S4 阶段填 null）——针对本卖点，该侧视频里有没有出现『效果呈现』。"
             "判 true 当且仅当满足结构库 S4-A~F 任意一种：①前后状态对比（同机位/分屏/左右 before/after，S4-A/B）；②人物差异对比（用了的人 vs 没用的人，视觉差可见，S4-C）；"
             "③本品 vs 替代方案效果对比（结果侧有差异，S4-D）；④借物量化（硬币/纸巾/水珠等参照物展示可量化效果，S4-E）；"
@@ -897,7 +953,7 @@ def build_llm_comparison_payload(
             "0.5 档同样适用于'内容存在但消费者无法有效接收'：看不清（虚焦/过曝/遮挡/一闪而过/画面晃动到观众抓不住重点）、听不清（吞字/被 BGM 压制）、读不完（字幕停留过短）——物理存在不等于有效传递，晃动按观众可看性判而非镜头美学。S5 背书孤证规则：仅口播提及背书而画面无任何佐证、或背书标志一闪而过无法辨认，执行分最高 0.5（高决策门槛品类口头孤证视为无效背书）。",
             "painpoint_relevance 只能取 benchmark_only、creator_only、both、none 四选一：该阶段双方内容是否命中 category_profile.painpoints 中的核心决策因素——只有标杆命中/只有达人命中/双方都命中/双方都未命中。按内容功能判断（讲没讲到、演没演到核心痛点），不要求字面用词一致。",
             "category_profile 必须含：category_name（品类名）, price_tier（low|mid|high 客单价档）, decision_threshold（impulse|considered）, drive_type（emotional|functional|mixed）, painpoints（该品类目标消费者最在意的决策因素关键词，每个痛点同时给中文和本地语两种表述放进同一数组，共 6-16 个词条）。只报品类事实与世界知识，不做权重判断。",
-            "打分前必须先输出 product_profile 产品商业 DNA（这是 S1-S6 打分的尺子，先立尺再量）：visualizable（yes|no，核心价值能否视觉化）、physical_task（解决的最直观尴尬）、hook_proposition（本品对目标人群最有拦截力的点=钩子命题）、core_visual_proposition（旧兼容字段：决定性视觉瞬间=本品到位效果展示的标准）、visual_proof_points（S4 多视觉证明点，数组 1-4 个；每项含 priority primary|secondary、proof_target、visual_standard、visual_diff_dimensions、related_selling_points；primary 是用户最核心效果证明且只能是一个消费者最终结果，禁止把多个卖点合并成 all-of；secondary 是附加卖点证明，不能压过 primary）、proof_mode（instant_visual/process_result/sensory_proxy/aesthetic_value/social_reaction/long_term_record/trust_substituted/low_decision_light_proof）、effect_requires_process（true/false/partial）、visual_diff_dimensions（旧兼容字段，本品 before/after 应在哪些视觉维度变化，1-3 个）、trust_multipliers（建立专业度的元素，3-6 个）、shooting_requirement、confidence（high|low）。只报产品事实与品类世界知识。visualizable=no 时 S4 不强求视觉命题，把判断重心放到 S5 信任放大与达人可信度。",
+            "打分前必须先输出 product_profile 产品商业 DNA（这是 S1-S6 打分的尺子，先立尺再量）：visualizable、physical_task、hook_proposition、core_selling_points、usage_context、short_video_proof_plan（先列全部候选卖点，再按可视展示空间→功能中心性→理解成本选出一个 S4 anchor，并把其他卖点分流到 S2/S3/S5；不是给产品删卖点）、proof_contract（只引用该 anchor）、core_visual_proposition（旧兼容字段）、visual_proof_points（S4 多视觉证明点；primary 是选中 anchor 的单一可测信号，secondary 是同一 S4 anchor 的补充画面，不能替代 primary）、proof_mode、effect_requires_process、visual_diff_dimensions、trust_multipliers、shooting_requirement、confidence。只报产品事实与品类世界知识。visualizable=no 时 S4 不强求视觉命题，把判断重心放到 S5 信任放大与达人可信度。",
             "每阶段输出 stage_standard_delivery（benchmark_only|creator_only|both|none）：该阶段双方是否有效达到本阶段的『本品到位标准』（见下条对照表锚点）。做到/展示到才算，仅口头讲到不算。先作为事实输出，暂不参与推导。",
             "S1-S6 执行分统一三层判：阶段目标(core_question) → 用了什么做法(module_id/module_fit) → 该做法在【本品】上到位没(execution)。'到位'按阶段查本品锚点、核心目标为主轴次要元素不补偿弱核心；本轮已接入的阶段锚点——S4 效果呈现→锚 visual_proof_points.primary（旧结果回退 core_visual_proposition）；S5 信任放大→锚 trust_multipliers：硬信任（第三方认证/检测/临床/仪器实测/官方背书）有效呈现可达 2，软信任（真实好评/社会认同/向往式对比/使用记录/达人自用）算信任但封顶 1（软不如硬），自述功效/纯参数不算；位置优先——视频开头的此类背书内容算 S1 钩子（留人）、结尾算 S6 CTA，不要按语义把开头/结尾的背书塞进 S5；判'用没用且呈现有效'非'口头说没说'，口播孤证或标志一闪而过最高 0.5；S6 促单→到位=把 structure_library S6 五型各自【适配条件】套上本品特征 category_profile + 命题 product_profile；S1 钩子→到位=把 structure_library S1 七型各自【适配条件】套上本品特征 category_profile + hook_proposition；S2 产品引出→到位=引出自然 + 承接 S1 钩子 + 引出产品身份；S3 使用过程→主轴锚 core_selling_points + 场景层 usage_context：到位=真实使用过程中把核心卖点'演示出来'被看见，场景再丰富人员再多样、卖点没在过程落地仍判弱。",
             "improvements 每项必须含：title,target_stage,gmv_impact,gap_type,time_range,creator_time_range,benchmark_time_range,problem,benchmark_reference,benchmark_evidence_ids,suggestion,actions,gmv_reason,evidence,creator_script,creator_script_zh,base_frame_suitability,best_base_frame_time,base_frame_evidence_id,base_frame_reason,aigc_prompt,aigc_image_path,expected_effect,priority。",

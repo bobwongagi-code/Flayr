@@ -23,6 +23,7 @@ from ..utils import run_command
 
 LLM_CURL_MAX_TIME_SECONDS = 900
 LLM_CURL_RETRIES = 2
+LLM_MAX_OUTPUT_TOKENS = 32768
 VIDEO_DATA_URL_MAX_DURATION_SECONDS = 180.0
 VIDEO_DATA_URL_MAX_BYTES = 24 * 1024 * 1024
 VIDEO_TRANSCODE_TIMEOUT_SECONDS = 300
@@ -118,7 +119,7 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
                     break
             else:
                 content, usage, complete, finish_reason = parse_sse_stream(sse_path)
-                if complete and content:
+                if complete and content and finish_reason != "length":
                     response: dict[str, Any] = {
                         "choices": [{"message": {"content": content}, "finish_reason": finish_reason or "stop"}]
                     }
@@ -127,14 +128,34 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
                     raw_text = json.dumps(response, ensure_ascii=False)
                     raw_path.write_text(raw_text, encoding="utf-8")
                     return raw_text
-                # 流被中途截断（无 [DONE]/finish_reason）→ 传输问题，可重试。
-                last_error = "流式响应不完整（连接在 [DONE] 前中断）" if content else "流式响应无内容"
+                if finish_reason == "length":
+                    # length 是服务端主动截断，不是可修复的残缺 JSON。先提高同一请求的输出预算再重发。
+                    old_budget, new_budget = increase_output_budget(payload)
+                    if new_budget > old_budget:
+                        req_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                        last_error = f"输出被 max_tokens={old_budget} 截断，已提高至 {new_budget} 后重试"
+                    else:
+                        last_error = f"输出在 max_tokens={old_budget} 仍被截断"
+                else:
+                    # 流被中途截断（无 [DONE]/finish_reason）→ 传输问题，可重试。
+                    last_error = "流式响应不完整（连接在 [DONE] 前中断）" if content else "流式响应无内容"
             if attempt >= LLM_CURL_RETRIES:
                 break
             time.sleep(5 * (attempt + 1))
         raise SystemExit(f"LLM streaming request failed: {last_error}")
     finally:
         auth_path.unlink(missing_ok=True)
+
+
+def increase_output_budget(payload: dict[str, Any]) -> tuple[int, int]:
+    """length 截断时把单次输出预算翻倍，最多到服务端兼容上限。"""
+    try:
+        old_budget = int(payload.get("max_tokens") or 8192)
+    except (TypeError, ValueError):
+        old_budget = 8192
+    new_budget = min(max(old_budget * 2, 16384), LLM_MAX_OUTPUT_TOKENS)
+    payload["max_tokens"] = new_budget
+    return old_budget, new_budget
 
 
 def is_retryable_error(error_text: str) -> bool:
@@ -149,6 +170,7 @@ def is_retryable_error(error_text: str) -> bool:
             "framing layer", "http/2", "429", "too many requests",
             "500", "502", "503", "504", "internal_server_error", "backend",
             "could not resolve", "connection refused",
+            "ssl_error_syscall", "ssl_connect", "tls handshake",
         )
     )
 
@@ -157,7 +179,7 @@ def parse_sse_stream(sse_path: Path) -> tuple[str, dict[str, Any] | None, bool, 
     """解析 SSE 文件，拼装 delta.content；返回 (内容, usage, 是否完整, finish_reason)。
 
     完整判据：出现 data:[DONE] 或某 chunk 带 finish_reason。两者都没有 = 流被中途截断。
-    finish_reason 用于区分 stop（正常）与 length（max_tokens 截断，重发无益）。
+    finish_reason 用于区分 stop（正常）与 length（输出预算截断，调用方应提高预算后重发）。
     """
     if not sse_path.is_file():
         return "", None, False, None
