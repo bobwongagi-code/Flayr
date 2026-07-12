@@ -18,6 +18,7 @@ _PROOF_SIGNAL_TYPES = {
 _PROOF_PLAN_RANKS = {"low": 1, "medium": 2, "high": 3}
 _PROOF_PLAN_STAGES = {"S2", "S3", "S4", "S5"}
 _PROOF_PLAN_SOURCES = {"model_category_default", "operator_priority", "curated_priority"}
+_PROOF_CONTRACT_SOURCES = {"operator", "curated", "inferred"}
 _DIRECT_VISUAL_PROOF_MODES = {"instant_visual", "process_result"}
 _SIGNAL_TYPES_BY_MODE = {
     "instant_visual": {"state_change"},
@@ -120,6 +121,10 @@ def normalize_product_profile(value: Any) -> dict[str, Any] | None:
         "short_video_proof_plan": proof_plan,
         # proof_contract 是 Step-0 的权威产品证明合同；旧字段保留，只供历史结果降级。
         "proof_contract": proof_contract,
+        # 合同来源决定独立视觉复核能否覆盖主分析。模型推断可指导分析，但不能伪装成运营事实。
+        "proof_contract_source": normalize_choice(
+            value.get("proof_contract_source"), _PROOF_CONTRACT_SOURCES, "inferred"
+        ),
         # 证明模式：S4 如何证明价值。视觉即时效果只是其中一种，低价颜值品/长周期品/感官品要避免硬套 before-after。
         "proof_mode": proof_mode,
         "effect_requires_process": normalize_effect_requires_process(value.get("effect_requires_process")),

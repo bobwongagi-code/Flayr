@@ -17,6 +17,7 @@ from flayr_core.llm.api import read_llm_api_key
 from flayr_core.llm.pipeline import (
     apply_finalized_analysis_result,
     merge_analysis_result,
+    run_comparison_scope_preflight,
     run_large_model_analysis,
 )
 from flayr_core.prompt import write_analysis_input
@@ -59,6 +60,12 @@ def main() -> int:
 
     analysis = build_analysis(args, run_dir, deps, videos)
     analysis_input_path = write_analysis_input(run_dir, analysis)
+    if args.mode == "scope":
+        eligibility = run_comparison_scope_preflight(args, analysis, run_dir)
+        write_json(run_dir / "analysis.json", analysis)
+        write_analysis_input(run_dir, analysis)
+        print_scope_summary(run_dir, deps, videos, eligibility)
+        return 0
     if args.llm_model and not args.analysis_result_json:
         completed = run_large_model_analysis(args, analysis, analysis_input_path, run_dir)
         if completed:
@@ -91,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "mode",
-        choices=("breakdown", "compare", "improve"),
+        choices=("breakdown", "compare", "improve", "scope"),
         help="Run mode.",
     )
     parser.add_argument("--benchmark-video", type=Path, help="Benchmark video path.")
@@ -339,12 +346,12 @@ def first_available(commands: tuple[str, ...]) -> str | None:
 def validate_inputs(args: argparse.Namespace) -> dict[str, Path]:
     inputs: dict[str, Path] = {}
 
-    if args.mode in {"breakdown", "compare", "improve"}:
+    if args.mode in {"breakdown", "compare", "improve", "scope"}:
         if not args.benchmark_video:
             raise SystemExit("--benchmark-video is required.")
         inputs["benchmark"] = validate_video_path(args.benchmark_video)
 
-    if args.mode in {"compare", "improve"}:
+    if args.mode in {"compare", "improve", "scope"}:
         if not args.creator_video:
             raise SystemExit("--creator-video is required for compare/improve mode.")
         inputs["creator"] = validate_video_path(args.creator_video)
@@ -752,6 +759,26 @@ def print_summary(
         )
     if plan:
         print("improved.mp4: not rendered; improved_video_plan.json created")
+
+
+def print_scope_summary(
+    run_dir: Path,
+    deps: dict[str, Any],
+    videos: dict[str, dict[str, Any]],
+    eligibility: dict[str, Any],
+) -> None:
+    """scope 模式不生成报告，只回显可审计的资格结果。"""
+    print(f"Run directory: {run_dir}")
+    print(f"comparison scope: {eligibility.get('scope', 'uncertain')}")
+    print(f"direct product stages: {','.join(eligibility.get('direct_product_stages') or []) or 'none'}")
+    print(f"reason: {eligibility.get('reason') or '未提供'}")
+    print(f"ffmpeg: {'ok' if deps['ffmpeg'] else 'missing'}")
+    print(f"whisper: {deps['whisper'] or 'missing'}")
+    for role, info in videos.items():
+        print(
+            f"{role}: frames={info['frame_count']} "
+            f"transcript={info['transcription_status']} errors={len(info['errors'])}"
+        )
 
 
 if __name__ == "__main__":

@@ -18,6 +18,20 @@ import re
 from typing import Any
 
 
+def product_context(analysis_input: str) -> str:
+    """只提取运行时产品信息，不能用整份 prompt 判断品类。
+
+    结构库、观察指引和 QA 规则会举儿童牙膏等案例；扫描全文会把示例误当成当前产品。
+    """
+    match = re.search(r"^## 产品信息\s*$\n(?P<body>.*?)(?=^## |\Z)", analysis_input, flags=re.MULTILINE | re.DOTALL)
+    return match.group("body") if match else ""
+
+
+def is_child_toothpaste_context(analysis_input: str) -> bool:
+    context = product_context(analysis_input).lower()
+    return "儿童牙膏" in context or "toothpaste" in context
+
+
 # ---------------------------------------------------------------------------
 # validate（会抛 SystemExit）
 # ---------------------------------------------------------------------------
@@ -63,7 +77,7 @@ def validate_recommendation_safety(result: dict[str, Any], analysis_input: str) 
             + "；".join(violations)
             + "。请保留对标杆风险的分析，但重写达人建议为合规表达：只谈日常营养补充、产品展示、成分信息需以包装可见内容为准，以及明确但不虚构优惠的购买引导。"
         )
-    if "儿童牙膏" in analysis_input or "toothpaste" in analysis_input.lower():
+    if is_child_toothpaste_context(analysis_input):
         oral_care_patterns = [
             r"terbaik",
             r"最好的",
@@ -120,7 +134,7 @@ def sanitize_child_toothpaste_recommendations(result: dict[str, Any], analysis_i
     违规判定与 validate_recommendation_safety 的 oral_care_patterns 一致；
     未命中违规的 improvement 保留 LLM 原文，避免覆盖 LLM 给出的精准建议（如 KKM 认证、限时优惠）。
     """
-    if "儿童牙膏" not in analysis_input and "toothpaste" not in analysis_input.lower():
+    if not is_child_toothpaste_context(analysis_input):
         return
     if "检测语言：th" in analysis_input:
         return

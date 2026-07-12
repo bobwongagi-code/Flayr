@@ -1,9 +1,9 @@
 """flayr_core.prompt：analysis_input.md 装配。
 
 把 harness（flayr.py）原先的"prompt 装配"职责整体迁出。本模块负责：
-  - 把 analysis dict + 关键帧 manifest + 转写 + 翻译 + 结构库 + ANALYSIS-PROMPT
+  - 把 analysis dict + 关键帧 manifest + 转写 + 翻译 + 结构库 + 三步分析流程
     拼接成给 LLM 的 analysis_input.md 输入包
-  - 提供 speech_status / read_analysis_prompt / render_*_markdown 等辅助
+  - 提供 speech_status / render_*_markdown 等辅助
 
 迁出原因（详见 ARCHITECTURE.md 5.1）：
   - 凝聚度：prompt 装配是独立子系统，不应混在 CLI harness 里
@@ -88,9 +88,11 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
         "",
         market_knowledge,
         "",
-        "## 分析方法（必须严格遵循）",
+        "## 三步分析流程（必须严格遵循）",
         "",
-        read_analysis_prompt(),
+        "1. 先整体理解两条视频，不引用局部证据，形成整体转化判断。",
+        "2. 再将锁定事实按功能归入 S1-S6，识别模块、时间边界、命题与执行质量。",
+        "3. 最后横向比较达人和标杆，输出证据闭环、差距等级与 GMV 优先提升点。",
         "",
         "## QA-RULES.md 自检契约（输出前必须自检）",
         "",
@@ -102,7 +104,7 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
         "",
         "## 输出要求",
         "",
-        "1. 严格按 ANALYSIS-PROMPT.md 的第一步、第二步、第三步输出结构化 JSON：第一步整体感知不得引用证据；第二、三步必须引用时间与证据。",
+        "1. 严格按上面的三步分析流程输出结构化 JSON：第一步整体感知不得引用证据；第二、三步必须引用时间与证据。",
         "1a. 当当前等级为“视频证据分析”时，仍须完成结构、口播、字幕、画面证据与对标差距分析；不得假定未提供的真实卖点、价格策略、目标人群适配或最终 GMV 排序，相关判断必须表述为待确认。",
         "1b. 当当前等级为“策略增强分析”时，才可结合已确认的品类、价格、卖点、人群和购买动机输出完整成交诊断与 GMV 优先级。",
         "2. 先为爆款与达人分别输出 video_understanding：沿全片时间线列出 evidence_units，只记实际口播、可读字幕和可见画面事实，此步骤不要先套 S1-S6。",
@@ -120,7 +122,7 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
         "11. 不要臆造品牌、价格、优惠、型号或参数。只有当产品名/转写/画面中明确出现品牌时才能写品牌；不确定时使用产品名或本地语言中的中性产品指代。",
         "12. 健康品类不得建议疾病治疗、激素/月经调节、排出血块或保证效果等高风险话术；如标杆包含此类表达，应指出合规风险并给低风险替代。",
         "13. 必须输出 holistic_assessment（每维独立评估，禁止复制）、key_conclusions（1-5 条消费者视角关键结论）、product_visibility、loop_closure；产品可见度无法精确统计时要标明估算依据。",
-        "14. severity 必须差异化：按 ANALYSIS-PROMPT.md 的标尺判断，large/medium/small 至少要出现 2 种。达人做到位或持平的阶段给 small，不能全给 medium。gap_summary 写'无明显差距'时 severity 必须是 small。",
+        "14. severity 必须差异化：按当前执行分与 QA 标尺判断，large/medium/small 至少要出现 2 种。达人做到位或持平的阶段给 small，不能全给 medium。gap_summary 写'无明显差距'时 severity 必须是 small。",
         "14a. 每阶段 task_completion 只能输出 complete、partial、missing 三选一，评估的是达人侧该阶段功能完成度（完成/部分完成/未做）。禁止 both_complete、completed、双侧组合词或任何自由文本；标杆侧完成情况写在 benchmark_summary，不写进此字段。",
         "14b. 每阶段必须输出 creator_execution 和 benchmark_execution 两个独立执行分，取值只能是 0、0.5、1、2 四个数字：0=未执行该阶段功能；0.5=做了但对核心功能基本无效——敷衍、平庸无感（如一句轻带的 CTA、平铺直叙的开场、仅口头承诺无验证）；1=执行合格（功能完成且有效）；2=执行出色。两侧各自按该阶段功能定义独立打分，先打分再对比，禁止因对比结果回调分数；这是系统推导差距等级的事实输入。",
         "14b1. 0.5 档同样适用于'内容存在但消费者无法有效接收'：看不清（虚焦/过曝/遮挡/一闪而过/画面晃动到观众抓不住重点）、听不清（吞字/被 BGM 压制）、读不完（字幕停留过短）——物理存在不等于有效传递。S5 背书孤证规则：仅口播提及背书而画面无佐证、或背书标志一闪而过无法辨认，执行分最高 0.5。",
@@ -240,10 +242,6 @@ def speech_mode_label(info: dict[str, Any]) -> str:
     if not mode:
         return "未分类"
     return speech_mode_prompt(mode)
-
-
-def read_analysis_prompt() -> str:
-    return read_optional_text(ROOT / "ANALYSIS-PROMPT.md")
 
 
 def render_focus_frame_markdown(info: dict[str, Any]) -> str:

@@ -28,6 +28,8 @@ from .validate import validate_transcript_attribution
 
 # 内容修补（修改 result data，正常返回）
 from .repair import (
+    apply_comparison_eligibility,
+    align_stage_flag_evidence,
     align_clear_commerce_evidence,
     align_timed_cta_from_transcript,
     bind_timed_transcript_quotes,
@@ -69,6 +71,13 @@ def stamp_product_foundation(normalized: dict[str, Any], analysis: dict[str, Any
         normalized["product_profile"] = profile
 
 
+def stamp_comparison_eligibility(normalized: dict[str, Any], analysis: dict[str, Any] | None) -> None:
+    """资格层是 facts 的独立判定，不允许主对比模型漏填或改写。"""
+    eligibility = (analysis or {}).get("comparison_eligibility")
+    if isinstance(eligibility, dict):
+        normalized["comparison_eligibility"] = dict(eligibility)
+
+
 def sanitize_promise_chain_scope(normalized: dict[str, Any]) -> None:
     """promise_chain 只管 S1-S4；CTA/促单问题归 S6，不让它污染承诺链。"""
     chain = normalized.get("promise_chain")
@@ -87,6 +96,7 @@ def sanitize_promise_chain_scope(normalized: dict[str, Any]) -> None:
 def apply_postprocess_chain(normalized: dict[str, Any], analysis: dict[str, Any]) -> None:
     """两个 caller 共享的中段流水线。每一步对应一个独立职责模块。"""
     stamp_product_foundation(normalized, analysis)                           # foundation  Step-0 品地基权威覆盖（须在 derive 前）
+    stamp_comparison_eligibility(normalized, analysis)                       # scope       双视频产品级比较资格（facts 独立判定）
     sanitize_promise_chain_scope(normalized)                                  # repair      S1-S4 承诺链不接收 S6/CTA 断点
     validate_transcript_attribution(normalized, analysis)                    # validate    跨视频串证据校验
     align_clear_commerce_evidence(normalized)                                # repair      关键词归位 benchmark 事实
@@ -99,11 +109,13 @@ def apply_postprocess_chain(normalized: dict[str, Any], analysis: dict[str, Any]
     ground_stage_visual_evidence(normalized)                                 # repair      visual_evidence 对齐 evidence_unit
     deduplicate_stage_quotes(normalized)                                     # repair      跨阶段去重 quote 子句
     materialize_spoken_stage_evidence(normalized)                            # repair      有口播无时段证据时补 stage 占位
-    fill_missing_evidence_references(normalized)                             # repair      引用错位时补占位或就近匹配
+    align_stage_flag_evidence(normalized)                                     # repair      stage/flag 间先恢复同阶段真实引用
+    fill_missing_evidence_references(normalized)                             # repair      引用仍缺失时才补占位或就近匹配
     derive_product_visibility(normalized, analysis)                          # repair      达人产品出镜标记确定性累加 product_visibility
     repair_s1_hook_boundaries(normalized, analysis)                           # repair      S1/S2 边界按 SRT/facts 候选收敛，防 Hook 吃掉产品引出
     materialize_cross_stage_inputs(normalized, analysis)                       # proposition 品命题矩阵 + S1→S2/S4→S6 跨阶段输入
     stabilize_stage_severity(normalized)                                      # repair      severity 阶段归属漂移校准
     derive_severity_from_facts(normalized, analysis)                          # derive      4d 执行分+权重表确定性推导（成功则覆盖，缺事实保留上游结果；含晃动封顶）
+    apply_comparison_eligibility(normalized)                                  # scope       跨品 S2-S5 不生成产品级差距
     materialize_quality_audits(normalized, analysis)                           # proposition 绝对质量层 + S5/S6 命题审计（不覆盖 gap severity）
     stabilize_improvement_priorities(normalized)                              # repair      Top 改进跟随最终商业判断

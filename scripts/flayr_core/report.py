@@ -89,6 +89,9 @@ def render_stage_rows(analysis: dict[str, Any]) -> str:
 
 def stage_skipped(stage: dict[str, Any]) -> tuple[bool, str]:
     """判断阶段是否双方都未设计（如 S5 都无信任背书），如是则折叠不展开分析。"""
+    if str(stage.get("comparison_status") or "") == "not_directly_comparable":
+        reason = str(stage.get("comparison_reason") or "两条视频不能在该阶段做产品级直接比较。")
+        return True, f"仅作为创意参考，不作产品级差距判断。{reason}"
     if normalize_severity(stage.get("severity")) != "small":
         return False, ""
     skip_phrases = (
@@ -134,12 +137,13 @@ def stage_skipped(stage: dict[str, Any]) -> tuple[bool, str]:
 
 
 def render_skipped_stage(stage: dict[str, Any], index: int, reason: str) -> str:
+    label = "仅创意参考" if str(stage.get("comparison_status") or "") == "not_directly_comparable" else "未涉及"
     return "\n".join(
         [
             f'<div class="stage stage-skipped" id="{escape(stage_anchor(index))}">',
             '<div class="stage-header">',
             f"<h3>{escape(stage['stage'])}</h3>",
-            '<span class="gap-badge gap-low"><span>未涉及</span></span>',
+            f'<span class="gap-badge gap-low"><span>{escape(label)}</span></span>',
             "</div>",
             f'<div class="meta skip-note">{escape(reason)}</div>',
             "</div>",
@@ -233,6 +237,12 @@ def split_readable_points(text: Any, limit: int = 3) -> list[str]:
 
 
 def executive_summary(analysis: dict[str, Any]) -> str:
+    eligibility = analysis.get("comparison_eligibility")
+    if isinstance(eligibility, dict) and str(eligibility.get("scope") or "") not in {"same_product", "comparable_variant"}:
+        # 兼容旧运行结果：即便 JSON 尚未走过最新后处理，报告也不能展示跨品产品结论。
+        from .postprocess.repair_stages import comparison_scope_summary
+
+        return comparison_scope_summary(eligibility)
     summary = str(analysis.get("one_line_summary") or analysis.get("executive_summary") or "").strip()
     if summary:
         return summary
@@ -243,6 +253,7 @@ def executive_summary(analysis: dict[str, Any]) -> str:
         item.get("stage", "")
         for item in analysis.get("stage_analysis", [])
         if item.get("severity") == "large"
+        and str(item.get("comparison_status") or "") != "not_directly_comparable"
     ]
     if large_stages:
         return f"达人视频最大差距集中在：{'、'.join(large_stages[:2])}。"
@@ -353,7 +364,8 @@ def render_gap_overview(analysis: dict[str, Any]) -> str:
         short_name, full_name = stage_display_names(stage.get("stage", ""), index)
         skipped, _ = stage_skipped(stage)
         if skipped:
-            css_level, label = "skip", "未涉及"
+            css_level = "skip"
+            label = "仅创意参考" if str(stage.get("comparison_status") or "") == "not_directly_comparable" else "未涉及"
         else:
             severity = normalize_severity(stage.get("severity"))
             css_level = {"large": "high", "medium": "mid", "small": "low"}[severity]

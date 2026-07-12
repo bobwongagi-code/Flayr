@@ -13,7 +13,7 @@
   必须在 REGISTRY 或 BULK_OR_INTENTIONAL 里登记；新增 canonical doc 不登记 → coverage 检查 fail。
   （否则校验对新 doc 是盲的——正是它该抓的那类失效。）
 
-waived：已知、已决定本轮不修的漂移项，显式记原因 → 降级为告警不 block（带 hash 写进 baseline 账）。
+waived：已知、已决定本轮不修的漂移项，显式记原因 → 降级为告警不 block（写进 gate 日志）。
 """
 from __future__ import annotations
 
@@ -109,12 +109,11 @@ REGISTRY: list[dict] = [
 # 已决定本轮不修、显式 waive 的漂移项（doc::item → 原因）。waive 的降级为告警、不 block。
 WAIVED: dict[str, str] = {}
 
-# 登记约束白名单：被代码装载但不做 item 级可达检查的 doc（翻译层等独立用途 / 仅人工参考 / 已退役）。
+# 登记约束白名单：被代码装载但不做 item 级可达检查的 doc（翻译层等独立用途 / 仅人工参考）。
 BULK_OR_INTENTIONAL: set[str] = {
     "references/commerce-translation-guidelines.md",  # 翻译步专用，非分析链
     "references/analysis-output-schema.json",          # 输出契约，字段经阶段2 指令转述
     "references/brand_propositions.json",              # 冻结品牌命题结构化数据，阶段2 运行时注入，不做 prompt 文档 item 级检查
-    "ANALYSIS-PROMPT.md",  # superseded：v1.1 单次流程已被阶段2 内联指令取代，且装进被砍的 analysis_input；freshness 域非 reachability，不 gate，待退役（标 superseded 或删）
     # 下列已在 REGISTRY 做 item 级检查，列此仅为登记可见：
     "QA-RULES.md",
     "structure_library_full.md",
@@ -165,7 +164,7 @@ def main() -> int:
         for doc, item, _ in blockers:
             print(f"   {doc} :: {item}")
     if waived:
-        print(f"\n🟡 已 waive（{len(waived)} 项，记进 baseline 账）：")
+        print(f"\n🟡 已 waive（{len(waived)} 项，记进 gate 日志）：")
         for doc, item, _ in waived:
             print(f"   {doc} :: {item} —— {WAIVED.get(f'{doc}::{item}', '')}")
     if unregistered:

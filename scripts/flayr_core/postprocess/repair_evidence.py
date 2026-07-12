@@ -45,26 +45,67 @@ def bind_timed_transcript_quotes(result: dict[str, Any], analysis: dict[str, Any
             if any("_NO_" in value for value in references):
                 stage[f"{role}_quote"] = ""
                 stage[f"{role}_quote_zh"] = ""
+
+
+def align_stage_flag_evidence(result: dict[str, Any]) -> None:
+    """统一阶段主引用与嵌套 flag 引用，只在已有真实 evidence 间对齐。
+
+    Repair/Phase C 有时只补全 flag.evidence_ids，若先给 stage 主字段造 NO_STAGE 占位，
+    报告会出现“flag 有真实画面、主结论却无证据”的自相矛盾。此处先双向恢复真实引用，
+    后续 fill_missing_evidence_references 才只处理双方都没有事实引用的情形。
+    """
+    flag_names = {1: "hook", 2: "s2", 3: "s3", 4: "s4", 5: "s5", 6: "s6"}
+    understanding = result.get("video_understanding", {})
+    for index, stage in enumerate(result.get("stage_analysis", []), start=1):
+        flag_name = flag_names.get(index)
+        if not flag_name or not isinstance(stage, dict):
+            continue
+        for role in ("benchmark", "creator"):
+            flag = stage.get(f"{role}_{flag_name}")
+            if not isinstance(flag, dict):
+                continue
+            stage_key = f"{role}_evidence_ids"
+            stage_ids = [
+                str(value)
+                for value in stage.get(stage_key, [])
+                if str(value).strip()
+            ]
+            units = understanding.get(role, {}).get("evidence_units", [])
+            flag_ids = [str(value) for value in flag.get("evidence_ids", []) if str(value).strip()]
+            flag_units = [
+                unit
+                for unit in units
+                if isinstance(unit, dict)
+                and str(unit.get("id")) in flag_ids
+                and evidence_overlaps_range(unit, stage.get(f"{role}_time_range"))
+            ]
+            if flag_units and (not stage_ids or any("_NO_" in value for value in stage_ids)):
+                restored_ids = [str(unit.get("id")) for unit in flag_units]
+                stage[stage_key] = restored_ids
+                primary = flag_units[0]
+                for key in ("summary", "key_message"):
+                    field = f"{role}_{key}"
+                    current = str(stage.get(field) or "").strip()
+                    if not current or current.startswith("（LLM 未填写"):
+                        stage[field] = str(primary.get("information") or primary.get("visual_fact") or "").strip()
+                if not is_effective_voiceover(stage.get(f"{role}_quote")):
+                    stage[f"{role}_quote"] = str(primary.get("voiceover") or "").strip()
+                    stage[f"{role}_quote_zh"] = str(primary.get("voiceover_zh") or "").strip()
+                stage[f"{role}_support_status"] = (
+                    "supported" if is_effective_voiceover(primary.get("voiceover")) else "visual_only"
+                )
+                stage_ids = restored_ids
+            if stage_ids and not flag_ids:
+                flag["evidence_ids"] = stage_ids
                 stage[f"{role}_support_status"] = "visual_only"
+                continue
+            if flag_ids:
                 continue
             reliable_unit = referenced_spoken_unit(result, stage, role)
             if reliable_unit:
                 stage[f"{role}_quote"] = str(reliable_unit.get("voiceover") or "")
                 stage[f"{role}_quote_zh"] = str(reliable_unit.get("voiceover_zh") or "")
                 continue
-            segments = read_srt_segments(videos.get(role, {}))
-            if not segments:
-                continue
-            start, end = parse_time_range_seconds(stage.get(f"{role}_time_range"), None)
-            text = " ".join(
-                segment["text"]
-                for segment in segments
-                if min(end, segment["end"]) > max(start, segment["start"])
-            ).strip()
-            old_text = str(stage.get(f"{role}_quote") or "").strip()
-            stage[f"{role}_quote"] = text
-            if text != old_text:
-                stage[f"{role}_quote_zh"] = ""
 
 
 def bind_improvement_benchmark_reference(item: dict[str, Any], stage: dict[str, Any]) -> None:

@@ -118,7 +118,7 @@ LLM raw JSON
 
 ```bash
 python3 -m py_compile scripts/flayr_core/llm/parse.py
-python3 scripts/dev_test_stage2.py runs/20260531-143521-improve --dry
+python3 scripts/dev_test_stage2.py runs/<run-dir> --dry
 ```
 
 ### Q02 stage_analysis 顺序固定为 S1-S6
@@ -275,7 +275,7 @@ python3 scripts/dev_test_stage2.py runs/20260531-143521-improve --dry
 
 实现位置：
 
-- `ANALYSIS-PROMPT.md`
+- 主流程内置三步分析流程
 - `scripts/flayr_core/llm/payload.py::build_llm_payload`
 - `scripts/flayr_core/postprocess/repair.py::stabilize_stage_severity`
 
@@ -421,7 +421,7 @@ python3 - <<'PY'
 import json
 from pathlib import Path
 from scripts.flayr_core.llm.payload import build_stage_review_payload
-run = Path('runs/20260531-143521-improve')
+run = Path('runs/<run-dir>')
 analysis = json.loads((run / 'analysis.json').read_text(encoding='utf-8'))
 facts = {
     'benchmark': json.loads((run / 'video_facts_benchmark.json').read_text(encoding='utf-8')),
@@ -521,13 +521,13 @@ PY
 ```bash
 python3 -m py_compile scripts/flayr.py scripts/dev_test_stage2.py scripts/flayr_core/*.py scripts/flayr_core/llm/*.py scripts/flayr_core/postprocess/*.py
 python3 -m json.tool references/analysis-output-schema.json >/dev/null
-python3 scripts/dev_test_stage2.py runs/20260531-143521-improve --dry
+python3 scripts/dev_test_stage2.py runs/<run-dir> --dry
 ```
 
 稳定性验收：
 
 ```bash
-python3 scripts/dev_test_stage2.py runs/20260531-143521-improve --repeat 5 --reuse-existing
+python3 scripts/dev_test_stage2.py runs/<run-dir> --repeat 5 --reuse-existing
 ```
 
 期望：

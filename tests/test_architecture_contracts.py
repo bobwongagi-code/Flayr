@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import flayr
 from flayr_core import proposal_video, translation, utils, video, voice_clone
+from flayr_core.report import executive_summary, stage_skipped
 from flayr_core.llm import pipeline
 from flayr_core.llm.analysis_contract import (
     AnalysisContractError,
@@ -25,17 +26,26 @@ from flayr_core.llm.analysis_contract import (
     validate_raw_analysis_envelope,
 )
 from flayr_core.llm.json_codec import parse_json_text
-from flayr_core.llm.product_profile import normalize_proof_contract
+from flayr_core.llm.product_profile import normalize_product_profile, normalize_proof_contract
+from flayr_core.llm.s4_visual_verifier import _visual_verifier_skip_reason
 from flayr_core.llm.payload import (
+    build_comparison_eligibility_payload,
     build_improvement_reconciliation_payload,
     build_llm_comparison_payload,
     build_llm_repair_payload,
     build_stage_review_payload,
 )
-from flayr_core.llm.parse import normalize_s3_flags
+from flayr_core.llm.parse import normalize_analysis_result, normalize_s3_flags, normalize_video_fact_result
 from flayr_core.postprocess.proposition import materialize_cross_stage_inputs, materialize_quality_audits
+from flayr_core.postprocess.chain import stamp_comparison_eligibility
 from flayr_core.postprocess.derive import _s6_cta_exec
-from flayr_core.postprocess.repair import reconcile_unsupported_cta
+from flayr_core.postprocess.repair import (
+    align_stage_flag_evidence,
+    apply_comparison_eligibility,
+    reconcile_unsupported_cta,
+    stabilize_improvement_priorities,
+)
+from flayr_core.postprocess.health_rewrite import is_child_toothpaste_context
 from flayr_core.postprocess.validate import validate_analysis_dimensions, validate_stage_time_coherence
 from flayr_core.prompt import write_analysis_input
 from flayr_core.proposition_contract import build_product_proposition_contract
@@ -146,6 +156,155 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertFalse(normalized["valid"])
         self.assertIn("一个可观察维度", normalized["validation_reason"])
 
+    def test_inferred_s4_contract_cannot_authoritatively_override_stage_analysis(self) -> None:
+        profile = normalize_product_profile(
+            {
+                "proof_contract_source": "inferred",
+                "proof_contract": {"valid": True, "mode": "instant_visual"},
+            }
+        )
+        self.assertEqual(profile["proof_contract_source"], "inferred")
+        reason = _visual_verifier_skip_reason({"product_profile": profile})
+        self.assertIn("模型推断", reason)
+
+    def test_derived_execution_is_written_to_severity_trace(self) -> None:
+        from flayr_core.postprocess.derive import derive_severity_from_facts
+
+        stage = {
+            "stage": "S2 产品引出",
+            "severity": "small",
+            "creator_execution": 0.5,
+            "benchmark_execution": 1.0,
+            "creator_s2": {"exists": True, "handoff_met": True, "s1_s2_compatible": True,
+                           "product_identity_clear": True, "product_role_clear": False},
+            "benchmark_s2": {"exists": True, "handoff_met": True, "s1_s2_compatible": True,
+                              "product_identity_clear": True, "product_role_clear": True},
+        }
+        result = {"stage_analysis": [stage]}
+        derive_severity_from_facts(result)
+        trace = stage["severity_derivation"]
+        self.assertEqual(trace["derived_creator_execution"], 1.0)
+        self.assertEqual(trace["derived_benchmark_execution"], 2.0)
+
+    def test_video_identity_and_comparison_scope_survive_normalization(self) -> None:
+        facts = normalize_video_fact_result(
+            "benchmark",
+            {
+                "product_identity": {
+                    "brand_or_product_name": "Simplus",
+                    "product_category": "榨汁机",
+                    "form_factor": "慢速榨汁机",
+                    "identity_basis": "visible",
+                    "confidence": "high",
+                },
+                "evidence_units": [{"id": "B1", "time_range": "0.0s - 1.0s", "information": "展示产品"}],
+            },
+            {"videos": {"benchmark": {}, "creator": {}}},
+        )
+        self.assertEqual(facts["product_identity"]["form_factor"], "慢速榨汁机")
+
+        normalized = normalize_analysis_result(
+            {
+                "comparison_eligibility": {
+                    "scope": "cross_product",
+                    "direct_product_stages": ["S1", "S3", "bad"],
+                    "reason": "产品形态不同",
+                },
+                "stage_analysis": [{"stage": f"S{index}"} for index in range(1, 7)],
+                "improvements": [{"title": "测试建议", "time_range": "0.0s - 1.0s"}],
+            }
+        )
+        self.assertEqual(normalized["comparison_eligibility"]["scope"], "cross_product")
+        self.assertEqual(normalized["comparison_eligibility"]["direct_product_stages"], ["S1"])
+
+    def test_locked_comparison_scope_reaches_and_overrides_main_analysis(self) -> None:
+        facts = {
+            "benchmark": {"product_identity": {"product_category": "挂烫机", "form_factor": "手持挂烫机"}},
+            "creator": {"product_identity": {"product_category": "地面清洁机", "form_factor": "吸尘清洁机"}},
+        }
+        scope_payload = build_comparison_eligibility_payload("test", facts)
+        scope_text = scope_payload["messages"][1]["content"][0]["text"]
+        self.assertIn("手持挂烫机", scope_text)
+
+        stages = [{"stage": f"S{index}"} for index in range(1, 7)]
+        result = {"stage_analysis": stages, "comparison_eligibility": {"scope": "same_product"}}
+        analysis = {"comparison_eligibility": {"scope": "cross_product", "direct_product_stages": ["S1"], "reason": "形态不同"}}
+        stamp_comparison_eligibility(result, analysis)
+        self.assertEqual(result["comparison_eligibility"]["scope"], "cross_product")
+
+    def test_cross_product_scope_excludes_s2_to_s5_from_gap_and_improvements(self) -> None:
+        stages = [{"stage": f"S{index}", "severity": "large"} for index in range(1, 7)]
+        result = {
+            "comparison_eligibility": {
+                "scope": "cross_product",
+                "direct_product_stages": ["S1", "S6"],
+                "reason": "产品关键形态不同",
+            },
+            "stage_analysis": stages,
+            "improvements": [
+                {"target_stage": "S3", "title": "使用过程建议", "priority": 1},
+                {"target_stage": "S6", "title": "CTA 建议", "priority": 2},
+            ],
+        }
+        apply_comparison_eligibility(result)
+        stabilize_improvement_priorities(result)
+
+        self.assertEqual(stages[0].get("comparison_status"), None)
+        self.assertEqual(stages[1]["comparison_status"], "not_directly_comparable")
+        self.assertEqual(stages[4]["comparison_status"], "not_directly_comparable")
+        self.assertEqual(result["improvements"], [{"target_stage": "S6", "title": "CTA 建议", "priority": 1}])
+        self.assertIn("S2-S5 仅作创意参考", result["one_line_summary"])
+        self.assertEqual(result["key_conclusions"][0], result["one_line_summary"])
+        skipped, reason = stage_skipped(stages[2])
+        self.assertTrue(skipped)
+        self.assertIn("仅作为创意参考", reason)
+
+    def test_improvement_placeholder_is_not_reportable(self) -> None:
+        result = {
+            "stage_analysis": [{"stage": f"S{index}", "severity": "medium"} for index in range(1, 7)],
+            "improvements": [
+                {"target_stage": "S1", "title": "有效建议", "problem": "明确问题", "priority": 2},
+                {"target_stage": "", "title": "（LLM 未填写 title，需人工补充）", "problem": "（LLM 未填写 problem，需人工补充）", "priority": 1},
+            ],
+        }
+        stabilize_improvement_priorities(result)
+        self.assertEqual([item["title"] for item in result["improvements"]], ["有效建议"])
+
+    def test_report_summary_does_not_render_legacy_cross_product_claim(self) -> None:
+        analysis = {
+            "comparison_eligibility": {
+                "scope": "cross_product",
+                "direct_product_stages": ["S1", "S6"],
+                "reason": "产品形态不同",
+            },
+            "one_line_summary": "达人效果弱于标杆。",
+        }
+        summary = executive_summary(analysis)
+        self.assertIn("不作产品级优劣比较", summary)
+        self.assertNotIn("达人效果弱于标杆", summary)
+
+    def test_child_toothpaste_scope_ignores_prompt_examples(self) -> None:
+        generic_input = """## 产品信息
+
+- 产品名：MMX吸尘清洗机
+- 品类：家电清洁
+
+## 通用规则
+
+儿童牙膏和 toothpaste 只是在这里作为示例出现。
+"""
+        child_input = """## 产品信息
+
+- 产品名：儿童牙膏
+- 品类：toothpaste
+
+## 通用规则
+
+无关示例。
+"""
+        self.assertFalse(is_child_toothpaste_context(generic_input))
+        self.assertTrue(is_child_toothpaste_context(child_input))
+
     def test_s6_module_mismatch_is_not_counted_as_standard_delivery(self) -> None:
         stages = [{"stage": f"S{index}"} for index in range(1, 7)]
         stages[5].update(
@@ -220,6 +379,64 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(stages[5]["benchmark_evidence_ids"], ["B8"])
         ids = [unit["id"] for unit in result["video_understanding"]["benchmark"]["evidence_units"]]
         self.assertNotIn("B_NO_CTA", ids)
+
+    def test_stage_flag_evidence_uses_same_stage_validated_references(self) -> None:
+        stages = [{"stage": f"S{index}"} for index in range(1, 7)]
+        stages[1].update(
+            {
+                "benchmark_evidence_ids": ["B2"],
+                "benchmark_s2": {"exists": True, "evidence_ids": []},
+            }
+        )
+        result = {"stage_analysis": stages}
+
+        align_stage_flag_evidence(result)
+
+        self.assertEqual(stages[1]["benchmark_s2"]["evidence_ids"], ["B2"])
+
+    def test_stage_flag_evidence_restores_primary_reference_before_placeholder(self) -> None:
+        result = {
+            "video_understanding": {
+                "creator": {
+                    "evidence_units": [
+                        {
+                            "id": "C3",
+                            "time_range": "10.0s - 20.0s",
+                            "information": "半脸前后对比展示哑光效果",
+                            "visual_fact": "同侧脸颊前后对比",
+                            "voiceover": "",
+                            "voiceover_zh": "",
+                        }
+                    ]
+                },
+                "benchmark": {"evidence_units": []},
+            },
+            "stage_analysis": [{"stage": f"S{index}"} for index in range(1, 4)] + [
+                {
+                    "stage": "S4 效果呈现",
+                    "creator_time_range": "10.0s - 20.0s",
+                    "creator_evidence_ids": ["C_NO_STAGE_4"],
+                    "creator_summary": "（LLM 未填写 creator_summary，需人工补充）",
+                    "creator_s4": {"evidence_ids": ["C3"]},
+                }
+            ] + [{"stage": f"S{index}"} for index in range(5, 7)],
+        }
+
+        align_stage_flag_evidence(result)
+
+        stage = result["stage_analysis"][3]
+        self.assertEqual(stage["creator_evidence_ids"], ["C3"])
+        self.assertEqual(stage["creator_summary"], "半脸前后对比展示哑光效果")
+        self.assertEqual(stage["creator_support_status"], "visual_only")
+
+    def test_repair_preserves_original_improvements_when_model_drops_them(self) -> None:
+        original = {"improvements": [{"title": "保留的合法建议"}], "stage_analysis": [{"stage": "旧"}]}
+        repaired = {"improvements": [], "stage_analysis": [{"stage": "修复后"}]}
+
+        merged = pipeline.preserve_valid_repair_sections(original, repaired)
+
+        self.assertEqual(merged["improvements"], original["improvements"])
+        self.assertEqual(merged["stage_analysis"], repaired["stage_analysis"])
 
     def test_large_stage_without_improvement_is_reported(self) -> None:
         result = {

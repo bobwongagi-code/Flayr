@@ -78,7 +78,6 @@ Flayr/
 │           ├── validate.py       #   通用校验
 │           ├── claims_my.py      #   MY 市场认证主张专项
 │           └── health_rewrite.py #   健康品类合规重写
-├── ANALYSIS-PROMPT.md            # 分析方法论（进 LLM 输入）
 ├── QA-RULES.md                   # 分析结果校验规则
 ├── structure_library_full.md     # Chimera 结构库（32 模块定义，进 LLM 输入）
 ├── references/                   # 分析知识库（进 LLM 输入）
@@ -86,6 +85,7 @@ Flayr/
 │   ├── observation-guide.md          # 视频观察指引（看视频的方法）
 │   ├── commercial-judgement-framework.md
 │   ├── market-knowledge-my.md
+│   ├── validation-inputs.json        # 主验证集与留出集的视频输入清单
 │   └── commerce-translation-guidelines.md
 ├── assets/report.html            # 报告模板
 └── runs/                         # 每次分析的输出目录

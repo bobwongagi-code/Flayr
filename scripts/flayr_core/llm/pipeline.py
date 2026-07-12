@@ -1,6 +1,7 @@
 """flayr_core.llm.pipeline：LLM 分析主入口。
 
 三个 public 函数：
+  - run_comparison_scope_preflight  只建立锁定事实与双视频产品比较资格
   - run_large_model_analysis        从 analysis_input.md 跑完整分析，写出 analysis_result.json
   - parse_and_validate_llm_result   解析模型原始输出，必要时做一次 repair 重试
   - merge_analysis_result           把外部提供的 analysis_result.json 合并进 analysis dict
@@ -24,12 +25,14 @@ from .analysis_contract import AnalysisContractError, validate_normalized_analys
 from .parse import (
     normalize_analysis_result,
     normalize_category_profile,
+    normalize_comparison_eligibility,
     normalize_product_profile,
     normalize_video_fact_result,
     parse_json_text,
 )
 from .payload import (
     build_improvement_reconciliation_payload,
+    build_comparison_eligibility_payload,
     build_llm_comparison_payload,
     build_llm_payload,
     build_llm_repair_payload,
@@ -67,6 +70,35 @@ from ..postprocess.validate import (
 # 外部 JSON 合并入口
 # ---------------------------------------------------------------------------
 
+def run_comparison_scope_preflight(
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    run_dir: Path,
+) -> dict[str, Any]:
+    """只跑事实抽取和产品级比较资格，供验证集入场审计使用。
+
+    资格判断只依赖锁定的双侧产品身份，不应为它支付阶段对比、Phase C 或提升点的成本。
+    事实与资格文件仍按完整链路同名落盘，因此后续可在同一目录继续运行完整分析。
+    """
+    api_key = read_llm_api_key(args).strip()
+    if not api_key and not args.llm_dry_run:
+        raise SystemExit("比较资格预检需要 LLM API key。")
+    facts = run_video_fact_extraction(args, analysis, run_dir, api_key)
+    if args.llm_dry_run:
+        return {
+            "scope": "uncertain",
+            "direct_product_stages": [],
+            "reason": "dry run 未调用事实抽取和资格判定。",
+        }
+    eligibility = establish_comparison_eligibility(args, facts, run_dir, api_key)
+    analysis["comparison_eligibility"] = eligibility
+    analysis["video_understanding"] = facts
+    analysis["analysis_source"] = {
+        "type": "comparison_scope_preflight",
+        "merged_at": dt.datetime.now().isoformat(timespec="seconds"),
+    }
+    return eligibility
+
 def apply_finalized_analysis_result(
     analysis: dict[str, Any],
     normalized: dict[str, Any],
@@ -79,6 +111,7 @@ def apply_finalized_analysis_result(
     analysis["one_line_verdict"] = normalized["one_line_verdict"]
     analysis["holistic_assessment"] = normalized["holistic_assessment"]
     analysis["key_conclusions"] = normalized.get("key_conclusions", [])
+    analysis["comparison_eligibility"] = normalized.get("comparison_eligibility", {})
     analysis["product_visibility"] = normalized["product_visibility"]
     analysis["loop_closure"] = normalized["loop_closure"]
     analysis["video_understanding"] = normalized["video_understanding"]
@@ -212,6 +245,9 @@ def run_large_model_analysis(
         if args.llm_dry_run:
             print(f"LLM dry run: fact request payloads written to {run_dir}")
             return None
+        analysis["comparison_eligibility"] = establish_comparison_eligibility(
+            args, facts, run_dir, api_key
+        )
         analysis["s1_hook_flags_required"] = True
         analysis["s2_flags_required"] = True
         analysis["s3_flags_required"] = True
@@ -257,6 +293,7 @@ def parse_and_validate_llm_result(
     locked_video_understanding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """解析 LLM 输出并跑全套校验；首次失败时构造 repair payload 再跑一次。"""
+    raw_result: dict[str, Any] | None = None
     try:
         raw_result = parse_json_text(raw_result_text)
         result = _process_llm_result(
@@ -310,7 +347,7 @@ def parse_and_validate_llm_result(
 
     repair_result_text = extract_chat_completion_text(json.loads(repair_raw_text))
     try:
-        raw_repair_result = parse_json_text(repair_result_text)
+        raw_repair_result = preserve_valid_repair_sections(raw_result, parse_json_text(repair_result_text))
         result = _process_llm_result(
             raw_repair_result,
             analysis,
@@ -347,6 +384,25 @@ def parse_and_validate_llm_result(
         raise SystemExit(f"LLM output repair failed. First error: {first_error}. Repair error: {exc}") from exc
 
 
+def preserve_valid_repair_sections(
+    original: dict[str, Any] | None,
+    repaired: dict[str, Any],
+) -> dict[str, Any]:
+    """Repair 误删合法提升点时保留原值；阶段修正仍以 repair 输出为准。"""
+    if not isinstance(original, dict):
+        return repaired
+    repaired_improvements = repaired.get("improvements")
+    original_improvements = original.get("improvements")
+    if (
+        (not isinstance(repaired_improvements, list) or not repaired_improvements)
+        and isinstance(original_improvements, list)
+        and 1 <= len(original_improvements) <= 5
+    ):
+        repaired = dict(repaired)
+        repaired["improvements"] = json.loads(json.dumps(original_improvements, ensure_ascii=False))
+    return repaired
+
+
 def uncovered_large_stage_codes(result: dict[str, Any]) -> list[str]:
     """返回最终为 large、但 Top 提升点尚未覆盖的阶段。"""
     covered = {
@@ -359,6 +415,7 @@ def uncovered_large_stage_codes(result: dict[str, Any]) -> list[str]:
         for stage in result.get("stage_analysis", [])
         if isinstance(stage, dict)
         and (code := stage_code(stage.get("stage")))
+        and str(stage.get("comparison_status") or "") != "not_directly_comparable"
         and str(stage.get("severity") or "").strip().lower() == "large"
         and code not in covered
     ]
@@ -380,7 +437,18 @@ def merge_reconciled_improvements(
         additions_by_stage.setdefault(stage_code(item.get("target_stage")), item)
 
     merged = json.loads(json.dumps(result, ensure_ascii=False))
-    existing = [item for item in merged.get("improvements", []) if isinstance(item, dict)]
+    stages_by_code = {
+        stage_code(stage.get("stage")): stage
+        for stage in merged.get("stage_analysis", [])
+        if isinstance(stage, dict)
+    }
+    existing = [
+        item
+        for item in merged.get("improvements", [])
+        if isinstance(item, dict)
+        and str(stages_by_code.get(stage_code(item.get("target_stage")), {}).get("comparison_status") or "")
+        != "not_directly_comparable"
+    ]
     stage_severity = {
         stage_code(stage.get("stage")): str(stage.get("severity") or "medium").strip().lower()
         for stage in merged.get("stage_analysis", [])
@@ -714,6 +782,7 @@ def establish_product_foundation(
             "category_profile": normalize_category_profile(raw.get("category_profile")),
             "product_profile": normalize_product_profile(raw.get("product_profile")),
         }
+        _stamp_proof_contract_source(foundation, analysis)
         validation_reason = product_foundation_validation_reason(foundation.get("product_profile"))
         if validation_reason:
             repair_payload = build_product_foundation_repair_payload(
@@ -731,6 +800,7 @@ def establish_product_foundation(
                 "category_profile": normalize_category_profile(repaired_raw.get("category_profile")),
                 "product_profile": normalize_product_profile(repaired_raw.get("product_profile")),
             }
+            _stamp_proof_contract_source(foundation, analysis)
             repaired_reason = product_foundation_validation_reason(foundation.get("product_profile"))
             if repaired_reason:
                 # 二次回答仍不合格时保留地基，但显式降级，禁止下游把旧视觉字段当强证据。
@@ -764,6 +834,52 @@ def establish_product_foundation(
         return None
     write_json(run_dir / "product_foundation.json", foundation)
     return foundation
+
+
+def establish_comparison_eligibility(
+    args: argparse.Namespace,
+    facts: dict[str, Any],
+    run_dir: Path,
+    api_key: str,
+) -> dict[str, Any]:
+    """独立判定双视频能否做产品级比较；失败时保守退回 uncertain。"""
+    payload = build_comparison_eligibility_payload(args.llm_model, facts)
+    request_path = run_dir / "llm_comparison_eligibility_request.json"
+    response_path = run_dir / "llm_comparison_eligibility_response.json"
+    write_json(request_path, payload)
+    try:
+        result_text = fetch_json_completion(args, api_key, request_path, response_path)
+        eligibility = normalize_comparison_eligibility(parse_json_text(result_text))
+        if eligibility["scope"] == "uncertain" and not eligibility["reason"]:
+            eligibility["reason"] = "双侧产品身份不足以确认产品级比较资格。"
+    except Exception as exc:  # 资格层不允许阻断主分析；uncertain 会阻止后续误用为直接产品比较。
+        eligibility = {
+            "scope": "uncertain",
+            "direct_product_stages": [],
+            "reason": f"产品级比较资格判定失败，保守按 uncertain 处理：{exc}",
+        }
+    write_json(run_dir / "comparison_eligibility.json", eligibility)
+    return eligibility
+
+
+def _stamp_proof_contract_source(foundation: dict[str, Any], analysis: dict[str, Any]) -> None:
+    """给 Step-0 合同标注证据来源，限制下游复核器的覆盖权限。
+
+    Step-0 可以用品类知识补全分析尺子，但没有运营给出的核心卖点时，它选出的 S4 主证明
+    仍是推断，不应反向否决视频中已经观察到的有效效果证据。
+    """
+    profile = foundation.get("product_profile")
+    if not isinstance(profile, dict):
+        return
+    product = analysis.get("product") if isinstance(analysis.get("product"), dict) else {}
+    supplied = str(product.get("core_selling_points") or "").strip()
+    existing = str(profile.get("proof_contract_source") or "").strip().lower()
+    if existing == "curated":
+        profile["proof_contract_source"] = "curated"
+    elif supplied and supplied not in {"未填写", "未提供", "无"}:
+        profile["proof_contract_source"] = "operator"
+    else:
+        profile["proof_contract_source"] = "inferred"
 
 
 def product_foundation_validation_reason(product_profile: Any) -> str:

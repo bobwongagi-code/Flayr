@@ -128,6 +128,9 @@ def build_s4_visual_verifier_payload(
 def _visual_verifier_skip_reason(result: dict[str, Any]) -> str:
     """直接视觉复核只消费通过合同校验的 instant_visual/process_result。"""
     profile = result.get("product_profile") if isinstance(result.get("product_profile"), dict) else {}
+    source = str(profile.get("proof_contract_source") or "inferred").strip().lower()
+    if source not in {"operator", "curated"}:
+        return "S4 proof_contract 仅来自模型推断，视觉复核只做辅助判断，不覆盖主分析。"
     contract = profile.get("proof_contract") if isinstance(profile.get("proof_contract"), dict) else None
     if contract is None:
         return ""

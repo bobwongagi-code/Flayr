@@ -159,6 +159,34 @@ def build_product_foundation_payload(model: str, analysis: dict[str, Any]) -> di
     }
 
 
+def build_comparison_eligibility_payload(model: str, facts: dict[str, Any]) -> dict[str, Any]:
+    """根据已锁定的双侧产品身份，单独判定产品级对比资格。"""
+    identities = {
+        role: ((facts.get(role) or {}).get("product_identity") or {})
+        for role in ("benchmark", "creator")
+    }
+    text = (
+        "你是短视频对比资格判定器。只根据以下两条视频已锁定的产品身份，禁止补充视频中没有的事实。\n"
+        "输出严格 JSON：{\"scope\":\"same_product|comparable_variant|creative_reference_only|cross_product|uncertain\","
+        "\"direct_product_stages\":[\"S1\"...],\"reason\":\"一句话\"}。\n"
+        "same_product：品牌/产品/关键形态均可支持同一品；comparable_variant：同品牌同品类但规格或版本不同，核心使用方式仍可比；"
+        "creative_reference_only：具体产品不同，但可借鉴镜头或叙事结构，不能作为本品卖点/效果的直接标杆；"
+        "cross_product：品类或关键形态不同，不能做 S2-S5 产品级优劣结论；uncertain：事实不足。\n"
+        "direct_product_stages 只填允许按本品卖点/效果做直接比较的阶段。creative_reference_only/cross_product 时只能填 S1 和/或 S6，"
+        "不得填 S2-S5。reason 必须点明两侧实际身份与限制。\n\n"
+        "产品身份事实：\n"
+        + json.dumps(identities, ensure_ascii=False, indent=2)
+    )
+    return {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "只输出严格 JSON，不要 Markdown，不要推测。"},
+            {"role": "user", "content": [{"type": "text", "text": text}]},
+        ],
+        "temperature": 0.0,
+    }
+
+
 def build_product_foundation_repair_payload(
     model: str,
     analysis: dict[str, Any],
@@ -355,6 +383,13 @@ def build_video_fact_payload(
                 {
                     "content_summary": "只概括这条视频，不比较另一条视频。",
                     "communication_strategy": "只描述这条视频的口播、字幕、画面、BGM如何配合推进。",
+                    "product_identity": {
+                        "brand_or_product_name": "只写这条视频里看见或听见/读到的品牌、产品名；无法确认留空。",
+                        "product_category": "这条视频实际展示的品类；无法确认留空。",
+                        "form_factor": "实际可见的产品形态/关键结构，如便携搅拌杯、慢速榨汁机、手持挂烫机；无法确认留空。",
+                        "identity_basis": "visible|spoken|subtitle|mixed|unknown",
+                        "confidence": "high|medium|low",
+                    },
                     "evidence_units": [
                         {
                             "id": f"{code}1",
@@ -423,6 +458,8 @@ def build_video_fact_payload(
         "按带货短视频的天然结构（钩子→产品引出→使用过程→效果呈现→信任放大→促单）找证据切分 evidence_units，"
         "目标是抽出对分析带货视频有价值的事实，而非随意找转折点；输出 4 到 8 条，沿时间线排列，id 必须使用指定前缀，"
         "time_range 用真实时间（如 2.5s - 4.0s）。"
+        "product_identity 必须只记录当前视频里实际看见、听见或读到的产品身份；声明产品名只作核对线索，"
+        "不得因为输入声明是某品就把视频中看不出的品牌、品类或形态填成该品。"
         "把各维度观察到的画面事实记入 visual_fact、声音事实记入 audio_fact（BGM 在场与类型/语气/音效）、"
         "口播与画面的对齐关系（同步/提前/滞后/无关）记入 information；按实记录，不做评价；"
         "凡 functions 含 S3_usage 的证据，visual_fact 必须记录证据接收质量：使用对象/场景上下文是否足以理解产品作用对象、"
@@ -733,6 +770,14 @@ def build_llm_comparison_payload(
             "你输出的 category_profile/product_profile 必须原样回填这套地基。\n"
             + json.dumps(fnd, ensure_ascii=False, indent=2)
         )
+    eligibility = (analysis or {}).get("comparison_eligibility") or {}
+    eligibility_block = ""
+    if isinstance(eligibility, dict) and eligibility:
+        eligibility_block = (
+            "## 已锁定的产品级比较资格（facts 独立判定，必须原样回填，不得改写）\n"
+            "该资格决定哪些阶段可按本品卖点/效果做直接优劣结论；不允许用文件名或预期产品替换它。\n"
+            + json.dumps(eligibility, ensure_ascii=False, indent=2)
+        )
     # S1 钩子命题尺子：优先用冻结·人工策展；没有则回退 Step-0 地基。无命题也仍强制输出 hook flags，
     # 因为 dims/landing 是通用钩子质量事实，不应依赖人工品库是否覆盖。
     bp = (analysis or {}).get("brand_proposition") or {}
@@ -987,6 +1032,7 @@ def build_llm_comparison_payload(
         [
             context,
             foundation_block,
+            eligibility_block,
             proposition_contract_block,
             hook_flag_block,
             s2_flag_block,
@@ -1014,7 +1060,8 @@ def build_llm_comparison_payload(
             speech_mode_block,
             "## 输出要求",
             "只输出严格 JSON，不要 Markdown。字段必须使用 references/analysis-output-schema.json 的字段名。",
-            "必须输出：one_line_verdict, one_line_summary, executive_summary, holistic_assessment（每维独立）, key_conclusions（1-5 条消费者视角）, product_visibility, category_profile, product_profile, loop_closure, s3_s4_relationship, promise_chain, video_understanding, stage_analysis[6], improvements（1-5 条，按 GMV 杠杆排序）。",
+            "顶层 comparison_eligibility 必须原样回填已锁定的资格对象；若未提供则填 uncertain、direct_product_stages=[] 并说明事实不足。",
+            "必须输出：one_line_verdict, one_line_summary, executive_summary, holistic_assessment（每维独立）, key_conclusions（1-5 条消费者视角）, comparison_eligibility, product_visibility, category_profile, product_profile, loop_closure, s3_s4_relationship, promise_chain, video_understanding, stage_analysis[6], improvements（1-5 条，按 GMV 杠杆排序）。",
             "stage_analysis 每项必须含：stage, time_range, benchmark_time_range, creator_time_range, core_question, creator_module_id, benchmark_module_id, module_fit, module_fit_reason, task_completion, gap_type, gap_summary, voice_performance, benchmark_summary, benchmark_key_message, benchmark_evidence_ids, benchmark_visual_evidence, benchmark_support_status, benchmark_has_effect_demo, benchmark_has_usage_demo, benchmark_quote, benchmark_quote_zh, creator_summary, creator_key_message, creator_evidence_ids, creator_visual_evidence, creator_support_status, creator_has_effect_demo, creator_has_usage_demo, creator_quote, creator_quote_zh, gap, evidence, severity, creator_execution, benchmark_execution, painpoint_relevance, stage_standard_delivery。",
             hook_field_req,
             s2_field_req,
@@ -1549,7 +1596,7 @@ def build_llm_payload(
                     "你是 Flayr 的 TikTok Shop 带货短视频分析器。"
                     "只输出严格 JSON，不要 Markdown，不要解释。"
                     "建议必须围绕 GMV、停留、信任、下单行动。"
-                    "分析必须严格遵循输入中的 ANALYSIS-PROMPT.md：第一步，整体感知并输出 one_line_verdict、holistic_assessment，不引用具体证据；"
+                    "分析必须严格遵循输入中的三步分析流程：第一步，整体感知并输出 one_line_verdict、holistic_assessment，不引用具体证据；"
                     "第二步，输出 product_visibility，并将事实证据映射到 structure_library_full.md 的 S1-S6 语义阶段、官方模块编号、模块适配性和真实时间边界；"
                     "第三步，输出 loop_closure，并基于被引用证据比较 gap_type 和提升点。"
                     "输出必须精炼：每个视频列出 3 到 6 个关键 evidence_units；任何 evidence、visual_evidence、gap_summary 或 actions 数组最多 3 条；"

@@ -21,6 +21,7 @@ from .repair_claims import (
     unit_product_visible,
 )
 from .repair_evidence import (
+    align_stage_flag_evidence,
     bind_improvement_base_material,
     bind_improvement_benchmark_reference,
     bind_timed_transcript_quotes,
@@ -35,6 +36,7 @@ from .repair_evidence import (
     split_quote_clauses,
 )
 from .repair_stages import (
+    apply_comparison_eligibility,
     align_clear_commerce_evidence,
     align_timed_cta_from_transcript,
     creator_has_cta,
@@ -54,6 +56,7 @@ from .repair_stages import (
 
 __all__ = [
     # repair_stages
+    "apply_comparison_eligibility",
     "align_clear_commerce_evidence",
     "align_timed_cta_from_transcript",
     "stabilize_stage_severity",
@@ -71,6 +74,7 @@ __all__ = [
     "set_stage_small",
     # repair_evidence
     "bind_timed_transcript_quotes",
+    "align_stage_flag_evidence",
     "bind_improvement_benchmark_reference",
     "bind_improvement_base_material",
     "reconcile_unsupported_cta",

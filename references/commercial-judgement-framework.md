@@ -2,7 +2,7 @@
 
 > 适用对象：东南亚 TikTok Shop 带货短视频对比分析。
 > 本文是商业判断层，优先解决“什么差距真正影响 GMV”。
-> 它不替代 `ANALYSIS-PROMPT.md` 的流程和 schema 约束，也不替代
+> 它不替代主流程内置三步分析流程和 schema 约束，也不替代
 > `structure_library_full.md` 的模块定义。
 
 ## 核心标尺

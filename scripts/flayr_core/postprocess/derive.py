@@ -625,14 +625,22 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
     """推导单阶段 severity。返回 severity_derivation 溯源 dict（status=derived 时含新 severity）。"""
     creator_exec = stage.get("creator_execution")
     bench_exec = stage.get("benchmark_execution")
+
+    def finish(trace: dict[str, Any]) -> dict[str, Any]:
+        """保留参与公式的最终执行分，避免报告字段与 severity 推导口径脱节。"""
+        trace.setdefault("derived_creator_execution", creator_exec)
+        trace.setdefault("derived_benchmark_execution", bench_exec)
+        return _attach_s3_process_framing_trace(stage_id, stage, trace)
+
     # S1 Hook flag 化：四维 bool 在时由 flag 推执行分，替代模型 0-2 主观分；flag 缺则回退模型分（优雅降级）。
     # severity 仍走下方 e 差值/阈值/放大器/红线，不把 S1 变成孤立打分系统。
     if stage_id == "S1":
         s1 = _s1_hook_exec(stage)
         if s1 is not None:
             if s1.get("redline"):
-                return {"status": "derived", "severity": "large", "E": 2,
-                        "reason": "S1 达人无 Hook、标杆有 Hook（hook_exists 红线）"}
+                creator_exec, bench_exec = 0.0, 2.0
+                return finish({"status": "derived", "severity": "large", "E": 2,
+                               "reason": "S1 达人无 Hook、标杆有 Hook（hook_exists 红线）"})
             creator_exec, bench_exec = s1["creator_exec"], s1["bench_exec"]
     elif stage_id == "S2":
         s2 = _s2_contract_exec(stage)
@@ -655,11 +663,7 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         if s6 is not None:
             creator_exec, bench_exec = s6["creator_exec"], s6["bench_exec"]
     if creator_exec is None or bench_exec is None:
-        return _attach_s3_process_framing_trace(
-            stage_id,
-            stage,
-            {"status": "skipped", "reason": "执行分缺失，保留模型 severity"},
-        )
+        return finish({"status": "skipped", "reason": "执行分缺失，保留模型 severity"})
 
     # 晃动确定性封顶（2026-06-12 用户判例：晃动=无法有效接收）：severe 侧在视觉依赖阶段
     # 执行分封顶 0.5，只降不升、双侧对称。指标由 flayr_core.motion 在预处理算出（零 LLM）。
@@ -677,12 +681,8 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
 
     # 原则④：事实不支撑则不判断
     if creator_exec == 0 and bench_exec == 0:
-        return _attach_s3_process_framing_trace(
-            stage_id,
-            stage,
-            {"status": "derived", "severity": "small", "E": 0,
-             "reason": "双方均未涉及（执行分均为 0），不进公式"},
-        )
+        return finish({"status": "derived", "severity": "small", "E": 0,
+                       "reason": "双方均未涉及（执行分均为 0），不进公式"})
     if stage_id == "S5":
         b = (endorsement or {}).get("benchmark") or _NO_ENDORSEMENT
         c = (endorsement or {}).get("creator") or _NO_ENDORSEMENT
@@ -693,8 +693,8 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
             b_has, c_has = has_hard_endorsement(bench_text), has_hard_endorsement(creator_text)
             src = "硬背书正则兜底"
         if not b_has and not c_has and not _s5_has_any_trust(stage):
-            return {"status": "derived", "severity": "small", "E": 0,
-                    "reason": f"S5 双方均无硬背书 → 均未涉及（{src}）"}
+            return finish({"status": "derived", "severity": "small", "E": 0,
+                           "reason": f"S5 双方均无硬背书 → 均未涉及（{src}）"})
 
     e = max(0.0, float(bench_exec) - float(creator_exec))
     reason = f"E = 标杆执行分 {bench_exec} − 达人执行分 {creator_exec}"
@@ -734,14 +734,10 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
     # 极性红线：达人持平或更优 → small（达人优势记亮点，绝不是差距）
     if e <= 0:
         if stage_id == "S1" and _s1_bench_anchors_only(stage, relevance):
-            return {"status": "derived", "severity": "medium", "E": 0,
-                    "reason": reason + "；命题锚下限：标杆钩子锚定本品核心命题、达人只做泛留人"}
-        return _attach_s3_process_framing_trace(
-            stage_id,
-            stage,
-            {"status": "derived", "severity": "small", "E": 0,
-             "reason": reason + "；达人持平或更优（亮点，零差距红线）"},
-        )
+            return finish({"status": "derived", "severity": "medium", "E": 0,
+                           "reason": reason + "；命题锚下限：标杆钩子锚定本品核心命题、达人只做泛留人"})
+        return finish({"status": "derived", "severity": "small", "E": 0,
+                       "reason": reason + "；达人持平或更优（亮点，零差距红线）"})
 
     w = (weights or {}).get(stage_id, 1.0)
     # 痛点命中系数：差距落在核心决策因素上 → 放大；与痛点无关 → 衰减；事实完全缺失 → 中性。
@@ -799,7 +795,7 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
     # 残差亮点门（只进 trace 不进 severity）：标杆四维全 met 且类型明确才允许亮点描述，否则跳过
     if stage_id == "S1" and _s1_bench_highlight(stage):
         trace["hook_highlight_allowed"] = True
-    return _attach_s3_process_framing_trace(stage_id, stage, trace)
+    return finish(trace)
 
 
 CRITICAL_BAND = 0.2

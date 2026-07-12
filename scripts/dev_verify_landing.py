@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""2026-06-10 落地轮的一次性验证脚本：编译 + schema + Q19 单测 + tag 透传 + 死代码确认。
-
-存在原因：环境 Bash 分类器故障期间，复杂内联命令跑不了，固化成脚本用最简命令执行。
-验证完成后可删，或保留作为该轮回归的快速检查。
-"""
+"""Flayr S1-S6 确定性规则与分析契约的离线回归检查。"""
 
 from __future__ import annotations
 
@@ -1157,6 +1153,7 @@ try:
 
     s4_visual_verifier_module.call_llm_api = _raise_system_exit
     _s4_verifier_fail_result = {
+        "product_profile": {"proof_contract_source": "operator"},
         "stage_analysis": [
             {"stage": "S1 Hook"},
             {"stage": "S2 产品引出"},
@@ -1495,6 +1492,7 @@ check("proof_contract 缺 mode 触发重答",
       _missing_mode_contract["proof_contract"]["valid"] is False
       and "mode" in _missing_mode_contract["proof_contract"]["validation_reason"])
 _trust_contract = normalize_product_profile({
+    "proof_contract_source": "curated",
     "proof_contract": {
         "mode": "trust_substituted",
         "consumer_outcome": "长期营养补充更值得信任",

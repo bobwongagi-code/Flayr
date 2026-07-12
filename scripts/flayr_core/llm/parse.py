@@ -839,6 +839,7 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
         "executive_summary": executive_summary,
         "holistic_assessment": normalize_holistic_assessment(result.get("holistic_assessment")),
         "key_conclusions": key_conclusions,
+        "comparison_eligibility": normalize_comparison_eligibility(result.get("comparison_eligibility")),
         "product_visibility": normalize_product_visibility(result.get("product_visibility")),
         "category_profile": normalize_category_profile(result.get("category_profile")),
         "product_profile": normalize_product_profile(result.get("product_profile")),
@@ -856,6 +857,42 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _FUNCTION_ENUM = {"S1_hook", "S2_intro", "S3_usage", "S4_effect", "S5_trust", "S6_cta"}
+_IDENTITY_BASIS = {"visible", "spoken", "subtitle", "mixed", "unknown"}
+_IDENTITY_CONFIDENCE = {"high", "medium", "low"}
+_COMPARISON_SCOPES = {
+    "same_product", "comparable_variant", "creative_reference_only", "cross_product", "uncertain",
+}
+
+
+def normalize_video_product_identity(value: Any) -> dict[str, str]:
+    """归一单视频中实际观察到的产品身份，不允许用声明产品补空。"""
+    value = value if isinstance(value, dict) else {}
+    return {
+        "brand_or_product_name": str(value.get("brand_or_product_name") or "").strip(),
+        "product_category": str(value.get("product_category") or "").strip(),
+        "form_factor": str(value.get("form_factor") or "").strip(),
+        "identity_basis": normalize_choice(value.get("identity_basis"), _IDENTITY_BASIS, "unknown"),
+        "confidence": normalize_choice(value.get("confidence"), _IDENTITY_CONFIDENCE, "low"),
+    }
+
+
+def normalize_comparison_eligibility(value: Any) -> dict[str, Any]:
+    """归一产品级对比资格，先供审计与指标过滤，暂不静默改写阶段严重度。"""
+    value = value if isinstance(value, dict) else {}
+    scope = normalize_choice(value.get("scope"), _COMPARISON_SCOPES, "uncertain")
+    stages: list[str] = []
+    if isinstance(value.get("direct_product_stages"), list):
+        for item in value["direct_product_stages"]:
+            token = str(item or "").upper().strip()
+            if token in {"S1", "S2", "S3", "S4", "S5", "S6"} and token not in stages:
+                stages.append(token)
+    if scope in {"creative_reference_only", "cross_product"}:
+        stages = [stage for stage in stages if stage not in {"S2", "S3", "S4", "S5"}]
+    return {
+        "scope": scope,
+        "direct_product_stages": stages,
+        "reason": str(value.get("reason") or "").strip(),
+    }
 
 
 def normalize_functions(value: Any) -> list[str] | None:
@@ -880,6 +917,7 @@ def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dic
     normalized = {
         "content_summary": str(result.get("content_summary") or "").strip(),
         "communication_strategy": str(result.get("communication_strategy") or "").strip(),
+        "product_identity": normalize_video_product_identity(result.get("product_identity")),
         "evidence_units": [],
     }
     for index, unit in enumerate(units[:8], start=1):

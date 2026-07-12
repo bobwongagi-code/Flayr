@@ -485,21 +485,84 @@ def stabilize_stage_severity(result: dict[str, Any]) -> None:
             )
 
 
+def apply_comparison_eligibility(result: dict[str, Any]) -> None:
+    """标出不能做产品级优劣比较的阶段，不把它们伪造成 small 差距。
+
+    跨品或仅创意参考时，S2-S5 保留各自观察到的事实，供人借鉴镜头和叙事；
+    但不得拿不同产品的卖点、过程或效果直接推导达人相对标杆的商业差距。
+    """
+    eligibility = result.get("comparison_eligibility")
+    if not isinstance(eligibility, dict):
+        return
+    scope = str(eligibility.get("scope") or "uncertain").strip()
+    allowed = {str(item).upper() for item in eligibility.get("direct_product_stages", [])}
+    if scope in {"same_product", "comparable_variant"}:
+        return
+    reason = str(eligibility.get("reason") or "两条视频的产品级比较资格不足。").strip()
+    for stage in result.get("stage_analysis", []):
+        if not isinstance(stage, dict):
+            continue
+        code = stage_code(stage)
+        if code not in {"S2", "S3", "S4", "S5"} or code in allowed:
+            continue
+        stage["comparison_status"] = "not_directly_comparable"
+        stage["comparison_reason"] = reason
+        trace = stage.get("severity_derivation")
+        if isinstance(trace, dict):
+            trace["direct_product_comparison_eligible"] = False
+
+    # 主模型在锁定资格前已生成的总览、结论，常会残留“本品效果弱于另一品”这类表述。
+    # 这不是可通过报告展示层过滤解决的问题：JSON 也是下游报告/接口的权威来源。
+    # 因此跨品时统一改为范围声明，只保留阶段卡中的本品事实作为创意参考。
+    summary = comparison_scope_summary(eligibility)
+    result["one_line_summary"] = summary
+    result["executive_summary"] = summary
+    result["one_line_verdict"] = "本次为跨品创意参考，不输出 S2-S5 的产品级优劣结论。"
+    result["key_conclusions"] = [
+        summary,
+        "S2-S5 保留达人自身的卖点、使用、效果与信任事实，供借鉴镜头和叙事；不据此判定达人优于或劣于标杆。",
+    ]
+
+
+def comparison_scope_summary(eligibility: dict[str, Any]) -> str:
+    """为非同品比较生成不会重新引入伪产品结论的总览说明。"""
+    scope = str(eligibility.get("scope") or "uncertain").strip()
+    reason = str(eligibility.get("reason") or "两条视频的产品级比较资格不足。").strip()
+    allowed = {str(item).upper() for item in eligibility.get("direct_product_stages", [])}
+    allowed_labels = []
+    if "S1" in allowed:
+        allowed_labels.append("S1 Hook")
+    if "S6" in allowed:
+        allowed_labels.append("S6 CTA")
+    allowed_text = "、".join(allowed_labels) if allowed_labels else "无产品级直接比较阶段"
+    if scope == "creative_reference_only":
+        prefix = "两条视频并非同一具体产品，本次仅作创意结构参考。"
+    elif scope == "cross_product":
+        prefix = "两条视频属于不同产品，本次不作产品级优劣比较。"
+    else:
+        prefix = "两条视频的产品对应关系无法确认，本次不作产品级优劣比较。"
+    return f"{prefix}允许参考的结构阶段：{allowed_text}；S2-S5 仅作创意参考。{reason}"
+
+
 def stabilize_improvement_priorities(result: dict[str, Any]) -> None:
     """让 Top 改进跟随最终 stage 判断，避免把达人优势阶段列为高优先级。"""
     stages = {stage_code(stage): stage for stage in result.get("stage_analysis", []) if isinstance(stage, dict)}
     cta_not_gap = str(stages.get("S6", {}).get("severity") or "") == "small"
     filtered: list[dict[str, Any]] = []
+    excluded_by_scope = False
     for item in result.get("improvements", []):
         if not isinstance(item, dict):
             continue
         target = improvement_stage_code(item)
+        if not improvement_is_actionable(item, target):
+            continue
+        if str(stages.get(target, {}).get("comparison_status") or "") == "not_directly_comparable":
+            excluded_by_scope = True
+            continue
         cta_label = " ".join(str(item.get(key) or "") for key in ("target_stage", "title"))
         if cta_not_gap and (target == "S6" or re.search(r"CTA|促单", cta_label, flags=re.IGNORECASE)):
             continue
         filtered.append(item)
-    if not filtered:
-        filtered = [item for item in result.get("improvements", []) if isinstance(item, dict)]
     severity_rank = {"large": 0, "medium": 1, "small": 2}
     filtered.sort(
         key=lambda item: (
@@ -510,6 +573,16 @@ def stabilize_improvement_priorities(result: dict[str, Any]) -> None:
     for index, item in enumerate(filtered, start=1):
         item["priority"] = index
     result["improvements"] = filtered[:5]
+
+
+def improvement_is_actionable(item: dict[str, Any], target: str) -> bool:
+    """报告只保留可执行的提升点，不能把 repair 模板占位符展示给用户。"""
+    title = str(item.get("title") or "").strip()
+    return bool(
+        target
+        and title
+        and "LLM 未填写" not in title
+    )
 
 
 def improvement_stage_code(item: dict[str, Any]) -> str:
