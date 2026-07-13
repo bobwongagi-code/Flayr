@@ -404,6 +404,8 @@ def build_video_fact_payload(
                             "product_coverage": "该时段产品在画面里的视觉占比：none｜low｜medium｜high。看不到产品写 none。",
                             "endorsement_verbal": False,
                             "endorsement_visual": False,
+                            "trust_source_signals": ["authority|traceable_data|independent_user|social_consensus|process_transparency"],
+                            "trust_source_reference": "实际看见/听见的机构名、报告号、评论原话、群体及共识原话或工厂/质检出处；没有则留空。",
                             "functions": ["S3_usage", "S4_effect"],
                         }
                     ],
@@ -471,6 +473,7 @@ def build_video_fact_payload(
         "再标 endorsement_verbal 与 endorsement_visual（各 true/false，纯观察、不判断算不算有效背书——有效性归后续打分）："
         "endorsement_verbal＝该时段口播/字幕里有没有【出现】halal/KKM/认证/证书/检测/临床/医生/皮肤科/专家/机构/FDA/GMP/SIRIM/BPOM/GMP/certified 等硬来源词（只看词出没出现，不判断是否构成援引背书）；"
         "endorsement_visual＝该时段画面里有没有【出现】独立的硬背书视觉证据（证书/检测报告文件/机构认证标识被画面清晰呈现）——产品瓶身上的印刷小标不算，口播说了但画面没出现也不算（口播归 endorsement_verbal，别把听到的脑补成画面）；"
+        "再标 trust_source_signals（数组，只记录实际看见/听见的独立信任来源，允许 authority/traceable_data/independent_user/social_consensus/process_transparency；没有则空数组）和 trust_source_reference（逐字或概括写出实际出处；无出处必须留空）。authority/traceable_data 必须有机构名、报告号、官方/平台页面或可辨识认证；independent_user 必须有评论/用户原话；social_consensus 必须同时有明确群体/社区和该群体共同看法；process_transparency 必须有工厂、原料、生产或质检过程。产品数量、价格、参数、时长、赠品、达人自述均不得填。"
         "每条还要标 functions（list，多选）：这段画面支撑哪些带货功能，枚举 S1_hook/S2_intro/S3_usage/S4_effect/S5_trust/S6_cta，"
         "按信息功能判断、信道无关（口播/字幕/画面/特效综合看，无口播也能判），一段可同时支撑多个"
         "（手在操作+效果出来 → [S3_usage,S4_effect]）；这是描述这段在带货结构里干什么、不是评价好坏，没有对应功能就不标；"
@@ -486,6 +489,58 @@ def build_video_fact_payload(
             {"role": "user", "content": content},
         ],
         "temperature": 0.0,
+    }
+
+
+def build_video_identity_payload(
+    model: str,
+    role: str,
+    analysis: dict[str, Any],
+    visual_inputs: list[dict[str, str]],
+) -> dict[str, Any]:
+    """为 scope 预检提取最小产品身份，不替代完整单视频事实抽取。"""
+    info = analysis.get("videos", {}).get(role, {})
+    role_dir = Path(str(info.get("work_dir") or ""))
+    text = "\n\n".join(
+        [
+            f"# 单视频产品身份提取：{role}",
+            f"- 运营声明产品：{analysis.get('product', {}).get('name') or '未填写'}（只作核对线索）",
+            "## 紧凑转写",
+            read_text_if_exists(role_dir / "transcript_packed.md"),
+            "## OCR 字幕轨",
+            read_track_markdown(role_dir / "subtitle_track.json", render_subtitle_track_markdown, "（未生成 OCR 字幕轨）"),
+            "## 输出 JSON",
+            json.dumps(
+                {
+                    "product_identity": {
+                        "brand_or_product_name": "视频中实际看见、读到或听到的品牌/产品名；无法确认留空。",
+                        "product_category": "视频实际展示的品类；无法确认留空。",
+                        "form_factor": "可见的关键形态/结构；无法确认留空。",
+                        "identity_basis": "visible|spoken|subtitle|mixed|unknown",
+                        "confidence": "high|medium|low",
+                    }
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        ]
+    )
+    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for item in visual_inputs:
+        content.extend(
+            [
+                {"type": "text", "text": f"代表帧：{item['label']}"},
+                {"type": "image_url", "image_url": {"url": item["data_url"], "detail": "low"}},
+            ]
+        )
+    return {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "你是视频产品身份提取器。只输出严格 JSON，不要 Markdown；不得用运营声明或常识补全视频中没有的身份。"},
+            {"role": "user", "content": content},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 512,
     }
 
 
@@ -518,15 +573,21 @@ _BRAND_PAIR_SUFFIX_RE = re.compile(r"-[bc]\d+$")
 
 
 def resolve_brand_key(run_dir_name: str) -> str:
-    """从 run 目录名解析【品】键：去 sample- 前缀、去 -b0/-c1 标杆/达人配对后缀；榨汁机族（wukoubo/youkoubo）归 juicer。"""
+    """从 run 目录名解析【品】键：去已约定运行前缀和配对后缀；榨汁机族归 juicer。"""
     s = run_dir_name.removeprefix("sample-")
+    for prefix in ("validation-", "scope-probe-"):
+        s = s.removeprefix(prefix)
     if s.startswith(("wukoubo", "youkoubo")):
         return "juicer"
     return _BRAND_PAIR_SUFFIX_RE.sub("", s)
 
 
-def load_brand_proposition(run_dir: Path) -> dict[str, Any] | None:
+def load_brand_proposition(
+    run_dir: Path | None = None,
+    proposition_key: str = "",
+) -> dict[str, Any] | None:
     """读冻结的 S1 命题尺子 references/brand_propositions.json，按【品】返回 {propositions, painpoints}。
+    显式 proposition_key 是业务身份，适用于线上 UUID/租户目录；目录名只为历史本地 run 兼容回退。
     文件缺失/无该品条目/解析失败 → None（pipeline 据此降级回 Step-0 命题，hook flag 仍会输出）。"""
     path = ROOT / "references" / "brand_propositions.json"
     if not path.is_file():
@@ -537,8 +598,15 @@ def load_brand_proposition(run_dir: Path) -> dict[str, Any] | None:
         return None
     entry = None
     if isinstance(data, dict):
-        for dirname in (run_dir.name, run_dir.parent.name):
-            candidate = data.get(resolve_brand_key(dirname))
+        keys: list[str] = []
+        explicit_key = str(proposition_key or "").strip()
+        if explicit_key:
+            keys.append(explicit_key)
+        elif run_dir is not None:
+            # 兼容已存在的本地 runs；新任务不得把实例目录当业务身份。
+            keys.extend(resolve_brand_key(dirname) for dirname in (run_dir.name, run_dir.parent.name))
+        for key in keys:
+            candidate = data.get(key)
             if isinstance(candidate, dict):
                 entry = candidate
                 break
@@ -872,6 +940,7 @@ def build_llm_comparison_payload(
         '"real_usage_met": bool（是否是真实可信的使用动作，而非摆拍假用、错误用法或只拿着产品说）, '
         '"core_selling_point_visible": bool（product_profile.core_selling_points 中至少一个核心卖点是否在使用动作里被看见；只口播不算）, '
         '"process_framing_met": bool（S3 使用过程证据是否可接收：使用对象/场景上下文足以理解产品作用对象、关键动作连续可追踪、核心卖点发生区域清楚可见。局部特写合理时可为 true；只有局部镜头导致看不清对象/动作/证明区域，或跑焦、主体出画、关键动作被遮挡时才为 false）, '
+        '"action_proof_met": bool（只判同一连续动作窗口是否形成可复核的卖点证明：产品/动作、作用对象、与核心卖点对应的即时可观察证据三者都在场才 true。它不要求 S4 的最终效果；但按压却未见泡沫、刷洗却看不清作用对象/覆盖区域、只靠口播或事后结果补足时必须 false）, '
         '"demonstrated_selling_points": ["动作里实际被证明的核心卖点，必须来自 product_profile.core_selling_points 或其同义表达"], '
         '"missing_selling_points": ["该阶段该演但没有被动作证明的核心卖点"], '
         '"scene_mode": "single_scene|multi_scene|multi_person|hybrid|unknown"（单场景/多场景/多人使用/混合；单场景和多场景无天然高低）, '
@@ -885,6 +954,9 @@ def build_llm_comparison_payload(
         '"multi_scene_role_adaptation_met": bool（scene_mode=multi_scene 时，达人造型/动作/道具是否随场景合理调整；其他模式填 false）, '
         '"role_design_met": bool（scene_mode=multi_person 时，主导/辅助/模特/孩子/家人/专业人员等角色是否清楚；其他模式填 false）, '
         '"role_interaction_met": bool（scene_mode=multi_person 时，互动是否自然且服务卖点；其他模式填 false）, '
+        '"distinct_personas_met": bool（多人使用时是否至少两类可辨识人物/角色差异；其他模式填 false）, '
+        '"steps_clear_met": bool（步骤拆解时步骤是否清楚且均有实际操作；未用填 false）, '
+        '"pov_immersive_met": bool（第一视角时是否持续形成操作代入；未用填 false）, '
         '"presentation_overlays": ["step_breakdown|first_person|asmr|closeup|none"]（表现手法，可与单/多场景/多人交叉，不是独立高分理由）, '
         '"fake_or_staged": bool（显假摆拍/错误使用/画面无法相信时 true）, '
         '"start_seconds": number, "end_seconds": number, '
@@ -894,6 +966,7 @@ def build_llm_comparison_payload(
         "S4 消费'结果是否可见、效果是否可信地由产品造成'。"
         "S3 铁律：口播/字幕说卖点但画面没做出来，不算 core_selling_point_visible；只有结果没有过程，S3 最高只能算弱；"
         "process_framing_met 只记录证据接收质量：局部特写不天然扣分；只有看不清产品作用对象、关键动作或核心证明区域时才 false。"
+        "action_proof_met 只判动作是否真的证明卖点，不得借用 S4 的最终效果，也不得拿后续口播/结果倒推为 true。"
         "即使有使用动作，若证据接收不足也不能算强演示；"
         "场景丰富、人物多、步骤多、ASMR/第一视角都不能补偿核心卖点没落地；"
         "单场景连续展示只说明 S3-A 成立，不自动等于执行出色；要给 2 分，必须在核心卖点可见、证据可接收之后，"
@@ -902,7 +975,7 @@ def build_llm_comparison_payload(
     s3_field_req = (
         "S3 强制：stage_analysis 第 3 项（S3 使用过程）必须再含 creator_s3 与 benchmark_s3 两个对象"
         "（结构见上方：exists/module_type/usage_process_visible/result_only_without_process/mouth_only_or_static/real_usage_met/"
-        "core_selling_point_visible/process_framing_met/demonstrated_selling_points/missing_selling_points/scene_mode/usage_context_fit/continuity_met/"
+        "core_selling_point_visible/process_framing_met/action_proof_met/demonstrated_selling_points/missing_selling_points/scene_mode/usage_context_fit/continuity_met/"
         "richness_met/single_scene_continuity_met/single_scene_variation_met/multi_scene_logic_met/multi_scene_transition_met/"
         "multi_scene_role_adaptation_met/role_design_met/role_interaction_met/presentation_overlays/fake_or_staged/"
         "start_seconds/end_seconds/usage_reason/evidence_ids/proposition_ids）。"
@@ -954,12 +1027,14 @@ def build_llm_comparison_payload(
         "S5 阶段（且仅 S5）每侧【必须】输出 creator_s5 与 benchmark_s5 两个对象，形如：\n"
         '{"exists": bool（是否有独立信任放大环节；S5 可跳过，低决策短视频没有独立信任环节可为 false）, '
         '"module_type": "A"~"E" 或 "unknown"（按 structure_library S5 五型：A数据/B权威/C用户证言/D场景广度/E过程透明）, '
-        '"trust_evidence_type": "hard|soft|mixed|none|unknown"（hard=认证/检测/数据/权威/官方/报告等；soft=评论/回购/达人自用/社会认同等；mixed=两者都有）, '
+        '"trust_evidence_type": "hard|soft|mixed|none|unknown"（hard=权威或可溯源数据；soft=独立用户/社会共识/过程透明；mixed=两者都有）, '
+        '"trust_basis": "authority|traceable_data|independent_user|social_consensus|process_transparency|product_claim|offer_or_spec|none|unknown"（只允许 authority=监管/认证/检测/专利等权威来源、traceable_data=带报告编号/平台截图/官方来源的可溯源数据、independent_user=真实用户评价/晒单、social_consensus=目标人群已有共识、process_transparency=探厂/原料/生产/质检进入 S5；产品自身功能/成分/参数主张填 product_claim，价格/数量/赠品/套装/使用时长填 offer_or_spec，这两类不构成 S5）, '
+        '"trust_source_evidence_ids": ["C1"]（只填阶段一事实中 trust_source_signals 含当前 trust_basis 的证据 ID；没有同类型来源时必须为空，并令 exists=false）, '
         '"trust_source_visible": bool（画面是否清楚呈现信任来源，如证书/检测报告/平台截图/评论截图/官方标识；只口播不算可见）, '
         '"trust_source_credible": bool（来源是否像真实外部来源或可核验材料；自述功效/纯参数/包装小标一闪而过不算）, '
         '"trust_claim_specific": bool（是否有具体数字、认证名、报告、评价原话、回购次数、可验证主张；泛泛说好用不算）, '
         '"product_relevance_met": bool（信任材料是否证明本产品/本卖点，而不是泛品牌、泛人设、无关荣誉）, '
-        '"independent_trust_purpose": bool（该段是否承担外部信任证明；第三方认证即使出现在开头或与产品引出同段也填 true，评论/粉丝提问型 Hook、使用演示、效果展示或结尾保障 CTA 才填 false）, '
+        '"independent_trust_purpose": bool（该段是否承担独立信任证明；只有 trust_basis 为 authority/traceable_data/independent_user/social_consensus/process_transparency 才可 true。第三方认证即使出现在开头或与产品引出同段也填 true；product_claim/offer_or_spec、评论/粉丝提问型 Hook、使用演示、效果展示或结尾保障 CTA 都填 false）, '
         '"duplicates_other_stage": bool（是否重复计入了其他阶段功能：开头评论/粉丝提问钩子归 S1，S3/S4 多场景归使用/效果，结尾保障承诺归 S6；第三方认证唯一归 S5，不因出现位置填 true）, '
         '"voice_only": bool（只有口播/字幕说信任点、画面无佐证时 true）, '
         '"risky_or_unsupported": bool（保健/美妆等出现未证实治疗、夸大功效、无来源数据时 true）, '
@@ -969,15 +1044,18 @@ def build_llm_comparison_payload(
         f"S5 铁律：{CERTIFICATION_OWNERSHIP_PROMPT}"
         "结尾的保障/承诺按 S6 CTA 判断；其他只有独立用来建立可信度的材料才归 S5。"
         "硬信任优于软信任；软信任可以算信任，但不能当作硬背书。"
+        "数字不是天然背书：产品包含数量、使用时长、配方参数、价格、赠品、套餐均是产品信息或促销；没有独立来源时填 product_claim 或 offer_or_spec，S5.exists=false，不得因数字清楚改成 hard。"
+        "分类反证：social_consensus 必须同时有【明确的目标群体/社区】和【该群体已表达的共同看法】两类视频证据；只出现产品耐用、数量、使用时长、价格或泛泛'大家会喜欢'时绝不能填 social_consensus。"
+        "traceable_data 必须带外部来源线索（报告编号、官方/平台页面、可辨识认证或来源截图）；产品包装或达人自行报出的数字不算。S5-D 场景广度必须真实列出至少两类不同人群/场景来证明适用范围，否则不得用 D。"
         "S5-C 用户证言若用于开头回答粉丝问题/评论钩子，只归 S1，不要重复算 S5；"
         "S5-D 场景广度必须是为了扩大可信人群/适用范围，不是 S3 使用多场景或 S4 效果多场景；"
         "S5-E 只在探厂、原料、生产、质检、供应链等过程透明中成立，不要把 S4-F 产品作用过程误判为 S5-E。"
     )
     s5_field_req = (
         "S5 强制：stage_analysis 第 5 项（S5 信任放大）必须再含 creator_s5 与 benchmark_s5 两个对象"
-        "（结构见上方：exists/module_type/trust_evidence_type/trust_source_visible/trust_source_credible/"
+        "（结构见上方：exists/module_type/trust_evidence_type/trust_basis/trust_source_visible/trust_source_credible/"
         "trust_claim_specific/product_relevance_met/independent_trust_purpose/duplicates_other_stage/voice_only/"
-        "risky_or_unsupported/start_seconds/end_seconds/trust_reason/evidence_ids/proposition_ids）。"
+        "risky_or_unsupported/start_seconds/end_seconds/trust_reason/evidence_ids/trust_source_evidence_ids/proposition_ids）。"
         "S5 flag 只服务信任材料判断，不把 S4 效果、S6 保障 CTA 或达人普通口播回填成信任放大。"
     )
     s6_flag_block = (
@@ -988,6 +1066,10 @@ def build_llm_comparison_payload(
         '"direct_order_met": bool（是否明确让用户购买/下单/点链接/进购物车/checkout，而不只是泛泛喜欢/看看）, '
         '"action_path_clear": bool（购买路径是否清楚，如 bag kuning/购物车/link/按钮/橱窗/评论区等）, '
         '"offer_or_incentive_clear": bool（价格、优惠、赠品、保障、包邮、组合装等利益是否清楚；没有就 false）, '
+        '"price_anchor_met": bool（S6-A 是否有原价/同类价/明确价格锚定；非 A 填 false）, '
+        '"urgency_evidence_met": bool（S6-B 是否有真实限时/限量/库存证据；非 B 填 false）, '
+        '"gift_stack_met": bool（S6-C 是否有具体赠品或组合利益；非 C 填 false）, '
+        '"guarantee_clear_met": bool（S6-E 是否有明确可理解的退换/质保/保障；非 E 填 false）, '
         '"urgency_met": bool（限时、限量、库存、今天、现在等紧迫理由是否清楚；没有就 false）, '
         '"product_value_recalled": bool（CTA 前是否快速回扣本品核心价值/效果/痛点，而非孤立喊下单）, '
         '"module_fit_met": bool（所选 CTA 类型是否适配本品决策门槛和购买动机；情感满足品硬打低价可为 false）, '
@@ -1287,6 +1369,7 @@ def build_stage_review_payload(
             "real_usage_met": True,
             "core_selling_point_visible": True,
             "process_framing_met": True,
+            "action_proof_met": True,
             "demonstrated_selling_points": ["动作里实际证明的核心卖点"],
             "missing_selling_points": [],
             "scene_mode": "single_scene|multi_scene|multi_person|hybrid|unknown",
@@ -1313,9 +1396,10 @@ def build_stage_review_payload(
         s3_contract = (
             "目标阶段包含 S3 时，stage_update 必须同时重判 creator_s3 与 benchmark_s3；"
             "S3 只判真实使用过程：有没有使用过程、是否只有结果无过程、是否只口播静态、核心卖点是否在动作里可见、"
-            "使用过程证据是否可接收、场景是单场景/多场景/多人/混合、场景组织是否服务卖点。"
+            "使用过程证据是否可接收、动作是否在同一窗口形成可复核卖点证明、场景是单场景/多场景/多人/混合、场景组织是否服务卖点。"
             "只口播/字幕说卖点但画面没演，不算 core_selling_point_visible；只有结果没有过程，S3 最高只能算弱；"
             "process_framing_met 只判证据接收质量，合理局部特写不扣分；看不清对象/动作/证明区域时为 false。"
+            "action_proof_met 不要求最终效果，但要求产品动作、作用对象、卖点的即时可观察证据同窗出现；不能靠后续效果或口播补足。"
             "单场景连续展示只算合格，不能自动判出色；只有核心卖点清楚可见、证据可接收且过程被做厚时才给高执行。"
             "场景丰富、ASMR、第一视角、步骤拆解都不能补偿核心卖点没落地。效果结果归 S4，背书归 S5，不要回填到 S3。"
         )
@@ -1359,6 +1443,7 @@ def build_stage_review_payload(
             "exists": True,
             "module_type": "A-E 或 unknown",
             "trust_evidence_type": "hard|soft|mixed|none|unknown",
+            "trust_basis": "authority|traceable_data|independent_user|social_consensus|process_transparency|product_claim|offer_or_spec|none|unknown",
             "trust_source_visible": True,
             "trust_source_credible": True,
             "trust_claim_specific": True,
@@ -1381,6 +1466,9 @@ def build_stage_review_payload(
             "硬信任可到 2，软信任封顶 1，口播孤证封顶 0.5；"
             + CERTIFICATION_OWNERSHIP_PROMPT
             + CERTIFICATION_POSITION_EXCEPTION_PROMPT
+            + "产品数量、使用时长、参数、价格、赠品、套餐不是独立信任；没有外部来源时填 product_claim 或 offer_or_spec，且 exists=false。"
+            + "social_consensus 必须同时有明确目标群体/社区和该群体已表达的共同看法；耐用、数量、时长、价格或泛泛“大家会喜欢”均不得填 social_consensus。"
+            + "traceable_data 必须带报告编号、官方/平台页面、可辨识认证或来源截图；产品包装或达人自行报出的数字不算。S5-D 必须真实列出至少两类不同人群/场景来证明适用范围。"
             + "S5-C 开头评论/粉丝问答归 S1；S5-D 不得重复 S3/S4 多场景；S5-E 只认探厂/原料/生产/质检/供应链。"
             + "保健/美妆等高风险品类不得把无来源疗效承诺判为可信信任。"
         )
@@ -1707,9 +1795,9 @@ def build_llm_repair_payload(
                     "hook_boundary_seconds 按 structure_library_full.md 的 S1 留人机制→S2 产品引出/解决方案承接功能切换判断，不得写死固定秒数；S2-A 承接式引出可早于产品实物或产品名出现，不能等产品画面才切 S2。"
                     "landing_met 按 type 无关三件套判断：0 到 hook_boundary_seconds 内对象明确、张力明确、承诺或证据明确，缺一即 false；不得用后续 S2/S3 产品介绍补足 S1 landing。若引用边界后材料，landing_window_leak=true 且 landing_met=false。"
                     "S2 产品引出必须补齐 creator_s2 与 benchmark_s2 两个对象，字段为 exists(bool)、merged_with_s3(bool)、module_type(A-D或unknown)、handoff_met(bool)、s1_s2_compatible(bool)、product_identity_clear(bool)、product_role_clear(bool)、excluded_or_risky_module(bool)、start_seconds(number)、end_seconds(number)、handoff_reason(非空)、evidence_ids(非空数组)、proposition_ids(数组)。"
-                    "S3 使用过程必须补齐 creator_s3 与 benchmark_s3 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、usage_process_visible(bool)、result_only_without_process(bool)、mouth_only_or_static(bool)、real_usage_met(bool)、core_selling_point_visible(bool)、process_framing_met(bool)、demonstrated_selling_points(数组)、missing_selling_points(数组)、scene_mode(single_scene/multi_scene/multi_person/hybrid/unknown)、usage_context_fit(bool)、continuity_met(bool)、richness_met(bool)、single_scene_continuity_met(bool)、single_scene_variation_met(bool)、multi_scene_logic_met(bool)、multi_scene_transition_met(bool)、multi_scene_role_adaptation_met(bool)、role_design_met(bool)、role_interaction_met(bool)、presentation_overlays(数组)、fake_or_staged(bool)、start_seconds(number)、end_seconds(number)、usage_reason(非空)、evidence_ids(非空数组)、proposition_ids(数组)。"
+                    "S3 使用过程必须补齐 creator_s3 与 benchmark_s3 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、usage_process_visible(bool)、result_only_without_process(bool)、mouth_only_or_static(bool)、real_usage_met(bool)、core_selling_point_visible(bool)、process_framing_met(bool)、action_proof_met(bool)、demonstrated_selling_points(数组)、missing_selling_points(数组)、scene_mode(single_scene/multi_scene/multi_person/hybrid/unknown)、usage_context_fit(bool)、continuity_met(bool)、richness_met(bool)、single_scene_continuity_met(bool)、single_scene_variation_met(bool)、multi_scene_logic_met(bool)、multi_scene_transition_met(bool)、multi_scene_role_adaptation_met(bool)、role_design_met(bool)、role_interaction_met(bool)、presentation_overlays(数组)、fake_or_staged(bool)、start_seconds(number)、end_seconds(number)、usage_reason(非空)、evidence_ids(非空数组)、proposition_ids(数组)。"
                     "S4 效果呈现必须补齐 creator_s4 与 benchmark_s4 两个对象，字段为 effect_type(before_after/split_screen/person_vs_person/product_vs_alt/quantified_test/process_visualization/aesthetic_display/none)、effect_visible(bool)、effect_salience(none/subtle/clear/strong)、effect_proposition_matched(bool)、comparison_control_met(bool)、closeup_or_focus_met(bool)、visual_difference_observed(bool)、module_constraints_met(bool)、effect_maximized(bool)、requires_close_inspection(bool)、effect_attribution_supported(bool)、result_only_without_process(bool)、process_linked_effect(bool)、tamper_or_cut_risk(bool)、effect_reason(非空)、evidence_ids(非空数组)、proposition_ids(数组)。"
-                    "S5 信任放大必须补齐 creator_s5 与 benchmark_s5 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、trust_evidence_type(hard/soft/mixed/none/unknown)、trust_source_visible(bool)、trust_source_credible(bool)、trust_claim_specific(bool)、product_relevance_met(bool)、independent_trust_purpose(bool)、duplicates_other_stage(bool)、voice_only(bool)、risky_or_unsupported(bool)、start_seconds(number)、end_seconds(number)、trust_reason(非空)、evidence_ids(数组；exists=false 或 trust_evidence_type=none/unknown 可为空)、proposition_ids(数组)。"
+                    "S5 信任放大必须补齐 creator_s5 与 benchmark_s5 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、trust_evidence_type(hard/soft/mixed/none/unknown)、trust_basis(authority/traceable_data/independent_user/social_consensus/process_transparency/product_claim/offer_or_spec/none/unknown)、trust_source_visible(bool)、trust_source_credible(bool)、trust_claim_specific(bool)、product_relevance_met(bool)、independent_trust_purpose(bool)、duplicates_other_stage(bool)、voice_only(bool)、risky_or_unsupported(bool)、start_seconds(number)、end_seconds(number)、trust_reason(非空)、evidence_ids(数组；exists=false 或 trust_evidence_type=none/unknown 可为空)、proposition_ids(数组)。"
                     "S6 CTA 必须补齐 creator_s6 与 benchmark_s6 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、direct_order_met(bool)、action_path_clear(bool)、offer_or_incentive_clear(bool)、urgency_met(bool)、product_value_recalled(bool)、module_fit_met(bool)、ending_position_met(bool)、depends_on_valid_s4(bool)、compliance_risk(bool)、start_seconds(number)、end_seconds(number)、cta_reason(非空)、evidence_ids(数组；exists=false 可为空)、proposition_ids(数组)。"
                     "必须补齐 s3_s4_relationship 和 promise_chain；promise_chain.chain_closed 必须是 bool，broken_at 只能是 S2/S3/S4/none/unknown；promise_chain 只审计 S1-S4，不得把 S5/S6/CTA/促单/下单问题写成承诺链断点。"
                     "提升点必须保留 benchmark_evidence_ids、base_frame_suitability、best_base_frame_time、base_frame_evidence_id、base_frame_reason 和 aigc_prompt；无可用达人素材时写 no_suitable_frame 且时间与 base_frame_evidence_id 留空。aigc_image_path 留空。"

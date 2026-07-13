@@ -55,7 +55,7 @@ def job_output_dir(job: dict, runs_dir: Path) -> Path:
 
 
 def build_command(job: dict, out_dir: Path, common_args: list[str]) -> list[str]:
-    return [
+    command = [
         "python3",
         str(ROOT / "scripts" / "flayr.py"),
         "improve",
@@ -69,6 +69,10 @@ def build_command(job: dict, out_dir: Path, common_args: list[str]) -> list[str]
         *common_args,
         *job.get("args", []),
     ]
+    proposition_key = str(job.get("proposition_key") or "").strip()
+    if proposition_key:
+        command.extend(["--proposition-key", proposition_key])
+    return command
 
 
 def main() -> int:

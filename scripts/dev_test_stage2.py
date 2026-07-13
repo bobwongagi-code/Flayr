@@ -306,11 +306,15 @@ def main() -> None:
         "creator": json.loads((run / "video_facts_creator.json").read_text(encoding="utf-8")),
     }
     analysis = json.loads((run / "analysis.json").read_text(encoding="utf-8"))
+    eligibility_path = run / "comparison_eligibility.json"
+    if eligibility_path.is_file():
+        analysis["comparison_eligibility"] = json.loads(eligibility_path.read_text(encoding="utf-8"))
     # 注入 Step-0 地基 + 冻结命题尺子（pipeline 正常会做；本工具绕过 pipeline，需手动补，否则 S1 hook flag 不触发）
     foundation_path = run / "product_foundation.json"
     if foundation_path.is_file():
         analysis["product_foundation"] = json.loads(foundation_path.read_text(encoding="utf-8"))
-    bp = load_brand_proposition(run)
+    product = analysis.get("product") if isinstance(analysis.get("product"), dict) else {}
+    bp = load_brand_proposition(run, str(product.get("proposition_key") or ""))
     if bp:
         analysis["brand_proposition"] = bp
     analysis["s1_hook_flags_required"] = True

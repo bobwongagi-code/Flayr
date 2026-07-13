@@ -315,6 +315,8 @@ def _s3_strong_scene(flag: dict[str, Any]) -> bool:
         return False
     if flag.get("process_framing_met") is not True:
         return False
+    if flag.get("action_proof_met") is False:
+        return False
     mode = str(flag.get("scene_mode") or "unknown")
     if mode == "single_scene":
         return (
@@ -328,7 +330,9 @@ def _s3_strong_scene(flag: dict[str, Any]) -> bool:
             and flag.get("multi_scene_role_adaptation_met") is True
         )
     if mode == "multi_person":
-        return flag.get("role_design_met") is True and flag.get("role_interaction_met") is True
+        return (flag.get("distinct_personas_met") is True
+                and flag.get("role_design_met") is True
+                and flag.get("role_interaction_met") is True)
     if mode == "hybrid":
         return flag.get("continuity_met") is True and flag.get("richness_met") is True
     return flag.get("continuity_met") is True and flag.get("richness_met") is True
@@ -357,6 +361,8 @@ def _s3_usage_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
             return 0.5
         if flag.get("process_framing_met") is False:
             return 0.5
+        if flag.get("action_proof_met") is False:
+            return 0.5
         if flag.get("usage_context_fit") is not True:
             return 0.5
         missing = flag.get("missing_selling_points")
@@ -380,6 +386,13 @@ def _attach_s3_process_framing_trace(stage_id: str, stage: dict[str, Any], trace
         framing["benchmark"] = b.get("process_framing_met")
     if framing:
         trace["s3_process_framing"] = framing
+    action_proof: dict[str, Any] = {}
+    if isinstance(c, dict) and "action_proof_met" in c:
+        action_proof["creator"] = c.get("action_proof_met")
+    if isinstance(b, dict) and "action_proof_met" in b:
+        action_proof["benchmark"] = b.get("action_proof_met")
+    if action_proof:
+        trace["s3_action_proof"] = action_proof
     return trace
 
 
@@ -392,6 +405,7 @@ def _s3_core_floor(stage: dict[str, Any]) -> tuple[bool, str]:
     benchmark_core = (
         (b.get("usage_process_visible") is True or b.get("real_usage_met") is True)
         and b.get("core_selling_point_visible") is True
+        and b.get("action_proof_met") is not False
     )
     if not benchmark_core:
         return False, ""
@@ -404,6 +418,8 @@ def _s3_core_floor(stage: dict[str, Any]) -> tuple[bool, str]:
         missing.append("缺少真实使用过程")
     if c.get("core_selling_point_visible") is not True:
         missing.append("核心卖点未在动作里可见")
+    if c.get("action_proof_met") is False:
+        missing.append("动作未形成可复核卖点证明")
     if not missing:
         return False, ""
     return True, "；S3 核心演示下限：" + "、".join(missing)
@@ -424,14 +440,21 @@ def _s3_thin_demo_floor(stage: dict[str, Any]) -> tuple[bool, str]:
             and (flag.get("usage_process_visible") is True or flag.get("real_usage_met") is True)
             and flag.get("fake_or_staged") is not True
             and flag.get("core_selling_point_visible") is True
+            and flag.get("action_proof_met") is not False
         )
 
     if not has_basic_process(c) or not has_basic_process(b):
         return False, ""
-    benchmark_strong = b.get("process_framing_met") is True and _s3_strong_scene(b)
+    benchmark_strong = (
+        b.get("process_framing_met") is True
+        and b.get("action_proof_met") is not False
+        and _s3_strong_scene(b)
+    )
     creator_thin_reasons = []
     if c.get("process_framing_met") is False:
         creator_thin_reasons.append("使用过程未拍全/未对准")
+    if c.get("action_proof_met") is False:
+        creator_thin_reasons.append("动作未形成可复核卖点证明")
     if c.get("usage_context_fit") is False:
         creator_thin_reasons.append("使用场景未给卖点舞台")
     if not _s3_strong_scene(c):
@@ -466,10 +489,11 @@ def _s4_thin_effect_floor(stage: dict[str, Any]) -> tuple[bool, str]:
         str(b.get("effect_salience") or "") == "strong"
         and b.get("effect_maximized") is True
     )
+    comparison_required = str(c.get("effect_type") or "") not in {"process_visualization", "aesthetic_display"}
     creator_thinner = (
         str(c.get("effect_salience") or "") != "strong"
         or c.get("effect_maximized") is not True
-        or c.get("comparison_control_met") is not True
+        or (comparison_required and c.get("comparison_control_met") is not True)
         or c.get("closeup_or_focus_met") is not True
     )
     if benchmark_stronger and creator_thinner:
@@ -539,12 +563,16 @@ def _s5_trust_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
     b = stage.get("benchmark_s5")
     if not isinstance(c, dict) or not isinstance(b, dict):
         return None
+    valid_bases = {"authority", "traceable_data", "independent_user", "social_consensus", "process_transparency"}
 
     def side_exec(flag: dict[str, Any]) -> float:
         if flag.get("exists") is False:
             return 0.0
         trust_type = str(flag.get("trust_evidence_type") or "unknown")
+        trust_basis = str(flag.get("trust_basis") or "unknown")
         if trust_type in {"none", "unknown"}:
+            return 0.0
+        if trust_basis not in valid_bases:
             return 0.0
         if flag.get("independent_trust_purpose") is not True or flag.get("duplicates_other_stage") is True:
             return 0.0
@@ -552,10 +580,10 @@ def _s5_trust_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
             return 0.5
         if flag.get("product_relevance_met") is not True:
             return 0.5
-        if trust_type == "soft":
-            return 1.0
         if flag.get("voice_only") is True:
             return 0.5
+        if trust_type == "soft":
+            return 1.0
         if flag.get("trust_source_credible") is True and flag.get("trust_claim_specific") is True:
             return 2.0 if flag.get("trust_source_visible") is True else 1.0
         if flag.get("trust_source_credible") is True or flag.get("trust_claim_specific") is True:
@@ -563,6 +591,29 @@ def _s5_trust_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
         return 0.5
 
     return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
+
+
+def _s5_hard_visual_gap(stage: dict[str, Any], endorsement: dict[str, _Endorsement] | None,
+                        weight: float) -> bool:
+    """高决策品中，硬背书可见性断层是独立于一般执行差的信任红线。"""
+    if weight < 1.4:
+        return False
+    creator = stage.get("creator_s5")
+    benchmark = stage.get("benchmark_s5")
+    if not isinstance(creator, dict) or not isinstance(benchmark, dict):
+        return False
+    benchmark_endorsement = (endorsement or {}).get("benchmark") or _NO_ENDORSEMENT
+    creator_endorsement = (endorsement or {}).get("creator") or _NO_ENDORSEMENT
+    return (
+        benchmark_endorsement.visual
+        and not creator_endorsement.visual
+        and str(benchmark.get("trust_evidence_type") or "") in {"hard", "mixed"}
+        and str(benchmark.get("trust_basis") or "") in {"authority", "traceable_data"}
+        and benchmark.get("trust_source_visible") is True
+        and benchmark.get("trust_source_credible") is True
+        and benchmark.get("trust_claim_specific") is True
+        and creator.get("voice_only") is True
+    )
 
 
 def _s5_has_any_trust(stage: dict[str, Any]) -> bool:
@@ -574,6 +625,9 @@ def _s5_has_any_trust(stage: dict[str, Any]) -> bool:
         if (
             flag.get("exists") is not False
             and str(flag.get("trust_evidence_type") or "unknown") not in {"none", "unknown"}
+            and str(flag.get("trust_basis") or "unknown") in {
+                "authority", "traceable_data", "independent_user", "social_consensus", "process_transparency",
+            }
             and flag.get("independent_trust_purpose") is True
             and flag.get("duplicates_other_stage") is not True
         ):
@@ -608,7 +662,17 @@ def _s6_cta_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
         depends_on_valid_s4 = flag.get("computed_depends_on_valid_s4")
         if depends_on_valid_s4 not in {True, False}:
             depends_on_valid_s4 = flag.get("depends_on_valid_s4")
-        if fit_value is False or (flag.get("module_type") == "D" and depends_on_valid_s4 is False):
+        module = str(flag.get("module_type") or "unknown")
+        module_met = {
+            "A": flag.get("price_anchor_met") is True,
+            "B": flag.get("urgency_evidence_met") is True,
+            "C": flag.get("gift_stack_met") is True,
+            "D": depends_on_valid_s4 is True,
+            "E": flag.get("guarantee_clear_met") is True,
+        }.get(module, False)
+        if all(flag.get(key) is None for key in ("price_anchor_met", "urgency_evidence_met", "gift_stack_met", "guarantee_clear_met")):
+            module_met = module != "D" or depends_on_valid_s4 is True
+        if fit_value is False or not module_met:
             return 0.5
         if direct and path and fit and amplifier:
             return 2.0
@@ -757,6 +821,9 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
     if e >= 2 and stage_id in {"S1", "S6"}:
         severity = "large"
         reason += "；S1/S6 核心功能缺失红线"
+    elif stage_id == "S5" and _s5_hard_visual_gap(stage, endorsement, w):
+        severity = "large"
+        reason += "；高决策品硬背书可见性断层（标杆可核验、达人仅口播）"
     elif score > TH_MEDIUM:
         severity = "large"
     elif score > TH_SMALL:

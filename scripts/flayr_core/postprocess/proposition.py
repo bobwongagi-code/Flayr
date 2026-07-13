@@ -422,6 +422,7 @@ def _selling_point_chain_state(
     s3_ready = isinstance(s3, dict) and (
         s3.get("core_selling_point_visible") is True
         and s3.get("process_framing_met") is not False
+        and s3.get("action_proof_met") is not False
         and s3.get("mouth_only_or_static") is not True
         and s3.get("result_only_without_process") is not True
     )
@@ -534,6 +535,8 @@ def _absolute_status(stage_id: str, flag: dict[str, Any] | None) -> tuple[str, s
             return "weak", "只有结果没有过程"
         if flag.get("core_selling_point_visible") is not True:
             return "weak", "核心卖点未在动作中可见"
+        if flag.get("action_proof_met") is False:
+            return "weak", "动作未形成可复核卖点证明"
         return "complete", "使用过程证明了核心卖点"
     if stage_id == "S4":
         if flag.get("effect_visible") is False or str(flag.get("effect_salience") or "") == "none":
@@ -546,6 +549,8 @@ def _absolute_status(stage_id: str, flag: dict[str, Any] | None) -> tuple[str, s
     if stage_id == "S5":
         if flag.get("exists") is False:
             return "not_applicable", "未设置独立信任环节"
+        if str(flag.get("trust_basis") or "unknown") in {"product_claim", "offer_or_spec", "none", "unknown"}:
+            return "not_applicable", "产品主张或促销规格不构成独立信任材料"
         if flag.get("duplicates_other_stage") is True:
             return "duplicate", "信任材料重复计入其他阶段"
         if flag.get("risky_or_unsupported") is True:

@@ -34,6 +34,9 @@ from flayr_core.llm.payload import (
     build_llm_comparison_payload,
     build_llm_repair_payload,
     build_stage_review_payload,
+    build_video_identity_payload,
+    load_brand_proposition,
+    resolve_brand_key,
 )
 from flayr_core.llm.parse import normalize_analysis_result, normalize_s3_flags, normalize_video_fact_result
 from flayr_core.postprocess.proposition import materialize_cross_stage_inputs, materialize_quality_audits
@@ -46,7 +49,11 @@ from flayr_core.postprocess.repair import (
     stabilize_improvement_priorities,
 )
 from flayr_core.postprocess.health_rewrite import is_child_toothpaste_context
-from flayr_core.postprocess.validate import validate_analysis_dimensions, validate_stage_time_coherence
+from flayr_core.postprocess.validate import (
+    validate_analysis_dimensions,
+    validate_required_stage_narratives,
+    validate_stage_time_coherence,
+)
 from flayr_core.prompt import write_analysis_input
 from flayr_core.proposition_contract import build_product_proposition_contract
 from flayr_core.stage_catalog import DEFAULT_STAGES, fallback_artifact_ranges, stage_tuples
@@ -111,6 +118,21 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn("本品命题引用合同", repair_text)
         self.assertIn('"proof.1"', repair_text)
 
+    def test_brand_proposition_resolves_validation_run_names(self) -> None:
+        self.assertEqual(resolve_brand_key("validation-are_xie"), "are_xie")
+        self.assertEqual(resolve_brand_key("scope-probe-carslan-b0"), "carslan")
+        self.assertEqual(resolve_brand_key("sample-youkoubo-c2"), "juicer")
+        brand = load_brand_proposition(Path("/tmp/validation-are_xie"))
+        self.assertIsNotNone(brand)
+        self.assertIn("经期腹痛", brand["painpoints"])
+
+    def test_explicit_proposition_key_does_not_depend_on_run_directory(self) -> None:
+        online_run = Path("/tmp/tenant-42/run-019f1e50")
+        brand = load_brand_proposition(online_run, "are_xie")
+        self.assertIsNotNone(brand)
+        self.assertIn("经期腹痛", brand["painpoints"])
+        self.assertIsNone(load_brand_proposition(online_run))
+
     def test_invalid_new_proof_contract_cannot_fallback_to_legacy_visual_claim(self) -> None:
         foundation = self._proposition_foundation()
         profile = foundation["product_profile"]
@@ -155,6 +177,11 @@ class ArchitectureContractTests(unittest.TestCase):
         normalized = normalize_proof_contract(compound)
         self.assertFalse(normalized["valid"])
         self.assertIn("一个可观察维度", normalized["validation_reason"])
+
+        same_object_state = {**base, "observable_dimension": "刷头完整性与存在状态"}
+        normalized = normalize_proof_contract(same_object_state)
+        self.assertTrue(normalized["valid"])
+        self.assertEqual(normalized["observable_dimension"], "刷头状态")
 
     def test_inferred_s4_contract_cannot_authoritatively_override_stage_analysis(self) -> None:
         profile = normalize_product_profile(
@@ -231,6 +258,24 @@ class ArchitectureContractTests(unittest.TestCase):
         analysis = {"comparison_eligibility": {"scope": "cross_product", "direct_product_stages": ["S1"], "reason": "形态不同"}}
         stamp_comparison_eligibility(result, analysis)
         self.assertEqual(result["comparison_eligibility"]["scope"], "cross_product")
+
+    def test_scope_identity_payload_excludes_video_and_audio(self) -> None:
+        analysis = {
+            "product": {"name": "测试产品"},
+            "videos": {"creator": {"work_dir": "", "duration_seconds": 10}},
+        }
+        payload = build_video_identity_payload(
+            "test",
+            "creator",
+            analysis,
+            [{"label": "creator frame", "data_url": "data:image/jpeg;base64,AA=="}],
+        )
+        content = payload["messages"][1]["content"]
+        types = [item.get("type") for item in content if isinstance(item, dict)]
+        self.assertEqual(payload["max_tokens"], 512)
+        self.assertNotIn("video_url", types)
+        self.assertNotIn("input_audio", types)
+        self.assertIn("image_url", types)
 
     def test_cross_product_scope_excludes_s2_to_s5_from_gap_and_improvements(self) -> None:
         stages = [{"stage": f"S{index}", "severity": "large"} for index in range(1, 7)]
@@ -653,6 +698,24 @@ class ArchitectureContractTests(unittest.TestCase):
         result["stage_analysis"][2]["stage"] = "S4 stage"
         with self.assertRaises(AnalysisContractError):
             validate_normalized_analysis_contract(result)
+
+    def test_quality_contract_rejects_missing_stage_narrative(self) -> None:
+        incomplete = {
+            "stage_analysis": [
+                {
+                    "stage": "S1 Hook",
+                    "benchmark_summary": "标杆表现",
+                    "creator_summary": "达人表现",
+                    "gap": "（LLM 未填写 gap，需人工补充）",
+                }
+            ]
+        }
+        with self.assertRaises(SystemExit):
+            validate_required_stage_narratives(incomplete)
+
+        complete = json.loads(json.dumps(incomplete, ensure_ascii=False))
+        complete["stage_analysis"][0]["gap"] = "达人未承接标杆的核心痛点。"
+        validate_required_stage_narratives(complete)
 
     def test_stage_catalog_is_shared_by_parse_and_artifact_fallback(self) -> None:
         from flayr_core.llm.parse import STAGES

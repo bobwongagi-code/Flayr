@@ -283,6 +283,7 @@ def _s5_flag(
     exists=True,
     module="A",
     trust_type="hard",
+    trust_basis="authority",
     visible=True,
     credible=True,
     specific=True,
@@ -296,6 +297,7 @@ def _s5_flag(
         "exists": exists,
         "module_type": module,
         "trust_evidence_type": trust_type,
+        "trust_basis": trust_basis,
         "trust_source_visible": visible,
         "trust_source_credible": credible,
         "trust_claim_specific": specific,
@@ -356,14 +358,30 @@ _s5_hard_vs_voice = _derive_one(
     None,
     {"benchmark": _Endorsement(False, True, True), "creator": _Endorsement(True, False, True)},
 )
-check("S5 硬信任画面佐证强于口播孤证→至少 medium",
-      _s5_hard_vs_voice.get("severity") in {"medium", "large"} and _s5_hard_vs_voice.get("E") == 1.5)
+check("S5 高决策品硬信任画面佐证强于口播孤证→large",
+      _s5_hard_vs_voice.get("severity") == "large" and _s5_hard_vs_voice.get("E") == 1.5)
+
+_s5_low_price_hard_vs_voice = _derive_one(
+    "S5",
+    {
+        "creator_s5": _s5_flag(voice_only=True),
+        "benchmark_s5": _s5_flag(),
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S5": 0.6},
+    [],
+    None,
+    {"benchmark": _Endorsement(False, True, True), "creator": _Endorsement(True, False, True)},
+)
+check("S5 低客单价硬信任差距不自动拉large",
+      _s5_low_price_hard_vs_voice.get("severity") != "large")
 
 _s5_soft_not_killed = _derive_one(
     "S5",
     {
-        "creator_s5": _s5_flag(trust_type="soft", visible=True, credible=True, specific=True),
-        "benchmark_s5": _s5_flag(trust_type="soft", visible=True, credible=True, specific=True),
+        "creator_s5": _s5_flag(trust_type="soft", trust_basis="independent_user", visible=True, credible=True, specific=True),
+        "benchmark_s5": _s5_flag(trust_type="soft", trust_basis="independent_user", visible=True, credible=True, specific=True),
         "creator_summary": "用户好评",
         "benchmark_summary": "用户好评",
     },
@@ -379,8 +397,8 @@ check("S5 软信任 flag 存在→不被双方无硬背书闸误杀",
 _s5_opening_comment_not_trust = _derive_one(
     "S5",
     {
-        "creator_s5": _s5_flag(trust_type="soft", independent=False, duplicate=True),
-        "benchmark_s5": _s5_flag(trust_type="soft", independent=True, duplicate=False),
+        "creator_s5": _s5_flag(trust_type="soft", trust_basis="independent_user", independent=False, duplicate=True),
+        "benchmark_s5": _s5_flag(trust_type="soft", trust_basis="independent_user", independent=True, duplicate=False),
         "creator_summary": "开头回答粉丝评论作为 Hook",
         "benchmark_summary": "独立用户证言",
     },
@@ -409,6 +427,28 @@ _s5_scene_duplicate_not_trust = _derive_one(
 check("S5-D 场景广度不得重复 S3/S4 多场景",
       _s5_scene_duplicate_not_trust.get("severity") == "small"
       and _s5_scene_duplicate_not_trust.get("E") == 1)
+
+_s5_spec_not_trust = _derive_one(
+    "S5",
+    {
+        "creator_s5": _s5_flag(
+            exists=False, trust_type="none", trust_basis="offer_or_spec", independent=False,
+            visible=True, credible=False, specific=True,
+        ),
+        "benchmark_s5": _s5_flag(
+            exists=False, trust_type="none", trust_basis="offer_or_spec", independent=False,
+            visible=True, credible=False, specific=True,
+        ),
+        "creator_summary": "展示刷头数量和可用时长",
+        "benchmark_summary": "展示套装数量和可用时长",
+    },
+    {"S5": 1.0},
+    [],
+    None,
+    {"benchmark": _Endorsement(False, False, True), "creator": _Endorsement(False, False, True)},
+)
+check("S5 产品数量/时长不是独立信任背书",
+      _s5_spec_not_trust.get("severity") == "small" and "均未涉及" in _s5_spec_not_trust.get("reason", ""))
 
 _s6_missing = _derive_one(
     "S6",
@@ -685,6 +725,7 @@ def _s3_flag(
     real=True,
     core=True,
     framing=True,
+    action_proof=True,
     context=True,
     continuity=True,
     richness=False,
@@ -708,6 +749,7 @@ def _s3_flag(
         "real_usage_met": real,
         "core_selling_point_visible": core,
         "process_framing_met": framing,
+        "action_proof_met": action_proof,
         "demonstrated_selling_points": ["核心卖点"],
         "missing_selling_points": [] if core else ["核心卖点"],
         "scene_mode": scene,
@@ -796,6 +838,22 @@ check("S3 使用过程拍不全/没对准→执行分封顶并触发 medium 下�
       _s3_bad_framing.get("severity") == "medium"
       and _s3_bad_framing.get("E") == 1.5
       and _s3_bad_framing.get("s3_process_framing") == {"creator": False, "benchmark": True})
+
+_s3_action_without_proof = _derive_one(
+    "S3",
+    {
+        "creator_s3": _s3_flag(action_proof=False, richness=True, single_variation=True),
+        "benchmark_s3": _s3_good,
+        "creator_summary": "x",
+        "benchmark_summary": "y",
+    },
+    {"S3": 1.0},
+    [],
+)
+check("S3 有动作但未形成可复核卖点证明→执行分封顶并触发 medium 下限",
+      _s3_action_without_proof.get("severity") == "medium"
+      and _s3_action_without_proof.get("E") == 1.5
+      and _s3_action_without_proof.get("s3_action_proof") == {"creator": False, "benchmark": True})
 
 _s3_both_thin = _derive_one(
     "S3",
@@ -1212,6 +1270,7 @@ _ns3 = normalize_s3_flags({
     "real_usage_met": 1,
     "core_selling_point_visible": "true",
     "process_framing_met": "no",
+    "action_proof_met": "false",
     "demonstrated_selling_points": ["控油"],
     "missing_selling_points": "遮毛孔",
     "scene_mode": "single-scene",
@@ -1236,6 +1295,7 @@ check("S3 parse 归一 usage flags（type→D, bool/时间/evidence 容错）",
       _ns3["module_type"] == "D"
       and _ns3["exists"] is True
       and _ns3["process_framing_met"] is False
+      and _ns3["action_proof_met"] is False
       and _ns3["usage_context_fit"] is False
       and _ns3["scene_mode"] == "single_scene"
       and _ns3["presentation_overlays"] == ["step_breakdown", "closeup"]
@@ -1276,6 +1336,7 @@ _ns5 = normalize_s5_flags({
     "module_type": "S5-B",
     "exists": "yes",
     "trust_evidence_type": "mixed",
+    "trust_basis": "authority",
     "trust_source_visible": "true",
     "trust_source_credible": "true",
     "trust_claim_specific": "false",
@@ -1292,6 +1353,7 @@ _ns5 = normalize_s5_flags({
 check("S5 parse 归一 trust flags",
       _ns5["module_type"] == "B"
       and _ns5["trust_evidence_type"] == "mixed"
+      and _ns5["trust_basis"] == "authority"
       and _ns5["trust_source_visible"] is True
       and _ns5["trust_claim_specific"] is False
       and _ns5["independent_trust_purpose"] is True
@@ -1478,6 +1540,21 @@ _compound_contract = normalize_product_profile({
 check("proof_contract 拒绝复合 primary",
       _compound_contract["proof_contract"]["valid"] is False
       and "observable_dimension" in _compound_contract["proof_contract"]["validation_reason"])
+_same_object_state_contract = normalize_product_profile({
+    "proof_contract": {
+        "mode": "process_result",
+        "consumer_outcome": "刷头随水流消失",
+        "signal_type": "state_change",
+        "observable_dimension": "刷头完整性与存在状态",
+        "observable_signal": "刷头从完整状态变为水中无残留",
+        "before_state": "刷头完整附着",
+        "after_state": "水中无刷头残留",
+        "proof_condition": "近景记录冲水全过程",
+    },
+})
+check("proof_contract 折叠同一对象状态同义项",
+      _same_object_state_contract["proof_contract"]["valid"] is True
+      and _same_object_state_contract["proof_contract"]["observable_dimension"] == "刷头状态")
 _missing_mode_contract = normalize_product_profile({
     "proof_contract": {
         "consumer_outcome": "油光减少",
@@ -1941,6 +2018,24 @@ except SystemExit:
     _s3_gate_ok = False
 check("S3 usage flag 门禁：完整字段通过", _s3_gate_ok)
 
+_s3_missing_action_proof = dict(_valid_s3)
+_s3_missing_action_proof.pop("action_proof_met")
+try:
+    validate_s3_usage_flags(
+        {
+            "stage_analysis": [
+                {"stage": "S1 Hook"},
+                {"stage": "S2 产品引出"},
+                {"stage": "S3 使用过程", "creator_s3": _s3_missing_action_proof, "benchmark_s3": dict(_valid_s3)},
+            ]
+        },
+        {"s3_flags_required": True},
+    )
+    _s3_missing_action_proof_failed = False
+except SystemExit as exc:
+    _s3_missing_action_proof_failed = "creator_s3.action_proof_met" in str(exc)
+check("S3 usage flag 门禁：缺 action_proof_met 触发 repair", _s3_missing_action_proof_failed)
+
 try:
     validate_s3_usage_flags(
         {"stage_analysis": [{"stage": "S1 Hook"}, {"stage": "S2 产品引出"}, {"stage": "S3 使用过程"}]},
@@ -2097,6 +2192,25 @@ except SystemExit:
     _s5_gate_ok = False
 check("S5 trust flag 门禁：完整字段通过", _s5_gate_ok)
 
+_s5_spec_as_trust = _s5_flag(trust_basis="offer_or_spec")
+try:
+    validate_s5_trust_flags(
+        {
+            "stage_analysis": [
+                {"stage": "S1 Hook"},
+                {"stage": "S2 产品引出"},
+                {"stage": "S3 使用过程"},
+                {"stage": "S4 效果呈现"},
+                {"stage": "S5 信任放大", "creator_s5": _s5_spec_as_trust, "benchmark_s5": dict(_valid_s5)},
+            ]
+        },
+        {"s5_flags_required": True},
+    )
+    _s5_spec_as_trust_failed = False
+except SystemExit as exc:
+    _s5_spec_as_trust_failed = "creator_s5.trust_basis 不构成独立信任" in str(exc)
+check("S5 trust flag 门禁：产品规格不得伪装独立背书", _s5_spec_as_trust_failed)
+
 try:
     validate_s5_trust_flags(
         {"stage_analysis": [{"stage": "S1 Hook"}, {"stage": "S2 产品引出"}, {"stage": "S3 使用过程"}, {"stage": "S4 效果呈现"}, {"stage": "S5 信任放大"}]},
@@ -2107,7 +2221,16 @@ except SystemExit as exc:
     _s5_gate_failed = "缺少 creator_s5" in str(exc) and "缺少 benchmark_s5" in str(exc)
 check("S5 trust flag 门禁：主链缺字段触发 repair", _s5_gate_failed)
 
-_absent_s5 = _s5_flag(exists=False, trust_type="none", visible=False, credible=False, specific=False, relevance=False)
+_absent_s5 = _s5_flag(
+    exists=False,
+    trust_type="none",
+    trust_basis="none",
+    independent=False,
+    visible=False,
+    credible=False,
+    specific=False,
+    relevance=False,
+)
 _absent_s5["evidence_ids"] = []
 try:
     validate_s5_trust_flags(
@@ -2679,6 +2802,9 @@ _review_s5s6_payload = build_stage_review_payload(
 _review_s5s6_user = _review_s5s6_payload["messages"][1]["content"][0]["text"]
 check("Phase C S5/S6 回看强制重判 trust/CTA flags",
       "creator_s5" in _review_s5s6_user and "benchmark_s5" in _review_s5s6_user
+      and "trust_basis" in _review_s5s6_user
+      and "social_consensus 必须同时有明确目标群体/社区" in _review_s5s6_user
+      and "产品数量、使用时长、参数、价格、赠品、套餐不是独立信任" in _review_s5s6_user
       and "creator_s6" in _review_s5s6_user and "benchmark_s6" in _review_s5s6_user)
 
 _skip, _reason = stage_skipped({"stage": "S2 产品引出", "severity": "medium", "gap": "达人未涉及产品身份，标杆有明确引出"})

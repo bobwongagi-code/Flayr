@@ -104,6 +104,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--benchmark-video", type=Path, help="Benchmark video path.")
     parser.add_argument("--creator-video", type=Path, help="Creator video path.")
     parser.add_argument("--product-name", default="未填写", help="Product name.")
+    parser.add_argument(
+        "--proposition-key",
+        default="",
+        help="Explicit key in references/brand_propositions.json. Never inferred from an online run directory.",
+    )
     parser.add_argument("--product-category", default="", help="Product category from the structure-library category set.")
     parser.add_argument("--product-price", default="未填写", help="Product price.")
     parser.add_argument(
@@ -673,6 +678,7 @@ def build_analysis(
         "analysis_scope": analysis_scope(args),
         "product": {
             "name": args.product_name,
+            "proposition_key": str(args.proposition_key or "").strip(),
             "category": args.product_category,
             "price": args.product_price,
             "tier": args.product_tier,  # 运营客单价档；None 时 derive 退回模型判断

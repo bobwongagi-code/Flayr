@@ -97,6 +97,18 @@ _S4_EFFECT_TYPES = {
 }
 _S4_EFFECT_SALIENCE = {"none", "subtle", "clear", "strong"}
 _S5_TRUST_TYPES = {"hard", "soft", "mixed", "none", "unknown"}
+_S5_TRUST_BASES = {
+    "authority",
+    "traceable_data",
+    "independent_user",
+    "social_consensus",
+    "process_transparency",
+    "product_claim",
+    "offer_or_spec",
+    "none",
+    "unknown",
+}
+_S5_SOURCE_SIGNALS = {"authority", "traceable_data", "independent_user", "social_consensus", "process_transparency"}
 _S3_S4_RELATIONSHIPS = {
     "process_creates_effect",
     "process_without_effect",
@@ -178,6 +190,21 @@ def normalize_s4_effect_salience(value: Any) -> str:
 def normalize_s5_trust_type(value: Any) -> str:
     trust_type = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     return trust_type if trust_type in _S5_TRUST_TYPES else "unknown"
+
+
+def normalize_s5_trust_basis(value: Any) -> str:
+    """归一 S5 信任来源，产品规格与促销不应伪装成独立背书。"""
+    basis = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return basis if basis in _S5_TRUST_BASES else "unknown"
+
+
+def normalize_s5_source_signals(value: Any) -> list[str]:
+    """只保留阶段一实际观察到的独立信任来源类型。"""
+    values = value if isinstance(value, list) else []
+    return list(dict.fromkeys(
+        signal for signal in (str(item or "").strip().lower() for item in values)
+        if signal in _S5_SOURCE_SIGNALS
+    ))
 
 
 def normalize_s3_s4_relationship_type(value: Any) -> str:
@@ -296,6 +323,7 @@ def normalize_s3_flags(value: Any) -> dict[str, Any] | None:
         "real_usage_met": normalize_demo_flag(value.get("real_usage_met")),
         "core_selling_point_visible": normalize_demo_flag(value.get("core_selling_point_visible")),
         "process_framing_met": process_framing_met,
+        "action_proof_met": normalize_demo_flag(value.get("action_proof_met")),
         "demonstrated_selling_points": normalize_evidence(value.get("demonstrated_selling_points")),
         "missing_selling_points": normalize_evidence(value.get("missing_selling_points")),
         "scene_mode": normalize_s3_scene_mode(value.get("scene_mode")),
@@ -309,6 +337,9 @@ def normalize_s3_flags(value: Any) -> dict[str, Any] | None:
         "multi_scene_role_adaptation_met": normalize_demo_flag(value.get("multi_scene_role_adaptation_met")),
         "role_design_met": normalize_demo_flag(value.get("role_design_met")),
         "role_interaction_met": normalize_demo_flag(value.get("role_interaction_met")),
+        "distinct_personas_met": normalize_demo_flag(value.get("distinct_personas_met")),
+        "steps_clear_met": normalize_demo_flag(value.get("steps_clear_met")),
+        "pov_immersive_met": normalize_demo_flag(value.get("pov_immersive_met")),
         "presentation_overlays": normalize_presentation_overlays(value.get("presentation_overlays")),
         "fake_or_staged": normalize_demo_flag(value.get("fake_or_staged")),
         "start_seconds": normalize_hook_boundary_seconds(value.get("start_seconds")),
@@ -352,6 +383,8 @@ def normalize_s5_flags(value: Any) -> dict[str, Any] | None:
         "exists": normalize_demo_flag(value.get("exists")),
         "module_type": normalize_s5_type(value.get("module_type")),
         "trust_evidence_type": normalize_s5_trust_type(value.get("trust_evidence_type")),
+        "trust_basis": normalize_s5_trust_basis(value.get("trust_basis")),
+        "trust_source_evidence_ids": normalize_evidence(value.get("trust_source_evidence_ids")),
         "trust_source_visible": normalize_demo_flag(value.get("trust_source_visible")),
         "trust_source_credible": normalize_demo_flag(value.get("trust_source_credible")),
         "trust_claim_specific": normalize_demo_flag(value.get("trust_claim_specific")),
@@ -378,6 +411,10 @@ def normalize_s6_flags(value: Any) -> dict[str, Any] | None:
         "direct_order_met": normalize_demo_flag(value.get("direct_order_met")),
         "action_path_clear": normalize_demo_flag(value.get("action_path_clear")),
         "offer_or_incentive_clear": normalize_demo_flag(value.get("offer_or_incentive_clear")),
+        "price_anchor_met": normalize_demo_flag(value.get("price_anchor_met")),
+        "urgency_evidence_met": normalize_demo_flag(value.get("urgency_evidence_met")),
+        "gift_stack_met": normalize_demo_flag(value.get("gift_stack_met")),
+        "guarantee_clear_met": normalize_demo_flag(value.get("guarantee_clear_met")),
         "urgency_met": normalize_demo_flag(value.get("urgency_met")),
         "product_value_recalled": normalize_demo_flag(value.get("product_value_recalled")),
         "module_fit_met": normalize_demo_flag(value.get("module_fit_met")),
@@ -610,6 +647,8 @@ def normalize_video_understanding(value: Any) -> dict[str, Any]:
                     # F 项背书劈成两个纯观察信道（替代焊死判断的 third_party_endorsement）：
                     "endorsement_verbal": normalize_bool_flag(unit.get("endorsement_verbal")),
                     "endorsement_visual": normalize_bool_flag(unit.get("endorsement_visual")),
+                    "trust_source_signals": normalize_s5_source_signals(unit.get("trust_source_signals")),
+                    "trust_source_reference": str(unit.get("trust_source_reference") or "").strip(),
                 }
                 for index, unit in enumerate(units, start=1)
                 if isinstance(unit, dict)
@@ -938,6 +977,8 @@ def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dic
                 # F 项背书劈成两个纯观察信道（替代焊死判断的 third_party_endorsement）：
                 "endorsement_verbal": normalize_bool_flag(unit.get("endorsement_verbal")),
                 "endorsement_visual": normalize_bool_flag(unit.get("endorsement_visual")),
+                "trust_source_signals": normalize_s5_source_signals(unit.get("trust_source_signals")),
+                "trust_source_reference": str(unit.get("trust_source_reference") or "").strip(),
                 # 这段支撑哪些带货功能（多选，描述性）；nullable，老 facts 缺失为 None
                 "functions": normalize_functions(unit.get("functions")),
             }

@@ -37,6 +37,9 @@ _OBSERVABLE_SIGNAL_RE = re.compile(
 )
 _COMPOUND_PRIMARY_RE = re.compile(r"[、，,；;+]|(?:与|及|和|且|并|同时)")
 _COMPOUND_DIMENSION_RE = re.compile(r"[、，,；;+]|(?:与|及|同时)")
+_SINGLE_OBJECT_STATE_RE = re.compile(
+    r"^(?P<object>.+?)(?:完整性|存在状态|形态|位置)(?:与|及|和)(?:完整性|存在状态|形态|位置)$"
+)
 
 
 def normalize_choice(value: Any, allowed: set[str], fallback: str) -> str:
@@ -149,6 +152,7 @@ def normalize_proof_contract(value: Any) -> dict[str, Any] | None:
     observable_dimension = str(value.get("observable_dimension") or "").strip()
     if not observable_dimension:
         observable_dimension = _infer_observable_dimension(observable_signal)
+    observable_dimension = _normalize_single_object_state_dimension(observable_dimension)
     contract = {
         "anchor_candidate_id": str(value.get("anchor_candidate_id") or "").strip(),
         "mode": mode,
@@ -204,6 +208,14 @@ def normalize_proof_contract(value: Any) -> dict[str, Any] | None:
             return contract
     contract["valid"] = True
     return contract
+
+
+def _normalize_single_object_state_dimension(value: str) -> str:
+    """将同一对象的状态同义项折叠为一个可观察维度，不放开真正的复合卖点。"""
+    match = _SINGLE_OBJECT_STATE_RE.fullmatch(str(value or "").strip())
+    if not match:
+        return str(value or "").strip()
+    return f"{match.group('object').strip()}状态"
 
 
 def _infer_observable_dimension(observable_signal: str) -> str:

@@ -27,6 +27,7 @@ from .parse import (
     normalize_category_profile,
     normalize_comparison_eligibility,
     normalize_product_profile,
+    normalize_video_product_identity,
     normalize_video_fact_result,
     parse_json_text,
 )
@@ -39,6 +40,7 @@ from .payload import (
     build_product_foundation_payload,
     build_product_foundation_repair_payload,
     build_stage_review_payload,
+    build_video_identity_payload,
     build_video_fact_payload,
     load_brand_proposition,
 )
@@ -83,7 +85,7 @@ def run_comparison_scope_preflight(
     api_key = read_llm_api_key(args).strip()
     if not api_key and not args.llm_dry_run:
         raise SystemExit("比较资格预检需要 LLM API key。")
-    facts = run_video_fact_extraction(args, analysis, run_dir, api_key)
+    facts = run_video_identity_extraction(args, analysis, run_dir, api_key)
     if args.llm_dry_run:
         return {
             "scope": "uncertain",
@@ -234,7 +236,11 @@ def run_large_model_analysis(
 
     if args.llm_include_images:
         # 冻结 S1 命题尺子（人工策展）：先挂进 analysis，再跑 Step-0，避免品牌/型号空猜污染品地基。
-        brand_proposition = load_brand_proposition(run_dir)
+        product = analysis.get("product") if isinstance(analysis.get("product"), dict) else {}
+        brand_proposition = load_brand_proposition(
+            run_dir,
+            str(product.get("proposition_key") or ""),
+        )
         if brand_proposition:
             analysis["brand_proposition"] = brand_proposition
         # Step-0：先确立品的商业地基（特征+命题），贯穿喂给阶段1 观察 + 阶段2 判断；失败则下游内联兜底。
@@ -253,6 +259,7 @@ def run_large_model_analysis(
         analysis["s3_flags_required"] = True
         analysis["s4_flags_required"] = True
         analysis["s5_flags_required"] = True
+        analysis["s5_source_signals_required"] = True
         analysis["s6_flags_required"] = True
         analysis_input = analysis_input_path.read_text(encoding="utf-8")
         payload = build_llm_comparison_payload(args.llm_model, analysis_input, facts, analysis)
@@ -592,6 +599,7 @@ def maybe_refine_low_confidence_stages(
             analysis,
             analysis_input,
             locked_video_understanding,
+            fallback_improvements=raw_result.get("improvements"),
         )
     except (SystemExit, json.JSONDecodeError) as exc:
         result["phase_c_review"] = {
@@ -688,6 +696,7 @@ def apply_stage_review_updates(
     analysis: dict[str, Any],
     analysis_input: str,
     locked_video_understanding: dict[str, Any],
+    fallback_improvements: Any = None,
 ) -> dict[str, Any]:
     """把 Phase C 返回的 stage_updates 合并回完整结果，再走现有校验链。"""
     updates = review_result.get("stage_updates")
@@ -705,6 +714,10 @@ def apply_stage_review_updates(
         raise SystemExit("Phase C review returned no valid stage codes.")
 
     merged = json.loads(json.dumps(current_result, ensure_ascii=False))
+    # Phase C 只更新阶段。若初轮后处理已过滤掉所有提升点，恢复初轮已通过 schema 的原始条目，
+    # 使重走统一收口时满足 raw envelope；最终仍由既有过滤/重排逻辑决定是否保留。
+    if not merged.get("improvements") and isinstance(fallback_improvements, list) and fallback_improvements:
+        merged["improvements"] = json.loads(json.dumps(fallback_improvements, ensure_ascii=False))
     merged_stages = []
     for stage in merged.get("stage_analysis", []):
         code = stage_code(stage.get("stage"))
@@ -937,3 +950,34 @@ def run_video_fact_extraction(
         facts[role] = fact_result
         write_json(result_path, fact_result)
     return facts
+
+
+def run_video_identity_extraction(
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    run_dir: Path,
+    api_key: str,
+) -> dict[str, Any]:
+    """scope 预检专用：每侧只取产品身份，避免完整事实抽取的原生视频和音频成本。"""
+    identities: dict[str, Any] = {}
+    videos = analysis.get("videos", {})
+    for role in ("benchmark", "creator"):
+        if role not in videos:
+            continue
+        payload = build_video_identity_payload(
+            args.llm_model,
+            role,
+            analysis,
+            select_role_visual_inputs(videos[role], role, image_limit=2),
+        )
+        request_path = run_dir / f"llm_identity_{role}_request.json"
+        response_path = run_dir / f"llm_identity_{role}_response.json"
+        result_path = run_dir / f"video_identity_{role}.json"
+        write_json(request_path, payload)
+        if args.llm_dry_run:
+            continue
+        result_text = fetch_json_completion(args, api_key, request_path, response_path)
+        identity = {"product_identity": normalize_video_product_identity(parse_json_text(result_text).get("product_identity"))}
+        identities[role] = identity
+        write_json(result_path, identity)
+    return identities

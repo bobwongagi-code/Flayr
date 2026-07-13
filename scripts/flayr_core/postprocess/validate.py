@@ -158,6 +158,21 @@ def validate_analysis_dimensions(result: dict[str, Any]) -> None:
         result["qa_warnings"] = existing + warnings
 
 
+def validate_required_stage_narratives(result: dict[str, Any]) -> None:
+    """报告核心的双侧表现与差距结论不得以解析占位符蒙混通过。"""
+    missing: list[str] = []
+    for stage in result.get("stage_analysis", []):
+        if not isinstance(stage, dict):
+            continue
+        label = str(stage.get("stage") or "未知阶段")
+        for field in ("benchmark_summary", "creator_summary", "gap"):
+            value = str(stage.get(field) or "").strip()
+            if not value or "LLM 未填写" in value:
+                missing.append(f"{label}.{field}")
+    if missing:
+        raise SystemExit("阶段报告核心字段缺失，需 repair：" + ", ".join(missing))
+
+
 def validate_quality_contract(result: dict[str, Any], analysis: dict[str, Any]) -> None:
     """执行 QA-RULES.md 里已落地的通用质量契约。
 
@@ -165,6 +180,7 @@ def validate_quality_contract(result: dict[str, Any], analysis: dict[str, Any]) 
       - 可确定为错误的规则抛 SystemExit，触发 repair；
       - 历史结果中常见、且已有下游兜底的弱问题写入 qa_warnings。
     """
+    validate_required_stage_narratives(result)
     validate_module_ids(result)
     validate_s1_hook_flags(result, analysis)
     validate_s2_contract_flags(result, analysis)
@@ -443,6 +459,7 @@ def validate_s3_usage_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
             "real_usage_met",
             "core_selling_point_visible",
             "process_framing_met",
+            "action_proof_met",
             "usage_context_fit",
             "continuity_met",
             "richness_met",
@@ -555,6 +572,8 @@ def validate_s5_trust_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
         return
 
     errors: list[str] = []
+    source_signals_required = analysis.get("s5_source_signals_required") is True
+    valid_bases = {"authority", "traceable_data", "independent_user", "social_consensus", "process_transparency"}
     for role in ("creator", "benchmark"):
         key = f"{role}_s5"
         flag = s5.get(key)
@@ -578,6 +597,35 @@ def validate_s5_trust_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
             errors.append(f"S5 {key}.module_type 必须是 A-E 或 unknown")
         if str(flag.get("trust_evidence_type") or "").strip() not in {"hard", "soft", "mixed", "none", "unknown"}:
             errors.append(f"S5 {key}.trust_evidence_type 非法")
+        if str(flag.get("trust_basis") or "").strip() not in {
+            "authority", "traceable_data", "independent_user", "social_consensus", "process_transparency",
+            "product_claim", "offer_or_spec", "none", "unknown",
+        }:
+            errors.append(f"S5 {key}.trust_basis 非法")
+        if str(flag.get("trust_basis") or "") in {"product_claim", "offer_or_spec", "none", "unknown"}:
+            if flag.get("exists") is not False:
+                errors.append(f"S5 {key}.trust_basis 不构成独立信任时 exists 必须为 false")
+            if flag.get("independent_trust_purpose") is not False:
+                errors.append(f"S5 {key}.trust_basis 不构成独立信任时 independent_trust_purpose 必须为 false")
+        source_ids = flag.get("trust_source_evidence_ids")
+        if source_signals_required and not isinstance(source_ids, list):
+            errors.append(f"S5 {key}.trust_source_evidence_ids 必须是数组")
+        if source_signals_required and str(flag.get("trust_basis") or "") in valid_bases:
+            unit_map = {
+                str(unit.get("id") or ""): (
+                    set(unit.get("trust_source_signals") or []),
+                    str(unit.get("trust_source_reference") or "").strip(),
+                )
+                for unit in result.get("video_understanding", {}).get(role, {}).get("evidence_units", [])
+                if isinstance(unit, dict)
+            }
+            basis = str(flag.get("trust_basis") or "")
+            if not source_ids or not any(
+                basis in unit_map.get(str(item), (set(), ""))[0]
+                and unit_map.get(str(item), (set(), ""))[1]
+                for item in source_ids
+            ):
+                errors.append(f"S5 {key}.{basis} 缺少阶段一同类型信任来源证据")
         start = flag.get("start_seconds")
         end = flag.get("end_seconds")
         if not isinstance(start, (int, float)) or isinstance(start, bool) or start < 0:
