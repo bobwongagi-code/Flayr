@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 import sys
@@ -22,7 +23,13 @@ if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 from flayr_core.structure_modules import stage1_event_catalog
-from flayr_core.postprocess.derive import CRITICAL_BAND, TH_MEDIUM, TH_SMALL
+from flayr_core.postprocess.derive import (
+    CRITICAL_BAND,
+    TH_MEDIUM,
+    TH_SMALL,
+    derive_severity_from_facts,
+)
+from flayr_core.validation_cohort import verify_cohort_lock, validate_blind_sample_contract
 
 
 SEVERITIES = ("small", "medium", "large")
@@ -32,9 +39,16 @@ STAGE_SEVERITY_SCOPE = "stage_severity"
 WHOLE_VIDEO_OBSERVATION_SCOPE = "whole_video_observation"
 WHOLE_VIDEO_VERDICTS = {"viable", "not_viable"}
 STAGE_RE = re.compile(r"^(S[1-6])")
-SHADOW_STAGES = ("S1", "S2", "S3", "S4")
-PROMOTION_MIN_SAMPLES_PER_STAGE = 3
-PROMOTION_MIN_CATEGORIES = 3
+PROMOTION_MIN_BLIND_PAIRS = 12
+PROMOTION_MIN_CATEGORIES = 4
+PROMOTION_MIN_MARKETS = 2
+PROMOTION_MIN_SAMPLES_PER_STAGE_CLASS = 6
+PROMOTION_MIN_S5_SAMPLES_PER_CLASS = 3
+PROMOTION_MIN_OVERALL_ACCURACY = 0.8
+PROMOTION_MIN_STAGE_ACCURACY = 0.7
+PROMOTION_MIN_EVENT_RECALL = 0.9
+PROMOTION_MIN_STAGE2_USE = 0.9
+PROMOTION_MIN_DECISION_RECALL = 0.8
 STAGE1_EVENT_IDS = tuple(str(item["id"]) for item in stage1_event_catalog())
 
 # 这是分析链的字段所有权表，不是新的判断规则。它让 GT 评测能审计：
@@ -284,6 +298,23 @@ def _usable_fact(unit: dict[str, Any]) -> bool:
     )
 
 
+def _source_artifact_ready(result: dict[str, Any], role: str, event: dict[str, Any]) -> bool | None:
+    """只判断源轨是否可用，不把“文件存在”冒充“内容正确”。"""
+    videos = result.get("videos") if isinstance(result.get("videos"), dict) else {}
+    side = videos.get(role) if isinstance(videos.get(role), dict) else {}
+    channels = {str(value) for value in event.get("channels_any") or [] if str(value).strip()}
+    if not channels:
+        return None
+    checks: list[bool] = []
+    if channels & {"voiceover", "voiceover_zh", "audio_fact"}:
+        checks.append(str(side.get("transcription_status") or "") not in {"", "placeholder", "failed"})
+    if "subtitle_fact" in channels:
+        checks.append(str(side.get("subtitle_track_status") or "") in {"ok", "ready", "completed"})
+    if "visual_fact" in channels:
+        checks.append(bool(side.get("path")) and int(side.get("frame_count") or 0) > 0)
+    return any(checks) if checks else None
+
+
 def _flag_chain_audit(result: dict[str, Any], sample_id: str) -> list[dict[str, Any]]:
     """审计每个阶段 flag 的证据完整性和字段去向。
 
@@ -426,7 +457,8 @@ def _human_key_event_audit(
     key_events: [{
       "id": "creator_s3_application", "role": "creator", "stage": "S3",
       "time_range": [12.0, 18.0], "required_functions": ["S3_usage"],
-      "channels_any": ["visual_fact"], "terms_any": ["涂抹", "按压"]
+      "channels_any": ["visual_fact"], "terms_any": ["涂抹", "按压"],
+      "expected_state": "present", "importance": "decision_critical"
     }]
     time_range、role、stage 是必填；其余条件只用于收紧匹配，不是让人工重写模型事实。
     """
@@ -457,6 +489,14 @@ def _human_key_event_audit(
             required_functions = {str(value) for value in event.get("required_functions") or [] if str(value).strip()}
             channels_any = [str(value) for value in event.get("channels_any") or [] if str(value).strip()]
             terms_any = [str(value).lower() for value in event.get("terms_any") or [] if str(value).strip()]
+            expected_state = str(event.get("expected_state") or "present").strip().lower()
+            importance = str(event.get("importance") or "decision_critical").strip().lower()
+            if expected_state not in {"present", "absent"}:
+                invalid.append({"sample_id": sample_id, "reason": f"key_events[{index}].expected_state 非法"})
+                continue
+            if expected_state == "absent" and not terms_any:
+                invalid.append({"sample_id": sample_id, "reason": f"key_events[{index}] 缺失事件必须提供 terms_any"})
+                continue
             matches: list[str] = []
             for unit_id, unit in _role_units(result, role).items():
                 unit_range = _event_time_bounds(unit.get("time_range"))
@@ -478,9 +518,14 @@ def _human_key_event_audit(
                 "role": role,
                 "stage": current_stage,
                 "time_range": event.get("time_range"),
-                "stage1_recalled": bool(matches),
+                "expected_state": expected_state,
+                "importance": importance,
+                "source_artifact_ready": _source_artifact_ready(result, role, event),
+                "stage1_recalled": bool(matches) if expected_state == "present" else None,
+                "absence_respected": not bool(matches) if expected_state == "absent" else None,
+                "unexpected_claim_evidence_ids": matches if expected_state == "absent" else [],
                 "stage1_matching_evidence_ids": matches,
-                "stage2_referenced": bool(set(matches) & referenced),
+                "stage2_referenced": bool(set(matches) & referenced) if expected_state == "present" else None,
                 "stage2_referenced_evidence_ids": sorted(set(matches) & referenced),
             })
     if not records:
@@ -489,25 +534,260 @@ def _human_key_event_audit(
         status = "partial_invalid_annotations"
     else:
         status = "measured"
-    stage1_recalled = sum(1 for row in records if row["stage1_recalled"])
-    stage2_referenced = sum(1 for row in records if row["stage2_referenced"])
+    present_records = [row for row in records if row["expected_state"] == "present"]
+    absent_records = [row for row in records if row["expected_state"] == "absent"]
+    stage1_recalled = sum(1 for row in present_records if row["stage1_recalled"])
+    stage2_referenced = sum(1 for row in present_records if row["stage2_referenced"])
+    absence_respected = sum(1 for row in absent_records if row["absence_respected"])
     return {
         "status": status,
         "annotation_contract": {
             "required": ["id", "role", "stage", "time_range"],
-            "optional": ["required_functions", "channels_any", "terms_any"],
+            "optional": ["required_functions", "channels_any", "terms_any", "expected_state", "importance"],
         },
         "summary": {
             "annotated_samples": annotated_samples,
             "events": len(records),
+            "present_events": len(present_records),
+            "absent_events": len(absent_records),
             "stage1_recalled": stage1_recalled,
-            "stage1_recall": round(stage1_recalled / len(records), 4) if records else None,
+            "stage1_recall": round(stage1_recalled / len(present_records), 4) if present_records else None,
             "stage2_referenced": stage2_referenced,
             "stage2_use_given_recall": round(stage2_referenced / stage1_recalled, 4) if stage1_recalled else None,
+            "absence_respected": absence_respected,
+            "absence_false_positive_rate": round(
+                (len(absent_records) - absence_respected) / len(absent_records), 4
+            ) if absent_records else None,
         },
-        "missed_by_stage1": [row for row in records if not row["stage1_recalled"]],
-        "not_used_by_stage2": [row for row in records if row["stage1_recalled"] and not row["stage2_referenced"]],
+        "source_artifact_unavailable": [row for row in records if row["source_artifact_ready"] is False],
+        "missed_by_stage1": [row for row in present_records if not row["stage1_recalled"]],
+        "not_used_by_stage2": [row for row in present_records if row["stage1_recalled"] and not row["stage2_referenced"]],
+        "unexpected_absence_claims": [row for row in absent_records if not row["absence_respected"]],
         "invalid_annotations": invalid,
+        "records": records,
+    }
+
+
+def _result_stage_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        stage_id(stage.get("stage")): stage
+        for stage in result.get("stage_analysis") or []
+        if isinstance(stage, dict) and stage_id(stage.get("stage"))
+    }
+
+
+def _execution_relation(creator: Any, benchmark: Any) -> str | None:
+    if not isinstance(creator, (int, float)) or not isinstance(benchmark, (int, float)):
+        return None
+    if float(creator) > float(benchmark):
+        return "creator_better"
+    if float(creator) < float(benchmark):
+        return "benchmark_better"
+    return "matched"
+
+
+def _effective_execution(stage: dict[str, Any], role: str) -> Any:
+    """返回生产 derive 实际消费后的执行分，旧产物才回退模型原始字段。"""
+    trace = stage.get("severity_derivation")
+    if isinstance(trace, dict):
+        value = trace.get(f"derived_{role}_execution")
+        if isinstance(value, (int, float)):
+            return value
+    return stage.get(f"{role}_execution")
+
+
+def _prepare_oracle_replay_stage(stage: dict[str, Any], current_stage: str, oracle: dict[str, Any]) -> str:
+    """移除模型判断字段，让回放只消费人工 execution 与显式 oracle patch。"""
+    suffix = FLAG_SUFFIXES[current_stage]
+    for role in ("creator", "benchmark"):
+        stage.pop(f"{role}_{suffix}", None)
+        stage.pop(f"{role}_multimodal", None)
+        stage[f"{role}_execution"] = oracle.get(f"{role}_execution")
+    stage.pop("severity_derivation", None)
+    derive_patch = oracle.get("derive_patch")
+    if isinstance(derive_patch, dict):
+        stage.update(copy.deepcopy(derive_patch))
+        return "complete_oracle_patch"
+    return "execution_only"
+
+
+def _stage_oracle_audit(labels: dict[str, Any], run_paths: dict[str, Path]) -> dict[str, Any]:
+    """用人工单侧执行分隔离 Stage2 判断，并可选回放生产 derive。"""
+    label_samples = labels.get("samples") if isinstance(labels.get("samples"), dict) else {}
+    records: list[dict[str, Any]] = []
+    for sample_id, label in sorted(label_samples.items()):
+        oracles = label.get("stage_oracles") if isinstance(label, dict) and isinstance(label.get("stage_oracles"), dict) else {}
+        path = run_paths.get(sample_id)
+        if not oracles or path is None or not path.exists():
+            continue
+        result = read_json(path)
+        stages = _result_stage_map(result)
+        expected_stages = label.get("stages") if isinstance(label.get("stages"), dict) else {}
+        for current_stage, oracle in sorted(oracles.items()):
+            if current_stage not in FLAG_SUFFIXES or not isinstance(oracle, dict):
+                continue
+            stage = stages.get(current_stage)
+            if not isinstance(stage, dict):
+                continue
+            expected_creator = oracle.get("creator_execution")
+            expected_benchmark = oracle.get("benchmark_execution")
+            actual_creator = _effective_execution(stage, "creator")
+            actual_benchmark = _effective_execution(stage, "benchmark")
+            execution_match = (
+                isinstance(expected_creator, (int, float))
+                and isinstance(expected_benchmark, (int, float))
+                and actual_creator == expected_creator
+                and actual_benchmark == expected_benchmark
+            )
+            candidate = copy.deepcopy(result)
+            candidate_stage = _result_stage_map(candidate).get(current_stage)
+            replay_status = "execution_only"
+            if isinstance(candidate_stage, dict):
+                replay_status = _prepare_oracle_replay_stage(candidate_stage, current_stage, oracle)
+                candidate["structured_relevance_required"] = True
+                derive_severity_from_facts(candidate, candidate)
+            replay_stage = _result_stage_map(candidate).get(current_stage) or {}
+            expected_severity = normalize_ground_truth(expected_stages.get(current_stage))
+            replay_severity = normalize_severity(replay_stage.get("severity"))
+            records.append({
+                "sample_id": sample_id,
+                "stage": current_stage,
+                "expected_creator_execution": expected_creator,
+                "actual_creator_execution": actual_creator,
+                "expected_benchmark_execution": expected_benchmark,
+                "actual_benchmark_execution": actual_benchmark,
+                "execution_match": execution_match,
+                "expected_relation": oracle.get("relation"),
+                "actual_relation": _execution_relation(actual_creator, actual_benchmark),
+                "relation_match": oracle.get("relation") == _execution_relation(actual_creator, actual_benchmark),
+                "expected_severity": expected_severity,
+                "final_severity": normalize_severity(stage.get("severity")),
+                "derive_replay_status": replay_status,
+                "derive_replay_severity": replay_severity,
+                "derive_replay_match": replay_severity == expected_severity,
+                "decision_event_ids": list(oracle.get("decision_event_ids") or []),
+                "confidence": oracle.get("confidence"),
+            })
+    complete_replays = [row for row in records if row["derive_replay_status"] == "complete_oracle_patch"]
+    return {
+        "status": "measured" if records else "unavailable_without_stage_oracles",
+        "summary": {
+            "stages": len(records),
+            "execution_matches": sum(1 for row in records if row["execution_match"]),
+            "execution_accuracy": round(sum(1 for row in records if row["execution_match"]) / len(records), 4) if records else None,
+            "relation_matches": sum(1 for row in records if row["relation_match"]),
+            "relation_accuracy": round(sum(1 for row in records if row["relation_match"]) / len(records), 4) if records else None,
+            "complete_derive_replays": len(complete_replays),
+            "complete_derive_replay_matches": sum(1 for row in complete_replays if row["derive_replay_match"]),
+            "complete_derive_replay_accuracy": round(
+                sum(1 for row in complete_replays if row["derive_replay_match"]) / len(complete_replays), 4
+            ) if complete_replays else None,
+        },
+        "execution_mismatches": [row for row in records if not row["execution_match"]],
+        "derive_replay_mismatches": [row for row in complete_replays if not row["derive_replay_match"]],
+        "records": records,
+    }
+
+
+def _phase_c_audit(labels: dict[str, Any], run_paths: dict[str, Path]) -> dict[str, Any]:
+    """比较 Phase C 前后结果；旧产物无快照时明确不可测。"""
+    label_samples = labels.get("samples") if isinstance(labels.get("samples"), dict) else {}
+    records: list[dict[str, Any]] = []
+    for sample_id, path in sorted(run_paths.items()):
+        label = label_samples.get(sample_id)
+        if not isinstance(label, dict) or not path.exists():
+            continue
+        result = read_json(path)
+        review = result.get("phase_c_review") if isinstance(result.get("phase_c_review"), dict) else None
+        if not review:
+            continue
+        before = _result_stage_map({"stage_analysis": review.get("before_stage_analysis") or []})
+        after = _result_stage_map({"stage_analysis": review.get("after_stage_analysis") or []})
+        for current_stage in review.get("requested_stages") or []:
+            expected = normalize_ground_truth((label.get("stages") or {}).get(current_stage))
+            before_severity = normalize_severity((before.get(current_stage) or {}).get("severity"))
+            after_severity = normalize_severity((after.get(current_stage) or {}).get("severity"))
+            if review.get("applied") is not True:
+                outcome = "review_failed"
+            elif before_severity is None or after_severity is None or expected is None:
+                outcome = "unavailable_without_snapshot_or_gt"
+            elif before_severity != expected and after_severity == expected:
+                outcome = "fixed"
+            elif before_severity == expected and after_severity != expected:
+                outcome = "regressed"
+            elif after_severity == expected:
+                outcome = "stable_correct"
+            else:
+                outcome = "unchanged_wrong"
+            records.append({
+                "sample_id": sample_id,
+                "stage": current_stage,
+                "expected": expected,
+                "before": before_severity,
+                "after": after_severity,
+                "outcome": outcome,
+            })
+    measurable = [row for row in records if row["outcome"] not in {"review_failed", "unavailable_without_snapshot_or_gt"}]
+    return {
+        "status": "measured" if measurable else "unavailable_without_phase_c_snapshots",
+        "summary": {
+            "reviewed_stages": len(records),
+            "measurable_stages": len(measurable),
+            "fixed": sum(1 for row in measurable if row["outcome"] == "fixed"),
+            "regressed": sum(1 for row in measurable if row["outcome"] == "regressed"),
+            "unchanged_wrong": sum(1 for row in measurable if row["outcome"] == "unchanged_wrong"),
+            "net_corrections": sum(1 for row in measurable if row["outcome"] == "fixed")
+            - sum(1 for row in measurable if row["outcome"] == "regressed"),
+        },
+        "records": records,
+    }
+
+
+def _decision_gt_audit(labels: dict[str, Any], run_paths: dict[str, Path]) -> dict[str, Any]:
+    """按 reference_id 对账人工 Top-N 根因和商业优先级，不做文本相似度猜测。"""
+    label_samples = labels.get("samples") if isinstance(labels.get("samples"), dict) else {}
+    records: list[dict[str, Any]] = []
+    for sample_id, label in sorted(label_samples.items()):
+        decision_gt = label.get("decision_gt") if isinstance(label, dict) and isinstance(label.get("decision_gt"), dict) else {}
+        roots = decision_gt.get("top_root_causes") if isinstance(decision_gt.get("top_root_causes"), list) else []
+        path = run_paths.get(sample_id)
+        if not roots or path is None or not path.exists():
+            continue
+        result = read_json(path)
+        expected = [
+            str(item.get("reference_id") or "")
+            for item in sorted(
+                (item for item in roots if isinstance(item, dict)),
+                key=lambda item: int(item.get("priority") or 999),
+            )
+            if str(item.get("reference_id") or "")
+        ]
+        predicted = [
+            str(item.get("reference_id") or "")
+            for item in result.get("commercial_priorities") or []
+            if isinstance(item, dict) and str(item.get("reference_id") or "")
+        ][: len(expected)]
+        overlap = set(expected) & set(predicted)
+        records.append({
+            "sample_id": sample_id,
+            "expected": expected,
+            "predicted": predicted,
+            "matched_reference_ids": sorted(overlap),
+            "recall": round(len(overlap) / len(expected), 4) if expected else None,
+            "precision": round(len(overlap) / len(predicted), 4) if predicted else 0.0,
+            "exact_order_match": predicted == expected,
+        })
+    expected_total = sum(len(row["expected"]) for row in records)
+    predicted_total = sum(len(row["predicted"]) for row in records)
+    matched_total = sum(len(row["matched_reference_ids"]) for row in records)
+    return {
+        "status": "measured" if records else "unavailable_without_human_priority_and_root_cause_labels",
+        "summary": {
+            "samples": len(records),
+            "root_cause_recall": round(matched_total / expected_total, 4) if expected_total else None,
+            "root_cause_precision": round(matched_total / predicted_total, 4) if predicted_total else None,
+            "exact_order_matches": sum(1 for row in records if row["exact_order_match"]),
+        },
         "records": records,
     }
 
@@ -707,87 +987,217 @@ def blind_contract_violations(labels: dict[str, Any], manifest: dict[str, Any]) 
             sample.get("evaluation_scope") or STAGE_SEVERITY_SCOPE
         ).strip():
             violations.append(f"blind {sample_id} 的 GT evaluation_scope 与输入不一致")
-    return violations
+        if isinstance(sample, dict):
+            violations.extend(validate_blind_sample_contract(sample_id, label, sample))
+    return list(dict.fromkeys(violations))
 
 
 def promotion_readiness(
     rows: list[dict[str, Any]],
     labels: dict[str, Any],
     manifest: dict[str, Any],
-    shadow_invariance_violations: list[dict[str, Any]],
+    cohort_lock: dict[str, Any] | None,
+    chain: dict[str, Any],
+    decision: dict[str, Any],
+    phase_c: dict[str, Any],
 ) -> dict[str, Any]:
-    """给 shadow→severity 晋级提供硬门，不让实验字段被提前消费。"""
+    """新版本晋级硬门：只消费冻结且未用来改规则的 blind cohort。"""
     samples = manifest_samples(manifest)
-    categories_by_partition: dict[str, set[str]] = defaultdict(set)
-    sample_ids_by_partition: dict[str, set[str]] = defaultdict(set)
+    blind_rows = [row for row in rows if row["partition"] == "blind"]
+    blind_ids = {row["sample_id"] for row in blind_rows}
+    categories = {
+        str((samples.get(sample_id) or {}).get("product_category") or "").strip()
+        for sample_id in blind_ids
+        if str((samples.get(sample_id) or {}).get("product_category") or "").strip()
+    }
+    markets = {
+        str((samples.get(sample_id) or {}).get("target_market") or "").strip()
+        for sample_id in blind_ids
+        if str((samples.get(sample_id) or {}).get("target_market") or "").strip()
+    }
     stage_coverage: dict[str, dict[str, Any]] = {}
     reasons: list[str] = []
-    for row in rows:
-        partition = row["partition"]
-        sample_id = row["sample_id"]
-        sample_ids_by_partition[partition].add(sample_id)
-        category = str((samples.get(sample_id) or {}).get("product_category") or "").strip()
-        if category:
-            categories_by_partition[partition].add(category)
+    if len(blind_ids) < PROMOTION_MIN_BLIND_PAIRS:
+        reasons.append(f"缺少至少 {PROMOTION_MIN_BLIND_PAIRS} 个全新 blind 视频对")
+    if len(categories) < PROMOTION_MIN_CATEGORIES:
+        reasons.append(f"blind 覆盖品类不足 {PROMOTION_MIN_CATEGORIES} 个")
+    if len(markets) < PROMOTION_MIN_MARKETS:
+        reasons.append(f"blind 覆盖市场不足 {PROMOTION_MIN_MARKETS} 个")
 
-    calibration_categories = set()
-    for partition in ("calibration", "seen_validation"):
-        calibration_categories.update(categories_by_partition.get(partition, set()))
-    if len(calibration_categories) < PROMOTION_MIN_CATEGORIES:
-        reasons.append(f"校准/已见验证覆盖品类不足 {PROMOTION_MIN_CATEGORIES} 个")
-
-    for stage in SHADOW_STAGES:
-        stage_rows = [row for row in rows if row["stage"] == stage]
+    for stage in FLAG_SUFFIXES:
+        stage_rows = [row for row in blind_rows if row["stage"] == stage]
         gap_examples = sum(1 for row in stage_rows if row["expected"] in {"medium", "large"})
         control_examples = sum(1 for row in stage_rows if row["expected"] == "small")
-        shadow_role_count = sum(
-            1
-            for row in stage_rows
-            for role in ("creator", "benchmark")
-            if isinstance(row[role].get("shadow"), dict)
-        )
-        shadow_expected = len(stage_rows) * 2
+        matched = sum(1 for row in stage_rows if row["matched"])
+        accuracy = round(matched / len(stage_rows), 4) if stage_rows else None
         stage_coverage[stage] = {
             "evaluated_pairs": len(stage_rows),
             "gap_examples": gap_examples,
             "no_gap_controls": control_examples,
-            "shadow_role_coverage": shadow_role_count,
-            "shadow_role_expected": shadow_expected,
+            "accuracy": accuracy,
         }
-        if gap_examples < PROMOTION_MIN_SAMPLES_PER_STAGE:
-            reasons.append(f"{stage} 缺少至少 {PROMOTION_MIN_SAMPLES_PER_STAGE} 个中/大差距样本")
-        if control_examples < PROMOTION_MIN_SAMPLES_PER_STAGE:
-            reasons.append(f"{stage} 缺少至少 {PROMOTION_MIN_SAMPLES_PER_STAGE} 个 small 对照样本")
-        if shadow_role_count != shadow_expected:
-            reasons.append(f"{stage} shadow 覆盖不完整")
+        required_per_class = (
+            PROMOTION_MIN_S5_SAMPLES_PER_CLASS if stage == "S5" else PROMOTION_MIN_SAMPLES_PER_STAGE_CLASS
+        )
+        if gap_examples < required_per_class:
+            reasons.append(f"{stage} 缺少至少 {required_per_class} 个中/大差距样本")
+        if control_examples < required_per_class:
+            reasons.append(f"{stage} 缺少至少 {required_per_class} 个 small 对照样本")
+        if accuracy is None or accuracy < PROMOTION_MIN_STAGE_ACCURACY:
+            reasons.append(f"{stage} 准确率未达到 {PROMOTION_MIN_STAGE_ACCURACY:.0%}")
 
-    blind_contract = manifest.get("blind_validation_contract") if isinstance(manifest.get("blind_validation_contract"), dict) else {}
-    min_blind_samples = int(blind_contract.get("minimum_samples") or PROMOTION_MIN_SAMPLES_PER_STAGE)
-    blind_count = len(sample_ids_by_partition.get("blind", set()))
-    if blind_count < min_blind_samples:
-        reasons.append(f"缺少至少 {min_blind_samples} 个全新 blind 样本")
     blind_violations = blind_contract_violations(labels, manifest)
     reasons.extend(blind_violations)
-    if shadow_invariance_violations:
-        reasons.append("shadow 在同一视频跨配对中出现执行分漂移")
-    # 当前 shadow 尚未获准生成 candidate severity；此门防止直接替换正式输出。
-    reasons.append("shadow 尚未通过候选 severity 离线对账，不得接入正式 severity")
+    lock_errors: list[str] = []
+    if blind_ids:
+        if not isinstance(cohort_lock, dict):
+            reasons.append("blind cohort 缺少冻结锁")
+        else:
+            lock_errors = verify_cohort_lock(cohort_lock)
+            reasons.extend(lock_errors)
+            if cohort_lock.get("status") != "frozen":
+                reasons.append("blind cohort 已被消费，不能用于晋级")
+            if set(cohort_lock.get("sample_ids") or []) != blind_ids:
+                reasons.append("cohort lock sample_ids 与本次 blind 评测不一致")
+            expected_model = str((cohort_lock.get("model_config") or {}).get("model") or "")
+            expected_temperature = (cohort_lock.get("model_config") or {}).get("temperature")
+            run_models = {
+                str((row.get("run_metadata") or {}).get("llm_model") or "")
+                for row in blind_rows
+            }
+            run_temperatures = {
+                (row.get("run_metadata") or {}).get("comparison_temperature")
+                for row in blind_rows
+            }
+            if run_models != {expected_model}:
+                reasons.append("analysis_result 模型版本与 cohort lock 不一致或缺失")
+            if run_temperatures != {expected_temperature}:
+                reasons.append("analysis_result comparison temperature 与 cohort lock 不一致或缺失")
+
+    overall_accuracy = round(sum(1 for row in blind_rows if row["matched"]) / len(blind_rows), 4) if blind_rows else None
+    two_band_errors = sum(1 for row in blind_rows if row.get("ordinal_distance") == 2)
+    if overall_accuracy is None or overall_accuracy < PROMOTION_MIN_OVERALL_ACCURACY:
+        reasons.append(f"blind 总准确率未达到 {PROMOTION_MIN_OVERALL_ACCURACY:.0%}")
+    if two_band_errors:
+        reasons.append("blind 存在 small↔large 两档错误")
+
+    human_events = ((chain.get("human_key_event_audit") or {}).get("records") or [])
+    blind_events = [row for row in human_events if row.get("sample_id") in blind_ids and row.get("expected_state") == "present"]
+    recalled = [row for row in blind_events if row.get("stage1_recalled") is True]
+    event_recall = round(len(recalled) / len(blind_events), 4) if blind_events else None
+    stage2_use = round(sum(1 for row in recalled if row.get("stage2_referenced") is True) / len(recalled), 4) if recalled else None
+    if event_recall is None or event_recall < PROMOTION_MIN_EVENT_RECALL:
+        reasons.append(f"Stage1 blind 关键事件召回未达到 {PROMOTION_MIN_EVENT_RECALL:.0%}")
+    if stage2_use is None or stage2_use < PROMOTION_MIN_STAGE2_USE:
+        reasons.append(f"Stage2 blind 证据使用率未达到 {PROMOTION_MIN_STAGE2_USE:.0%}")
+
+    decision_records = [row for row in decision.get("records") or [] if row.get("sample_id") in blind_ids]
+    expected_roots = sum(len(row.get("expected") or []) for row in decision_records)
+    matched_roots = sum(len(row.get("matched_reference_ids") or []) for row in decision_records)
+    decision_recall = round(matched_roots / expected_roots, 4) if expected_roots else None
+    if decision_recall is None or decision_recall < PROMOTION_MIN_DECISION_RECALL:
+        reasons.append(f"blind Top-N 根因召回未达到 {PROMOTION_MIN_DECISION_RECALL:.0%}")
+    phase_regressions = sum(
+        1 for row in phase_c.get("records") or []
+        if row.get("sample_id") in blind_ids and row.get("outcome") == "regressed"
+    )
+    if phase_regressions:
+        reasons.append("Phase C 在 blind 样本引入回归")
     return {
-        "eligible": False,
+        "eligible": not reasons,
         "policy": {
-            "min_gap_examples_per_stage": PROMOTION_MIN_SAMPLES_PER_STAGE,
-            "min_no_gap_controls_per_stage": PROMOTION_MIN_SAMPLES_PER_STAGE,
+            "min_blind_pairs": PROMOTION_MIN_BLIND_PAIRS,
+            "min_gap_examples_per_stage": PROMOTION_MIN_SAMPLES_PER_STAGE_CLASS,
+            "min_no_gap_controls_per_stage": PROMOTION_MIN_SAMPLES_PER_STAGE_CLASS,
+            "min_s5_examples_per_class": PROMOTION_MIN_S5_SAMPLES_PER_CLASS,
             "min_categories": PROMOTION_MIN_CATEGORIES,
-            "min_new_blind_samples": min_blind_samples,
+            "min_markets": PROMOTION_MIN_MARKETS,
+            "min_overall_accuracy": PROMOTION_MIN_OVERALL_ACCURACY,
+            "min_stage_accuracy": PROMOTION_MIN_STAGE_ACCURACY,
+            "max_two_band_errors": 0,
+            "min_stage1_event_recall": PROMOTION_MIN_EVENT_RECALL,
+            "min_stage2_evidence_use": PROMOTION_MIN_STAGE2_USE,
+            "min_decision_recall": PROMOTION_MIN_DECISION_RECALL,
         },
         "coverage": {
-            "samples_by_partition": {key: len(value) for key, value in sorted(sample_ids_by_partition.items())},
-            "categories": sorted(calibration_categories),
+            "blind_pairs": len(blind_ids),
+            "categories": sorted(categories),
+            "markets": sorted(markets),
             "stages": stage_coverage,
-            "shadow_invariance_violations": len(shadow_invariance_violations),
             "blind_contract_violations": blind_violations,
+            "cohort_lock_errors": lock_errors,
+            "overall_accuracy": overall_accuracy,
+            "two_band_errors": two_band_errors,
+            "stage1_event_recall": event_recall,
+            "stage2_evidence_use": stage2_use,
+            "decision_recall": decision_recall,
+            "phase_c_regressions": phase_regressions,
         },
         "reasons": list(dict.fromkeys(reasons)),
+    }
+
+
+def _layer_attribution(
+    mismatches: list[dict[str, Any]],
+    human_events: dict[str, Any],
+    stage_oracles: dict[str, Any],
+    phase_c: dict[str, Any],
+) -> dict[str, Any]:
+    """按最早可证明失败的层级归因，不从最终标签反推故事。"""
+    event_map = {
+        (row.get("sample_id"), row.get("event_id")): row
+        for row in human_events.get("records") or []
+    }
+    oracle_map = {
+        (row.get("sample_id"), row.get("stage")): row
+        for row in stage_oracles.get("records") or []
+    }
+    phase_map = {
+        (row.get("sample_id"), row.get("stage")): row
+        for row in phase_c.get("records") or []
+    }
+    records: list[dict[str, Any]] = []
+    for row in mismatches:
+        key = (row["sample_id"], row["stage"])
+        oracle = oracle_map.get(key)
+        decision_events = [
+            event_map.get((row["sample_id"], event_id))
+            for event_id in (oracle or {}).get("decision_event_ids") or []
+        ]
+        decision_events = [event for event in decision_events if isinstance(event, dict)]
+        phase = phase_map.get(key)
+        if phase and phase.get("outcome") == "regressed":
+            layer, reason = "L4_phase_c", "Phase C 前正确、回看后错误"
+        elif any(event.get("source_artifact_ready") is False for event in decision_events):
+            layer, reason = "L0_preprocessing", "人工决策所需模态的预处理产物不可用"
+        elif any(event.get("expected_state") == "present" and event.get("stage1_recalled") is False for event in decision_events):
+            layer, reason = "L1_fact_recall", "人工关键事件未进入 Stage1 locked facts"
+        elif any(
+            event.get("expected_state") == "present"
+            and event.get("stage1_recalled") is True
+            and event.get("stage2_referenced") is False
+            for event in decision_events
+        ):
+            layer, reason = "L2_evidence_use", "Stage1 已召回关键事实，但 Stage2 未引用"
+        elif oracle and oracle.get("execution_match") is False:
+            layer, reason = "L2_judgement", "Stage2 单侧执行分或比较方向与人工 oracle 不一致"
+        elif oracle and oracle.get("derive_replay_status") == "complete_oracle_patch" and oracle.get("derive_replay_match") is False:
+            layer, reason = "L3_derive", "人工 oracle 输入生产 derive 后仍无法得到 GT severity"
+        else:
+            layer, reason = "unresolved", "缺少足够 oracle，不能可靠定位到单一层级"
+        records.append({
+            "sample_id": row["sample_id"],
+            "stage": row["stage"],
+            "expected": row["expected"],
+            "final": row["final"],
+            "layer": layer,
+            "reason": reason,
+        })
+    counts = Counter(record["layer"] for record in records)
+    return {
+        "policy": "归因到最早有直接证据支持的失败层；无 oracle 时保持 unresolved。",
+        "summary": dict(sorted(counts.items())),
+        "records": records,
     }
 
 
@@ -795,6 +1205,7 @@ def evaluate(
     labels: dict[str, Any],
     manifest: dict[str, Any],
     run_paths: dict[str, Path],
+    cohort_lock: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     label_samples = labels.get("samples") if isinstance(labels.get("samples"), dict) else {}
     input_samples = manifest_samples(manifest)
@@ -849,6 +1260,7 @@ def evaluate(
                 "diagnosis": diagnosis(expected, final, stage),
                 "creator": side_execution(stage, "creator"),
                 "benchmark": side_execution(stage, "benchmark"),
+                "run_metadata": result.get("analysis_run_metadata") if isinstance(result.get("analysis_run_metadata"), dict) else {},
             }
             row.update(severity_diagnostics(expected, final, stage))
             rows.append(row)
@@ -921,7 +1333,17 @@ def evaluate(
         for (role, path, stage), values in sorted(shadow_invariance.items())
         if len(values) > 1
     ]
-    readiness = promotion_readiness(rows, labels, manifest, shadow_unstable)
+    chain = chain_audit(run_paths, labels)
+    stage_oracles = _stage_oracle_audit(labels, run_paths)
+    phase_c = _phase_c_audit(labels, run_paths)
+    decision = _decision_gt_audit(labels, run_paths)
+    layered = _layer_attribution(
+        mismatches,
+        chain.get("human_key_event_audit") or {},
+        stage_oracles,
+        phase_c,
+    )
+    readiness = promotion_readiness(rows, labels, manifest, cohort_lock, chain, decision, phase_c)
     return {
         "schema_version": 2,
         "sources": {
@@ -969,16 +1391,16 @@ def evaluate(
                 for stage, groups in sorted(mechanism_by_stage.items())
             },
         },
-        "decision_level_evaluation": {
-            "status": "unavailable_without_human_priority_and_root_cause_labels",
-            "reason": "当前 GT 只有阶段 severity/关系和少量全局观察，没有可对账的人工 Top-N 根因及优先级；不能用阶段排名相同冒充商业决策一致。",
-        },
+        "decision_level_evaluation": decision,
+        "stage_oracle_evaluation": stage_oracles,
+        "phase_c_evaluation": phase_c,
+        "layer_attribution": layered,
         "mismatches": mismatches,
         "execution_invariance_violations": unstable,
         "shadow_execution_invariance_violations": shadow_unstable,
         "whole_video_observations": whole_video_observations,
         "promotion_readiness": readiness,
-        "chain_audit": chain_audit(run_paths, labels),
+        "chain_audit": chain,
         "missing_runs": missing_runs,
         "missing_labels": sorted(missing_labels),
     }
@@ -989,6 +1411,7 @@ def main() -> int:
     parser.add_argument("--labels", type=Path, default=Path("references/ground-truth-labels.json"))
     parser.add_argument("--manifest", type=Path, default=Path("references/validation-inputs.json"))
     parser.add_argument("--runs-root", type=Path, default=Path("runs"))
+    parser.add_argument("--cohort-lock", type=Path, help="可选：本次 blind cohort 的冻结锁")
     parser.add_argument("--run-prefix", default="contract-", help="默认以此前缀查找 <sample>/analysis.json")
     parser.add_argument("--sample", action="append", default=[], help="只评测指定 sample id，可重复传入")
     parser.add_argument(
@@ -1003,6 +1426,7 @@ def main() -> int:
 
     labels = read_json(args.labels)
     manifest = read_json(args.manifest)
+    cohort_lock = read_json(args.cohort_lock) if args.cohort_lock else None
     samples = labels.get("samples") if isinstance(labels.get("samples"), dict) else {}
     try:
         explicit_paths = parse_explicit_run_paths(args.run_path)
@@ -1011,7 +1435,7 @@ def main() -> int:
     selected = args.sample or sorted(explicit_paths) or sorted(samples)
     run_paths = {sample_id: sample_run_path(args.runs_root, sample_id, args.run_prefix) for sample_id in selected}
     run_paths.update(explicit_paths)
-    report = evaluate(labels, manifest, run_paths)
+    report = evaluate(labels, manifest, run_paths, cohort_lock)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     summary = report["summary"]

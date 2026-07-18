@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "description": "Flayr 从零验证输入清单。primary 用于主回归；已参与规则讨论的历史 holdout 已降级为 seen_validation，不得用于最终泛化验收。产品级 GT 统计必须先通过锁定事实的 comparison_eligibility 审计。",
   "comparison_eligibility_policy": {
     "product_gt_scopes": ["same_product", "comparable_variant"],
@@ -8,7 +8,7 @@
     "pending_scope": "未经当前 facts 审计的样本不得进入产品级指标"
   },
   "blind_validation_contract": {
-    "minimum_samples": 3,
+    "minimum_samples": 12,
     "group": "blind",
     "evaluation_scopes": {
       "stage_severity": "默认范围。人工必须在模型结果打开前填写 S1-S6 的差距等级，进入阶段准确率统计。",
@@ -17,12 +17,16 @@
     "admission": [
       "视频对不得出现在 primary、calibration、seen_validation 或任何用于规则设计的历史 run 中",
       "每对必须提供 benchmark_video、creator_video、product_name、product_category、target_market；产品级比较仍须通过 comparison_eligibility 审计",
-      "每个阶段的人工 GT 必须在本轮规则冻结后、模型结果打开前完成"
+      "每个阶段的人工 GT 必须在本轮规则冻结后、模型结果打开前完成",
+      "必须用 manage_validation_cohort.py 冻结视频、GT、代码、prompt/schema 与模型配置哈希",
+      "结果一旦打开或用于修改规则，cohort 必须标记 spent，样本降级为 seen_validation"
     ],
     "required_ground_truth": {
       "partition": "blind",
       "stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
-      "severity_values": ["small", "medium", "large"]
+      "severity_values": ["small", "medium", "large"],
+      "stage_oracles": ["creator_execution", "benchmark_execution", "relation", "decision_event_ids", "reason", "confidence"],
+      "decision_gt": ["top_root_causes"]
     }
   },
   "samples": [
@@ -246,7 +250,7 @@
   {
     "id": "colorblu-c0",
     "proposition_key": "colorblu_waterproof_sealant",
-    "group": "blind",
+    "group": "seen_validation",
       "product_name": "Color Blu 快干防水密封剂",
       "product_category": "五金工具 / 五金 / 胶水、胶带、密封条",
       "target_market": "th",
@@ -261,7 +265,7 @@
   {
     "id": "colorblu-c1",
     "proposition_key": "colorblu_waterproof_sealant",
-    "group": "blind",
+    "group": "seen_validation",
       "product_name": "Color Blu 快干防水密封剂",
       "product_category": "五金工具 / 五金 / 胶水、胶带、密封条",
       "target_market": "th",
@@ -276,7 +280,7 @@
   {
     "id": "carslan-powder-c0",
     "proposition_key": "carslan",
-    "group": "blind",
+    "group": "seen_validation",
       "product_name": "CARSLAN 2.0 控油粉饼",
       "product_category": "美妆个护 / 美妆 / 散粉",
       "target_market": "th",
@@ -292,7 +296,7 @@
   {
     "id": "carslan-powder-c1",
     "proposition_key": "carslan",
-    "group": "blind",
+    "group": "seen_validation",
       "product_name": "CARSLAN 2.0 控油粉饼",
       "product_category": "美妆个护 / 美妆 / 散粉",
       "target_market": "th",
@@ -306,7 +310,7 @@
     },
     {
       "id": "colorkey-lip-c0",
-      "group": "blind",
+      "group": "seen_validation",
       "proposition_key": "colorkey_lip_mud",
       "product_name": "COLORKEY Silky Creamy Matte Lip Mud 唇彩",
       "product_category": "美妆个护 / 美妆 / 口红与唇彩",
@@ -320,7 +324,7 @@
     },
     {
       "id": "colorkey-lip-c1",
-      "group": "blind",
+      "group": "seen_validation",
       "evaluation_scope": "whole_video_observation",
       "proposition_key": "colorkey_lip_mud",
       "product_name": "COLORKEY Silky Creamy Matte Lip Mud 唇彩",

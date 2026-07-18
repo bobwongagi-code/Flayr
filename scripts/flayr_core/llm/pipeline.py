@@ -378,6 +378,12 @@ def run_large_model_analysis(
         analysis=analysis,
         locked_video_understanding=facts,
     )
+    result["analysis_run_metadata"] = {
+        "llm_model": str(args.llm_model or ""),
+        "llm_api_url": str(args.llm_api_url or ""),
+        "comparison_temperature": payload.get("temperature"),
+        "multimodal_input": bool(args.llm_include_images),
+    }
     result_path = run_dir / "analysis_result.json"
     write_json(result_path, result)
     return result_path, result
@@ -718,6 +724,11 @@ def maybe_refine_low_confidence_stages(
     stage_codes = sorted(candidates, key=lambda c: (_priority.get(c, 2), candidates.index(c)))[:2]
     if not stage_codes:
         return result
+    before_stages = [
+        json.loads(json.dumps(stage, ensure_ascii=False))
+        for stage in result.get("stage_analysis") or []
+        if isinstance(stage, dict) and stage_code(stage.get("stage")) in stage_codes
+    ]
 
     review_payload = build_stage_review_payload(
         args.llm_model,
@@ -731,6 +742,7 @@ def maybe_refine_low_confidence_stages(
             "requested_stages": stage_codes,
             "applied": False,
             "reason": "low_confidence_stages 已声明，但本地视频切片构造失败。",
+            "before_stage_analysis": before_stages,
         }
         return result
 
@@ -755,6 +767,7 @@ def maybe_refine_low_confidence_stages(
             "requested_stages": stage_codes,
             "applied": False,
             "reason": f"低置信阶段回看失败：{exc}",
+            "before_stage_analysis": before_stages,
         }
         return result
 
@@ -763,6 +776,12 @@ def maybe_refine_low_confidence_stages(
         "applied": True,
         "response_path": str(review_response_path),
         "notes": review_result.get("review_notes", []),
+        "before_stage_analysis": before_stages,
+        "after_stage_analysis": [
+            json.loads(json.dumps(stage, ensure_ascii=False))
+            for stage in refined.get("stage_analysis") or []
+            if isinstance(stage, dict) and stage_code(stage.get("stage")) in stage_codes
+        ],
     }
     return refined
 

@@ -58,6 +58,7 @@ Flayr/
 │   ├── batch_analyze.py          # 批量作业、断点续跑与限并发
 │   ├── dev_test_stage2.py        # 阶段二独立测试工具（复用阶段一产物，调 prompt 用）
 │   ├── evaluate_analysis.py      # 分析结果与人工 GT 对照
+│   ├── manage_validation_cohort.py # 冻结/校验/消费 blind cohort（不调模型）
 │   ├── verify_analysis_contracts.py # S1-S6 与跨模块契约门
 │   └── flayr_core/               # 核心模块包
 │       ├── video.py whisper.py   # 转写 + 抽帧 + 抽音频
@@ -207,6 +208,25 @@ python3 scripts/flayr.py ... improve \
 | `timeline_views/` | Hook、CTA 的帧序列 + 波形 + 口播证据图 |
 | `transcript_packed.*` | 带时间戳的紧凑口播索引 |
 | `video_evidence_audit.json` | 二级证据视图自检结果 |
+
+---
+
+### 分层 GT 验证
+
+新 blind 样本必须先完成人工 `key_events`、`stage_oracles` 和 `decision_gt`，再冻结 cohort：
+
+```bash
+python3 scripts/manage_validation_cohort.py freeze \
+  --sample <sample-id> \
+  --model <model-id> \
+  --api-url <compatible-api-url> \
+  --temperature 0 \
+  --output runs/validation/<cohort-id>.lock.json
+```
+
+`evaluate_analysis.py --cohort-lock ...` 会分别报告预处理可用性、Stage1 事实召回、Stage2
+证据使用/判断、derive oracle 回放、Phase C 净收益和 Top-N 商业根因。cohort 结果一旦打开或用于
+修改规则，须执行 `manage_validation_cohort.py spend`，该批样本以后只作 `seen_validation` 回归。
 
 ---
 

@@ -407,13 +407,14 @@ python3 scripts/dev_test_stage2.py runs/<run-dir> --dry
 
 ## 7. P1 Phase C 契约
 
-### Q17 低置信阶段只能由模型声明，代码不猜
+### Q17 低置信回看候选必须来自已登记触发器
 
 规则：
 
 - 第一遍 stage2 可输出 `low_confidence_stages`。
-- 只接受 `S1` 到 `S6`，最多 2 个。
-- 只有代表帧/切片音频不足以支撑 severity 时才声明。
+- 代码只允许追加两类确定性候选：素材/占位证据不足，以及 derive 分数落在预登记临界带。
+- 只接受 `S1` 到 `S6`，按 S1/S6、S4、其他阶段的固定优先级最多取 2 个。
+- 不允许根据具体样本名称、产品词或人工 GT 触发回看。
 
 处理：已实现。
 
@@ -499,6 +500,48 @@ PY
 
 ---
 
+## 7.5 Ground Truth 与 blind cohort 契约
+
+### Q21 GT 必须支持分层归因
+
+- 新 blind 的每个有效阶段必须提供 `stage_oracles`：达人/标杆单侧执行分、比较方向、决策事件、理由与置信度。
+- `key_events` 只标改变人工结论的关键事实；必须绑定 role、stage、time_range 和证据模态。
+- 人工确认“未出现”的关键事实用 `expected_state=absent`，并提供 `terms_any`，不能用空数组表达。
+- 整条视频必须提供 `decision_gt.top_root_causes`，使用 `reference_id` 对齐全局门控或 S1-S6，禁止文本相似度猜测。
+
+实现位置：
+
+- `scripts/flayr_core/validation_cohort.py::validate_blind_sample_contract`
+- `scripts/evaluate_analysis.py::_human_key_event_audit`
+- `scripts/evaluate_analysis.py::_stage_oracle_audit`
+- `scripts/evaluate_analysis.py::_decision_gt_audit`
+
+### Q22 blind cohort 是一次性验收资产
+
+- 冻结前完成 GT，冻结后锁定视频、GT、代码、prompt/schema 和模型配置哈希。
+- 结果一旦打开或用于修改规则，cohort 标记为 `spent`，样本降级为 `seen_validation`。
+- 同一视频内容或同一标杆复用不能伪装成多个独立 blind 样本。
+- 模型版本与 comparison temperature 必须和冻结锁一致。
+
+实现位置：
+
+- `scripts/manage_validation_cohort.py`
+- `scripts/flayr_core/validation_cohort.py`
+- `scripts/evaluate_analysis.py::promotion_readiness`
+
+### Q23 偏差必须归到最早可证明的失败层
+
+- L0：人工决策所需口播/字幕/画面源轨不可用。
+- L1：源轨可用，但关键事件未进入 locked facts。
+- L2：facts 已有但未引用，或单侧执行分/方向与人工 oracle 不一致。
+- L3：完整人工 oracle patch 经生产 derive 回放仍无法得到 GT severity。
+- L4：Phase C 前正确、回看后错误。
+- 缺少足够 oracle 时必须写 `unresolved`，不得根据最终结果编造根因。
+
+Phase C 现在保存 `before_stage_analysis` / `after_stage_analysis` 快照，仅用于离线净收益评估，不改变主分析。
+
+---
+
 ## 8. 当前缺口
 
 ### G01 统一 QA issue 对象未实现（暂不做）
@@ -547,6 +590,7 @@ PY
 python3 -m py_compile scripts/flayr.py scripts/dev_test_stage2.py scripts/flayr_core/*.py scripts/flayr_core/llm/*.py scripts/flayr_core/postprocess/*.py
 python3 -m json.tool references/analysis-output-schema.json >/dev/null
 python3 scripts/dev_test_stage2.py runs/<run-dir> --dry
+python3 scripts/manage_validation_cohort.py verify runs/validation/<cohort-id>.lock.json
 ```
 
 稳定性验收：

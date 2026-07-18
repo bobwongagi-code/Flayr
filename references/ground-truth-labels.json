@@ -1,11 +1,12 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "source": "ground-truth-labels.md",
   "policy": {
     "severity_order": ["small", "medium", "large"],
     "purpose": "人工裁决的机器可读副本，只用于评测，不参与分析或 severity 推导。stages 仅记录达人相对标杆的不足程度；stage_relations 记录比较方向但暂不参与准确率。na 表示该阶段不适用，不计入准确率。",
     "holdout_policy": "已被用于规则讨论的样本标记为 seen_validation，不得再称为盲测。",
-    "blind_policy": "blind 标签必须由人工在规则冻结后、模型结果打开前录入；对应 validation-inputs 样本 group 必须为 blind，且视频路径不得复用历史开发样本。"
+    "blind_policy": "blind 标签必须由人工在规则冻结后、模型结果打开前录入；对应 validation-inputs 样本 group 必须为 blind，且视频内容不得复用历史开发样本。结果一旦打开或用于修改规则，该 cohort 必须降级为 seen_validation。",
+    "oracle_policy": "新 blind 的每个有效阶段必须提供 stage_oracles；每条决策关键事实用 key_events 锚定；decision_gt.top_root_causes 用 reference_id 记录人工 Top-N 根因。旧 calibration/seen_validation 允许逐步补标。"
   },
   "samples": {
     "are_xie": {
@@ -53,7 +54,7 @@
       "stages": {"S1": "medium", "S2": "medium", "S3": "medium", "S4": "medium", "S5": "small", "S6": "small"}
     },
     "colorblu-c0": {
-      "partition": "blind",
+      "partition": "seen_validation",
       "stages": {"S1": "small", "S2": "small", "S3": "large", "S4": "large", "S5": "na", "S6": "small"},
       "key_events": [
         {
@@ -73,11 +74,11 @@
       ]
     },
     "colorblu-c1": {
-      "partition": "blind",
+      "partition": "seen_validation",
       "stages": {"S1": "medium", "S2": "small", "S3": "large", "S4": "large", "S5": "na", "S6": "small"}
     },
     "carslan-powder-c0": {
-      "partition": "blind",
+      "partition": "seen_validation",
       "stages": {"S1": "medium", "S2": "small", "S3": "small", "S4": "medium", "S5": "small", "S6": "small"},
       "stage_relations": {"S6": "creator_better"},
       "global_observations": [
@@ -104,14 +105,14 @@
       ]
     },
     "carslan-powder-c1": {
-      "partition": "blind",
+      "partition": "seen_validation",
       "stages": {"S1": "medium", "S2": "small", "S3": "medium", "S4": "large", "S5": "small", "S6": "na"},
       "global_observations": [
         "将清凉感和轻薄感作为主卖点，但两者缺乏可视化证明空间，不适合作为短视频的主信息。"
       ]
     },
     "colorkey-lip-c0": {
-      "partition": "blind",
+      "partition": "seen_validation",
       "stages": {"S1": "small", "S2": "small", "S3": "medium", "S4": "large", "S5": "na", "S6": "small"},
       "global_observations": [
         "口红内容的核心竞争在色彩、肤色匹配和上唇效果；只展示口红本体或基础涂抹，在同类高可视化内容中缺乏吸引力。"
@@ -144,7 +145,7 @@
       ]
     },
     "colorkey-lip-c1": {
-      "partition": "blind",
+      "partition": "seen_validation",
       "evaluation_scope": "whole_video_observation",
       "overall_verdict": "not_viable",
       "overall_reason": "视频只展示口红本体和手部试色；在口红竞争激烈、可视化展示成熟的内容环境中，用户缺少继续观看的理由，因此本质上不应采用这种拍法。"
