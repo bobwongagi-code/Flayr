@@ -22,7 +22,6 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
 from typing import Any, NamedTuple
 
 from ..multimodal import channel_requirement_for, has_multimodal_assessment, multimodal_execution
@@ -46,34 +45,6 @@ TH_SMALL, TH_MEDIUM = 1.2, 2.5
 _STAGE_RE = re.compile(r"(S[1-6])")
 # S4 动作演示词：效果验证的功能定义是"让用户看到并信服"，标杆动作演示 vs 达人口头宣称 = 验证功能未达成
 _DEMO_RE = re.compile(r"闻|嗅|按压|挤出|涂抹|擦拭|冲水|冲洗|冲净|脱落|掉入|掉进|排空|实测|对比|试用|测试|前后")
-
-
-def pool_creator_executions(results: list[dict[str, Any]]) -> None:
-    """同达人多对：达人侧执行分按阶段跨对池化（众数，平手取较高），覆盖锚定漂移。
-
-    锚定效应（round6 实证 carslan/colorkey + round4 youkoubo-c2）：模型打达人侧执行分时
-    被标杆内容干扰，同一达人视频在不同对比对里得分漂移，违反独立打分纪律。达人侧打分
-    本与标杆无关，跨对池化既复原独立性又降方差。平手取较高：锚定倾向把达人压低（显得更差），
-    高值更接近真值。仅在同一达人视频出现于多个对比对时有意义（"一达人 vs 多标杆"批量场景）；
-    须在 derive_severity_from_facts 之前调用。调用方负责按达人视频分组传入同组 results。
-    """
-    by_stage: dict[str, list[float]] = {}
-    for res in results:
-        for s in res.get("stage_analysis", []):
-            match = _STAGE_RE.match(str(s.get("stage") or ""))
-            ce = s.get("creator_execution")
-            if match and ce is not None:
-                by_stage.setdefault(match.group(1), []).append(ce)
-    pooled = {}
-    for sid, vals in by_stage.items():
-        counts = Counter(vals)
-        top_freq = counts.most_common(1)[0][1]
-        pooled[sid] = max(v for v in vals if counts[v] == top_freq)
-    for res in results:
-        for s in res.get("stage_analysis", []):
-            match = _STAGE_RE.match(str(s.get("stage") or ""))
-            if match and match.group(1) in pooled:
-                s["creator_execution"] = pooled[match.group(1)]
 
 
 def _reconcile_operator_tier(profile: dict[str, Any] | None, analysis: dict[str, Any] | None) -> None:

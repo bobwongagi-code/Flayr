@@ -35,11 +35,20 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+SAFE_JOB_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+RUNNER_OWNED_FLAGS = {
+    "--benchmark-video",
+    "--creator-video",
+    "--output-dir",
+    "--reuse-preprocessing",
+}
 
 
 def now() -> str:
@@ -47,11 +56,59 @@ def now() -> str:
 
 
 def write_status(path: Path, status: dict) -> None:
-    path.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def job_output_dir(job: dict, runs_dir: Path) -> Path:
     return Path(job["output_dir"]) if job.get("output_dir") else runs_dir / f"sample-{job['name']}"
+
+
+def validate_spec(spec: Any, runs_dir: Path, concurrency: int) -> tuple[list[dict], list[str]]:
+    """校验作业清单，防止名称/目录冲突和参数覆盖 runner 持有的输入输出边界。"""
+    if not isinstance(spec, dict):
+        raise ValueError("jobs 文件根节点必须是 JSON object。")
+    jobs = spec.get("jobs")
+    common_args = spec.get("common_args", [])
+    if not isinstance(jobs, list) or not jobs:
+        raise ValueError("jobs 必须是非空数组。")
+    if concurrency < 1:
+        raise ValueError("--concurrency 必须大于等于 1。")
+    _validate_cli_args(common_args, "common_args")
+
+    names: set[str] = set()
+    output_dirs: set[Path] = set()
+    for index, job in enumerate(jobs):
+        if not isinstance(job, dict):
+            raise ValueError(f"jobs[{index}] 必须是 object。")
+        name = str(job.get("name") or "").strip()
+        if not SAFE_JOB_NAME.fullmatch(name) or name in {".", ".."}:
+            raise ValueError(f"jobs[{index}].name 非法：仅允许字母、数字、点、下划线和连字符。")
+        if name in names:
+            raise ValueError(f"重复 job name：{name}")
+        names.add(name)
+        for field in ("creator", "benchmark"):
+            if not isinstance(job.get(field), str) or not job[field].strip():
+                raise ValueError(f"job {name} 缺少有效的 {field} 路径。")
+        _validate_cli_args(job.get("args", []), f"job {name}.args")
+        out_dir = job_output_dir(job, runs_dir).expanduser().resolve()
+        if out_dir in output_dirs:
+            raise ValueError(f"多个 job 指向同一 output_dir：{out_dir}")
+        output_dirs.add(out_dir)
+    return jobs, common_args
+
+
+def _validate_cli_args(values: Any, label: str) -> None:
+    if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+        raise ValueError(f"{label} 必须是字符串数组。")
+    for value in values:
+        flag = value.split("=", 1)[0]
+        if flag in RUNNER_OWNED_FLAGS:
+            raise ValueError(f"{label} 不得覆盖 runner 参数 {flag}。")
 
 
 def build_command(job: dict, out_dir: Path, common_args: list[str]) -> list[str]:
@@ -78,6 +135,29 @@ def build_command(job: dict, out_dir: Path, common_args: list[str]) -> list[str]
     return command
 
 
+def acquire_lock(lock_path: Path) -> None:
+    """用 O_EXCL 原子创建锁；仅清理已确认不存活的旧锁。"""
+    for _ in range(2):
+        try:
+            descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            try:
+                old = lock_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                old = ""
+            if old.isdigit() and _pid_alive(int(old)):
+                raise RuntimeError(f"已有 runner 在跑 (pid {old})")
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+        with os.fdopen(descriptor, "w", encoding="utf-8") as lock_file:
+            lock_file.write(str(os.getpid()))
+        return
+    raise RuntimeError(f"无法取得 runner 锁：{lock_path}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Flayr 批量分析 runner")
     parser.add_argument("jobs_file", help="作业清单 JSON")
@@ -85,22 +165,22 @@ def main() -> int:
     parser.add_argument("--runs-dir", default=str(ROOT / "runs"))
     args = parser.parse_args()
 
-    spec = json.loads(Path(args.jobs_file).read_text(encoding="utf-8"))
-    common_args = spec.get("common_args", [])
-    jobs = spec["jobs"]
     runs_dir = Path(args.runs_dir)
+    try:
+        spec = json.loads(Path(args.jobs_file).read_text(encoding="utf-8"))
+        jobs, common_args = validate_spec(spec, runs_dir, args.concurrency)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        parser.error(str(error))
     batch_dir = runs_dir / "_batch"
     batch_dir.mkdir(parents=True, exist_ok=True)
     status_path = batch_dir / "status.json"
 
-    # 防重复启动：已有存活 runner 时拒绝，避免两个 runner 跑同一 output-dir 互相覆写。
     lock_path = batch_dir / "runner.lock"
-    if lock_path.is_file():
-        old = lock_path.read_text(encoding="utf-8").strip()
-        if old.isdigit() and _pid_alive(int(old)):
-            print(f"[batch] 已有 runner 在跑 (pid {old})，拒绝重复启动；如确认其已死可删 {lock_path}。")
-            return 1
-    lock_path.write_text(str(os.getpid()), encoding="utf-8")
+    try:
+        acquire_lock(lock_path)
+    except RuntimeError as error:
+        print(f"[batch] {error}，拒绝重复启动。")
+        return 1
     try:
         return _run_jobs(jobs, common_args, runs_dir, status_path, args.concurrency)
     finally:
@@ -140,30 +220,51 @@ def _run_jobs(
         out = job_output_dir(job, runs_dir)
         log_path = batch_dir / f"{job['name']}.log"
         log_file = open(log_path, "w", encoding="utf-8")  # noqa: SIM115 — 进程存活期间需保持打开
-        proc = subprocess.Popen(
-            build_command(job, out, common_args), stdout=log_file, stderr=subprocess.STDOUT
-        )
+        try:
+            proc = subprocess.Popen(
+                build_command(job, out, common_args), stdout=log_file, stderr=subprocess.STDOUT
+            )
+        except BaseException:
+            log_file.close()
+            raise
         status["jobs"][job["name"]].update({"state": "running", "started": now(), "log": str(log_path)})
         write_status(status_path, status)
         running.append((job, proc, log_file))
 
-    while idx < len(pending) or running:
-        while idx < len(pending) and len(running) < max(1, concurrency):
-            launch(pending[idx])
-            idx += 1
-        time.sleep(5)
-        for entry in list(running):
-            job, proc, log_file = entry
+    try:
+        while idx < len(pending) or running:
+            while idx < len(pending) and len(running) < concurrency:
+                launch(pending[idx])
+                idx += 1
+            time.sleep(5)
+            for entry in list(running):
+                job, proc, log_file = entry
+                if proc.poll() is None:
+                    continue
+                log_file.close()
+                out = job_output_dir(job, runs_dir)
+                ok = (out / "analysis_result.json").is_file()
+                status["jobs"][job["name"]].update(
+                    {"state": "done" if ok else "failed", "rc": proc.returncode, "ended": now()}
+                )
+                write_status(status_path, status)
+                running.remove(entry)
+    except BaseException:
+        for job, proc, _ in running:
+            status["jobs"][job["name"]].update({"state": "interrupted", "ended": now()})
             if proc.poll() is None:
-                continue
+                proc.terminate()
+        write_status(status_path, status)
+        deadline = time.monotonic() + 5
+        for _, proc, log_file in running:
+            timeout = max(0.0, deadline - time.monotonic())
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
             log_file.close()
-            out = job_output_dir(job, runs_dir)
-            ok = (out / "analysis_result.json").is_file()
-            status["jobs"][job["name"]].update(
-                {"state": "done" if ok else "failed", "rc": proc.returncode, "ended": now()}
-            )
-            write_status(status_path, status)
-            running.remove(entry)
+        raise
 
     done_n = sum(1 for item in status["jobs"].values() if item["state"] == "done")
     status["finished"] = now()

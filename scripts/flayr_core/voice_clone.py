@@ -162,38 +162,53 @@ def _synthesize_lines(
     """用 dashscope SDK 的 CosyVoice wss 合成每条话术。"""
     import certifi
     import dashscope
-    # 关键：让 wss 的 ssl 用 certifi 的根证书，否则部分环境握手失败
-    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
-    # SDK 认证：环境变量有时不被 wss 客户端读取，显式赋值最稳
-    dashscope.api_key = api_key
     from dashscope.audio.tts_v2 import SpeechSynthesizer, AudioFormat
 
     out_dir = role_dir / "voice_lines"
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[dict[str, Any]] = []
-    for item in lines:
-        line_id = str(item.get("id") or "")
-        text = str(item.get("text") or "").strip()
-        if not text:
-            results.append({"id": line_id, "error": "空话术"})
-            continue
-        try:
-            synth = SpeechSynthesizer(
-                model=TARGET_MODEL, voice=voice_id,
-                format=AudioFormat.WAV_24000HZ_MONO_16BIT,
-            )
-            audio = synth.call(text)
-            if not audio:
-                results.append({"id": line_id, "error": "合成返回空音频"})
+    missing = object()
+    previous_ssl_cert_file = os.environ.get("SSL_CERT_FILE")
+    previous_api_key = getattr(dashscope, "api_key", missing)
+    try:
+        # 仅在本次 SDK 调用期间设置进程级依赖，避免污染后续任务。
+        os.environ["SSL_CERT_FILE"] = certifi.where()
+        dashscope.api_key = api_key
+        for item in lines:
+            line_id = str(item.get("id") or "")
+            text = str(item.get("text") or "").strip()
+            if not text:
+                results.append({"id": line_id, "error": "空话术"})
                 continue
-            audio_path = out_dir / f"{line_id}.wav"
-            write_bytes(audio_path, audio)
-            results.append({
-                "id": line_id, "text": text,
-                "audio_path": str(audio_path),
-            })
-        except Exception as exc:  # noqa: BLE001 — wss 异常类型多，统一兜底不崩主流程
-            results.append({"id": line_id, "error": str(exc)[:160]})
+            try:
+                synth = SpeechSynthesizer(
+                    model=TARGET_MODEL, voice=voice_id,
+                    format=AudioFormat.WAV_24000HZ_MONO_16BIT,
+                )
+                audio = synth.call(text)
+                if not audio:
+                    results.append({"id": line_id, "error": "合成返回空音频"})
+                    continue
+                audio_path = out_dir / f"{line_id}.wav"
+                write_bytes(audio_path, audio)
+                results.append({
+                    "id": line_id, "text": text,
+                    "audio_path": str(audio_path),
+                })
+            except Exception as exc:  # noqa: BLE001 — wss 异常类型多，统一兜底不崩主流程
+                results.append({"id": line_id, "error": str(exc)[:160]})
+    finally:
+        if previous_api_key is missing:
+            try:
+                del dashscope.api_key
+            except AttributeError:
+                pass
+        else:
+            dashscope.api_key = previous_api_key
+        if previous_ssl_cert_file is None:
+            os.environ.pop("SSL_CERT_FILE", None)
+        else:
+            os.environ["SSL_CERT_FILE"] = previous_ssl_cert_file
     return results
 
 

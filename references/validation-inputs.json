@@ -39,8 +39,7 @@
       "comparison_scope_status": "verified",
       "comparison_scope": "comparable_variant",
       "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
-      "metric_scope": "product_gt",
-      "scope_evidence_run": "runs/validation-are_xie"
+      "metric_scope": "product_gt"
     },
     {
       "id": "kakwanreview",
@@ -54,8 +53,7 @@
       "comparison_scope_status": "verified",
       "comparison_scope": "same_product",
       "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
-      "metric_scope": "product_gt",
-      "scope_evidence_run": "runs/validation-kakwanreview"
+      "metric_scope": "product_gt"
     },
     {
       "id": "tashadiyana",
@@ -69,8 +67,7 @@
       "comparison_scope_status": "verified",
       "comparison_scope": "same_product",
       "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
-      "metric_scope": "product_gt",
-      "scope_evidence_run": "runs/validation-tashadiyana"
+      "metric_scope": "product_gt"
     },
     {
       "id": "bluetoothwanju",
@@ -85,8 +82,7 @@
       "comparison_scope_status": "verified",
       "comparison_scope": "comparable_variant",
       "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
-      "metric_scope": "product_gt",
-      "scope_evidence_run": "runs/validation-bluetoothwanju"
+      "metric_scope": "product_gt"
     },
     {
       "id": "skincare",
@@ -100,8 +96,7 @@
       "comparison_scope_status": "verified",
       "comparison_scope": "cross_product",
       "direct_product_stages": ["S1"],
-      "metric_scope": "structure_only",
-      "scope_evidence_run": "runs/validation-skincare"
+      "metric_scope": "structure_only"
     },
     {
       "id": "wukoubo-c0",
@@ -116,8 +111,7 @@
       "comparison_scope_status": "verified",
       "comparison_scope": "cross_product",
       "direct_product_stages": ["S1", "S6"],
-      "metric_scope": "structure_only",
-      "scope_evidence_run": "runs/scope-probe-wukoubo-c0"
+      "metric_scope": "structure_only"
     },
     {
       "id": "youkoubo-c2",
@@ -132,8 +126,7 @@
       "comparison_scope_status": "verified_uncertain",
       "comparison_scope": "uncertain",
       "direct_product_stages": [],
-      "metric_scope": "excluded",
-      "scope_evidence_run": "runs/validation-youkoubo-c2"
+      "metric_scope": "excluded"
     },
     {
       "id": "carslan-b0",
@@ -147,8 +140,7 @@
       "comparison_scope_status": "verified",
       "comparison_scope": "same_product",
       "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
-      "metric_scope": "product_gt",
-      "scope_evidence_run": "runs/scope-probe-carslan-b0"
+      "metric_scope": "product_gt"
     },
     {
       "id": "colorkey-b0",
@@ -162,8 +154,7 @@
       "comparison_scope_status": "verified",
       "comparison_scope": "same_product",
       "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
-      "metric_scope": "product_gt",
-      "scope_evidence_run": "runs/scope-probe-colorkey-b0"
+      "metric_scope": "product_gt"
     },
     {
       "id": "paint",
@@ -176,8 +167,7 @@
       "comparison_scope_status": "verified",
       "comparison_scope": "comparable_variant",
       "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
-      "metric_scope": "product_gt",
-      "scope_evidence_run": "runs/validation-paint"
+      "metric_scope": "product_gt"
     },
     {
       "id": "simplus",
@@ -190,8 +180,7 @@
       "comparison_scope_status": "verified",
       "comparison_scope": "comparable_variant",
       "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
-      "metric_scope": "product_gt",
-      "scope_evidence_run": "runs/validation-simplus"
+      "metric_scope": "product_gt"
     },
     {
       "id": "mmx",
@@ -204,8 +193,7 @@
       "comparison_scope_status": "verified",
       "comparison_scope": "cross_product",
       "direct_product_stages": ["S1", "S6"],
-      "metric_scope": "structure_only",
-      "scope_evidence_run": "runs/scope-probe-mmx"
+      "metric_scope": "structure_only"
     },
     {
       "id": "wukoubo-c1",

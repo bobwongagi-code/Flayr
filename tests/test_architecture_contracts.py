@@ -49,7 +49,6 @@ from flayr_core.llm.parse import (
     normalize_comparison_contract,
     normalize_comparison_eligibility,
     normalize_hook_flags,
-    normalize_landing_shadow,
     normalize_multimodal_assessment,
     normalize_module_id,
     normalize_s3_flags,
@@ -63,7 +62,6 @@ from flayr_core.postprocess.chain import stamp_comparison_eligibility
 from flayr_core.postprocess.derive import _derive_one, _s3_usage_exec, _s4_effect_exec, _s6_cta_exec
 from flayr_core.postprocess.global_diagnosis import materialize_global_diagnosis
 from flayr_core.postprocess.repair import (
-    align_stage_flag_evidence,
     align_stage_flag_evidence,
     apply_comparison_eligibility,
     reconcile_s3_s4_evidence_coherence,
@@ -87,7 +85,6 @@ from flayr_core.prompt import write_analysis_input
 from flayr_core.proposition_contract import build_product_proposition_contract
 from flayr_core.stage_catalog import DEFAULT_STAGES, fallback_artifact_ranges, stage_tuples
 from flayr_core.stage_ownership import CERTIFICATION_OWNERSHIP_PROMPT
-from flayr_core.s1_landing import LANDING_SHADOW_REVIEW_RULES
 
 
 class ArchitectureContractTests(unittest.TestCase):
@@ -310,123 +307,6 @@ class ArchitectureContractTests(unittest.TestCase):
         }
         align_stage_flag_evidence(result)
         self.assertEqual(result["stage_analysis"][0]["creator_evidence_ids"], ["C1", "C2"])
-
-    def test_landing_shadow_is_deterministically_derived(self) -> None:
-        normalized = normalize_landing_shadow(
-            {
-                "immediately_understandable": True,
-                "singular_and_concrete": True,
-                "creates_stay_motivation": True,
-                "effectively_received": True,
-                "stay_motivation_mechanism": "contrast",
-                "landing_shadow_reason": "0-3s 形成清楚反差。",
-            }
-        )
-        self.assertTrue(normalized["landing_shadow_met"])
-        self.assertEqual(normalized["landing_failure_reasons"], [])
-        self.assertEqual(normalized["stay_motivation_mechanism"], "contrast")
-
-    def test_landing_shadow_failure_and_missing_fields_are_not_guessed(self) -> None:
-        failed = normalize_landing_shadow(
-            {
-                "immediately_understandable": True,
-                "singular_and_concrete": False,
-                "creates_stay_motivation": True,
-                "effectively_received": True,
-                "stay_motivation_mechanism": "invented-mechanism",
-            }
-        )
-        self.assertFalse(failed["landing_shadow_met"])
-        self.assertEqual(failed["landing_failure_reasons"], ["singular_and_concrete"])
-        self.assertEqual(failed["stay_motivation_mechanism"], "other")
-
-        incomplete = normalize_landing_shadow(
-            {
-                "immediately_understandable": True,
-                "singular_and_concrete": True,
-                "creates_stay_motivation": True,
-            }
-        )
-        self.assertIsNone(incomplete["landing_shadow_met"])
-
-    def test_landing_shadow_does_not_rewrite_current_landing(self) -> None:
-        hook = normalize_hook_flags(
-            {
-                "exists": True,
-                "type": "B",
-                "dims": {"camera": True, "copy": True, "sound": True, "rhythm": True},
-                "landing_met": True,
-                "landing_conditions": {
-                    "immediately_understandable": True,
-                    "singular_and_concrete": False,
-                    "creates_stay_motivation": True,
-                    "effectively_received": True,
-                },
-            }
-        )
-        self.assertIsNotNone(hook)
-        self.assertTrue(hook["landing_met"])
-        self.assertFalse(hook["landing_shadow_met"])
-
-    def test_landing_shadow_is_required_by_production_gate(self) -> None:
-        hook = normalize_hook_flags(
-            {
-                "exists": True,
-                "type": "A",
-                "dims": {"camera": True, "copy": True, "sound": True, "rhythm": True},
-                "hook_boundary_seconds": 3.0,
-                "hook_boundary_reason": "3 秒后开始回答问题。",
-                "s2_start_signal": "开始回答问题。",
-                "landing_met": True,
-                "landing_reason": "0-3.0s 痛点清楚。",
-                "window_evidence": "0-3.0s 提出漏水问题。",
-                "landing_window_leak": False,
-                "anchors_proposition": True,
-                "landing_conditions": {
-                    "immediately_understandable": True,
-                    "singular_and_concrete": True,
-                    "creates_stay_motivation": True,
-                    "effectively_received": True,
-                },
-                "stay_motivation_mechanism": "pain",
-                "landing_shadow_reason": "0-3.0s 明确提出漏水痛点，画面与口播均清楚。",
-            }
-        )
-        result = {"stage_analysis": [{"stage": "S1 Hook", "creator_hook": hook, "benchmark_hook": hook}]}
-        validate_s1_hook_flags(result, {"s1_hook_flags_required": True})
-
-        missing = json.loads(json.dumps(result, ensure_ascii=False))
-        missing["stage_analysis"][0]["creator_hook"]["landing_conditions"].pop("creates_stay_motivation")
-        with self.assertRaises(SystemExit):
-            validate_s1_hook_flags(missing, {"s1_hook_flags_required": True})
-
-    def test_landing_shadow_window_leak_is_blocked(self) -> None:
-        raw_hook = {
-            "exists": True,
-            "type": "B",
-            "dims": {"camera": True, "copy": True, "sound": True, "rhythm": True},
-            "hook_boundary_seconds": 3.0,
-            "hook_boundary_reason": "3 秒后进入产品介绍。",
-            "s2_start_signal": "开始介绍产品。",
-            "landing_met": True,
-            "landing_reason": "0-3.0s 形成反差。",
-            "window_evidence": "0-3.0s 展示使用前状态。",
-            "landing_window_leak": False,
-            "anchors_proposition": True,
-            "landing_conditions": {
-                "immediately_understandable": True,
-                "singular_and_concrete": True,
-                "creates_stay_motivation": True,
-                "effectively_received": True,
-            },
-            "stay_motivation_mechanism": "contrast",
-            "landing_shadow_reason": "0-6.0s 产品揭晓后才知道结果。",
-        }
-        hook = normalize_hook_flags(raw_hook)
-        self.assertTrue(hook["landing_shadow_window_leak"])
-        result = {"stage_analysis": [{"stage": "S1 Hook", "creator_hook": hook, "benchmark_hook": hook}]}
-        with self.assertRaises(SystemExit):
-            validate_s1_hook_flags(result, {"s1_hook_flags_required": True})
 
     def test_variant_attribution_uses_visual_threshold_and_explicit_comparison(self) -> None:
         understanding = normalize_video_understanding(
@@ -847,7 +727,7 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(s4["creator_s4"], {"effect_visible": True})
         self.assertEqual(merged["improvements"], original["improvements"])
 
-    def test_llm_stream_retries_preserve_attempts_and_accept_only_completed_stream(self) -> None:
+    def test_llm_stream_retries_cleanup_sensitive_artifacts_and_accept_only_completed_stream(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             payload_path = root / "request.json"
@@ -875,10 +755,12 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertIn("--speed-limit", calls[0])
             self.assertIn("--speed-time", calls[0])
             self.assertEqual(calls[0][calls[0].index("--max-time") + 1], "1800")
-            self.assertTrue((root / "response.attempt-1.sse").is_file())
-            self.assertTrue((root / "response.attempt-2.sse").is_file())
             self.assertIn('"finish_reason": "stop"', raw)
-            self.assertIn("[DONE]", (root / "response.sse").read_text(encoding="utf-8"))
+            self.assertTrue(raw_path.is_file())
+            self.assertEqual(
+                sorted(path.name for path in root.iterdir()),
+                ["request.json", "response.json"],
+            )
 
     def test_small_json_request_can_set_a_shorter_transport_deadline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2599,19 +2481,6 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertNotIn("开头的背书/认证类内容按钩子算", comparison_text)
         self.assertNotIn("只归入 S2", repair_text)
         self.assertNotIn("产品名/卖点/认证", review_text)
-
-    def test_landing_shadow_contract_reaches_all_analysis_prompts(self) -> None:
-        comparison = build_llm_comparison_payload("test", "input", {}, {"videos": {}})
-        repair = build_llm_repair_payload("test", "{}", "error", "input")
-        review = build_stage_review_payload(
-            "test",
-            {"videos": {}},
-            {"benchmark": {"evidence_units": []}, "creator": {"evidence_units": []}},
-            {"stage_analysis": [{"stage": "S1 Hook", "creator_time_range": "0s - 3s", "benchmark_time_range": "0s - 3s"}]},
-            ["S1"],
-        )
-        for payload in (comparison, repair, review):
-            self.assertIn(LANDING_SHADOW_REVIEW_RULES, json.dumps(payload, ensure_ascii=False))
 
     def test_multimodal_contract_reaches_all_analysis_prompts(self) -> None:
         comparison = build_llm_comparison_payload("test", "input", {}, {"videos": {}})

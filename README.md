@@ -55,7 +55,10 @@ Phase C：低置信阶段回看（只触发一次）
 Flayr/
 ├── scripts/
 │   ├── flayr.py                  # CLI 主入口
+│   ├── batch_analyze.py          # 批量作业、断点续跑与限并发
 │   ├── dev_test_stage2.py        # 阶段二独立测试工具（复用阶段一产物，调 prompt 用）
+│   ├── evaluate_analysis.py      # 分析结果与人工 GT 对照
+│   ├── verify_analysis_contracts.py # S1-S6 与跨模块契约门
 │   └── flayr_core/               # 核心模块包
 │       ├── video.py whisper.py   # 转写 + 抽帧 + 抽音频
 │       ├── translation.py        # 转写翻译
@@ -84,6 +87,8 @@ Flayr/
 │   ├── analysis-output-schema.json   # 输出契约（字段唯一真相源）
 │   ├── observation-guide.md          # 视频观察指引（看视频的方法）
 │   ├── commercial-judgement-framework.md
+│   ├── brand_propositions.json      # 冻结命题与痛点键
+│   ├── ground-truth-labels.md/.json # 人工 GT 理由版/机器版
 │   ├── market-knowledge-my.md
 │   ├── validation-inputs.json        # 主验证集与留出集的视频输入清单
 │   └── commerce-translation-guidelines.md

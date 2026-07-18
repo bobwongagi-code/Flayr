@@ -25,7 +25,6 @@ from ..multimodal import (
 )
 from ..stage_catalog import stage_tuples
 from ..structure_modules import canonical_module_id, stage1_event_catalog
-from ..s1_landing import LANDING_MOTIVATION_MECHANISMS, LANDING_SHADOW_CONDITIONS
 from .analysis_contract import AnalysisContractError, validate_raw_analysis_envelope
 from .json_codec import escape_unquoted_string_quotes, parse_json_text, remove_trailing_commas
 from .product_profile import normalize_category_profile, normalize_product_profile
@@ -284,28 +283,6 @@ def hook_reason_window_leaks(reason: str, boundary_seconds: float | None, tolera
     return bool(vals and max(vals) > boundary_seconds + tolerance)
 
 
-def normalize_landing_shadow(value: Any) -> dict[str, Any]:
-    """归一 S1 shadow 合同；总判断只由四个子条件确定性派生，不接受模型自报。"""
-    source = value if isinstance(value, dict) else {}
-    conditions = {
-        key: normalize_demo_flag(source.get(key))
-        for key in LANDING_SHADOW_CONDITIONS
-    }
-    values = list(conditions.values())
-    shadow_met = all(value is True for value in values) if all(value is not None for value in values) else None
-    failure_reasons = [key for key, condition in conditions.items() if condition is False]
-    mechanism = str(source.get("stay_motivation_mechanism") or "unknown").strip().lower()
-    if mechanism not in LANDING_MOTIVATION_MECHANISMS:
-        mechanism = "other"
-    return {
-        "landing_conditions": conditions,
-        "landing_shadow_met": shadow_met,
-        "landing_failure_reasons": failure_reasons,
-        "stay_motivation_mechanism": mechanism,
-        "landing_shadow_reason": str(source.get("landing_shadow_reason") or "").strip(),
-    }
-
-
 def normalize_hook_flags(value: Any) -> dict[str, Any] | None:
     """归一单侧 S1 钩子结构化 flag。整体缺失（非 dict）→None，derive 见 None 回退模型执行分（优雅降级）。
     形状：{exists: bool|None, type: A-G|unknown, dims:{camera/copy/sound/rhythm: bool}, anchors_proposition: bool|None}。
@@ -343,16 +320,6 @@ def normalize_hook_flags(value: Any) -> dict[str, Any] | None:
         "anchors_proposition": normalize_demo_flag(value.get("anchors_proposition")),
         "proposition_ids": normalize_proposition_ids(value.get("proposition_ids")),
     }
-    shadow_source = value.get("landing_conditions") if isinstance(value.get("landing_conditions"), dict) else {}
-    shadow_source = {
-        **shadow_source,
-        "stay_motivation_mechanism": value.get("stay_motivation_mechanism"),
-        "landing_shadow_reason": value.get("landing_shadow_reason"),
-    }
-    normalized.update(normalize_landing_shadow(shadow_source))
-    normalized["landing_shadow_window_leak"] = hook_reason_window_leaks(
-        normalized["landing_shadow_reason"], boundary_seconds
-    )
     return normalized
 
 

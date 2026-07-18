@@ -638,30 +638,11 @@ S1 > S4 > S3 > S6 > S2 > S5 排序。
 
 `commercial_priority_summary` 取排序第一项。报告在 S1-S6 之前展示可行动的全局根因；没有根因时不显示空区块。
 
-### 8.6 S1 Landing Shadow 合同
+### 8.6 S1-S6 跨模态综合合同
 
-`landing_met` 在缺少跨模态字段的历史结果中继续服务旧 severity 兼容路径。新主分析启用跨模态综合合同后，
-S1 执行质量由多渠道组合后的 `integrated_effect` 决定，不再让 landing 二元值或四维命中数覆盖强视觉、
-强口播等渠道间的合理补偿。新增的
-`landing_conditions` 是独立 shadow 观察，只回答冷启动 Hook 是否同时满足：
-
-1. `immediately_understandable`：无需品牌、SKU 或达人前史即可立即理解。
-2. `singular_and_concrete`：一个连贯具体焦点；问题→方案、悬念→揭晓、Before→After 等强因果双段算一个焦点，平行卖点罗列不算。
-3. `creates_stay_motivation`：对冷启动受众形成具体利害或可感收益。清楚可见且品类相关的结果、便利或感官收益本身可以成立，不强制再补负面痛点、紧迫感或悬念；仅听懂品类、SKU 差异提问、泛泛称赞、纯操作运动画面或只喊某类人群不算。
-4. `effectively_received`：关键信息经画面、口播、字幕或声音至少一个主要信道清楚可接收，无需细看或脑补。
-
-模型只逐项输出子条件及证据理由；`landing_shadow_met` 由 parse 确定性派生：四项全 true 才为 true，
-任一 false 为 false，字段不完整为 null。模型自报总判断无效，shadow 结果在验收前不得进入 severity、
-商业优先级或报告主结论。
-
-四项定义的代码单一来源是 `scripts/flayr_core/s1_landing.py`；主分析、Phase C、Repair 和独立验证器
-必须引用同一合同。生产 validator 要求四项、机制与逐项理由完整，并阻断引用 Hook 边界后证据的结果。
-
-判断窗口使用 S1→S2 的功能边界，不写死 5 秒或 10 秒。边界依次参考 SRT 语义切换、事实单元的
-S1/S2 功能切换、模型边界，并由 postprocess 检查窗口泄漏；边界之后的产品解释不得反向补足 Hook。
-达人和标杆必须独立判断，双方都弱时相对 gap 可小，但绝对质量问题仍保留供后续商业优先级验收。
-
-### 8.7 S1-S6 跨模态综合合同
+`landing_met` 在缺少跨模态字段的历史结果中继续服务 severity 兼容路径。新主分析启用跨模态综合合同后，
+S1 执行质量由多渠道组合后的 `integrated_effect` 决定，不让 landing 二元值或四维命中数覆盖强视觉、
+强口播等渠道间的合理补偿。
 
 单一来源为 `scripts/flayr_core/multimodal.py`。主分析、Repair 与 Phase C 使用同一合同，分别保留
 `visual`、`speech`、`text`、`sound_rhythm` 四个渠道的影响和证据，再输出：

@@ -52,7 +52,7 @@ FLAG_FIELD_OWNERSHIP: dict[str, dict[str, set[str]]] = {
     "S1": {
         "derive": {"exists", "dims", "landing_met", "anchors_proposition"},
         "cross_stage": {"type", "hook_boundary_seconds", "proposition_ids"},
-        "qa_report": {"hook_boundary_reason", "s2_start_signal", "landing_reason", "window_evidence", "landing_window_leak", "landing_conditions", "landing_shadow_met", "landing_failure_reasons", "stay_motivation_mechanism", "landing_shadow_reason", "landing_shadow_window_leak", "evidence_ids"},
+        "qa_report": {"hook_boundary_reason", "s2_start_signal", "landing_reason", "window_evidence", "landing_window_leak", "evidence_ids"},
     },
     "S2": {
         "derive": {"exists", "merged_with_s3", "handoff_met", "s1_s2_compatible", "computed_s1_s2_compatible", "product_identity_clear", "product_role_clear", "excluded_or_risky_module"},

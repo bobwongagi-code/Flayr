@@ -4,12 +4,9 @@
    触发 pipeline 走 repair payload 重跑 LLM。调用方必须感知这个控制流副作用，
    不要把这些函数和 repair.py 里的"纯数据修补"混用。
 
-注意：健康品类专项的 validate_recommendation_safety / validate_creator_script_language
-不在本模块，它们和 sanitize_* 强耦合（共用同一组健康关键词）所以放在 health_rewrite.py。
-未来如要把所有 validate_* 集中收口，需要先把品类硬编码抽出去（参见 review TODO）。
-
-TODO: validate_stage_ownership 当前含 MY 市场 KKM/kelulusan 硬编码，
-      未来若推广到其他市场应抽到 claims_xx.py 的 validate 区，本模块只保留通用校验。
+健康品类专项的 validate_recommendation_safety / validate_creator_script_language
+与 sanitize_* 共用同一组健康关键词，因此保留在 health_rewrite.py。
+认证阶段归属则统一从 stage_ownership.py 导入，本模块不再维护市场特例。
 """
 
 from __future__ import annotations
@@ -32,7 +29,6 @@ from ..multimodal import (
     MULTIMODAL_IMPACTS,
     MULTIMODAL_RELATIONS,
 )
-from ..s1_landing import LANDING_MOTIVATION_MECHANISMS, LANDING_SHADOW_CONDITIONS
 from ..stage_ownership import CERTIFICATION_OWNER_STAGE, contains_certification, is_certification_owner_stage
 from ..structure_modules import official_module_ids
 from .utils import evidence_overlaps_range
@@ -71,15 +67,6 @@ def _role_claim_references(stage: dict[str, Any], role: str) -> list[str]:
         if key.startswith(role) and isinstance(value, dict):
             append_many(value.get("evidence_ids"))
     return references
-
-
-def _role_report_payload(stage: dict[str, Any], role: str) -> dict[str, Any]:
-    """提取报告可见的某侧阶段主张，用于阶段归属判断。"""
-    return {
-        key: value
-        for key, value in stage.items()
-        if key.startswith(role) and not isinstance(value, dict)
-    }
 
 
 def validate_evidence_alignment(result: dict[str, Any]) -> None:
@@ -414,29 +401,6 @@ def validate_s1_hook_flags(result: dict[str, Any], analysis: dict[str, Any]) -> 
             errors.append(f"S1 {key}.landing_window_leak 必须是 bool")
         if hook.get("anchors_proposition") not in {True, False}:
             errors.append(f"S1 {key}.anchors_proposition 必须是 bool")
-        conditions = hook.get("landing_conditions")
-        if not isinstance(conditions, dict):
-            errors.append(f"S1 {key}.landing_conditions 必须是 object")
-        else:
-            for condition in LANDING_SHADOW_CONDITIONS:
-                if conditions.get(condition) not in {True, False}:
-                    errors.append(f"S1 {key}.landing_conditions.{condition} 必须是 bool")
-        expected_shadow = (
-            all(conditions.get(condition) is True for condition in LANDING_SHADOW_CONDITIONS)
-            if isinstance(conditions, dict)
-            and all(conditions.get(condition) in {True, False} for condition in LANDING_SHADOW_CONDITIONS)
-            else None
-        )
-        if expected_shadow is not None and hook.get("landing_shadow_met") is not expected_shadow:
-            errors.append(f"S1 {key}.landing_shadow_met 必须由四项条件确定性派生")
-        mechanism = str(hook.get("stay_motivation_mechanism") or "").strip().lower()
-        if mechanism not in LANDING_MOTIVATION_MECHANISMS:
-            errors.append(f"S1 {key}.stay_motivation_mechanism 非法")
-        shadow_reason = str(hook.get("landing_shadow_reason") or "").strip()
-        if not shadow_reason:
-            errors.append(f"S1 {key}.landing_shadow_reason 不能为空")
-        if hook.get("landing_shadow_window_leak") is True or hook_reason_window_leaks(shadow_reason, boundary):
-            errors.append(f"S1 {key}.landing_shadow_reason 引用了 Hook 边界后的材料")
     if errors:
         raise SystemExit("S1 hook flag 输出不完整：" + "；".join(errors))
 

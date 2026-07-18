@@ -305,16 +305,6 @@ def _s3_stage(result: dict[str, Any]) -> dict[str, Any] | None:
     return stage
 
 
-def _collect_s4_frames(
-    role: str,
-    s4: dict[str, Any],
-    result: dict[str, Any],
-    analysis: dict[str, Any],
-    limit: int,
-) -> list[dict[str, str]]:
-    return _collect_stage_frames(role, s4, result, analysis, "s4", limit)
-
-
 def _collect_stage_video(
     role: str,
     stage: dict[str, Any],

@@ -40,62 +40,6 @@ def select_role_visual_inputs(info: dict[str, Any], role: str, image_limit: int)
     return selected[:image_limit]
 
 
-def select_llm_visual_inputs(analysis: dict[str, Any], image_limit: int) -> list[dict[str, str]]:
-    """跨视频选关键帧（同时含 benchmark 和 creator）。"""
-    if image_limit <= 0:
-        return []
-
-    videos = analysis.get("videos", {})
-    roles = [role for role in ("benchmark", "creator") if role in videos]
-    if not roles:
-        return []
-
-    per_role_limit = max(1, image_limit // len(roles))
-    selected: list[dict[str, str]] = []
-    for role in roles:
-        entries = get_llm_visual_candidates(videos[role], per_role_limit)
-        for entry in entries[:per_role_limit]:
-            frame = Path(str(entry.get("path", "")))
-            if not frame.exists():
-                continue
-            timestamp = format_seconds(entry.get("timestamp_seconds")) if entry.get("timestamp_seconds") is not None else ""
-            marker = f" @ {timestamp}" if timestamp else ""
-            selected.append(
-                {
-                    "role": role,
-                    "path": str(frame),
-                    "label": f"{role} {entry.get('stage') or entry.get('label', 'frame')}{marker} {frame.name}",
-                    "data_url": image_to_data_url(frame),
-                }
-            )
-
-    if len(selected) < image_limit:
-        used_paths = {item["path"] for item in selected}
-        for role in roles:
-            entries = get_llm_visual_candidates(videos[role], image_limit)
-            for entry in entries:
-                if len(selected) >= image_limit:
-                    break
-                frame = Path(str(entry.get("path", "")))
-                if not frame.exists():
-                    continue
-                if str(frame) in used_paths:
-                    continue
-                timestamp = format_seconds(entry.get("timestamp_seconds")) if entry.get("timestamp_seconds") is not None else ""
-                marker = f" @ {timestamp}" if timestamp else ""
-                selected.append(
-                    {
-                        "role": role,
-                        "path": str(frame),
-                        "label": f"{role} {entry.get('stage') or entry.get('label', 'frame')}{marker} {frame.name}",
-                        "data_url": image_to_data_url(frame),
-                    }
-                )
-                used_paths.add(str(frame))
-
-    return selected[:image_limit]
-
-
 def get_llm_visual_candidates(info: dict[str, Any], limit: int) -> list[dict[str, Any]]:
     """候选视觉输入：先给 Hook/CTA timeline view，再补原始帧。"""
     if limit <= 0:

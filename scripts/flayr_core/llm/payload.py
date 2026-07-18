@@ -16,11 +16,6 @@ from ..proposition_contract import build_product_proposition_contract
 from ..market import render_market_knowledge
 from ..multimodal import multimodal_output_example, render_multimodal_prompt_contract
 from ..shot_track import render_shot_track_markdown
-from ..s1_landing import (
-    LANDING_SHADOW_CONDITION_DESCRIPTIONS,
-    LANDING_SHADOW_PROMPT_CONTRACT,
-    LANDING_SHADOW_REVIEW_RULES,
-)
 from ..speech_mode import speech_mode_prompt
 from ..structure_modules import stage1_event_catalog
 from ..stage_ownership import (
@@ -921,72 +916,6 @@ def build_s1_boundary_hint_block(analysis: dict[str, Any] | None, facts: dict[st
     return "\n".join(lines) if wrote_any else ""
 
 
-def build_s1_landing_shadow_payload(
-    model: str,
-    analysis: dict[str, Any],
-    facts: dict[str, Any],
-    *,
-    observation_window_seconds: float = 12.0,
-) -> dict[str, Any]:
-    """构造只验证 S1 Landing shadow 的聚焦多模态请求，不判断 S2-S6 或 severity。"""
-    product = analysis.get("product") if isinstance(analysis.get("product"), dict) else {}
-    foundation = analysis.get("product_foundation") if isinstance(analysis.get("product_foundation"), dict) else {}
-    early_facts: dict[str, list[dict[str, Any]]] = {}
-    for role in ("creator", "benchmark"):
-        role_facts = facts.get(role) if isinstance(facts.get(role), dict) else {}
-        units: list[dict[str, Any]] = []
-        for unit in role_facts.get("evidence_units") or []:
-            if not isinstance(unit, dict):
-                continue
-            start, _ = parse_time_range_seconds(str(unit.get("time_range") or ""), None)
-            if start < observation_window_seconds:
-                units.append(unit)
-        early_facts[role] = units
-
-    prompt = "\n\n".join(
-        [
-            "# S1 Hook Landing Shadow 独立验证",
-            "你只判断 creator 与 benchmark 各自的开头是否能让冷启动用户停留。不得比较双方，不得输出 severity，不得分析 S2-S6。",
-            "先按功能识别真实 Hook 边界：S1 是抢注意力与制造停留理由；开始回答 Hook、揭晓解决方案、解释产品身份/卖点，或产品成为解决方案主角时进入 S2。边界不是固定 5 秒或 10 秒。",
-            "只允许使用 0 到 hook_boundary_seconds 内证据判四项条件；边界后的产品解释不得补足 Hook。information 只作索引，原始口播/字幕/画面/音频优先。",
-            "四项都是必要条件。逐项输出 bool，不得输出 landing_shadow_met；代码会确定性派生总判断。",
-            "## 四项合同\n" + json.dumps(LANDING_SHADOW_CONDITION_DESCRIPTIONS, ensure_ascii=False, indent=2),
-            LANDING_SHADOW_REVIEW_RULES,
-            "## 停留机制 v1\npain | desire | result | contrast | curiosity | identity | scene | other | none | unknown。确有新机制可填 other，不得硬套。",
-            "## 产品与品类背景（只帮助理解品类，不得假定冷启动用户已知）\n"
-            + json.dumps({"product": product, "foundation": foundation}, ensure_ascii=False, indent=2),
-            build_s1_boundary_hint_block(analysis, facts),
-            "## 0-12 秒已有事实索引\n" + json.dumps(early_facts, ensure_ascii=False, indent=2),
-            "## 严格 JSON 输出\n"
-            '{"creator":{"hook_boundary_seconds":number,"hook_boundary_reason":"string","s2_start_signal":"string",'
-            '"landing_conditions":{"immediately_understandable":bool,"singular_and_concrete":bool,'
-            '"creates_stay_motivation":bool,"effectively_received":bool},'
-            '"stay_motivation_mechanism":"enum","landing_shadow_reason":"逐项引用边界内时间戳证据"},'
-            '"benchmark":{同结构}}',
-        ]
-    )
-    payload = build_llm_payload(model, prompt, [])
-    payload["temperature"] = 0.0
-    payload["max_tokens"] = 3000
-    sensory = build_evidence_sensory_inputs(
-        analysis,
-        facts,
-        frames_per_unit=2,
-        window_end_seconds=observation_window_seconds,
-    )
-    if sensory:
-        payload["messages"][1]["content"] = [
-            {"type": "text", "text": prompt},
-            {"type": "text", "text": "以下是两侧开头的画面与连续切片音频，仅用于上述 S1 判断。"},
-            *sensory,
-        ]
-    payload["messages"][0]["content"] = (
-        "你是带货短视频 S1 Hook 的独立审计器。只输出严格 JSON；两侧独立判断；"
-        "不得输出相对优劣、severity、建议或 S2-S6 结论。"
-    )
-    return payload
-
-
 def infer_s1_boundary_candidate(
     role: str,
     segments: list[dict[str, Any]],
@@ -1204,8 +1133,7 @@ def build_llm_comparison_payload(
         '泛泛“很好用/很特别”不算具体未解问题。三件缺任一即 false——'
         '不是没 hook 元素，是 hook 没闭环。【铁律：严禁因为后续 S2/S3 产品介绍补足了逻辑就把 S1 landing 判 true，'
         '只看 0 到 hook_boundary_seconds 本身闭没闭环、不跟后段走】）, '
-        + LANDING_SHADOW_PROMPT_CONTRACT
-        + '"landing_reason": "一句话说清 landing 为何 true/false，必须只引用 0 到 hook_boundary_seconds 内的具体证据（时间戳+原话/画面），'
+        '"landing_reason": "一句话说清 landing 为何 true/false，必须只引用 0 到 hook_boundary_seconds 内的具体证据（时间戳+原话/画面），'
         '如 0-6.8s 仅口播\'结果超预期\'但没说超预期的结果是什么→承诺不明确→false；严禁引用 hook_boundary_seconds 之后的产品/卖点/认证来补足", '
         '"window_evidence": "0 到 hook_boundary_seconds 内实际出现了什么（带时间戳），作为 type 判断依据，'
         '如 0-4.5s 近脸/指脸/拿产品但未建立使用前后强对比", '
@@ -1216,12 +1144,11 @@ def build_llm_comparison_payload(
     # 强制字段要求（放在末尾"输出要求"区，模型严格跟这块走；前面的尺子块只给结构定义）
     hook_field_req = (
         "S1 强制：stage_analysis 第 1 项（S1 Hook）必须再含 creator_hook 与 benchmark_hook 两个对象"
-        "（结构见上方：exists/type/dims{camera,copy,sound,rhythm}/hook_boundary_seconds/hook_boundary_reason/s2_start_signal/landing_met/landing_conditions{immediately_understandable,singular_and_concrete,creates_stay_motivation,effectively_received}/stay_motivation_mechanism/landing_shadow_reason/landing_reason/window_evidence/landing_window_leak/anchors_proposition/proposition_ids）。"
+        "（结构见上方：exists/type/dims{camera,copy,sound,rhythm}/hook_boundary_seconds/hook_boundary_reason/s2_start_signal/landing_met/landing_reason/window_evidence/landing_window_leak/anchors_proposition/proposition_ids）。"
         "type 为描述字段（按最早窗口主导机制判、不进 severity）；landing_met 是 type 无关的三件套二元判（进 severity）；"
         "exists 只判是否做了留人尝试，不得把“弱 Hook、未打穿”误写成无 Hook；具体用户问题/收益/结果承诺即使与产品介绍同句出现，仍可 exists=true、landing_met=false。"
         "hook_boundary_seconds 必须按 structure_library 的 S1 留人机制→S2 产品引出/解决方案承接功能切换来判，不得写死固定秒数；"
         "S2-A 承接式引出可早于产品实物或产品名出现，不能等产品画面才切 S2；缺失视为违规输出。S2-S6 不含这两个字段。"
-        + LANDING_SHADOW_REVIEW_RULES
     )
     s2_flag_block = (
         "## S2 产品引出契约 flag（只判 S1→S2 衔接，不做四维打分）\n"
@@ -1641,14 +1568,6 @@ def build_stage_review_payload(
             "hook_boundary_reason": "S1 是痛点/反差/悬念留人，S2 从解决方案承接/产品引出/产品揭晓开始",
             "s2_start_signal": "开始回答 Hook 或把某个东西作为解决方案承接，即使产品尚未出镜",
             "landing_met": True,
-            "landing_conditions": {
-                "immediately_understandable": True,
-                "singular_and_concrete": True,
-                "creates_stay_motivation": True,
-                "effectively_received": True,
-            },
-            "stay_motivation_mechanism": "pain|desire|result|contrast|curiosity|identity|scene|other|none|unknown",
-            "landing_shadow_reason": "逐项引用 Hook 边界内证据解释四个 shadow 条件，不输出 shadow 总布尔值",
             "landing_reason": "只引用 0 到 hook_boundary_seconds 内的时间戳+原话/画面，说明对象/张力/收益方向（承诺、证据或具体未解问题）是否齐全",
             "window_evidence": "0.0s 到 hook_boundary_seconds 内实际出现的画面/口播/字幕",
             "landing_window_leak": False,
@@ -1666,8 +1585,6 @@ def build_stage_review_payload(
             "landing_met 只能按 0 到 hook_boundary_seconds 内的三件套判：对象明确 + 张力明确 + 可感知承诺/证据或具体未解问题。"
             "痛点提问的答案可以在 S2 承接，不要求 S1 先说出产品；泛泛好评不算具体未解问题。"
             "缺一即 false，禁止用后续 S2/S3 补足；若 landing_reason 引用边界后内容，landing_window_leak=true 且 landing_met=false。"
-            "还必须独立重判 landing_conditions 四项、stay_motivation_mechanism 和 landing_shadow_reason；"
-            + LANDING_SHADOW_REVIEW_RULES
         )
     if "S2" in target_codes:
         stage_update_example["stage"] = "S2 产品引出"
@@ -2150,10 +2067,9 @@ def build_llm_repair_payload(
                     + "一条事实只归属一个主要阶段；口播提及但画面不可见时标记 voice_only。"
                     + render_multimodal_prompt_contract()
                     + "每个阶段必须补齐 creator_multimodal 与 benchmark_multimodal；只能引用该侧该阶段已有 evidence_ids，不得为补多模态字段新增事实。"
-                    "S1 Hook 必须补齐 creator_hook 与 benchmark_hook 两个对象，字段为 exists(bool)、type(A-G 或 unknown)、dims{camera,copy,sound,rhythm}(bool)、hook_boundary_seconds(number)、hook_boundary_reason(非空)、s2_start_signal(非空)、landing_met(bool)、landing_conditions{immediately_understandable,singular_and_concrete,creates_stay_motivation,effectively_received}(bool)、stay_motivation_mechanism、landing_shadow_reason(非空)、landing_reason(非空)、window_evidence(非空)、landing_window_leak(bool)、anchors_proposition(bool)、proposition_ids(数组)。exists 只判是否有具体面向用户的留人尝试；弱 Hook 可以 exists=true、landing_met=false，不能与完全无 Hook 混淆。"
+                    "S1 Hook 必须补齐 creator_hook 与 benchmark_hook 两个对象，字段为 exists(bool)、type(A-G 或 unknown)、dims{camera,copy,sound,rhythm}(bool)、hook_boundary_seconds(number)、hook_boundary_reason(非空)、s2_start_signal(非空)、landing_met(bool)、landing_reason(非空)、window_evidence(非空)、landing_window_leak(bool)、anchors_proposition(bool)、proposition_ids(数组)。exists 只判是否有具体面向用户的留人尝试；弱 Hook 可以 exists=true、landing_met=false，不能与完全无 Hook 混淆。"
                     "hook_boundary_seconds 按 structure_library_full.md 的 S1 留人机制→S2 产品引出/解决方案承接功能切换判断，不得写死固定秒数；S2-A 承接式引出可早于产品实物或产品名出现，不能等产品画面才切 S2。"
                     "landing_met 按 type 无关三件套判断：0 到 hook_boundary_seconds 内对象明确、张力明确、可感知承诺/证据或具体未解问题，缺一即 false；痛点提问的答案可以在 S2 承接，不要求 S1 先说出产品；不得用后续 S2/S3 产品介绍补足 S1 landing。若引用边界后材料，landing_window_leak=true 且 landing_met=false。"
-                    + LANDING_SHADOW_REVIEW_RULES
                     + "S2 产品引出必须补齐 creator_s2 与 benchmark_s2 两个对象，字段为 exists(bool)、merged_with_s3(bool)、module_type(A-D或unknown)、handoff_met(bool)、s1_s2_compatible(bool)、product_identity_clear(bool)、product_role_clear(bool)、excluded_or_risky_module(bool)、start_seconds(number)、end_seconds(number)、handoff_reason(非空)、evidence_ids(非空数组)、proposition_ids(数组)。"
                     "S3 使用过程必须补齐 creator_s3 与 benchmark_s3 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、usage_process_visible(bool)、result_only_without_process(bool)、mouth_only_or_static(bool)、real_usage_met(bool)、core_selling_point_visible(bool)、process_framing_met(bool)、action_proof_met(bool)、action_target_contact_met(bool)、action_application_change_visible(bool)、critical_action_continuity_met(bool)、demonstrated_selling_points(数组)、missing_selling_points(数组)、scene_mode(single_scene/multi_scene/multi_person/hybrid/unknown)、usage_context_fit(bool)、continuity_met(bool)、richness_met(bool)、single_scene_continuity_met(bool)、single_scene_variation_met(bool)、multi_scene_logic_met(bool)、multi_scene_transition_met(bool)、multi_scene_role_adaptation_met(bool)、role_design_met(bool)、role_interaction_met(bool)、distinct_personas_met(bool)、steps_clear_met(bool)、pov_immersive_met(bool)、presentation_overlays(数组)、fake_or_staged(bool)、start_seconds(number)、end_seconds(number)、usage_reason(非空)、evidence_ids(非空数组)、proposition_ids(数组)。"
                     "S4 效果呈现必须补齐 creator_s4 与 benchmark_s4 两个对象，字段为 effect_type(before_after/split_screen/person_vs_person/product_vs_alt/quantified_test/process_visualization/aesthetic_display/none)、effect_visible(bool)、effect_salience(none/subtle/clear/strong)、effect_proposition_matched(bool)、comparison_control_met(bool)、closeup_or_focus_met(bool)、visual_difference_observed(bool)、module_constraints_met(bool)、effect_maximized(bool)、requires_close_inspection(bool)、effect_attribution_supported(bool)、result_only_without_process(bool)、process_linked_effect(bool)、tamper_or_cut_risk(bool)、effect_reason(非空)、evidence_ids(非空数组)、proposition_ids(数组)。"

@@ -252,27 +252,7 @@ python3 scripts/dev_test_stage2.py runs/<run-dir> --dry
 - 阻断/警告：`scripts/flayr_core/postprocess/validate.py::validate_stage_time_coherence`
 - 阻断/警告：`scripts/flayr_core/postprocess/validate.py::validate_product_visibility`
 
-### Q09A S1 Landing shadow 必须完整且只使用 Hook 窗口证据
-
-规则：
-
-- 达人和标杆必须分别输出 `immediately_understandable`、`singular_and_concrete`、`creates_stay_motivation`、`effectively_received` 四项布尔观察。
-- `landing_shadow_met` 只能由代码派生：四项全 true 才为 true；模型不得自报或从旧 `landing_met` 反填。
-- 强因果双段可视为一个焦点；平行卖点/SKU 罗列不算单一焦点。
-- 停留动力必须给冷启动受众具体利害或可感收益。清楚可见且品类相关的结果、便利或感官收益本身可以成立，不强制再补负面痛点、紧迫感或悬念；仅 SKU 差异提问、泛泛称赞、纯操作运动画面或只喊某类人群不算。
-- `landing_shadow_reason` 只能引用 0 到 `hook_boundary_seconds` 内的时间戳证据；引用后段材料必须触发 Repair。
-- shadow 验收通过前不进入 severity、商业优先级或报告主结论。
-
-处理：已阻断 + 独立 shadow 验证。
-
-实现位置：
-
-- 单一合同：`scripts/flayr_core/s1_landing.py`
-- 归一与泄漏探针：`scripts/flayr_core/llm/parse.py::normalize_hook_flags`
-- 生产阻断：`scripts/flayr_core/postprocess/validate.py::validate_s1_hook_flags`
-- 跨品验证：`scripts/evaluate_s1_landing_shadow.py`
-
-### Q09B S1-S6 必须做跨模态综合判断，不能按单一信息维度定结论
+### Q09A S1-S6 必须做跨模态综合判断，不能按单一信息维度定结论
 
 规则：
 

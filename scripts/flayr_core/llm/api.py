@@ -83,17 +83,29 @@ def call_llm_api(
         stream_options = {}
     stream_options["include_usage"] = True
     payload["stream_options"] = stream_options
-    req_path = raw_path.with_name(raw_path.stem + ".stream_req.json")
-    write_text(req_path, json.dumps(payload, ensure_ascii=False))
-    sse_path = raw_path.with_name(raw_path.stem + ".sse")
-    # API key 不进 curl argv（否则 ps/进程列表对本机任意进程可见）：写入 0600 临时文件、
-    # 用 curl `-H @file` 读，finally 删除。比内联 -H "Bearer {key}" 安全。
-    auth_path = raw_path.with_name(raw_path.stem + ".curlauth")
-    auth_path.write_text(f"Authorization: Bearer {api_key}\n", encoding="utf-8")
-    try:
-        os.chmod(auth_path, 0o600)
-    except OSError:
-        pass
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    # 请求体可能内嵌完整视频/音频，认证头也包含密钥。两者只用 0600 临时文件传给 curl，
+    # 调用结束立即清理；运行目录只保留正式响应，避免重复载荷长期占盘或扩大敏感面。
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix=f".{raw_path.stem}.stream_req.",
+        suffix=".json",
+        dir=raw_path.parent,
+        delete=False,
+    ) as req_file:
+        json.dump(payload, req_file, ensure_ascii=False)
+        req_path = Path(req_file.name)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix=f".{raw_path.stem}.auth.",
+        suffix=".txt",
+        dir=raw_path.parent,
+        delete=False,
+    ) as auth_file:
+        auth_file.write(f"Authorization: Bearer {api_key}\n")
+        auth_path = Path(auth_file.name)
 
     max_time_seconds = max(1, int(max_time_seconds))
     low_speed_time_seconds = max(1, int(low_speed_time_seconds))
@@ -122,13 +134,19 @@ def call_llm_api(
     ]
 
     last_error = ""
+    attempt_paths: list[Path] = []
     try:
         for attempt in range(retries + 1):
-            attempt_sse_path = sse_path.with_name(f"{sse_path.stem}.attempt-{attempt + 1}.sse")
+            with tempfile.NamedTemporaryFile(
+                prefix=f".{raw_path.stem}.attempt-{attempt + 1}.",
+                suffix=".sse",
+                dir=raw_path.parent,
+                delete=False,
+            ) as attempt_file:
+                attempt_sse_path = Path(attempt_file.name)
+            attempt_paths.append(attempt_sse_path)
             completed = run_command([*curl_command, "-o", str(attempt_sse_path)])
             if completed.returncode != 0:
-                if attempt_sse_path.is_file():
-                    shutil.copyfile(attempt_sse_path, sse_path)
                 body = attempt_sse_path.read_text(encoding="utf-8", errors="replace").strip()[:400] if attempt_sse_path.is_file() else ""
                 last_error = completed.stderr.strip() or completed.stdout.strip() or "curl failed"
                 if body:
@@ -139,7 +157,6 @@ def call_llm_api(
             else:
                 content, usage, complete, finish_reason = parse_sse_stream(attempt_sse_path)
                 if complete and content and finish_reason != "length":
-                    shutil.copyfile(attempt_sse_path, sse_path)
                     response: dict[str, Any] = {
                         "choices": [{"message": {"content": content}, "finish_reason": finish_reason or "stop"}]
                     }
@@ -159,14 +176,15 @@ def call_llm_api(
                 else:
                     # 流被中途截断（无 [DONE]/finish_reason）→ 传输问题，可重试。
                     last_error = "流式响应不完整（连接在 [DONE] 前中断）" if content else "流式响应无内容"
-                    if attempt_sse_path.is_file():
-                        shutil.copyfile(attempt_sse_path, sse_path)
             if attempt >= retries:
                 break
             time.sleep(5 * (attempt + 1))
         raise SystemExit(f"LLM streaming request failed: {last_error}")
     finally:
         auth_path.unlink(missing_ok=True)
+        req_path.unlink(missing_ok=True)
+        for attempt_path in attempt_paths:
+            attempt_path.unlink(missing_ok=True)
 
 
 def increase_output_budget(payload: dict[str, Any]) -> tuple[int, int]:

@@ -250,19 +250,6 @@
         "hook_boundary_reason": "仅 S1 必填：一句话说明 S1 主导信息是什么、为什么此处切到 S2。",
         "s2_start_signal": "仅 S1 必填：边界后的第一个 S2 信号，如开始回答 Hook、解决方案承接、产品名、产品揭晓或产品成为画面主角；第三方认证按 S5 信任放大归因。",
         "landing_met": "仅 S1 必填：0 到 hook_boundary_seconds 内对象明确 + 张力明确 + 承诺或证据明确，三件齐才 true。",
-        "landing_conditions": {
-          "immediately_understandable": "shadow：冷启动用户无需品牌、SKU 或达人前史即可立即理解，true|false|null。",
-          "singular_and_concrete": "shadow：开头只有一个连贯具体焦点；强因果双段允许，平行卖点罗列不允许，true|false|null。",
-          "creates_stay_motivation": "shadow：对冷启动受众形成具体利害或可感收益；清楚可见的品类相关结果、便利或感官收益可以成立，纯动作不算，true|false|null。",
-          "effectively_received": "shadow：关键信息经至少一个主要信道清楚可接收，无需细看或脑补，true|false|null。"
-        },
-        "landing_shadow_met": "代码确定性派生：四项全 true 才为 true，任一 false 为 false，字段不完整为 null；验证期不进入 severity。",
-        "landing_failure_reasons": [
-          "代码根据 false 子条件生成；不接受模型自报。"
-        ],
-        "stay_motivation_mechanism": "pain | desire | result | contrast | curiosity | identity | scene | other | none | unknown。",
-        "landing_shadow_reason": "仅引用 Hook 边界内证据，逐项解释四个 shadow 条件。",
-        "landing_shadow_window_leak": "代码确定性派生：landing_shadow_reason 是否引用 Hook 边界后的时间戳；true 时生产门禁阻断并触发 Repair。",
         "landing_reason": "仅 S1 必填：一句话只引用 0 到 hook_boundary_seconds 内证据，说明 landing_met 为何 true/false。",
         "window_evidence": "仅 S1 必填：0 到 hook_boundary_seconds 内实际出现了什么，带时间戳。",
         "landing_window_leak": "仅 S1 必填：landing 判断是否借用了 hook_boundary_seconds 之后的 S2/S3 材料，true|false；若 true，landing_met 应为 false。",
@@ -284,19 +271,6 @@
         "hook_boundary_reason": "仅 S1 必填：一句话说明 S1 主导信息是什么、为什么此处切到 S2。",
         "s2_start_signal": "仅 S1 必填：边界后的第一个 S2 信号，如开始回答 Hook、解决方案承接、产品名、产品揭晓或产品成为画面主角；第三方认证按 S5 信任放大归因。",
         "landing_met": "仅 S1 必填：0 到 hook_boundary_seconds 内对象明确 + 张力明确 + 承诺或证据明确，三件齐才 true。",
-        "landing_conditions": {
-          "immediately_understandable": "shadow：冷启动用户无需品牌、SKU 或达人前史即可立即理解，true|false|null。",
-          "singular_and_concrete": "shadow：开头只有一个连贯具体焦点；强因果双段允许，平行卖点罗列不允许，true|false|null。",
-          "creates_stay_motivation": "shadow：对冷启动受众形成具体利害或可感收益；清楚可见的品类相关结果、便利或感官收益可以成立，纯动作不算，true|false|null。",
-          "effectively_received": "shadow：关键信息经至少一个主要信道清楚可接收，无需细看或脑补，true|false|null。"
-        },
-        "landing_shadow_met": "代码确定性派生：四项全 true 才为 true，任一 false 为 false，字段不完整为 null；验证期不进入 severity。",
-        "landing_failure_reasons": [
-          "代码根据 false 子条件生成；不接受模型自报。"
-        ],
-        "stay_motivation_mechanism": "pain | desire | result | contrast | curiosity | identity | scene | other | none | unknown。",
-        "landing_shadow_reason": "仅引用 Hook 边界内证据，逐项解释四个 shadow 条件。",
-        "landing_shadow_window_leak": "代码确定性派生：landing_shadow_reason 是否引用 Hook 边界后的时间戳；true 时生产门禁阻断并触发 Repair。",
         "landing_reason": "仅 S1 必填：一句话只引用 0 到 hook_boundary_seconds 内证据，说明 landing_met 为何 true/false。",
         "window_evidence": "仅 S1 必填：0 到 hook_boundary_seconds 内实际出现了什么，带时间戳。",
         "landing_window_leak": "仅 S1 必填：landing 判断是否借用了 hook_boundary_seconds 之后的 S2/S3 材料，true|false；若 true，landing_met 应为 false。",

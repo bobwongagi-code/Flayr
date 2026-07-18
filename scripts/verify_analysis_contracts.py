@@ -1049,8 +1049,8 @@ _s4_result_weak = _derive_one(
     {"S4": 1.4},
     [],
 )
-check("S4 只有结果且无因果桥→效果展示封顶弱",
-      _s4_result_weak.get("severity") in {"medium", "large"} and _s4_result_weak.get("E") == 1.5)
+check("S4 只有结果且无因果桥、标杆强证明→差距大",
+      _s4_result_weak.get("severity") == "large" and _s4_result_weak.get("E") == 2)
 
 _s4_result_bound = _derive_one(
     "S4",
@@ -1063,8 +1063,8 @@ _s4_result_bound = _derive_one(
     {"S4": 1.4},
     [],
 )
-check("S4 只有结果但产品结果强绑定→最多中等可信",
-      _s4_result_bound.get("severity") in {"small", "medium"} and _s4_result_bound.get("E") == 1)
+check("S4 产品结果强绑定不能替代使用因果桥",
+      _s4_result_bound.get("severity") == "large" and _s4_result_bound.get("E") == 2)
 
 _s4_strong_same = _derive_one(
     "S4",
@@ -1993,17 +1993,6 @@ _valid_hook = {
     "window_evidence": "0-3s 口播低期待到高结果",
     "landing_window_leak": False,
     "anchors_proposition": True,
-    "landing_conditions": {
-        "immediately_understandable": True,
-        "singular_and_concrete": True,
-        "creates_stay_motivation": False,
-        "effectively_received": True,
-    },
-    "landing_shadow_met": False,
-    "landing_failure_reasons": ["creates_stay_motivation"],
-    "stay_motivation_mechanism": "contrast",
-    "landing_shadow_reason": "0-3s 反差可理解且可接收，但没有具体收益或利害。",
-    "landing_shadow_window_leak": False,
 }
 try:
     validate_s1_hook_flags(
