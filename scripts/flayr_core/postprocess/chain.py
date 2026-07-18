@@ -39,6 +39,8 @@ from .repair import (
     fill_missing_evidence_references,
     ground_stage_visual_evidence,
     materialize_spoken_stage_evidence,
+    reconcile_s3_s4_evidence_coherence,
+    reconcile_s5_trust_sources,
     reconcile_unsupported_cta,
     repair_s1_hook_boundaries,
     stabilize_improvement_priorities,
@@ -73,9 +75,10 @@ def stamp_product_foundation(normalized: dict[str, Any], analysis: dict[str, Any
 
 def stamp_comparison_eligibility(normalized: dict[str, Any], analysis: dict[str, Any] | None) -> None:
     """资格层是 facts 的独立判定，不允许主对比模型漏填或改写。"""
-    eligibility = (analysis or {}).get("comparison_eligibility")
-    if isinstance(eligibility, dict):
-        normalized["comparison_eligibility"] = dict(eligibility)
+    contract = (analysis or {}).get("comparison_contract") or (analysis or {}).get("comparison_eligibility")
+    if isinstance(contract, dict):
+        normalized["comparison_contract"] = dict(contract)
+        normalized["comparison_eligibility"] = dict(contract)
 
 
 def sanitize_promise_chain_scope(normalized: dict[str, Any]) -> None:
@@ -84,7 +87,8 @@ def sanitize_promise_chain_scope(normalized: dict[str, Any]) -> None:
     if not isinstance(chain, dict):
         return
     reason = str(chain.get("break_reason") or "")
-    if not any(token in reason for token in ("S5", "S6", "CTA", "促单", "下单", "购买指令", "转化链条")):
+    # “转化链条”可泛指 S1-S4 的承诺到效果验证，不能单独视为 CTA 污染。
+    if not any(token in reason for token in ("S5", "S6", "CTA", "促单", "下单", "购买指令")):
         return
     if str(chain.get("broken_at") or "").strip() not in {"none", "unknown", ""}:
         return
@@ -96,7 +100,7 @@ def sanitize_promise_chain_scope(normalized: dict[str, Any]) -> None:
 def apply_postprocess_chain(normalized: dict[str, Any], analysis: dict[str, Any]) -> None:
     """两个 caller 共享的中段流水线。每一步对应一个独立职责模块。"""
     stamp_product_foundation(normalized, analysis)                           # foundation  Step-0 品地基权威覆盖（须在 derive 前）
-    stamp_comparison_eligibility(normalized, analysis)                       # scope       双视频产品级比较资格（facts 独立判定）
+    stamp_comparison_eligibility(normalized, analysis)                       # contract    商品关系 + 阶段级比较资格（facts 独立判定）
     sanitize_promise_chain_scope(normalized)                                  # repair      S1-S4 承诺链不接收 S6/CTA 断点
     validate_transcript_attribution(normalized, analysis)                    # validate    跨视频串证据校验
     align_clear_commerce_evidence(normalized)                                # repair      关键词归位 benchmark 事实
@@ -111,11 +115,15 @@ def apply_postprocess_chain(normalized: dict[str, Any], analysis: dict[str, Any]
     materialize_spoken_stage_evidence(normalized)                            # repair      有口播无时段证据时补 stage 占位
     align_stage_flag_evidence(normalized)                                     # repair      stage/flag 间先恢复同阶段真实引用
     fill_missing_evidence_references(normalized)                             # repair      引用仍缺失时才补占位或就近匹配
+    reconcile_s3_s4_evidence_coherence(normalized)                           # repair      S3 真实作用与 S4 因果桥硬一致性
     derive_product_visibility(normalized, analysis)                          # repair      达人产品出镜标记确定性累加 product_visibility
     repair_s1_hook_boundaries(normalized, analysis)                           # repair      S1/S2 边界按 SRT/facts 候选收敛，防 Hook 吃掉产品引出
+    reconcile_s5_trust_sources(                                                # repair      S5 只接受 Stage1 同类型可核验来源
+        normalized, analysis.get("s5_source_signals_required") is True
+    )
     materialize_cross_stage_inputs(normalized, analysis)                       # proposition 品命题矩阵 + S1→S2/S4→S6 跨阶段输入
     stabilize_stage_severity(normalized)                                      # repair      severity 阶段归属漂移校准
     derive_severity_from_facts(normalized, analysis)                          # derive      4d 执行分+权重表确定性推导（成功则覆盖，缺事实保留上游结果；含晃动封顶）
-    apply_comparison_eligibility(normalized)                                  # scope       跨品 S2-S5 不生成产品级差距
+    apply_comparison_eligibility(normalized)                                  # contract    按阶段资格限制差距与建议
     materialize_quality_audits(normalized, analysis)                           # proposition 绝对质量层 + S5/S6 命题审计（不覆盖 gap severity）
     stabilize_improvement_priorities(normalized)                              # repair      Top 改进跟随最终商业判断

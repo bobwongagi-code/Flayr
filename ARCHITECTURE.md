@@ -571,3 +571,129 @@ flayr.py
 5. 阶段目录已收口到 `stage_catalog.py`；真实阶段边界仍由模型按功能识别，目录中的时间仅用于预处理和报告占位回退。后续新增阶段或改回退窗口只能修改该目录。
 6. `postprocess/claims_my.py` 和 `health_rewrite.py` 是市场/品类硬编码的妥协。未来扩品类/扩市场应新建平级文件（`claims_xx.py` / `xx_rewrite.py`），不要往现有文件塞；积累到 3-4 个后考虑抽象成 `references/category-policies/*.yaml` 配置层。
 7. `validate_stage_ownership` 与 `validate_evidence_alignment` 内含 MY 市场 KKM 硬编码，未来抽到 `claims_my.py` 的 validate 区，让 `validate.py` 保持纯通用校验。
+
+---
+
+## 8. 视频级商业门控与商业优先级规范
+
+视频级商业门控位于 S1-S6 之外，只识别会同时污染多个阶段的根本问题。它不得改写
+`stage_analysis[].severity`，也不得删除阶段原判断；只能通过因果字段解释阶段问题受何种根因影响。
+
+### 8.1 三个固定门控
+
+1. `selling_point_route`：主卖点是否适合短视频证明，且是否真的给出对应证明信号。
+2. `focus_coherence`：单品多 SKU/变体是否保持单一焦点，或形成清楚的比较与选择逻辑。
+3. `attention_cleanliness`：是否存在持续抢占注意力、又不参与产品任务的高显著物体。
+
+V1 不为单个品类维护专属证明目录或合理动作清单。卖点路线复用
+`short_video_proof_plan` 和通用 `proof_mode`；合理动作由“是否参与产品任务”这一观察字段约束。
+
+### 8.2 事实与判定边界
+
+- Stage1 只输出观察事实：卖点画面/口播占比、证明信号、变体身份与占比、选择解释、注意力竞争物。
+- 三项观察必须分别输出 `gate_observation_status=complete|unknown`；缺字段、数据形状不合法或未完成扫描只能是 `unknown`，不得由空数组推断为通过。注意力扫描还必须提交 `attention_scan_audit`，明确检查录音/拍摄设备和前景非任务物体；任一项可见却未给竞争物明细时仍为 `unknown`。
+- `temporal_evidence_mode` 由实际请求能力写入：`full_temporal | focused_temporal | static_only | unknown`。
+- `single_focus` 单元中，单个变体视觉占比达到 70% 才生成 `primary_variant_id` 并确认归属。
+- `explicit_comparison` 可不设 `primary_variant_id`；只要至少两个变体身份明确且比较目的明确，归属仍可确认。
+- 视觉占比与口播占比分开保存，不得互相替代。
+- `variant_visual_shares` / `variant_speech_shares` 的 key 必须属于 `variant_ids`，数值在 0-1 且每侧总和不超过 1.05；不一致时归属无效。
+- 静态证据不能证明持续运动或无序反复切换；证据不足输出 `unknown`，不得进入阻断结论。
+- 单侧绝对判断使用该侧能力；比较判断使用两侧较弱的时序能力。
+
+### 8.3 Impact 定义
+
+- `blocking`：用户无法理解产品核心价值、无法判断核心证据属于哪一 SKU，或核心证明区域被持续遮挡。
+- `major`：显著削弱理解或注意力，但产品核心价值仍可识别。
+- `minor`：存在干扰或非首选路线，但没有造成核心信息丢失。
+- `pass`：门控通过。
+- `unknown`：证据不足；不进入商业优先级。
+
+模型默认生成、低置信度的产品地基不得单独触发 `blocking`。卖点路线 P0 必须同时满足：
+受信任的 `proof_contract_source=operator|curated`、运营/策展来源的高置信锚点、达人主路线偏离或未证明，
+且 S3/S4 的绝对证明状态缺失或薄弱。模型自报 `selection_source` 不能抬升来源权限。
+
+`primary_candidate_id` 表示整条短视频的商业主路线，可落在 S2-S5；`s4_anchor_candidate_id` 只负责 S4 的单一效果测量，二者不得混用。当前可信运营入口是 `--primary-selling-point`：它必须唯一对应 candidate 才能把来源提升为 operator。
+
+### 8.4 因果标注
+
+- `stage_analysis[].affected_by_global_issues`：该阶段受哪些全局根因影响。
+- `improvements[].root_cause_ids`：该建议应追溯到哪些全局根因。
+- 不做文本去重。报告保留阶段原结论，并提示应先处理根因。
+
+### 8.5 确定性商业优先级
+
+商业优先级只由 postprocess 计算，不接受模型自由排序：
+
+1. P0：证据支持的全局 `blocking`。
+2. P1：阶段差距 `large`。
+3. P2：全局 `major`。
+4. P3：阶段差距 `medium`。
+5. P4：全局 `minor`。
+6. P5：存在可执行建议的阶段差距 `small`。
+
+同层全局门控顺序：卖点路线 > 焦点一致性 > 注意力洁净度；再按影响阶段数降序、置信度降序、稳定 id 排序。
+
+同层阶段顺序：缺失/方向错误 > 证明无效 > 执行薄弱 > 细节问题；仍相同时按
+S1 > S4 > S3 > S6 > S2 > S5 排序。
+
+`commercial_priority_summary` 取排序第一项。报告在 S1-S6 之前展示可行动的全局根因；没有根因时不显示空区块。
+
+### 8.6 S1 Landing Shadow 合同
+
+`landing_met` 在缺少跨模态字段的历史结果中继续服务旧 severity 兼容路径。新主分析启用跨模态综合合同后，
+S1 执行质量由多渠道组合后的 `integrated_effect` 决定，不再让 landing 二元值或四维命中数覆盖强视觉、
+强口播等渠道间的合理补偿。新增的
+`landing_conditions` 是独立 shadow 观察，只回答冷启动 Hook 是否同时满足：
+
+1. `immediately_understandable`：无需品牌、SKU 或达人前史即可立即理解。
+2. `singular_and_concrete`：一个连贯具体焦点；问题→方案、悬念→揭晓、Before→After 等强因果双段算一个焦点，平行卖点罗列不算。
+3. `creates_stay_motivation`：对冷启动受众形成具体利害或可感收益。清楚可见且品类相关的结果、便利或感官收益本身可以成立，不强制再补负面痛点、紧迫感或悬念；仅听懂品类、SKU 差异提问、泛泛称赞、纯操作运动画面或只喊某类人群不算。
+4. `effectively_received`：关键信息经画面、口播、字幕或声音至少一个主要信道清楚可接收，无需细看或脑补。
+
+模型只逐项输出子条件及证据理由；`landing_shadow_met` 由 parse 确定性派生：四项全 true 才为 true，
+任一 false 为 false，字段不完整为 null。模型自报总判断无效，shadow 结果在验收前不得进入 severity、
+商业优先级或报告主结论。
+
+四项定义的代码单一来源是 `scripts/flayr_core/s1_landing.py`；主分析、Phase C、Repair 和独立验证器
+必须引用同一合同。生产 validator 要求四项、机制与逐项理由完整，并阻断引用 Hook 边界后证据的结果。
+
+判断窗口使用 S1→S2 的功能边界，不写死 5 秒或 10 秒。边界依次参考 SRT 语义切换、事实单元的
+S1/S2 功能切换、模型边界，并由 postprocess 检查窗口泄漏；边界之后的产品解释不得反向补足 Hook。
+达人和标杆必须独立判断，双方都弱时相对 gap 可小，但绝对质量问题仍保留供后续商业优先级验收。
+
+### 8.7 S1-S6 跨模态综合合同
+
+单一来源为 `scripts/flayr_core/multimodal.py`。主分析、Repair 与 Phase C 使用同一合同，分别保留
+`visual`、`speech`、`text`、`sound_rhythm` 四个渠道的影响和证据，再输出：
+
+- `dominant_channel`：真正承担该阶段核心任务的主导渠道。
+- `cross_channel_relation`：增强、互补、中性、冲突或干扰。
+- `integrated_effect`：渠道组合后的净效果，而不是最弱项或等权平均。
+- `compensation_applied`：强渠道是否实际弥补了弱、缺失或轻度负向渠道。
+
+模型负责在锁定事实内做跨渠道关系判断；代码负责枚举归一、证据归属、自洽门禁和阶段硬边界。
+渠道可替代性不是六条散落规则，而是 `MULTIMODAL_CHANNEL_REQUIREMENTS` 中的一条统一轴：
+
+| 等级 | 含义 | 阶段 |
+|---|---|---|
+| `any_channel_sufficient` | 任一渠道可完成信息传达，但仍须完成该阶段任务 | S1、S2 |
+| `required_evidence_with_amplification` | 指定主证据必须成立，其他渠道只能增强 | S3、S4、S6 |
+| `source_grounded` | 可信来源必须真实存在；清晰展示可增强，通用氛围不能补来源 | S5 |
+
+各阶段必要信号为：
+
+1. S1 任一渠道都可主导留人，强视觉可以补偿普通或缺失口播；冲突口播和显著干扰仍会降低净效果。
+2. S2 必须完成产品身份、出现理由和 S1 承接，其他渠道只能增强表达。
+3. S3 必须有真实使用过程与关键动作，口播、字幕、声音节奏不能替代演示。
+4. S4 必须有可见效果，描述性口播不能把不可见结果说成成立。
+5. S5 必须有可信来源和相关信任主张，氛围不能替代背书来源。
+6. S6 必须有购买邀请或行动指令，价格、赠品、字幕和声音只能放大促单动作。
+
+“存在”不按字面或单帧判断，也不新增统一秒数阈值。代码复用各阶段已校准的结构化事实：S3 的真实动作、
+目标接触、应用变化与关键连续性；S4 的可见差异与模块约束；S5 的来源可信度、具体性、产品相关性和
+可核验性；S6 的结尾购买邀请、行动路径和利益放大器。技术上闪现但观众无法有效接收的内容仍按弱执行处理。
+
+`derive.py` 先按各阶段结构化 flags 得到硬条件执行分，再由跨模态净效果做融合；S1 直接使用净效果，
+S3 只有真实过程闭环完整时才允许多渠道表现把基础演示提升为出色，其他阶段均不得越过既有硬条件。
+没有新字段的存量结果保持旧路径。Phase C 更新阶段时先移除旧多模态结论，确保新切片必须产生新判断。
+`severity_derivation.multimodal_integration` 保存两侧主导渠道、渠道关系、净效果和补偿状态，供评估与排错。

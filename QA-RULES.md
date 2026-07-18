@@ -252,6 +252,51 @@ python3 scripts/dev_test_stage2.py runs/<run-dir> --dry
 - 阻断/警告：`scripts/flayr_core/postprocess/validate.py::validate_stage_time_coherence`
 - 阻断/警告：`scripts/flayr_core/postprocess/validate.py::validate_product_visibility`
 
+### Q09A S1 Landing shadow 必须完整且只使用 Hook 窗口证据
+
+规则：
+
+- 达人和标杆必须分别输出 `immediately_understandable`、`singular_and_concrete`、`creates_stay_motivation`、`effectively_received` 四项布尔观察。
+- `landing_shadow_met` 只能由代码派生：四项全 true 才为 true；模型不得自报或从旧 `landing_met` 反填。
+- 强因果双段可视为一个焦点；平行卖点/SKU 罗列不算单一焦点。
+- 停留动力必须给冷启动受众具体利害或可感收益。清楚可见且品类相关的结果、便利或感官收益本身可以成立，不强制再补负面痛点、紧迫感或悬念；仅 SKU 差异提问、泛泛称赞、纯操作运动画面或只喊某类人群不算。
+- `landing_shadow_reason` 只能引用 0 到 `hook_boundary_seconds` 内的时间戳证据；引用后段材料必须触发 Repair。
+- shadow 验收通过前不进入 severity、商业优先级或报告主结论。
+
+处理：已阻断 + 独立 shadow 验证。
+
+实现位置：
+
+- 单一合同：`scripts/flayr_core/s1_landing.py`
+- 归一与泄漏探针：`scripts/flayr_core/llm/parse.py::normalize_hook_flags`
+- 生产阻断：`scripts/flayr_core/postprocess/validate.py::validate_s1_hook_flags`
+- 跨品验证：`scripts/evaluate_s1_landing_shadow.py`
+
+### Q09B S1-S6 必须做跨模态综合判断，不能按单一信息维度定结论
+
+规则：
+
+- 达人和标杆每个阶段都必须分别观察画面、口播、屏幕文字、声音与节奏，再输出组合后的净效果。
+- 渠道事实保持分开，最终判断必须显式给出主导渠道、渠道关系、补偿是否成立和综合净效果。
+- 不按最弱渠道一票否决，也不做四维等权计数。渠道缺失不等于负面；弱但中性的口播不能拖垮强视觉，含糊、冲突或抢注意力的信号可以扣减。
+- 渠道可替代性只有三档：S1/S2=`any_channel_sufficient`；S3/S4/S6=`required_evidence_with_amplification`；S5=`source_grounded`。
+- S3 的真实使用过程、S4 的可见效果、S5 的可信来源、S6 的购买动作不能被其他渠道替代。S5 来源存在后可由清晰展示和解释增强，但通用氛围不能凭空造出来源。
+- “必须存在”沿用各阶段现有结构化 flag 判据：S3 检查真实动作、接触、变化和连续性；S4 检查肉眼可见差异及模块约束；S5 检查来源可信、具体、相关且可核验；S6 检查结尾购买邀请与行动路径。不新增跨品类写死秒数。
+- `strong/effective` 必须有正向主导渠道和本阶段证据；`strong` 不得与 `strong_negative` 同时成立。
+- Phase C 回看必须重判该阶段两侧多模态结论，禁止把回看前的旧净效果沿用到新证据。
+- 旧结果没有多模态字段时走历史兼容路径；新主分析必须完整输出，缺失或自相矛盾时触发 Repair/阻断。
+
+处理：已进入主分析 + Repair + Phase C + 确定性 derive + 证据门禁。
+
+实现位置：
+
+- 单一合同与阶段硬边界：`scripts/flayr_core/multimodal.py`
+- 主分析/Repair/Phase C：`scripts/flayr_core/llm/payload.py`
+- 归一：`scripts/flayr_core/llm/parse.py::normalize_multimodal_assessment`
+- 阻断：`scripts/flayr_core/postprocess/validate.py::validate_multimodal_assessments`
+- 执行分融合：`scripts/flayr_core/postprocess/derive.py::_derive_one`
+- Phase C 防旧结论污染：`scripts/flayr_core/llm/pipeline.py::apply_stage_review_updates`
+
 ---
 
 ## 5. P0 商业判断契约

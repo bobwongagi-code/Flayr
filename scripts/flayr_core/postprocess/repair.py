@@ -32,6 +32,8 @@ from .repair_evidence import (
     improvement_reference_stage,
     materialize_spoken_stage_evidence,
     normalized_quote_clause,
+    reconcile_s3_s4_evidence_coherence,
+    reconcile_s5_trust_sources,
     reconcile_unsupported_cta,
     split_quote_clauses,
 )
@@ -77,6 +79,8 @@ __all__ = [
     "align_stage_flag_evidence",
     "bind_improvement_benchmark_reference",
     "bind_improvement_base_material",
+    "reconcile_s3_s4_evidence_coherence",
+    "reconcile_s5_trust_sources",
     "reconcile_unsupported_cta",
     "ground_stage_visual_evidence",
     "ground_improvement_evidence",

@@ -98,7 +98,28 @@ def call_once(
             result_text = extract_chat_completion_text(raw)
             raw_result = parse_json_text(result_text)
             write_json(raw_result_path, raw_result)
-            result = _process_llm_result(raw_result, analysis, analysis_input, facts)
+            try:
+                result = _process_llm_result(raw_result, analysis, analysis_input, facts)
+            except SystemExit as exc:
+                # 已拿到完整 JSON 后的业务契约失败不是网络瞬断。开发工具没有主 pipeline
+                # 的轻量 Repair，整次重跑只会重复支付多模态调用并掩盖首个真实错误。
+                errors.append(str(exc))
+                return {
+                    "index": index,
+                    "ok": False,
+                    "attempts": attempt,
+                    "finish_reason": finish_reason(raw),
+                    "severity": {},
+                    "raw_severity": stage_severities(raw_result),
+                    "s3_severity": "",
+                    "s3_gap": "",
+                    "s3_gap_summary": [],
+                    "ambiguity_count": 0,
+                    "result_path": "",
+                    "raw_result_path": str(raw_result_path),
+                    "response_path": str(raw_path),
+                    "errors": errors,
+                }
             write_json(result_path, result)
             severities = stage_severities(result)
             raw_severities = stage_severities(raw_result)
@@ -318,6 +339,7 @@ def main() -> None:
     if bp:
         analysis["brand_proposition"] = bp
     analysis["s1_hook_flags_required"] = True
+    analysis["multimodal_assessment_required"] = True
     analysis["s2_flags_required"] = True
     analysis["s3_flags_required"] = True
     analysis["s4_flags_required"] = True

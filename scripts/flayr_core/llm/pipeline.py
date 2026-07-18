@@ -14,18 +14,22 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
 from ..utils import write_json, write_text
+from ..structure_modules import canonical_module_id
 from .api import call_llm_api, extract_chat_completion_text, read_llm_api_key
 from .analysis_contract import AnalysisContractError, validate_normalized_analysis_contract
 from .parse import (
     normalize_analysis_result,
     normalize_category_profile,
-    normalize_comparison_eligibility,
+    normalize_comparison_contract,
+    normalize_absolute_execution_shadow,
     normalize_product_profile,
     normalize_video_product_identity,
     normalize_video_fact_result,
@@ -34,6 +38,7 @@ from .parse import (
 from .payload import (
     build_improvement_reconciliation_payload,
     build_comparison_eligibility_payload,
+    build_absolute_execution_shadow_payload,
     build_llm_comparison_payload,
     build_llm_payload,
     build_llm_repair_payload,
@@ -48,6 +53,7 @@ from .s4_visual_verifier import maybe_apply_s4_visual_verifier
 from .media import select_role_visual_inputs
 from ..postprocess import apply_postprocess_chain
 from ..postprocess.derive import critical_severity_stages
+from ..postprocess.global_diagnosis import materialize_global_diagnosis
 from ..postprocess.health_rewrite import (
     sanitize_child_toothpaste_recommendations,
     sanitize_health_recommendations,
@@ -66,6 +72,10 @@ from ..postprocess.validate import (
     validate_quality_contract,
     validate_stage_ownership,
 )
+
+
+# 修改 build_video_fact_payload 的语义合同后必须递增，避免旧 facts 与新判断规则混用。
+VIDEO_FACT_CACHE_SCHEMA_VERSION = 7
 
 
 # ---------------------------------------------------------------------------
@@ -87,12 +97,9 @@ def run_comparison_scope_preflight(
         raise SystemExit("比较资格预检需要 LLM API key。")
     facts = run_video_identity_extraction(args, analysis, run_dir, api_key)
     if args.llm_dry_run:
-        return {
-            "scope": "uncertain",
-            "direct_product_stages": [],
-            "reason": "dry run 未调用事实抽取和资格判定。",
-        }
+        return normalize_comparison_contract({"reason": "dry run 未调用事实抽取和资格判定。"})
     eligibility = establish_comparison_eligibility(args, facts, run_dir, api_key)
+    analysis["comparison_contract"] = eligibility
     analysis["comparison_eligibility"] = eligibility
     analysis["video_understanding"] = facts
     analysis["analysis_source"] = {
@@ -113,6 +120,7 @@ def apply_finalized_analysis_result(
     analysis["one_line_verdict"] = normalized["one_line_verdict"]
     analysis["holistic_assessment"] = normalized["holistic_assessment"]
     analysis["key_conclusions"] = normalized.get("key_conclusions", [])
+    analysis["comparison_contract"] = normalized.get("comparison_contract", {})
     analysis["comparison_eligibility"] = normalized.get("comparison_eligibility", {})
     analysis["product_visibility"] = normalized["product_visibility"]
     analysis["loop_closure"] = normalized["loop_closure"]
@@ -127,11 +135,16 @@ def apply_finalized_analysis_result(
         "product_proposition_contract",
         "cross_stage_state",
         "proposition_trace",
+        "absolute_quality",
+        "absolute_execution_shadow",
         "computed_loop_closure",
         "qa_warnings",
         "quality_audit",
         "improvement_reconciliation",
         "s4_visual_verifier",
+        "global_diagnosis",
+        "commercial_priorities",
+        "commercial_priority_summary",
     ):
         if key in normalized:
             analysis[key] = normalized[key]
@@ -172,6 +185,8 @@ def finalize_analysis_result(
     validate_creator_script_language(normalized, analysis_input)
     remove_unverified_brand_models(normalized, analysis)
     clamp_result_time_ranges(normalized, analysis)
+    # 全局门控须在提升点完成最终过滤后生成，避免商业优先级引用已被清除的建议。
+    materialize_global_diagnosis(normalized, analysis)
     validate_quality_contract(normalized, analysis)
     return normalized
 
@@ -179,6 +194,16 @@ def finalize_analysis_result(
 def merge_analysis_result(analysis: dict[str, Any], result_path: Path, analysis_input: str) -> None:
     """把外部 analysis_result.json 经唯一处理链后合并入 analysis。"""
     result = json.loads(result_path.read_text(encoding="utf-8"))
+    stages = result.get("stage_analysis") if isinstance(result.get("stage_analysis"), list) else []
+    has_structured_s5 = any(
+        isinstance(stage, dict)
+        and str(stage.get("stage") or "").upper().startswith("S5")
+        and any(isinstance(stage.get(f"{role}_s5"), dict) for role in ("creator", "benchmark"))
+        for stage in stages
+    )
+    if has_structured_s5:
+        # 外部导入也必须使用和主链相同的 S5 来源门禁，避免入口不同导致背书结论漂移。
+        analysis["s5_source_signals_required"] = True
     phase_c_review = result.get("phase_c_review")
     normalized = finalize_analysis_result(result, analysis, analysis_input)
     if isinstance(phase_c_review, dict):
@@ -196,6 +221,7 @@ def fetch_json_completion(
     payload_path: Path,
     raw_path: Path,
     max_attempts: int = 3,
+    request_max_time_seconds: int | None = None,
 ) -> str:
     """调用 LLM 并确保返回内容是可解析 JSON；静默截断时整体重取。
 
@@ -205,7 +231,17 @@ def fetch_json_completion(
     """
     last_text = ""
     for attempt in range(max_attempts):
-        raw_text = call_llm_api(args.llm_api_url, api_key, payload_path, raw_path)
+        request_options = {}
+        if request_max_time_seconds is not None:
+            request_options["max_time_seconds"] = request_max_time_seconds
+        try:
+            raw_text = call_llm_api(args.llm_api_url, api_key, payload_path, raw_path, **request_options)
+        except SystemExit:
+            # 底层已做同一 SSE 请求的传输重试；仍失败时重取完整响应，不能让单次网络中断终止整条 pipeline。
+            if attempt + 1 >= max_attempts:
+                raise
+            time.sleep(5 * (attempt + 1))
+            continue
         raw = json.loads(raw_text)
         last_text = extract_chat_completion_text(raw)
         try:
@@ -218,6 +254,57 @@ def fetch_json_completion(
             if attempt + 1 >= max_attempts:
                 break
     return last_text
+
+
+def _stable_digest(value: Any) -> str:
+    """生成跨运行稳定的内容摘要；缓存 key 只依赖可审计输入。"""
+    text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _source_video_hash(analysis: dict[str, Any], role: str) -> str:
+    videos = analysis.get("videos") if isinstance(analysis.get("videos"), dict) else {}
+    info = videos.get(role) if isinstance(videos, dict) else None
+    fingerprint = info.get("preprocess_fingerprint") if isinstance(info, dict) else None
+    source = fingerprint.get("source_video") if isinstance(fingerprint, dict) else None
+    return str(source.get("sha256") or "") if isinstance(source, dict) else ""
+
+
+def _cache_path(run_dir: Path, namespace: str, key: dict[str, Any]) -> Path | None:
+    """缓存归属输出目录父级，避免依赖本地 run 名称，也便于未来线上换存储实现。"""
+    source_hash = str(key.get("source_video_sha256") or "")
+    if not source_hash:
+        return None
+    return run_dir.parent / namespace / f"{_stable_digest(key)}.json"
+
+
+def _read_cache_result(path: Path | None, result_key: str) -> dict[str, Any] | None:
+    if path is None or not path.is_file():
+        return None
+    try:
+        cached = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    result = cached.get(result_key) if isinstance(cached, dict) else None
+    return result if isinstance(result, dict) else None
+
+
+def _write_cache_result(path: Path | None, record: dict[str, Any]) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(path, record)
+
+
+def _video_fact_cache_key(args: argparse.Namespace, analysis: dict[str, Any], role: str) -> dict[str, Any]:
+    foundation = analysis.get("product_foundation") if isinstance(analysis.get("product_foundation"), dict) else {}
+    return {
+        "cache_schema_version": VIDEO_FACT_CACHE_SCHEMA_VERSION,
+        "source_video_sha256": _source_video_hash(analysis, role),
+        "role": role,
+        "llm_model": str(args.llm_model or ""),
+        "foundation_digest": _stable_digest(foundation),
+    }
 
 
 def run_large_model_analysis(
@@ -251,16 +338,22 @@ def run_large_model_analysis(
         if args.llm_dry_run:
             print(f"LLM dry run: fact request payloads written to {run_dir}")
             return None
-        analysis["comparison_eligibility"] = establish_comparison_eligibility(
-            args, facts, run_dir, api_key
-        )
+        maybe_run_absolute_execution_shadow(args, analysis, facts, run_dir, api_key)
+        comparison_contract = establish_comparison_eligibility(args, facts, run_dir, api_key)
+        analysis["comparison_contract"] = comparison_contract
+        analysis["comparison_eligibility"] = comparison_contract
+        if comparison_contract.get("overall_status") in {"not_comparable", "uncertain"}:
+            _apply_non_comparable_result(analysis, facts, comparison_contract, run_dir)
+            return None
         analysis["s1_hook_flags_required"] = True
+        analysis["structured_relevance_required"] = True
         analysis["s2_flags_required"] = True
         analysis["s3_flags_required"] = True
         analysis["s4_flags_required"] = True
         analysis["s5_flags_required"] = True
         analysis["s5_source_signals_required"] = True
         analysis["s6_flags_required"] = True
+        analysis["multimodal_assessment_required"] = True
         analysis_input = analysis_input_path.read_text(encoding="utf-8")
         payload = build_llm_comparison_payload(args.llm_model, analysis_input, facts, analysis)
     else:
@@ -288,6 +381,43 @@ def run_large_model_analysis(
     result_path = run_dir / "analysis_result.json"
     write_json(result_path, result)
     return result_path, result
+
+
+def maybe_run_absolute_execution_shadow(
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    facts: dict[str, Any],
+    run_dir: Path,
+    api_key: str,
+) -> None:
+    """按开关运行单侧执行审计；失败只记录结果，不得中断主分析。
+
+    审计读取的仅是每侧 Stage1 锁定事实，因此不会接触另一侧视频或主对比的
+    stage_analysis。当前是 shadow mode：结果不进入 severity，也不缓存评分结果；
+    这样才能如实测量模型在相同 facts 下的方差，而不是把首次随机结果伪装成稳定。
+    """
+    if not getattr(args, "absolute_execution_shadow", False):
+        return
+    audit: dict[str, Any] = {"status": "pending", "roles": {}, "errors": []}
+    for role in ("benchmark", "creator"):
+        if not isinstance(facts.get(role), dict):
+            audit["errors"].append(f"{role}: 缺少锁定单视频事实")
+            continue
+        try:
+            request_path = run_dir / f"llm_absolute_execution_{role}_request.json"
+            response_path = run_dir / f"llm_absolute_execution_{role}_response.json"
+            payload = build_absolute_execution_shadow_payload(args.llm_model, role, facts, analysis)
+            write_json(request_path, payload)
+            response_text = fetch_json_completion(args, api_key, request_path, response_path)
+            parsed = normalize_absolute_execution_shadow(role, parse_json_text(response_text))
+            if parsed is None:
+                raise SystemExit("单侧审计缺少完整 S1-S4 枚举输出")
+            audit["roles"][role] = parsed
+            write_json(run_dir / f"absolute_execution_{role}.json", parsed)
+        except (OSError, ValueError, SystemExit, json.JSONDecodeError) as exc:
+            audit["errors"].append(f"{role}: {exc}")
+    audit["status"] = "completed" if len(audit["roles"]) == 2 else "partial" if audit["roles"] else "failed"
+    analysis["absolute_execution_shadow"] = audit
 
 
 def parse_and_validate_llm_result(
@@ -395,9 +525,29 @@ def preserve_valid_repair_sections(
     original: dict[str, Any] | None,
     repaired: dict[str, Any],
 ) -> dict[str, Any]:
-    """Repair 误删合法提升点时保留原值；阶段修正仍以 repair 输出为准。"""
+    """Repair 只覆盖它实际输出的字段，避免一次小修复清空完整阶段结果。"""
     if not isinstance(original, dict):
         return repaired
+    repaired = dict(repaired)
+    original_stages = original.get("stage_analysis")
+    repaired_stages = repaired.get("stage_analysis")
+    if isinstance(original_stages, list) and isinstance(repaired_stages, list):
+        merged_stages: list[Any] = []
+        for index, repaired_stage in enumerate(repaired_stages, start=1):
+            original_stage = original_stages[index - 1] if index <= len(original_stages) else None
+            if not isinstance(original_stage, dict) or not isinstance(repaired_stage, dict):
+                merged_stages.append(repaired_stage)
+                continue
+            merged_stage = dict(repaired_stage)
+            for key, value in original_stage.items():
+                current = merged_stage.get(key)
+                if key not in merged_stage or current is None or (isinstance(current, str) and not current.strip()):
+                    if key in {"creator_module_id", "benchmark_module_id"}:
+                        merged_stage[key] = canonical_module_id(value, index)
+                    else:
+                        merged_stage[key] = json.loads(json.dumps(value, ensure_ascii=False))
+            merged_stages.append(merged_stage)
+        repaired["stage_analysis"] = merged_stages
     repaired_improvements = repaired.get("improvements")
     original_improvements = original.get("improvements")
     if (
@@ -405,7 +555,6 @@ def preserve_valid_repair_sections(
         and isinstance(original_improvements, list)
         and 1 <= len(original_improvements) <= 5
     ):
-        repaired = dict(repaired)
         repaired["improvements"] = json.loads(json.dumps(original_improvements, ensure_ascii=False))
     return repaired
 
@@ -422,7 +571,7 @@ def uncovered_large_stage_codes(result: dict[str, Any]) -> list[str]:
         for stage in result.get("stage_analysis", [])
         if isinstance(stage, dict)
         and (code := stage_code(stage.get("stage")))
-        and str(stage.get("comparison_status") or "") != "not_directly_comparable"
+        and str(stage.get("comparison_status") or "") not in {"not_directly_comparable", "not_applicable"}
         and str(stage.get("severity") or "").strip().lower() == "large"
         and code not in covered
     ]
@@ -454,7 +603,7 @@ def merge_reconciled_improvements(
         for item in merged.get("improvements", [])
         if isinstance(item, dict)
         and str(stages_by_code.get(stage_code(item.get("target_stage")), {}).get("comparison_status") or "")
-        != "not_directly_comparable"
+        not in {"not_directly_comparable", "not_applicable"}
     ]
     stage_severity = {
         stage_code(stage.get("stage")): str(stage.get("severity") or "medium").strip().lower()
@@ -725,6 +874,10 @@ def apply_stage_review_updates(
             # 字段级合并而非整字典替换：回看若漏掉执行分等新字段，保留原值，
             # 否则 derive 对复核阶段反而退化为模型直判（code review #1）。
             base_stage = dict(stage)
+            # 跨模态净效果依赖本次回看片段。Phase C 更新任一阶段时必须重判，
+            # 不能因模型漏字段而沿用旧证据上的综合结论。
+            base_stage.pop("creator_multimodal", None)
+            base_stage.pop("benchmark_multimodal", None)
             # S1 hook flags 是 severity 输入事实。S1 回看后必须由回看结果重判，
             # 不能字段级合并时沿用旧 hook，否则会出现"新 stage 套旧 hook"。
             if code == "S1":
@@ -782,6 +935,18 @@ def establish_product_foundation(
             flush=True,
         )
         return None
+    cache_path = run_dir / "product_foundation.json"
+    if getattr(args, "reuse_preprocessing", False) and cache_path.is_file():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cached = None
+        if isinstance(cached, dict) and (
+            isinstance(cached.get("category_profile"), dict)
+            or isinstance(cached.get("product_profile"), dict)
+        ):
+            _stamp_proof_contract_source(cached, analysis)
+            return cached
     payload = build_product_foundation_payload(args.llm_model, analysis)
     request_path = run_dir / "llm_product_foundation_request.json"
     response_path = run_dir / "llm_product_foundation_response.json"
@@ -789,7 +954,13 @@ def establish_product_foundation(
     if args.llm_dry_run:
         return None
     try:
-        result_text = fetch_json_completion(args, api_key, request_path, response_path)
+        result_text = fetch_json_completion(
+            args,
+            api_key,
+            request_path,
+            response_path,
+            request_max_time_seconds=240,
+        )
         raw = parse_json_text(result_text)
         foundation = {
             "category_profile": normalize_category_profile(raw.get("category_profile")),
@@ -807,7 +978,13 @@ def establish_product_foundation(
             repair_request_path = run_dir / "llm_product_foundation_repair_request.json"
             repair_response_path = run_dir / "llm_product_foundation_repair_response.json"
             write_json(repair_request_path, repair_payload)
-            repair_text = fetch_json_completion(args, api_key, repair_request_path, repair_response_path)
+            repair_text = fetch_json_completion(
+                args,
+                api_key,
+                repair_request_path,
+                repair_response_path,
+                request_max_time_seconds=240,
+            )
             repaired_raw = parse_json_text(repair_text)
             foundation = {
                 "category_profile": normalize_category_profile(repaired_raw.get("category_profile")),
@@ -845,7 +1022,7 @@ def establish_product_foundation(
     except Exception as exc:  # noqa: BLE001
         print(f"Step-0 品地基确立失败，回退到阶段2 内联产出：{exc}", flush=True)
         return None
-    write_json(run_dir / "product_foundation.json", foundation)
+    write_json(cache_path, foundation)
     return foundation
 
 
@@ -862,37 +1039,140 @@ def establish_comparison_eligibility(
     write_json(request_path, payload)
     try:
         result_text = fetch_json_completion(args, api_key, request_path, response_path)
-        eligibility = normalize_comparison_eligibility(parse_json_text(result_text))
-        if eligibility["scope"] == "uncertain" and not eligibility["reason"]:
+        eligibility = normalize_comparison_contract(parse_json_text(result_text))
+        if eligibility["overall_status"] == "uncertain" and not eligibility["reason"]:
             eligibility["reason"] = "双侧产品身份不足以确认产品级比较资格。"
     except Exception as exc:  # 资格层不允许阻断主分析；uncertain 会阻止后续误用为直接产品比较。
-        eligibility = {
-            "scope": "uncertain",
-            "direct_product_stages": [],
-            "reason": f"产品级比较资格判定失败，保守按 uncertain 处理：{exc}",
-        }
+        eligibility = normalize_comparison_contract(
+            {"reason": f"产品级比较资格判定失败，保守按 uncertain 处理：{exc}"}
+        )
+    eligibility = _stamp_facts_eligibility(eligibility)
+    eligibility = _apply_operator_scope_override(
+        eligibility,
+        getattr(args, "comparison_scope_override", None),
+    )
+    write_json(run_dir / "comparison_contract.json", eligibility)
     write_json(run_dir / "comparison_eligibility.json", eligibility)
     return eligibility
+
+
+def _stamp_facts_eligibility(eligibility: dict[str, Any]) -> dict[str, Any]:
+    """让事实预检的审计字段与其判定结论保持一致。
+
+    资格预检的唯一输入是锁定的双侧产品身份事实，因此不能保留主比较模型或
+    normalize 默认值带来的 ``facts_scope=uncertain``。人工结构对标覆盖在此之后
+    单独处理，并把这份事实结论作为原始审计记录保留下来。
+    """
+    normalized = normalize_comparison_contract(eligibility)
+    normalized["scope_origin"] = "facts"
+    normalized["facts_scope"] = normalized["scope"]
+    normalized["facts_reason"] = normalized["reason"]
+    return normalized
+
+
+def _apply_operator_scope_override(
+    facts_eligibility: dict[str, Any],
+    override: str | None,
+) -> dict[str, Any]:
+    """应用人工确认的结构对标范围，同时保留 facts 身份审计结论。
+
+    模型绝不能自行把跨品样本升级为同任务结构对标。该范围只能由运营或验证清单显式提供，
+    因此未来线上任务也应传递元数据，而不能从目录名或产品名推断。
+    """
+    if override != "same_task_structure":
+        return facts_eligibility
+    overridden = normalize_comparison_contract(facts_eligibility)
+    overridden["scope_origin"] = "operator_certified"
+    overridden["facts_scope"] = str(facts_eligibility.get("scope") or "uncertain")
+    overridden["facts_reason"] = str(facts_eligibility.get("reason") or "双侧产品身份事实不足。")
+    if overridden.get("identity_relation") == "different_product":
+        overridden["substitution_relation"] = "strong_substitute"
+        shared = dict(overridden.get("shared_job") or {})
+        shared.update(
+            {
+                "same_consumer_job": True,
+                "same_target_object": True,
+                "same_desired_outcome": True,
+                "same_purchase_decision": True,
+                "complement_or_dependency": False,
+            }
+        )
+        overridden["shared_job"] = shared
+    overridden["reason"] = (
+        "运营确认双方共享消费者任务与替代关系；各阶段仍按已锁定 stage_eligibility 单独决定是否可比，"
+        "不得据此固定开放 S1-S4/S6。"
+    )
+    return normalize_comparison_contract(overridden)
+
+
+def _apply_non_comparable_result(
+    analysis: dict[str, Any],
+    facts: dict[str, Any],
+    contract: dict[str, Any],
+    run_dir: Path,
+) -> None:
+    """无替代或身份不确定时在主对比前结束，不伪造 S1-S6 占位结论。"""
+    uncertain = contract.get("overall_status") == "uncertain"
+    reason = str(contract.get("reason") or "双侧产品缺少共同消费者任务，不能进行带货内容对比。")
+    analysis["analysis_status"] = "comparison_uncertain" if uncertain else "not_comparable"
+    analysis["one_line_verdict"] = "商品关系不确定，暂不分析" if uncertain else "两条视频不具备比较资格"
+    analysis["one_line_summary"] = reason
+    analysis["executive_summary"] = reason
+    analysis["key_conclusions"] = [reason]
+    analysis["comparison_contract"] = contract
+    analysis["comparison_eligibility"] = contract
+    analysis["video_understanding"] = facts
+    analysis["stage_analysis"] = []
+    analysis["improvements"] = []
+    analysis["improvements_status"] = "not_applicable"
+    analysis["analysis_source"] = {
+        "type": "comparison_contract_gate",
+        "merged_at": dt.datetime.now().isoformat(timespec="seconds"),
+    }
+    write_json(
+        run_dir / "comparison_rejection.json",
+        {"analysis_status": analysis["analysis_status"], "comparison_contract": contract, "reason": reason},
+    )
 
 
 def _stamp_proof_contract_source(foundation: dict[str, Any], analysis: dict[str, Any]) -> None:
     """给 Step-0 合同标注证据来源，限制下游复核器的覆盖权限。
 
-    Step-0 可以用品类知识补全分析尺子，但没有运营给出的核心卖点时，它选出的 S4 主证明
-    仍是推断，不应反向否决视频中已经观察到的有效效果证据。
+    运营提供核心卖点只证明“产品卖什么”，不证明“哪一个卖点应成为唯一 S4 主视觉信号”。
+    后者若仍由 Step-0 模型排序/生成，就必须标为 inferred，避免视觉复核器把模型选尺子
+    误当运营裁决，再反向否决视频中已经观察到的其他有效视觉效果。
+
+    默认标为 inferred。只有 --primary-selling-point 能唯一对应证明计划 candidate 时才标为
+    operator；模型输出或普通 core_selling_points 文本不能自行抬升来源等级。
     """
     profile = foundation.get("product_profile")
     if not isinstance(profile, dict):
         return
+    profile["proof_contract_source"] = "inferred"
     product = analysis.get("product") if isinstance(analysis.get("product"), dict) else {}
-    supplied = str(product.get("core_selling_points") or "").strip()
-    existing = str(profile.get("proof_contract_source") or "").strip().lower()
-    if existing == "curated":
-        profile["proof_contract_source"] = "curated"
-    elif supplied and supplied not in {"未填写", "未提供", "无"}:
-        profile["proof_contract_source"] = "operator"
-    else:
-        profile["proof_contract_source"] = "inferred"
+    operator_point = str(product.get("primary_selling_point") or "").strip()
+    plan = profile.get("short_video_proof_plan") if isinstance(profile.get("short_video_proof_plan"), dict) else {}
+    candidates = plan.get("candidates") if isinstance(plan.get("candidates"), list) else []
+    if not operator_point or not plan.get("valid"):
+        return
+    normalized_operator = re.sub(r"[^\w\u4e00-\u9fff]+", "", operator_point.lower())
+    matches = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        selling_point = str(candidate.get("selling_point") or "").strip()
+        normalized_candidate = re.sub(r"[^\w\u4e00-\u9fff]+", "", selling_point.lower())
+        if normalized_operator and (
+            normalized_operator in normalized_candidate or normalized_candidate in normalized_operator
+        ):
+            matches.append(candidate)
+    if len(matches) != 1:
+        profile["proof_contract_validation_warning"] = "运营主卖点未能唯一对应 short_video_proof_plan candidate"
+        return
+    plan["primary_candidate_id"] = str(matches[0].get("id") or "")
+    plan["selection_source"] = "operator_priority"
+    plan["anchor_confidence"] = "high"
+    profile["proof_contract_source"] = "operator"
 
 
 def product_foundation_validation_reason(product_profile: Any) -> str:
@@ -937,18 +1217,29 @@ def run_video_fact_extraction(
         if role not in videos:
             continue
         role_dir = run_dir / role
+        result_path = run_dir / f"video_facts_{role}.json"
+        cache_key = _video_fact_cache_key(args, analysis, role)
+        cache_path = _cache_path(run_dir, ".video_fact_cache", cache_key)
+        cached = None if args.llm_dry_run else _read_cache_result(cache_path, "fact_result")
+        if cached is not None:
+            cached.setdefault("temporal_evidence_mode", "unknown")
+            facts[role] = cached
+            write_json(result_path, cached)
+            continue
         visual_inputs = select_role_visual_inputs(videos[role], role, per_role_limit)
         payload = build_video_fact_payload(args.llm_model, role, analysis, visual_inputs)
         request_path = run_dir / f"llm_facts_{role}_request.json"
         response_path = run_dir / f"llm_facts_{role}_response.json"
-        result_path = run_dir / f"video_facts_{role}.json"
         write_json(request_path, payload)
         if args.llm_dry_run:
             continue
         result_text = fetch_json_completion(args, api_key, request_path, response_path)
         fact_result = normalize_video_fact_result(role, parse_json_text(result_text), analysis)
+        # 能力状态取自实际请求载荷，不让模型猜自己是否看到了连续视频。
+        fact_result["temporal_evidence_mode"] = "full_temporal" if payload_has_video(payload) else "static_only"
         facts[role] = fact_result
         write_json(result_path, fact_result)
+        _write_cache_result(cache_path, {**cache_key, "fact_result": fact_result})
     return facts
 
 

@@ -318,6 +318,7 @@ def _s6_flag(
     module="B",
     direct=True,
     path=True,
+    soft_invitation=False,
     offer=True,
     urgency=True,
     recall=True,
@@ -331,7 +332,12 @@ def _s6_flag(
         "module_type": module,
         "direct_order_met": direct,
         "action_path_clear": path,
+        "soft_purchase_invitation_met": soft_invitation,
         "offer_or_incentive_clear": offer,
+        "price_anchor_met": module == "A" and offer,
+        "urgency_evidence_met": module == "B" and urgency,
+        "gift_stack_met": module == "C" and offer,
+        "guarantee_clear_met": module == "E" and offer,
         "urgency_met": urgency,
         "product_value_recalled": recall,
         "module_fit_met": fit,
@@ -490,9 +496,10 @@ _s6_invalid_effect_summary = _derive_one(
     {"S6": 1.8},
     [],
 )
-check("S6-D 效果总结必须依赖有效 S4 输出",
-      _s6_invalid_effect_summary.get("severity") in {"medium", "large"}
-      and _s6_invalid_effect_summary.get("E") >= 1)
+check("S6-D 缺有效 S4 时不把完整 CTA 错降；依赖仅进审计",
+      _s6_invalid_effect_summary.get("severity") == "small"
+      and _s6_invalid_effect_summary.get("E") == 0
+      and _s6_invalid_effect_summary.get("s6_effect_summary_dependency") == {"creator": False, "benchmark": True})
 
 _s6_creator_better = _derive_one(
     "S6",
@@ -507,6 +514,20 @@ _s6_creator_better = _derive_one(
 )
 check("S6 达人 CTA 更强→零差距红线保持 small",
       _s6_creator_better.get("severity") == "small" and _s6_creator_better.get("E") == 0)
+
+_s6_soft_invitation = _derive_one(
+    "S6",
+    {
+        "creator_s6": _s6_flag(direct=False, path=False, soft_invitation=True, offer=True, recall=True, fit=True),
+        "benchmark_s6": _s6_flag(),
+        "creator_summary": "结尾面向感兴趣用户提示促销与免邮，但未给购买路径",
+        "benchmark_summary": "结尾给出明确下单路径与优惠",
+    },
+    {"S6": 1.8},
+    [],
+)
+check("S6 软促单（邀请+利益）不与无 CTA 混同",
+      _s6_soft_invitation.get("severity") == "small" and _s6_soft_invitation.get("E") == 0.5)
 
 _matrix_result = {
     "category_profile": {"decision_threshold": "impulse", "drive_type": "functional", "painpoints": ["油光"]},
@@ -726,6 +747,9 @@ def _s3_flag(
     core=True,
     framing=True,
     action_proof=True,
+    target_contact=True,
+    application_change=True,
+    critical_continuity=True,
     context=True,
     continuity=True,
     richness=False,
@@ -738,6 +762,9 @@ def _s3_flag(
     multi_role=False,
     role_design=False,
     role_interaction=False,
+    distinct_personas=False,
+    steps_clear=False,
+    pov_immersive=False,
     overlays=None,
 ):
     return {
@@ -750,6 +777,9 @@ def _s3_flag(
         "core_selling_point_visible": core,
         "process_framing_met": framing,
         "action_proof_met": action_proof,
+        "action_target_contact_met": target_contact,
+        "action_application_change_visible": application_change,
+        "critical_action_continuity_met": critical_continuity,
         "demonstrated_selling_points": ["核心卖点"],
         "missing_selling_points": [] if core else ["核心卖点"],
         "scene_mode": scene,
@@ -763,6 +793,9 @@ def _s3_flag(
         "multi_scene_role_adaptation_met": multi_role,
         "role_design_met": role_design,
         "role_interaction_met": role_interaction,
+        "distinct_personas_met": distinct_personas,
+        "steps_clear_met": steps_clear,
+        "pov_immersive_met": pov_immersive,
         "presentation_overlays": overlays or ["none"],
         "fake_or_staged": fake,
         "start_seconds": 8.0,
@@ -834,9 +867,9 @@ _s3_bad_framing = _derive_one(
     {"S3": 1.0},
     [],
 )
-check("S3 使用过程拍不全/没对准→执行分封顶并触发 medium 下限",
-      _s3_bad_framing.get("severity") == "medium"
-      and _s3_bad_framing.get("E") == 1.5
+check("S3 使用过程拍摄对准不足→仅进入 trace，不抢先影响 severity",
+      _s3_bad_framing.get("severity") == "small"
+      and _s3_bad_framing.get("E") == 0
       and _s3_bad_framing.get("s3_process_framing") == {"creator": False, "benchmark": True})
 
 _s3_action_without_proof = _derive_one(
@@ -876,7 +909,7 @@ _s3_result_only = _derive_one(
     [],
 )
 check("S3 只有结果没有过程→最高 0.5",
-      _s3_result_only.get("severity") in {"medium", "large"} and _s3_result_only.get("E") == 1.5)
+      _s3_result_only.get("severity") == "large" and _s3_result_only.get("E") == 2)
 
 _s3_static = _derive_one(
     "S3",
@@ -1102,7 +1135,7 @@ _s4_no_visual_diff = _derive_one(
     [],
 )
 check("S4 看不出指定视觉差异→不能拿满分",
-      _s4_no_visual_diff.get("severity") in {"small", "medium"} and _s4_no_visual_diff.get("E") == 1)
+      _s4_no_visual_diff.get("severity") == "large" and _s4_no_visual_diff.get("E") == 2)
 
 _s4_module_broken = _derive_one(
     "S4",
@@ -1172,6 +1205,7 @@ _s4_verifier_applied = apply_s4_visual_verifier_result(
     _s4_verifier_result,
     {
         "creator": {
+            "evidence_sufficient": True,
             "visual_difference_observed": False,
             "module_constraints_met": True,
             "effect_salience": "subtle",
@@ -1180,6 +1214,7 @@ _s4_verifier_applied = apply_s4_visual_verifier_result(
             "reason": "前后变化需要仔细找。",
         },
         "benchmark": {
+            "evidence_sufficient": True,
             "visual_difference_observed": True,
             "module_constraints_met": True,
             "effect_salience": "strong",
@@ -1958,6 +1993,17 @@ _valid_hook = {
     "window_evidence": "0-3s 口播低期待到高结果",
     "landing_window_leak": False,
     "anchors_proposition": True,
+    "landing_conditions": {
+        "immediately_understandable": True,
+        "singular_and_concrete": True,
+        "creates_stay_motivation": False,
+        "effectively_received": True,
+    },
+    "landing_shadow_met": False,
+    "landing_failure_reasons": ["creates_stay_motivation"],
+    "stay_motivation_mechanism": "contrast",
+    "landing_shadow_reason": "0-3s 反差可理解且可接收，但没有具体收益或利害。",
+    "landing_shadow_window_leak": False,
 }
 try:
     validate_s1_hook_flags(
@@ -2035,6 +2081,24 @@ try:
 except SystemExit as exc:
     _s3_missing_action_proof_failed = "creator_s3.action_proof_met" in str(exc)
 check("S3 usage flag 门禁：缺 action_proof_met 触发 repair", _s3_missing_action_proof_failed)
+
+_s3_missing_application_change = dict(_valid_s3)
+_s3_missing_application_change.pop("action_application_change_visible")
+try:
+    validate_s3_usage_flags(
+        {
+            "stage_analysis": [
+                {"stage": "S1 Hook"},
+                {"stage": "S2 产品引出"},
+                {"stage": "S3 使用过程", "creator_s3": _s3_missing_application_change, "benchmark_s3": dict(_valid_s3)},
+            ]
+        },
+        {"s3_flags_required": True},
+    )
+    _s3_missing_application_change_failed = False
+except SystemExit as exc:
+    _s3_missing_application_change_failed = "creator_s3.action_application_change_visible" in str(exc)
+check("S3 usage flag 门禁：缺 action_application_change_visible 触发 repair", _s3_missing_application_change_failed)
 
 try:
     validate_s3_usage_flags(
@@ -2859,8 +2923,8 @@ check("Step-0 地基门禁同时要求计划和合同",
       product_foundation_validation_reason(_proof_plan_profile) == ""
       and "short_video_proof_plan" in product_foundation_validation_reason(_contract_profile))
 check("S4 verifier 兜底复合 primary",
-      "复合条件" in inspect.getsource(s4_visual_verifier_module.build_s4_visual_verifier_payload)
-      and "不能直接把 primary 判 false" in inspect.getsource(s4_visual_verifier_module.build_s4_visual_verifier_payload))
+      "复合条件" in inspect.getsource(s4_visual_verifier_module._visual_verifier_scope_rule)
+      and "不能直接把 primary 判 false" in inspect.getsource(s4_visual_verifier_module._visual_verifier_scope_rule))
 _length_payload = {"max_tokens": 16384}
 _old_budget, _new_budget = increase_output_budget(_length_payload)
 _capped_old, _capped_new = increase_output_budget({"max_tokens": LLM_MAX_OUTPUT_TOKENS})

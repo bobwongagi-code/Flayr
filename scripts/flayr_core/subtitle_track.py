@@ -31,6 +31,8 @@ OCR_MODEL = "qwen-vl-ocr"
 SAMPLE_INTERVAL_SEC = 2.5
 # 读光 OCR 的 OpenAI 兼容端点（与主分析同一个 base，模型不同）。
 OCR_API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+OCR_REQUEST_MAX_TIME_SECONDS = 90
+OCR_REQUEST_LOW_SPEED_TIME_SECONDS = 45
 # ⚠️ 关键：实测中文指令"请识别…按行输出"会触发读光的【检测模式】（返回纯坐标无文字），
 # 导致约 40% 帧假阴性。简洁英文指令稳定走【识别模式】，且比无指令多读出小字（如瓶身 12hrs）。
 # 改这句前务必用真实帧回归测试，别再写"按行/逐行/输出位置"这类暗示检测的措辞。
@@ -127,7 +129,15 @@ def ocr_frame_with_retry(
         response_path = raw_dir / f"ocr_{index:03d}_resp.json"
         write_json(request_path, build_ocr_payload(frame_path, model))
         try:
-            raw = call_llm_api(api_url, api_key, request_path, response_path)
+            raw = call_llm_api(
+                api_url,
+                api_key,
+                request_path,
+                response_path,
+                max_time_seconds=OCR_REQUEST_MAX_TIME_SECONDS,
+                low_speed_time_seconds=OCR_REQUEST_LOW_SPEED_TIME_SECONDS,
+                retries=0,
+            )
         except SystemExit as exc:
             if attempt == 0:
                 continue

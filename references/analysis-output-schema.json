@@ -16,11 +16,32 @@
   "low_confidence_stages": [
     "可选。仅当代表帧/切片音频不足以稳定判断该阶段 severity 时填写 S1-S6 阶段代码，最多 2 个。"
   ],
-  "comparison_eligibility": {
-    "scope": "same_product | comparable_variant | creative_reference_only | cross_product | uncertain。由两条视频实际观察到的产品身份决定，不由输入文件名决定。",
-    "direct_product_stages": ["允许直接以本品命题/卖点做比较的 S1-S6 阶段代码。creative_reference_only/cross_product 不得含 S2-S5。"],
-    "reason": "一句话说明双方实际产品身份、对比资格与限制。"
+  "comparison_contract": {
+    "identity_relation": "exact_product | same_product_family | different_product | uncertain。包装颜色、口红色号、同系列 SKU 不能单独作为不同产品证据。",
+    "substitution_relation": "same_solution | strong_substitute | partial_substitute | none | uncertain。strong_substitute 必须同时满足同一消费者任务、目标对象、期望结果和购买决策，且不是互补品。",
+    "shared_job": {
+      "same_consumer_job": true,
+      "same_target_object": true,
+      "same_desired_outcome": true,
+      "same_purchase_decision": true,
+      "complement_or_dependency": false,
+      "reason": "共同消费者任务的事实依据。",
+      "evidence_ids": ["B1", "C1"]
+    },
+    "stage_eligibility": {
+      "S1": {"status": "direct | structural | not_applicable | not_comparable", "basis": "共同比较基础", "shared_contract": "共同任务或证据合同", "restrictions": ["不得比较的产品属性"], "evidence_ids": ["B1", "C1"]},
+      "S2": {"status": "direct | structural | not_applicable | not_comparable", "basis": "同上", "shared_contract": "同上", "restrictions": [], "evidence_ids": []},
+      "S3": {"status": "direct | structural | not_applicable | not_comparable", "basis": "同上", "shared_contract": "同上", "restrictions": [], "evidence_ids": []},
+      "S4": {"status": "direct | structural | not_applicable | not_comparable", "basis": "同上", "shared_contract": "同上", "restrictions": [], "evidence_ids": []},
+      "S5": {"status": "direct | structural | not_applicable | not_comparable", "basis": "同上", "shared_contract": "同上", "restrictions": [], "evidence_ids": []},
+      "S6": {"status": "direct | structural | not_applicable | not_comparable", "basis": "同上", "shared_contract": "同上", "restrictions": [], "evidence_ids": []}
+    },
+    "overall_status": "full_direct | selective_structural | not_comparable | uncertain。由代码根据关系与阶段资格派生。",
+    "comparable_stages": ["由代码派生的 direct/structural 阶段。"],
+    "reason": "一句话说明商品关系、替代关系与比较限制。",
+    "scope_origin": "facts | operator_certified。人工只可确认共同任务与替代关系，不能固定开放某些阶段。"
   },
+  "comparison_eligibility": "兼容旧消费者的 comparison_contract 镜像；新代码只以 comparison_contract 为权威。",
 
   "product_visibility": {
     "first_appearance_sec": 0.0,
@@ -67,6 +88,37 @@
     "benchmark": {
       "content_summary": "先整体概括标杆视频传递了什么信息、如何推进成交。",
       "communication_strategy": "概括口播、画面、字幕如何配合。",
+      "temporal_evidence_mode": "full_temporal | focused_temporal | static_only | unknown。由代码按实际请求能力写入，不由模型猜。",
+      "selling_point_observations": [
+        {
+          "id": "SP1",
+          "candidate_id": "可对应 short_video_proof_plan candidate 时填写，否则为空。",
+          "text": "实际重点传递的卖点。",
+          "visual_share": "0-1，卖点占画面表达的估计比例。",
+          "speech_share": "0-1，卖点占口播/字幕表达的估计比例。",
+          "proof_mode_observed": "实际采用的通用证明模式或 unknown。",
+          "proof_signal_present": "true | false | null。",
+          "evidence_ids": ["B1"]
+        }
+      ],
+      "variant_decision_rule": {
+        "speech_explains_choice": "true | false | null。",
+        "visual_comparison_present": "true | false | null。",
+        "reason": "是否明确解释多个 SKU/变体如何选择。",
+        "evidence_ids": []
+      },
+      "gate_observation_status": {
+        "selling_point_route": "complete | unknown",
+        "variant_focus": "complete | unknown",
+        "attention_scan": "complete | unknown"
+      },
+      "attention_scan_audit": {
+        "recording_equipment_visible": "true | false | null",
+        "foreground_non_task_object_visible": "true | false | null",
+        "notes": "嘴边、手部及产品证明区域的扫描事实。",
+        "evidence_ids": []
+      },
+      "attention_competitors": [],
       "evidence_units": [
         {
           "id": "B1",
@@ -79,6 +131,15 @@
           "audio_fact": "该时段的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。",
           "product_visible": true,
           "product_coverage": "该时段产品在画面中的视觉占比：none｜low｜medium｜high。看不到产品写 none。",
+          "variant_ids": [],
+          "variant_visual_shares": {},
+          "variant_speech_shares": {},
+          "variant_relation_mode": "single_focus | explicit_comparison | sequence | ambiguous | none。",
+          "comparison_purpose_explicit": "true | false | null。",
+          "primary_variant_id": "代码计算：single_focus 且单个变体视觉占比 >=70% 时填写。",
+          "variant_attribution_confident": "代码计算；明确比较可以 primary 为空但 confident=true。",
+          "variant_data_valid": "代码计算：ID、占比键、数值范围、总和和关系模式均一致才为 true。",
+          "attention_competitor_ids": [],
           "third_party_endorsement": "true|false：机构类型（监管认证/行业协会/评测实验室/高校研究/调研咨询/疾病防治中心）+ 其数据或结论在证明本产品价值，同时成立才 true；仅提机构名/赞助 logo/自述功效/用户评论为 false。定义与判例见 ARCHITECTURE.md §0.5。"
         }
       ]
@@ -86,6 +147,26 @@
     "creator": {
       "content_summary": "先整体概括达人视频传递了什么信息、如何推进成交。",
       "communication_strategy": "概括口播、画面、字幕如何配合。",
+      "temporal_evidence_mode": "full_temporal | focused_temporal | static_only | unknown。",
+      "selling_point_observations": [],
+      "variant_decision_rule": {
+        "speech_explains_choice": "true | false | null。",
+        "visual_comparison_present": "true | false | null。",
+        "reason": "是否明确解释多个 SKU/变体如何选择。",
+        "evidence_ids": []
+      },
+      "gate_observation_status": {
+        "selling_point_route": "complete | unknown",
+        "variant_focus": "complete | unknown",
+        "attention_scan": "complete | unknown"
+      },
+      "attention_scan_audit": {
+        "recording_equipment_visible": "true | false | null",
+        "foreground_non_task_object_visible": "true | false | null",
+        "notes": "嘴边、手部及产品证明区域的扫描事实。",
+        "evidence_ids": []
+      },
+      "attention_competitors": [],
       "evidence_units": [
         {
           "id": "C1",
@@ -98,11 +179,56 @@
           "audio_fact": "该时段的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。",
           "product_visible": true,
           "product_coverage": "该时段产品在画面中的视觉占比：none｜low｜medium｜high。看不到产品写 none。",
+          "variant_ids": [],
+          "variant_visual_shares": {},
+          "variant_speech_shares": {},
+          "variant_relation_mode": "single_focus | explicit_comparison | sequence | ambiguous | none。",
+          "comparison_purpose_explicit": "true | false | null。",
+          "primary_variant_id": "代码按 70% 视觉占比阈值计算。",
+          "variant_attribution_confident": "代码计算。",
+          "variant_data_valid": "代码计算。",
+          "attention_competitor_ids": [],
           "third_party_endorsement": "true|false：机构类型（监管认证/行业协会/评测实验室/高校研究/调研咨询/疾病防治中心）+ 其数据或结论在证明本产品价值，同时成立才 true；仅提机构名/赞助 logo/自述功效/用户评论为 false。定义与判例见 ARCHITECTURE.md §0.5。"
         }
       ]
     }
   },
+  "global_diagnosis": {
+    "version": "1.0",
+    "temporal_capability": {
+      "creator": "full_temporal | focused_temporal | static_only | unknown",
+      "benchmark": "full_temporal | focused_temporal | static_only | unknown",
+      "comparative": "取两侧较弱能力。"
+    },
+    "overall_status": "blocking | major | minor | pass | unknown",
+    "findings": [
+      {
+        "id": "selling_point_route | focus_coherence | attention_cleanliness",
+        "impact": "blocking | major | minor | pass | unknown",
+        "creator_status": "单侧绝对状态。",
+        "benchmark_status": "单侧绝对状态。",
+        "comparative_status": "comparable | unknown。",
+        "summary": "根本问题结论。",
+        "downstream_impact": "对阶段链条的影响。",
+        "suggested_action": "应先处理的动作。",
+        "evidence_ids": [],
+        "affected_stages": ["S2", "S3", "S4"],
+        "confidence": "high | medium | low"
+      }
+    ]
+  },
+  "commercial_priorities": [
+    {
+      "id": "global:selling_point_route | stage:S4",
+      "source": "global | stage",
+      "tier": "P0 | P1 | P2 | P3 | P4 | P5",
+      "title": "优先项标题。",
+      "summary": "优先项结论。",
+      "reference_id": "finding id 或 stage code。",
+      "root_cause_ids": []
+    }
+  ],
+  "commercial_priority_summary": "商业优先级第一项的一句话结论。",
   "stage_analysis": [
     {
       "stage": "S1 Hook",
@@ -110,6 +236,7 @@
       "benchmark_time_range": "标杆视频中该阶段真实起止时间，例如 0~5s",
       "creator_time_range": "达人视频中该阶段真实起止时间，例如 0~8s",
       "core_question": "用户凭什么停下来",
+      "affected_by_global_issues": ["selling_point_route"],
       "creator_hook": {
         "exists": "仅 S1 必填：达人前段是否存在抢注意力的 Hook，true|false。",
         "type": "仅 S1 必填：S1-A~G 的字母 A-G，或 unknown。type 只作描述字段，不直接进入 severity。",
@@ -123,6 +250,19 @@
         "hook_boundary_reason": "仅 S1 必填：一句话说明 S1 主导信息是什么、为什么此处切到 S2。",
         "s2_start_signal": "仅 S1 必填：边界后的第一个 S2 信号，如开始回答 Hook、解决方案承接、产品名、产品揭晓或产品成为画面主角；第三方认证按 S5 信任放大归因。",
         "landing_met": "仅 S1 必填：0 到 hook_boundary_seconds 内对象明确 + 张力明确 + 承诺或证据明确，三件齐才 true。",
+        "landing_conditions": {
+          "immediately_understandable": "shadow：冷启动用户无需品牌、SKU 或达人前史即可立即理解，true|false|null。",
+          "singular_and_concrete": "shadow：开头只有一个连贯具体焦点；强因果双段允许，平行卖点罗列不允许，true|false|null。",
+          "creates_stay_motivation": "shadow：对冷启动受众形成具体利害或可感收益；清楚可见的品类相关结果、便利或感官收益可以成立，纯动作不算，true|false|null。",
+          "effectively_received": "shadow：关键信息经至少一个主要信道清楚可接收，无需细看或脑补，true|false|null。"
+        },
+        "landing_shadow_met": "代码确定性派生：四项全 true 才为 true，任一 false 为 false，字段不完整为 null；验证期不进入 severity。",
+        "landing_failure_reasons": [
+          "代码根据 false 子条件生成；不接受模型自报。"
+        ],
+        "stay_motivation_mechanism": "pain | desire | result | contrast | curiosity | identity | scene | other | none | unknown。",
+        "landing_shadow_reason": "仅引用 Hook 边界内证据，逐项解释四个 shadow 条件。",
+        "landing_shadow_window_leak": "代码确定性派生：landing_shadow_reason 是否引用 Hook 边界后的时间戳；true 时生产门禁阻断并触发 Repair。",
         "landing_reason": "仅 S1 必填：一句话只引用 0 到 hook_boundary_seconds 内证据，说明 landing_met 为何 true/false。",
         "window_evidence": "仅 S1 必填：0 到 hook_boundary_seconds 内实际出现了什么，带时间戳。",
         "landing_window_leak": "仅 S1 必填：landing 判断是否借用了 hook_boundary_seconds 之后的 S2/S3 材料，true|false；若 true，landing_met 应为 false。",
@@ -144,6 +284,19 @@
         "hook_boundary_reason": "仅 S1 必填：一句话说明 S1 主导信息是什么、为什么此处切到 S2。",
         "s2_start_signal": "仅 S1 必填：边界后的第一个 S2 信号，如开始回答 Hook、解决方案承接、产品名、产品揭晓或产品成为画面主角；第三方认证按 S5 信任放大归因。",
         "landing_met": "仅 S1 必填：0 到 hook_boundary_seconds 内对象明确 + 张力明确 + 承诺或证据明确，三件齐才 true。",
+        "landing_conditions": {
+          "immediately_understandable": "shadow：冷启动用户无需品牌、SKU 或达人前史即可立即理解，true|false|null。",
+          "singular_and_concrete": "shadow：开头只有一个连贯具体焦点；强因果双段允许，平行卖点罗列不允许，true|false|null。",
+          "creates_stay_motivation": "shadow：对冷启动受众形成具体利害或可感收益；清楚可见的品类相关结果、便利或感官收益可以成立，纯动作不算，true|false|null。",
+          "effectively_received": "shadow：关键信息经至少一个主要信道清楚可接收，无需细看或脑补，true|false|null。"
+        },
+        "landing_shadow_met": "代码确定性派生：四项全 true 才为 true，任一 false 为 false，字段不完整为 null；验证期不进入 severity。",
+        "landing_failure_reasons": [
+          "代码根据 false 子条件生成；不接受模型自报。"
+        ],
+        "stay_motivation_mechanism": "pain | desire | result | contrast | curiosity | identity | scene | other | none | unknown。",
+        "landing_shadow_reason": "仅引用 Hook 边界内证据，逐项解释四个 shadow 条件。",
+        "landing_shadow_window_leak": "代码确定性派生：landing_shadow_reason 是否引用 Hook 边界后的时间戳；true 时生产门禁阻断并触发 Repair。",
         "landing_reason": "仅 S1 必填：一句话只引用 0 到 hook_boundary_seconds 内证据，说明 landing_met 为何 true/false。",
         "window_evidence": "仅 S1 必填：0 到 hook_boundary_seconds 内实际出现了什么，带时间戳。",
         "landing_window_leak": "仅 S1 必填：landing 判断是否借用了 hook_boundary_seconds 之后的 S2/S3 材料，true|false；若 true，landing_met 应为 false。",
@@ -200,6 +353,9 @@
         "core_selling_point_visible": "仅 S3 必填：product_profile.core_selling_points 中至少一个核心卖点是否在使用动作里被看见；只口播不算，true|false。",
         "process_framing_met": "仅 S3 必填：使用过程证据是否可接收；使用对象/场景上下文足以理解产品作用对象、关键动作连续可追踪、核心卖点发生区域清楚可见。合理局部特写可为 true；看不清对象/动作/证明区域或跑焦/主体出画/遮挡时为 false。false 时该侧 S3 不能算强演示。",
         "action_proof_met": "仅 S3 必填：同一连续动作窗口内，产品/动作、作用对象、与核心卖点对应的即时可观察证据是否同时存在。它不要求 S4 最终效果；但按压未见泡沫、刷洗看不清作用对象/覆盖区域、只靠口播或事后结果补足时为 false。",
+        "action_target_contact_met": "仅 S3 必填：产品/材料/工具是否实际接触并作用于目标对象或区域。手持展示、剪裁准备、空中比划、目标对象已完成后才出现均为 false。",
+        "action_application_change_visible": "仅 S3 必填：同一使用窗口内，是否直接看见动作新施加/位移/激活产品或材料，或使目标状态发生可观察变化。允许从真实刷洗/涂抹动作中途开始，不要求绝对接触前镜头；但仅触碰、按压或搅动已经存在的材料/结果均为 false。",
+        "critical_action_continuity_met": "仅 S3 必填：是否看见作用于目标对象的关键动作，并能把它与紧随的目标状态变化连起来；允许正常切镜，但准备镜头直接跳到完成态为 false。",
         "demonstrated_selling_points": [
           "动作里实际被证明的核心卖点。"
         ],
@@ -359,6 +515,44 @@
       "creator_has_usage_demo": "仅 S3 需判：达人是否在真实使用过程中把核心卖点『演示出来被看见』(结构库 S3-A~E 任一)，true|false；非 S3 阶段填 null。判据见用户消息中 S3 字段说明。",
       "creator_quote": "达人该阶段的本地语言口播原句；没有明确口播则留空。",
       "creator_quote_zh": "creator_quote 的中文翻译；没有则留空。",
+      "creator_multimodal": {
+        "channel_impacts": {
+          "visual": "strong_positive | positive | neutral | negative | strong_negative | absent | unknown",
+          "speech": "同上。只判口播语义与表达对本阶段核心任务的贡献；含糊信息可为 negative，完全无口播为 absent。",
+          "text": "同上。屏幕字幕、贴纸和价格卡等文字信号。",
+          "sound_rhythm": "同上。语气、BGM、音效、停顿和剪辑节奏的合并信号。"
+        },
+        "channel_evidence_ids": {
+          "visual": ["C1"],
+          "speech": ["C1"],
+          "text": ["C1"],
+          "sound_rhythm": ["C1"]
+        },
+        "dominant_channel": "visual | speech | text | sound_rhythm | none | unknown",
+        "cross_channel_relation": "reinforcing | complementary | neutral | conflicting | distracting | unknown",
+        "integrated_effect": "strong | effective | weak | missing | unknown。判断各渠道组合后的阶段核心任务净效果，不按最弱渠道一票否决，也不等权相加。",
+        "compensation_applied": "一个强正向渠道是否实际弥补另一个弱、缺失或轻度负向渠道，true|false。",
+        "integration_reason": "点明主导渠道、补偿或冲突关系和净效果；只能引用该侧该阶段 channel_evidence_ids。"
+      },
+      "benchmark_multimodal": {
+        "channel_impacts": {
+          "visual": "strong_positive | positive | neutral | negative | strong_negative | absent | unknown",
+          "speech": "同上。",
+          "text": "同上。",
+          "sound_rhythm": "同上。"
+        },
+        "channel_evidence_ids": {
+          "visual": ["B1"],
+          "speech": ["B1"],
+          "text": ["B1"],
+          "sound_rhythm": ["B1"]
+        },
+        "dominant_channel": "visual | speech | text | sound_rhythm | none | unknown",
+        "cross_channel_relation": "reinforcing | complementary | neutral | conflicting | distracting | unknown",
+        "integrated_effect": "strong | effective | weak | missing | unknown。阶段硬条件与达人侧相同。",
+        "compensation_applied": "true|false。",
+        "integration_reason": "同达人侧，引用标杆该阶段证据。"
+      },
       "gap": "达人和爆款的具体差距，必须指向画面、话术或节奏。",
       "evidence": [
         "必须至少 1 条，引用时间段、画面证据或口播证据。"
@@ -368,9 +562,11 @@
       "benchmark_execution": "0 | 0.5 | 1 | 2。标杆侧独立执行分，标尺同上。两个执行分是系统确定性推导差距等级的事实输入。",
       "painpoint_relevance": "benchmark_only | creator_only | both | none。该阶段双方内容是否命中 category_profile.painpoints 的核心决策因素；按内容功能判断，不要求字面用词一致。系统据此定痛点命中系数。",
       "stage_standard_delivery": "benchmark_only | creator_only | both | none。该阶段双方是否有效达到本阶段的『本品到位标准』（按阶段查产品锚点：S1 钩子→hook_proposition、S2 引出→承接钩子的自然引出、S3 使用过程→core_selling_points+usage_context（使用中传卖点）、S4 效果→visual_proof_points.primary（旧结果回退 core_visual_proposition）、S5 信任→trust_multipliers、S6 促单→decision_threshold 匹配的 CTA）。做到/展示到才算，仅口头讲到不算。先作为事实收集，暂不参与推导。",
-      "creator_s5": "仅 S5 需输出。对象字段：exists、module_type(A-E/unknown)、trust_evidence_type(hard/soft/mixed/none/unknown)、trust_basis(authority/traceable_data/independent_user/social_consensus/process_transparency/product_claim/offer_or_spec/none/unknown)、trust_source_visible、trust_source_credible、trust_claim_specific、product_relevance_met、independent_trust_purpose、duplicates_other_stage、voice_only、risky_or_unsupported、start_seconds、end_seconds、trust_reason、evidence_ids、proposition_ids（信任材料支持的产品主张 ID，不是 trust.*）。产品功能/参数为 product_claim，价格/数量/赠品/套装/使用时长为 offer_or_spec，二者不计入 S5。",
+      "creator_s3": "仅 S3 需输出。对象字段：exists、module_type(A-E/unknown)、usage_process_visible、result_only_without_process、mouth_only_or_static、real_usage_met、core_selling_point_visible、process_framing_met、action_proof_met、action_target_contact_met、action_application_change_visible、critical_action_continuity_met、demonstrated_selling_points、missing_selling_points、scene_mode、usage_context_fit、continuity_met、richness_met、single_scene_continuity_met、single_scene_variation_met、multi_scene_logic_met、multi_scene_transition_met、multi_scene_role_adaptation_met、role_design_met、role_interaction_met、distinct_personas_met、steps_clear_met、pov_immersive_met、presentation_overlays、fake_or_staged、start_seconds、end_seconds、usage_reason、evidence_ids、proposition_ids。",
+      "benchmark_s3": "仅 S3 需输出。字段同 creator_s3。",
+      "creator_s5": "仅 S5 需输出。对象字段：exists、module_type(A-E/unknown)、trust_evidence_type(hard/soft/mixed/none/unknown)、trust_basis(authority/traceable_data/independent_user/social_consensus/process_transparency/product_claim/offer_or_spec/none/unknown)、trust_source_evidence_ids（仅引用 Stage1 中同类型且有来源说明的证据 ID）、trust_source_visible、trust_source_credible、trust_claim_specific、product_relevance_met、independent_trust_purpose、duplicates_other_stage、voice_only、risky_or_unsupported、start_seconds、end_seconds、trust_reason、evidence_ids、proposition_ids（信任材料支持的产品主张 ID，不是 trust.*）。产品功能/参数为 product_claim，价格/数量/赠品/套装/使用时长为 offer_or_spec，二者不计入 S5。",
       "benchmark_s5": "仅 S5 需输出。字段同 creator_s5。",
-      "creator_s6": "仅 S6 需输出。对象字段：exists、module_type(A-E/unknown)、direct_order_met、action_path_clear、offer_or_incentive_clear、urgency_met、product_value_recalled、module_fit_met、ending_position_met、depends_on_valid_s4、compliance_risk、start_seconds、end_seconds、cta_reason、evidence_ids、proposition_ids（CTA 召回的产品价值 ID）。",
+      "creator_s6": "仅 S6 需输出。对象字段：exists、module_type(A-E/unknown)、direct_order_met、action_path_clear、soft_purchase_invitation_met、offer_or_incentive_clear、price_anchor_met、urgency_evidence_met、gift_stack_met、guarantee_clear_met、urgency_met、product_value_recalled、module_fit_met、ending_position_met、depends_on_valid_s4、compliance_risk、start_seconds、end_seconds、cta_reason、evidence_ids、proposition_ids（CTA 召回的产品价值 ID）。soft_purchase_invitation_met 仅表示“面向用户邀请 + 明确利益点”的无路径软促单，不等同完整购买路径。A/B/C/E 细分观察先进入 trace/QA；S6-D 的 S4 依赖仍为确定性约束。",
       "benchmark_s6": "仅 S6 需输出。字段同 creator_s6。"
     }
   ],
@@ -406,6 +602,7 @@
           "reason": "一句话说明阶段分流或排序依据。"
         }
       ],
+      "primary_candidate_id": "整条视频商业主路线对应的 candidate；可来自受信任运营输入，否则按统一排序从全部 candidates 选。",
       "s4_anchor_candidate_id": "单一 S4 测量锚点。必须是 candidates 中 delivery_stage=S4 的最高优先候选；按 visual_space、functional_centrality、comprehension_cost 依次排序。没有适合 S4 的候选则为空。",
       "selection_source": "model_category_default | operator_priority | curated_priority。无运营明确排序时用 model_category_default。",
       "anchor_confidence": "high | low。模型对该品类默认排序的置信度。",
@@ -482,6 +679,7 @@
       "aigc_prompt": "以达人原始画面为素材输入的改图提示词，具体到镜头角度、产品位置、动作、字幕。",
       "aigc_image_path": "可选；实际生成并保存到本次 run directory 后的图片路径，模型分析阶段留空。",
       "expected_effect": "该改造预期改善的观看或转化环节。",
+      "root_cause_ids": ["selling_point_route"],
       "priority": 1
     }
   ]

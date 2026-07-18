@@ -1,10 +1,29 @@
 {
-  "schema_version": 2,
-  "description": "Flayr 从零验证输入清单。primary 用于主回归，holdout 仅用于最终泛化验收。产品级 GT 统计必须先通过锁定事实的 comparison_eligibility 审计。",
+  "schema_version": 3,
+  "description": "Flayr 从零验证输入清单。primary 用于主回归；已参与规则讨论的历史 holdout 已降级为 seen_validation，不得用于最终泛化验收。产品级 GT 统计必须先通过锁定事实的 comparison_eligibility 审计。",
   "comparison_eligibility_policy": {
     "product_gt_scopes": ["same_product", "comparable_variant"],
     "cross_product_scope": "S1/S6 可作结构参考，S2-S5 不纳入产品级 GT、差距或改进统计",
+    "same_task_structure_scope": "仅运营显式确认的同类同任务、非同 SKU 样本可用；允许 S1-S4/S6 的结构执行 GT，禁止比较具体配方、参数、品牌或功效优劣，S5 默认不纳入",
     "pending_scope": "未经当前 facts 审计的样本不得进入产品级指标"
+  },
+  "blind_validation_contract": {
+    "minimum_samples": 3,
+    "group": "blind",
+    "evaluation_scopes": {
+      "stage_severity": "默认范围。人工必须在模型结果打开前填写 S1-S6 的差距等级，进入阶段准确率统计。",
+      "whole_video_observation": "只冻结人工对整条内容是否具备观看与带货竞争力的裁决；不伪造 S1-S6 标签，不进入阶段准确率或 blind 样本数量统计。"
+    },
+    "admission": [
+      "视频对不得出现在 primary、calibration、seen_validation 或任何用于规则设计的历史 run 中",
+      "每对必须提供 benchmark_video、creator_video、product_name、product_category、target_market；产品级比较仍须通过 comparison_eligibility 审计",
+      "每个阶段的人工 GT 必须在本轮规则冻结后、模型结果打开前完成"
+    ],
+    "required_ground_truth": {
+      "partition": "blind",
+      "stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
+      "severity_values": ["small", "medium", "large"]
+    }
   },
   "samples": [
     {
@@ -190,7 +209,7 @@
     },
     {
       "id": "wukoubo-c1",
-      "group": "holdout",
+      "group": "seen_validation",
       "product_name": "便携榨汁机",
       "product_category": "小家电 - 便携榨汁机",
       "target_market": "my",
@@ -200,7 +219,7 @@
     },
     {
       "id": "youkoubo-c0",
-      "group": "holdout",
+      "group": "seen_validation",
       "product_name": "便携榨汁机",
       "product_category": "小家电 - 便携榨汁机",
       "target_market": "my",
@@ -210,7 +229,7 @@
     },
     {
       "id": "youkoubo-c1",
-      "group": "holdout",
+      "group": "seen_validation",
       "product_name": "便携榨汁机",
       "product_category": "小家电 - 便携榨汁机",
       "target_market": "my",
@@ -220,7 +239,7 @@
     },
     {
       "id": "carslan-b1",
-      "group": "holdout",
+      "group": "seen_validation",
       "product_name": "CARSLAN 卡姿兰定妆粉饼",
       "product_category": "美妆 - 定妆",
       "target_market": "auto",
@@ -229,12 +248,102 @@
     },
     {
       "id": "colorkey-b1",
-      "group": "holdout",
+      "group": "seen_validation",
       "product_name": "COLORKEY 珂拉琪面膜",
       "product_category": "护肤 - 面膜",
       "target_market": "auto",
       "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/标杆视频1.mp4",
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/达人视频.mp4"
+    },
+  {
+    "id": "colorblu-c0",
+    "proposition_key": "colorblu_waterproof_sealant",
+    "group": "blind",
+      "product_name": "Color Blu 快干防水密封剂",
+      "product_category": "五金工具 / 五金 / 胶水、胶带、密封条",
+      "target_market": "th",
+      "core_selling_points": "快干防水密封；用于地面和户外裂缝、水泥、屋顶漏水修补。",
+      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/Color blu/标杆1.3万单.mp4",
+      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/Color blu/达人.mp4",
+      "comparison_scope_status": "operator_verified_same_task_structure",
+      "comparison_scope": "same_task_structure",
+      "direct_product_stages": ["S1", "S2", "S3", "S4", "S6"],
+      "metric_scope": "structure_execution_gt"
+    },
+  {
+    "id": "colorblu-c1",
+    "proposition_key": "colorblu_waterproof_sealant",
+    "group": "blind",
+      "product_name": "Color Blu 快干防水密封剂",
+      "product_category": "五金工具 / 五金 / 胶水、胶带、密封条",
+      "target_market": "th",
+      "core_selling_points": "快干防水密封；用于地面和户外裂缝、水泥、屋顶漏水修补。",
+      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/Color blu/标杆1.3万单.mp4",
+      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/Color blu/达人1.mp4",
+      "comparison_scope_status": "operator_verified_same_task_structure",
+      "comparison_scope": "same_task_structure",
+      "direct_product_stages": ["S1", "S2", "S3", "S4", "S6"],
+      "metric_scope": "structure_execution_gt"
+    },
+  {
+    "id": "carslan-powder-c0",
+    "proposition_key": "carslan",
+    "group": "blind",
+      "product_name": "CARSLAN 2.0 控油粉饼",
+      "product_category": "美妆个护 / 美妆 / 散粉",
+      "target_market": "th",
+      "core_selling_points": "无需打底；控油；毛孔模糊；柔雾质地；24 小时防汗持妆。",
+      "primary_selling_point": "控油",
+      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/标杆粉饼.mp4",
+      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/达人粉饼.mp4",
+      "comparison_scope_status": "facts_verified_same_product",
+      "comparison_scope": "same_product",
+      "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
+      "metric_scope": "product_gt"
+    },
+  {
+    "id": "carslan-powder-c1",
+    "proposition_key": "carslan",
+    "group": "blind",
+      "product_name": "CARSLAN 2.0 控油粉饼",
+      "product_category": "美妆个护 / 美妆 / 散粉",
+      "target_market": "th",
+      "core_selling_points": "无需打底；控油；毛孔模糊；柔雾质地；24 小时防汗持妆。",
+      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/标杆粉饼.mp4",
+      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/达人粉饼1.mp4",
+      "comparison_scope_status": "operator_verified_same_task_structure",
+      "comparison_scope": "same_task_structure",
+      "direct_product_stages": ["S1", "S2", "S3", "S4", "S6"],
+      "metric_scope": "structure_execution_gt"
+    },
+    {
+      "id": "colorkey-lip-c0",
+      "group": "blind",
+      "proposition_key": "colorkey_lip_mud",
+      "product_name": "COLORKEY Silky Creamy Matte Lip Mud 唇彩",
+      "product_category": "美妆个护 / 美妆 / 口红与唇彩",
+      "target_market": "th",
+      "core_selling_points": "丝绒奶油哑光妆效；色号显色与肤色适配；自然柔和的上唇效果。",
+      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/标杆口红.mp4",
+      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/达人口红1.mp4",
+      "comparison_scope_status": "pending_facts_audit",
+      "comparison_scope": "pending",
+      "metric_scope": "pending"
+    },
+    {
+      "id": "colorkey-lip-c1",
+      "group": "blind",
+      "evaluation_scope": "whole_video_observation",
+      "proposition_key": "colorkey_lip_mud",
+      "product_name": "COLORKEY Silky Creamy Matte Lip Mud 唇彩",
+      "product_category": "美妆个护 / 美妆 / 口红与唇彩",
+      "target_market": "th",
+      "core_selling_points": "丝绒奶油哑光妆效；色号显色与肤色适配；自然柔和的上唇效果。",
+      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/标杆口红.mp4",
+      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/达人口红2.mp4",
+      "comparison_scope_status": "pending_facts_audit",
+      "comparison_scope": "pending",
+      "metric_scope": "whole_video_observation"
     }
   ]
 }

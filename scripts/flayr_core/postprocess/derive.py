@@ -25,6 +25,7 @@ import re
 from collections import Counter
 from typing import Any, NamedTuple
 
+from ..multimodal import channel_requirement_for, has_multimodal_assessment, multimodal_execution
 from .repair import has_hard_endorsement
 
 # ── 品类原型 → 阶段权重表 W（政策数据，待数据积累渐进拟合）──────────────────────
@@ -313,9 +314,13 @@ def _s3_strong_scene(flag: dict[str, Any]) -> bool:
     has_missing_core = isinstance(missing, list) and any(str(item).strip() for item in missing)
     if has_missing_core:
         return False
-    if flag.get("process_framing_met") is not True:
-        return False
     if flag.get("action_proof_met") is False:
+        return False
+    if flag.get("action_target_contact_met") is False:
+        return False
+    if flag.get("action_application_change_visible") is False:
+        return False
+    if flag.get("critical_action_continuity_met") is False:
         return False
     mode = str(flag.get("scene_mode") or "unknown")
     if mode == "single_scene":
@@ -330,9 +335,7 @@ def _s3_strong_scene(flag: dict[str, Any]) -> bool:
             and flag.get("multi_scene_role_adaptation_met") is True
         )
     if mode == "multi_person":
-        return (flag.get("distinct_personas_met") is True
-                and flag.get("role_design_met") is True
-                and flag.get("role_interaction_met") is True)
+        return flag.get("role_design_met") is True and flag.get("role_interaction_met") is True
     if mode == "hybrid":
         return flag.get("continuity_met") is True and flag.get("richness_met") is True
     return flag.get("continuity_met") is True and flag.get("richness_met") is True
@@ -359,10 +362,14 @@ def _s3_usage_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
             return 0.0
         if flag.get("core_selling_point_visible") is not True:
             return 0.5
-        if flag.get("process_framing_met") is False:
-            return 0.5
         if flag.get("action_proof_met") is False:
             return 0.5
+        if flag.get("action_target_contact_met") is False:
+            return 0.0
+        if flag.get("action_application_change_visible") is False:
+            return 0.0
+        if flag.get("critical_action_continuity_met") is False:
+            return 0.0
         if flag.get("usage_context_fit") is not True:
             return 0.5
         missing = flag.get("missing_selling_points")
@@ -373,26 +380,122 @@ def _s3_usage_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
     return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
 
 
-def _attach_s3_process_framing_trace(stage_id: str, stage: dict[str, Any], trace: dict[str, Any]) -> dict[str, Any]:
-    """S3 拍摄对准质量进入执行分，同时在 trace 中留审计信息。"""
-    if stage_id != "S3":
-        return trace
-    c = stage.get("creator_s3")
-    b = stage.get("benchmark_s3")
-    framing: dict[str, Any] = {}
-    if isinstance(c, dict) and "process_framing_met" in c:
-        framing["creator"] = c.get("process_framing_met")
-    if isinstance(b, dict) and "process_framing_met" in b:
-        framing["benchmark"] = b.get("process_framing_met")
-    if framing:
-        trace["s3_process_framing"] = framing
-    action_proof: dict[str, Any] = {}
-    if isinstance(c, dict) and "action_proof_met" in c:
-        action_proof["creator"] = c.get("action_proof_met")
-    if isinstance(b, dict) and "action_proof_met" in b:
-        action_proof["benchmark"] = b.get("action_proof_met")
-    if action_proof:
-        trace["s3_action_proof"] = action_proof
+def _s3_complete_real_usage(flag: dict[str, Any]) -> bool:
+    """S3-A~E 共同底线：真实作用、关键动作闭环、核心卖点在动作中可见。"""
+    return (
+        (flag.get("usage_process_visible") is True or flag.get("real_usage_met") is True)
+        and flag.get("core_selling_point_visible") is True
+        and flag.get("action_proof_met") is True
+        and flag.get("action_target_contact_met") is True
+        and flag.get("action_application_change_visible") is True
+        and flag.get("critical_action_continuity_met") is True
+    )
+
+
+def _s3_explicitly_missing_real_usage(flag: dict[str, Any]) -> bool:
+    """只在事实明确否定使用过程时触发，未知字段不冒充缺失。"""
+    return (
+        flag.get("exists") is False
+        or flag.get("mouth_only_or_static") is True
+        or flag.get("result_only_without_process") is True
+        or flag.get("usage_process_visible") is False
+        or flag.get("real_usage_met") is False
+        or flag.get("action_target_contact_met") is False
+        or flag.get("action_application_change_visible") is False
+        or flag.get("critical_action_continuity_met") is False
+    )
+
+
+def _s4_strong_visible_effect(flag: dict[str, Any]) -> bool:
+    """S4-A~F 的共同底线：用户无需脑补即可看到并理解效果。"""
+    return (
+        flag.get("effect_visible") is True
+        and flag.get("visual_difference_observed") is True
+        and flag.get("module_constraints_met") is True
+        and str(flag.get("effect_salience") or "") in {"clear", "strong"}
+        and flag.get("effect_attribution_supported") is True
+        and flag.get("requires_close_inspection") is not True
+        and flag.get("tamper_or_cut_risk") is not True
+    )
+
+
+def _s4_explicitly_missing_visible_effect(flag: dict[str, Any]) -> bool:
+    """效果不存在或视觉验证明确失败；不把未知结果当成缺失。"""
+    return (
+        flag.get("effect_visible") is False
+        or flag.get("visual_difference_observed") is False
+        or str(flag.get("effect_salience") or "") == "none"
+    )
+
+
+def _attach_pending_flag_trace(stage_id: str, stage: dict[str, Any], trace: dict[str, Any]) -> dict[str, Any]:
+    """记录尚在留出验证期的观察字段，不让它们抢先影响 severity。"""
+    if stage_id == "S3":
+        c = stage.get("creator_s3")
+        b = stage.get("benchmark_s3")
+        framing: dict[str, Any] = {}
+        if isinstance(c, dict) and "process_framing_met" in c:
+            framing["creator"] = c.get("process_framing_met")
+        if isinstance(b, dict) and "process_framing_met" in b:
+            framing["benchmark"] = b.get("process_framing_met")
+        if framing:
+            trace["s3_process_framing"] = framing
+        action_proof: dict[str, Any] = {}
+        if isinstance(c, dict) and "action_proof_met" in c:
+            action_proof["creator"] = c.get("action_proof_met")
+        if isinstance(b, dict) and "action_proof_met" in b:
+            action_proof["benchmark"] = b.get("action_proof_met")
+        if action_proof:
+            trace["s3_action_proof"] = action_proof
+        contact: dict[str, Any] = {}
+        application_change: dict[str, Any] = {}
+        continuity: dict[str, Any] = {}
+        for role, flag in (("creator", c), ("benchmark", b)):
+            if isinstance(flag, dict) and "action_target_contact_met" in flag:
+                contact[role] = flag.get("action_target_contact_met")
+            if isinstance(flag, dict) and "action_application_change_visible" in flag:
+                application_change[role] = flag.get("action_application_change_visible")
+            if isinstance(flag, dict) and "critical_action_continuity_met" in flag:
+                continuity[role] = flag.get("critical_action_continuity_met")
+        if contact:
+            trace["s3_action_target_contact"] = contact
+        if application_change:
+            trace["s3_action_application_change"] = application_change
+        if continuity:
+            trace["s3_critical_action_continuity"] = continuity
+        presentation: dict[str, dict[str, Any]] = {}
+        for role, flag in (("creator", c), ("benchmark", b)):
+            if isinstance(flag, dict):
+                presentation[role] = {
+                    key: flag.get(key)
+                    for key in ("distinct_personas_met", "steps_clear_met", "pov_immersive_met")
+                    if key in flag
+                }
+        if presentation:
+            trace["s3_presentation_observations"] = presentation
+    elif stage_id == "S6":
+        c = stage.get("creator_s6")
+        b = stage.get("benchmark_s6")
+        module_checks: dict[str, dict[str, Any]] = {}
+        for role, flag in (("creator", c), ("benchmark", b)):
+            if isinstance(flag, dict):
+                module_checks[role] = {
+                    key: flag.get(key)
+                    for key in ("price_anchor_met", "urgency_evidence_met", "gift_stack_met", "guarantee_clear_met")
+                    if key in flag
+                }
+        if module_checks:
+            trace["s6_module_observations"] = module_checks
+        effect_summary_dependency: dict[str, Any] = {}
+        for role, flag in (("creator", c), ("benchmark", b)):
+            if not isinstance(flag, dict) or str(flag.get("module_type") or "") != "D":
+                continue
+            dependency = flag.get("computed_depends_on_valid_s4")
+            if dependency not in {True, False}:
+                dependency = flag.get("depends_on_valid_s4")
+            effect_summary_dependency[role] = dependency
+        if effect_summary_dependency:
+            trace["s6_effect_summary_dependency"] = effect_summary_dependency
     return trace
 
 
@@ -406,6 +509,9 @@ def _s3_core_floor(stage: dict[str, Any]) -> tuple[bool, str]:
         (b.get("usage_process_visible") is True or b.get("real_usage_met") is True)
         and b.get("core_selling_point_visible") is True
         and b.get("action_proof_met") is not False
+        and b.get("action_target_contact_met") is not False
+        and b.get("action_application_change_visible") is not False
+        and b.get("critical_action_continuity_met") is not False
     )
     if not benchmark_core:
         return False, ""
@@ -420,6 +526,12 @@ def _s3_core_floor(stage: dict[str, Any]) -> tuple[bool, str]:
         missing.append("核心卖点未在动作里可见")
     if c.get("action_proof_met") is False:
         missing.append("动作未形成可复核卖点证明")
+    if c.get("action_target_contact_met") is False:
+        missing.append("产品未实际作用于目标对象")
+    if c.get("action_application_change_visible") is False:
+        missing.append("未见动作使产品/材料发生可复核变化")
+    if c.get("critical_action_continuity_met") is False:
+        missing.append("关键动作被跳剪，无法确认状态变化")
     if not missing:
         return False, ""
     return True, "；S3 核心演示下限：" + "、".join(missing)
@@ -441,6 +553,9 @@ def _s3_thin_demo_floor(stage: dict[str, Any]) -> tuple[bool, str]:
             and flag.get("fake_or_staged") is not True
             and flag.get("core_selling_point_visible") is True
             and flag.get("action_proof_met") is not False
+            and flag.get("action_target_contact_met") is not False
+            and flag.get("action_application_change_visible") is not False
+            and flag.get("critical_action_continuity_met") is not False
         )
 
     if not has_basic_process(c) or not has_basic_process(b):
@@ -455,6 +570,12 @@ def _s3_thin_demo_floor(stage: dict[str, Any]) -> tuple[bool, str]:
         creator_thin_reasons.append("使用过程未拍全/未对准")
     if c.get("action_proof_met") is False:
         creator_thin_reasons.append("动作未形成可复核卖点证明")
+    if c.get("action_target_contact_met") is False:
+        creator_thin_reasons.append("产品未实际作用于目标对象")
+    if c.get("action_application_change_visible") is False:
+        creator_thin_reasons.append("未见动作使产品/材料发生可复核变化")
+    if c.get("critical_action_continuity_met") is False:
+        creator_thin_reasons.append("关键动作被跳剪，无法确认状态变化")
     if c.get("usage_context_fit") is False:
         creator_thin_reasons.append("使用场景未给卖点舞台")
     if not _s3_strong_scene(c):
@@ -489,7 +610,9 @@ def _s4_thin_effect_floor(stage: dict[str, Any]) -> tuple[bool, str]:
         str(b.get("effect_salience") or "") == "strong"
         and b.get("effect_maximized") is True
     )
-    comparison_required = str(c.get("effect_type") or "") not in {"process_visualization", "aesthetic_display"}
+    comparison_required = str(c.get("effect_type") or "") not in {
+        "process_visualization", "quantified_test", "aesthetic_display"
+    }
     creator_thinner = (
         str(c.get("effect_salience") or "") != "strong"
         or c.get("effect_maximized") is not True
@@ -532,7 +655,7 @@ def _s4_effect_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
             return 0.5
         if flag.get("process_linked_effect") is True and flag.get("effect_attribution_supported") is True:
             if (
-                flag.get("effect_type") == "process_visualization"
+                flag.get("effect_type") in {"process_visualization", "quantified_test"}
                 and salience == "strong"
                 and flag.get("effect_proposition_matched") is True
                 and flag.get("closeup_or_focus_met") is True
@@ -649,6 +772,7 @@ def _s6_cta_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
             return 0.0
         direct = flag.get("direct_order_met") is True
         path = flag.get("action_path_clear") is True
+        soft_invitation = flag.get("soft_purchase_invitation_met") is True
         fit_value = flag.get("module_fit_met")
         fit = fit_value is True
         amplifier = any(
@@ -656,23 +780,19 @@ def _s6_cta_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
             for key in ("offer_or_incentive_clear", "urgency_met", "product_value_recalled")
         )
         if flag.get("compliance_risk") is True:
-            return 0.5 if direct or path else 0.0
+            return 0.5 if direct or path or soft_invitation else 0.0
         if not direct and not path:
+            # 结尾的“感兴趣/需要的朋友 + 明确优惠”仍是软促单：没有路径，绝对质量仍弱，
+            # 但不能与完全没有面向用户购买动作混为一谈。
+            if soft_invitation and flag.get("offer_or_incentive_clear") is True:
+                return 1.5 if fit else 1.0
+            if soft_invitation:
+                return 0.5
             return 0.0
-        depends_on_valid_s4 = flag.get("computed_depends_on_valid_s4")
-        if depends_on_valid_s4 not in {True, False}:
-            depends_on_valid_s4 = flag.get("depends_on_valid_s4")
-        module = str(flag.get("module_type") or "unknown")
-        module_met = {
-            "A": flag.get("price_anchor_met") is True,
-            "B": flag.get("urgency_evidence_met") is True,
-            "C": flag.get("gift_stack_met") is True,
-            "D": depends_on_valid_s4 is True,
-            "E": flag.get("guarantee_clear_met") is True,
-        }.get(module, False)
-        if all(flag.get(key) is None for key in ("price_anchor_met", "urgency_evidence_met", "gift_stack_met", "guarantee_clear_met")):
-            module_met = module != "D" or depends_on_valid_s4 is True
-        if fit_value is False or not module_met:
+        # S6-D 的效果总结素材仍要依赖有效 S4（写入 trace/绝对质量审计），但 CTA 的核心是
+        # 结尾购买指令和行动路径。若这两项和利益点已成立，不能仅因模型把表达归成 D 就把 CTA
+        # 降为无效；否则会把模块标签误差变成类型层级偏见。
+        if fit_value is False:
             return 0.5
         if direct and path and fit and amplifier:
             return 2.0
@@ -685,7 +805,8 @@ def _s6_cta_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
 
 def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] | None,
                 painpoints: list[str], shake: dict[str, bool] | None = None,
-                endorsement: dict[str, tuple[bool, bool, bool]] | None = None) -> dict[str, Any]:
+                endorsement: dict[str, tuple[bool, bool, bool]] | None = None,
+                allow_legacy_text_fallback: bool = True) -> dict[str, Any]:
     """推导单阶段 severity。返回 severity_derivation 溯源 dict（status=derived 时含新 severity）。"""
     creator_exec = stage.get("creator_execution")
     bench_exec = stage.get("benchmark_execution")
@@ -694,11 +815,29 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         """保留参与公式的最终执行分，避免报告字段与 severity 推导口径脱节。"""
         trace.setdefault("derived_creator_execution", creator_exec)
         trace.setdefault("derived_benchmark_execution", bench_exec)
-        return _attach_s3_process_framing_trace(stage_id, stage, trace)
+        if has_multimodal_assessment(stage):
+            trace.setdefault(
+                "multimodal_integration",
+                {
+                    "channel_requirement": channel_requirement_for(stage_id),
+                    "sides": {
+                        role: {
+                            "dominant_channel": (stage.get(f"{role}_multimodal") or {}).get("dominant_channel"),
+                            "cross_channel_relation": (stage.get(f"{role}_multimodal") or {}).get("cross_channel_relation"),
+                            "integrated_effect": (stage.get(f"{role}_multimodal") or {}).get("integrated_effect"),
+                            "compensation_applied": (stage.get(f"{role}_multimodal") or {}).get("compensation_applied"),
+                        }
+                        for role in ("creator", "benchmark")
+                        if isinstance(stage.get(f"{role}_multimodal"), dict)
+                    },
+                },
+            )
+        return _attach_pending_flag_trace(stage_id, stage, trace)
 
     # S1 Hook flag 化：四维 bool 在时由 flag 推执行分，替代模型 0-2 主观分；flag 缺则回退模型分（优雅降级）。
     # severity 仍走下方 e 差值/阈值/放大器/红线，不把 S1 变成孤立打分系统。
-    if stage_id == "S1":
+    multimodal_active = has_multimodal_assessment(stage)
+    if stage_id == "S1" and not multimodal_active:
         s1 = _s1_hook_exec(stage)
         if s1 is not None:
             if s1.get("redline"):
@@ -726,6 +865,10 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         s6 = _s6_cta_exec(stage)
         if s6 is not None:
             creator_exec, bench_exec = s6["creator_exec"], s6["bench_exec"]
+
+    if multimodal_active:
+        creator_exec = multimodal_execution(stage_id, stage, "creator", creator_exec)
+        bench_exec = multimodal_execution(stage_id, stage, "benchmark", bench_exec)
     if creator_exec is None or bench_exec is None:
         return finish({"status": "skipped", "reason": "执行分缺失，保留模型 severity"})
 
@@ -742,6 +885,50 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
 
     bench_text = _side_text(stage, "benchmark")
     creator_text = _side_text(stage, "creator")
+
+    # S3/S4 都是结构库中不可跳过的核心证明槽位。一侧已把过程/效果做成可复核闭环，
+    # 另一侧被事实明确判为缺失时，不能只按普通 0-2 分差稀释为 medium。
+    if stage_id == "S3":
+        creator_s3 = stage.get("creator_s3")
+        benchmark_s3 = stage.get("benchmark_s3")
+        if (
+            isinstance(creator_s3, dict)
+            and isinstance(benchmark_s3, dict)
+            and _s3_complete_real_usage(benchmark_s3)
+            and _s3_explicitly_missing_real_usage(creator_s3)
+        ):
+            return finish({
+                "status": "derived",
+                "severity": "large",
+                "E": 2,
+                "reason": "S3 标杆完成可复核真实使用、达人明确缺少真实使用（使用过程完整性断层）",
+            })
+    if stage_id == "S4":
+        creator_s4 = stage.get("creator_s4")
+        benchmark_s4 = stage.get("benchmark_s4")
+        if (
+            isinstance(creator_s4, dict)
+            and isinstance(benchmark_s4, dict)
+            and _s4_strong_visible_effect(benchmark_s4)
+            and (
+                _s4_explicitly_missing_visible_effect(creator_s4)
+                or (
+                    creator_s4.get("result_only_without_process") is True
+                    and creator_s4.get("process_linked_effect") is False
+                )
+            )
+        ):
+            reason = (
+                "S4 标杆完成强而可见的效果证明、达人只有结果态且缺少可复核过程因果桥（效果归因断层）"
+                if creator_s4.get("result_only_without_process") is True
+                else "S4 标杆完成强而可见的效果证明、达人明确未呈现可见效果（效果说服力断层）"
+            )
+            return finish({
+                "status": "derived",
+                "severity": "large",
+                "E": 2,
+                "reason": reason,
+            })
 
     # 原则④：事实不支撑则不判断
     if creator_exec == 0 and bench_exec == 0:
@@ -762,12 +949,14 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
 
     e = max(0.0, float(bench_exec) - float(creator_exec))
     reason = f"E = 标杆执行分 {bench_exec} − 达人执行分 {creator_exec}"
+    if multimodal_active:
+        reason += "；执行分已按阶段硬条件融合画面、口播、字幕、声音节奏的综合净效果"
     if shake_notes:
         reason += "；" + "；".join(shake_notes)
 
     # 痛点命中：优先用模型事实枚举（round3 实证词法匹配跨语言/跨粒度不可靠），缺失退回词法兜底
     relevance = stage.get("painpoint_relevance")
-    if relevance is None and painpoints:
+    if relevance is None and painpoints and allow_legacy_text_fallback:
         lever_text = f"{stage.get('gap_summary') or ''} {stage.get('gap') or ''} {bench_text}"
         if _hits(lever_text, painpoints):
             relevance = "both" if _hits(creator_text, painpoints) else "benchmark_only"
@@ -790,16 +979,24 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         e, reason = max(e, 2.0), reason + "；S4 标杆呈现了效果(S4-A~F)、达人未呈现（验证=让用户看到）"
     elif stage_id == "S3" and e > 0 and b_usage is True and c_usage is False:
         e, reason = max(e, 2.0), reason + "；S3 标杆把卖点演示出来(S3-A~E)、达人只口播未演示（演示即证据）"
-    elif stage_id == "S1" and e > 0 and _s1_bench_anchors_only(stage, relevance):
+    elif stage_id == "S1" and not multimodal_active and e > 0 and _s1_bench_anchors_only(stage, relevance):
         e, reason = max(e, 2.0), reason + "；S1 标杆钩子锚定品命题、达人未锚定（命题不止痛点）"
     elif stage_id == "S2" and e > 0 and _s2_risky_module(stage):
         e, reason = max(e, 1.0), reason + "；S2 达人使用结构库排除/高风险引出方式"
 
     # 极性红线：达人持平或更优 → small（达人优势记亮点，绝不是差距）
     if e <= 0:
-        if stage_id == "S1" and _s1_bench_anchors_only(stage, relevance):
+        if stage_id == "S1" and not multimodal_active and _s1_bench_anchors_only(stage, relevance):
             return finish({"status": "derived", "severity": "medium", "E": 0,
                            "reason": reason + "；命题锚下限：标杆钩子锚定本品核心命题、达人只做泛留人"})
+        # S4 的基础执行分是离散档，可能把“双方都有可信效果”都压成 1.0；若既有
+        # 结构化观察已明确标杆强且最大化、达人仅清楚但单薄，应在持平红线前保留
+        # medium 差距。双方效果仍须满足可信门槛，不能由口播或氛围替代视觉证据。
+        if stage_id == "S4":
+            thin_floor, thin_reason = _s4_thin_effect_floor(stage)
+            if thin_floor:
+                return finish({"status": "derived", "severity": "medium", "E": 0,
+                               "reason": reason + thin_reason})
         return finish({"status": "derived", "severity": "small", "E": 0,
                        "reason": reason + "；达人持平或更优（亮点，零差距红线）"})
 
@@ -831,10 +1028,10 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
     else:
         severity = "small"
     # landing 下限：标杆钩子立住、达人未立住 → 至少 medium（件齐但钩子没打穿，不该判 small）
-    if stage_id == "S1" and severity == "small" and _s1_landing_floor(stage):
+    if stage_id == "S1" and not multimodal_active and severity == "small" and _s1_landing_floor(stage):
         severity = "medium"
         reason += "；landing 下限：标杆钩子立住、达人未立住（结构件齐全但钩子没打穿）"
-    if stage_id == "S1" and severity == "small" and _s1_bench_anchors_only(stage, relevance):
+    if stage_id == "S1" and not multimodal_active and severity == "small" and _s1_bench_anchors_only(stage, relevance):
         severity = "medium"
         reason += "；命题锚下限：标杆钩子锚定本品核心命题、达人只做泛留人"
     if stage_id == "S2" and severity == "small":
@@ -924,7 +1121,15 @@ def derive_severity_from_facts(result: dict[str, Any], analysis: dict[str, Any] 
         if not match:
             continue
         try:
-            trace = _derive_one(match.group(1), stage, weights, painpoints, shake, endorsement)
+            trace = _derive_one(
+                match.group(1),
+                stage,
+                weights,
+                painpoints,
+                shake,
+                endorsement,
+                allow_legacy_text_fallback=not bool((analysis or {}).get("structured_relevance_required")),
+            )
         except Exception as exc:  # 架构不变量：推导绝不拖垮主流程
             trace = {"status": "error", "reason": f"推导异常已降级：{exc}"}
         if archetype:

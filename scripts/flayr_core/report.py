@@ -23,6 +23,7 @@ def write_report(run_dir: Path, analysis: dict[str, Any], plan: dict[str, Any] |
     report = report.replace("{{generated_at}}", escape(format_generated_at(analysis.get("generated_at"))))
     report = report.replace("{{executive_summary}}", escape(executive_summary(analysis)))
     report = report.replace("{{overview_cards}}", render_overview_cards(analysis, run_dir))
+    report = report.replace("{{global_diagnosis}}", render_global_diagnosis(analysis))
     report = report.replace("{{holistic_assessment}}", render_key_conclusions(analysis))
     report = report.replace("{{gap_overview}}", render_gap_overview(analysis))
     report = report.replace("{{stage_rows}}", render_stage_rows(analysis))
@@ -72,6 +73,7 @@ def render_stage_rows(analysis: dict[str, Any]) -> str:
             f"<h3>{escape(stage['stage'])}</h3>",
             render_gap_badge(stage.get("severity", "medium")),
             "</div>",
+            render_global_cause_note(stage.get("affected_by_global_issues")),
             # 列头
             '<div class="stage-col-head">达人表现</div>',
             '<div class="stage-col-head">标杆表现</div>',
@@ -87,11 +89,26 @@ def render_stage_rows(analysis: dict[str, Any]) -> str:
     return "\n".join(rows)
 
 
+def render_global_cause_note(value: Any) -> str:
+    ids = value if isinstance(value, list) else []
+    labels = [global_finding_title(str(item)) for item in ids if str(item).strip()]
+    if not labels:
+        return ""
+    return (
+        '<div class="cause-note"><strong>先处理根因：</strong>'
+        f'{escape("、".join(labels))}。本阶段结论保留，但执行建议受上述问题影响。</div>'
+    )
+
+
 def stage_skipped(stage: dict[str, Any]) -> tuple[bool, str]:
     """判断阶段是否双方都未设计（如 S5 都无信任背书），如是则折叠不展开分析。"""
-    if str(stage.get("comparison_status") or "") == "not_directly_comparable":
+    comparison_status = str(stage.get("comparison_status") or "")
+    if comparison_status == "not_directly_comparable":
         reason = str(stage.get("comparison_reason") or "两条视频不能在该阶段做产品级直接比较。")
-        return True, f"仅作为创意参考，不作产品级差距判断。{reason}"
+        return True, f"该阶段没有共同的比较合同，不输出差距判断。{reason}"
+    if comparison_status == "not_applicable":
+        reason = str(stage.get("comparison_reason") or "双方在该阶段均未涉及可比较内容。")
+        return True, reason
     if normalize_severity(stage.get("severity")) != "small":
         return False, ""
     skip_phrases = (
@@ -137,7 +154,7 @@ def stage_skipped(stage: dict[str, Any]) -> tuple[bool, str]:
 
 
 def render_skipped_stage(stage: dict[str, Any], index: int, reason: str) -> str:
-    label = "仅创意参考" if str(stage.get("comparison_status") or "") == "not_directly_comparable" else "未涉及"
+    label = "不比较" if str(stage.get("comparison_status") or "") == "not_directly_comparable" else "未涉及"
     return "\n".join(
         [
             f'<div class="stage stage-skipped" id="{escape(stage_anchor(index))}">',
@@ -237,12 +254,30 @@ def split_readable_points(text: Any, limit: int = 3) -> list[str]:
 
 
 def executive_summary(analysis: dict[str, Any]) -> str:
-    eligibility = analysis.get("comparison_eligibility")
-    if isinstance(eligibility, dict) and str(eligibility.get("scope") or "") not in {"same_product", "comparable_variant"}:
+    eligibility = analysis.get("comparison_contract") or analysis.get("comparison_eligibility")
+    if isinstance(eligibility, dict):
+        from .llm.parse import normalize_comparison_contract
+
+        eligibility = normalize_comparison_contract(eligibility)
+    if isinstance(eligibility, dict) and str(eligibility.get("overall_status") or "") == "selective_structural":
+        from .postprocess.repair_stages import comparison_scope_summary
+
+        summary = str(
+            analysis.get("commercial_priority_summary")
+            or analysis.get("one_line_summary")
+            or analysis.get("executive_summary")
+            or ""
+        ).strip()
+        scope_note = comparison_scope_summary(eligibility)
+        return f"{scope_note} {summary}".strip()
+    if isinstance(eligibility, dict) and str(eligibility.get("overall_status") or "") in {"not_comparable", "uncertain"}:
         # 兼容旧运行结果：即便 JSON 尚未走过最新后处理，报告也不能展示跨品产品结论。
         from .postprocess.repair_stages import comparison_scope_summary
 
         return comparison_scope_summary(eligibility)
+    commercial_summary = str(analysis.get("commercial_priority_summary") or "").strip()
+    if commercial_summary:
+        return commercial_summary
     summary = str(analysis.get("one_line_summary") or analysis.get("executive_summary") or "").strip()
     if summary:
         return summary
@@ -253,11 +288,85 @@ def executive_summary(analysis: dict[str, Any]) -> str:
         item.get("stage", "")
         for item in analysis.get("stage_analysis", [])
         if item.get("severity") == "large"
-        and str(item.get("comparison_status") or "") != "not_directly_comparable"
+        and str(item.get("comparison_status") or "") not in {"not_directly_comparable", "not_applicable"}
     ]
     if large_stages:
         return f"达人视频最大差距集中在：{'、'.join(large_stages[:2])}。"
     return "当前报告已完成阶段拆解，建议优先查看 Top 提升点。"
+
+
+def render_global_diagnosis(analysis: dict[str, Any]) -> str:
+    diagnosis = analysis.get("global_diagnosis") if isinstance(analysis.get("global_diagnosis"), dict) else {}
+    findings = [
+        item for item in diagnosis.get("findings") or []
+        if isinstance(item, dict) and item.get("impact") in {"blocking", "major", "minor"}
+    ]
+    if not findings:
+        return ""
+    impact_order = {"blocking": 0, "major": 1, "minor": 2}
+    gate_order = {"selling_point_route": 0, "focus_coherence": 1, "attention_cleanliness": 2}
+    findings.sort(key=lambda item: (impact_order.get(str(item.get("impact")), 9), gate_order.get(str(item.get("id")), 9)))
+    labels = {"blocking": "根本阻断", "major": "显著影响", "minor": "轻度影响"}
+    rows = []
+    for item in findings:
+        impact = str(item.get("impact") or "major")
+        affected = "、".join(str(stage) for stage in item.get("affected_stages") or [])
+        rows.append(
+            "\n".join(
+                [
+                    f'<article class="root-finding root-{escape(impact)}">',
+                    '<div class="root-finding-head">',
+                    f'<span class="root-impact">{escape(labels.get(impact, impact))}</span>',
+                    f'<h3>{escape(global_finding_title(str(item.get("id") or "")))}</h3>',
+                    "</div>",
+                    f'<p class="root-summary">{escape(item.get("summary"))}</p>',
+                    f'<p><strong>影响：</strong>{escape(item.get("downstream_impact"))}</p>',
+                    f'<p><strong>先做：</strong>{escape(item.get("suggested_action"))}</p>',
+                    f'<div class="meta">关联阶段：{escape(affected or "全局")}</div>',
+                    "</article>",
+                ]
+            )
+        )
+    capability = diagnosis.get("temporal_capability") if isinstance(diagnosis.get("temporal_capability"), dict) else {}
+    reliability = ""
+    if str(capability.get("comparative") or "") in {"static_only", "unknown"}:
+        reliability = '<div class="root-reliability">部分时序对比证据不足；相关门控只保留单侧事实，不作阻断性比较。</div>'
+    priorities = [item for item in analysis.get("commercial_priorities") or [] if isinstance(item, dict)][:6]
+    priority_block = ""
+    if priorities:
+        priority_block = "\n".join(
+            [
+                '<div class="commercial-order">',
+                '<div class="label">商业处理顺序</div>',
+                '<ol>',
+                *(
+                    f'<li><strong>{escape(item.get("tier"))} · {escape(item.get("title"))}</strong>：{escape(item.get("summary"))}</li>'
+                    for item in priorities
+                ),
+                '</ol>',
+                '</div>',
+            ]
+        )
+    return "\n".join(
+        [
+            '<div class="root-diagnosis-block">',
+            "<h2>根本性问题</h2>",
+            '<section class="root-diagnosis">',
+            *rows,
+            priority_block,
+            reliability,
+            "</section>",
+            "</div>",
+        ]
+    )
+
+
+def global_finding_title(gate_id: str) -> str:
+    return {
+        "selling_point_route": "主卖点路线",
+        "focus_coherence": "产品焦点一致性",
+        "attention_cleanliness": "画面注意力洁净度",
+    }.get(gate_id, gate_id or "视频级问题")
 
 
 def render_overview_cards(analysis: dict[str, Any], run_dir: Path) -> str:
@@ -365,7 +474,7 @@ def render_gap_overview(analysis: dict[str, Any]) -> str:
         skipped, _ = stage_skipped(stage)
         if skipped:
             css_level = "skip"
-            label = "仅创意参考" if str(stage.get("comparison_status") or "") == "not_directly_comparable" else "未涉及"
+            label = "不比较" if str(stage.get("comparison_status") or "") == "not_directly_comparable" else "未涉及"
         else:
             severity = normalize_severity(stage.get("severity"))
             css_level = {"large": "high", "medium": "mid", "small": "low"}[severity]
@@ -660,7 +769,9 @@ def render_improvement_meta(item: dict[str, Any], creator_range: str) -> str:
         f"成交影响：{item.get('gmv_impact') or '待评估'}",
         f"差距类型：{gap_types.get(item.get('gap_type'), '待确认')}",
     ]
-    return f'<div class="improvement-meta">{escape(" · ".join(fields))}</div>'
+    roots = [global_finding_title(str(root)) for root in item.get("root_cause_ids") or [] if str(root).strip()]
+    root_note = f'<div class="cause-note"><strong>根因关联：</strong>{escape("、".join(roots))}</div>' if roots else ""
+    return f'<div class="improvement-meta">{escape(" · ".join(fields))}</div>{root_note}'
 
 
 def render_expected_effect(item: dict[str, Any]) -> str:

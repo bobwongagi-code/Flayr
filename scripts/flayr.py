@@ -26,6 +26,7 @@ from flayr_core.proposal_video import config_from_args
 from flayr_core.report import write_report
 from flayr_core.stage_catalog import DEFAULT_STAGES
 from flayr_core.motion import compute_shake_metric
+from flayr_core.market import normalize_target_market
 from flayr_core.shot_track import build_shot_track
 from flayr_core.speech_mode import classify_speech_mode
 from flayr_core.subtitle_track import build_subtitle_track
@@ -73,7 +74,8 @@ def main() -> int:
             apply_finalized_analysis_result(analysis, normalized_result, llm_result_path)
     elif args.analysis_result_json:
         merge_analysis_result(analysis, args.analysis_result_json, analysis_input_path.read_text(encoding="utf-8"))
-    if args.mode in {"compare", "improve"}:
+    comparison_stopped = analysis.get("analysis_status") in {"not_comparable", "comparison_uncertain"}
+    if args.mode in {"compare", "improve"} and not comparison_stopped:
         voice_key = read_llm_api_key(args).strip() if getattr(args, "with_voice_clone", False) else ""
         analysis["proposal_clips"] = generate_proposal_clips(
             run_dir, analysis, config_from_args(args), voice_clone_api_key=voice_key,
@@ -81,7 +83,7 @@ def main() -> int:
     write_json(run_dir / "analysis.json", analysis)
     write_analysis_input(run_dir, analysis)
 
-    if args.mode in {"compare", "improve"}:
+    if args.mode in {"compare", "improve"} and not comparison_stopped:
         plan = build_improved_video_plan(analysis)
         write_json(run_dir / "improved_video_plan.json", plan)
     else:
@@ -110,6 +112,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Explicit key in references/brand_propositions.json. Never inferred from an online run directory.",
     )
     parser.add_argument("--product-category", default="", help="Product category from the structure-library category set.")
+    parser.add_argument(
+        "--comparison-scope-override",
+        choices=("same_task_structure",),
+        help=(
+            "运营确认的比较关系覆盖。same_task_structure 仅用于不同产品但共享消费者任务且具有替代关系的情况；"
+            "各阶段仍由 stage_eligibility 单独判断，不自动开放固定阶段。"
+        ),
+    )
     parser.add_argument("--product-price", default="未填写", help="Product price.")
     parser.add_argument(
         "--product-tier",
@@ -120,11 +130,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--target-market",
-        choices=("auto", "sea", "my"),
+        type=normalize_target_market,
         default="auto",
-        help="Target market knowledge pack. auto loads SEA/MY seed as judging hints; my enables Malaysia-specific rules.",
+        help="Target market: auto, sea, or a two-letter SEA market code (for example my, th, id). Only my loads Malaysia-specific rules.",
     )
     parser.add_argument("--core-selling-points", default="", help="Verified product selling points and differentiation.")
+    parser.add_argument(
+        "--primary-selling-point",
+        default="",
+        help="Operator-approved primary commercial selling point for this video route.",
+    )
     parser.add_argument("--target-user", default="", help="Target audience profile and core pain point.")
     parser.add_argument(
         "--purchase-motivation",
@@ -203,8 +218,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--llm-include-images",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Use the full Step-0 + per-video fact extraction + multimodal comparison pipeline. "
+            "Enabled by default; --no-llm-include-images is legacy text-only compatibility mode."
+        ),
+    )
+    parser.add_argument(
+        "--absolute-execution-shadow",
         action="store_true",
-        help="Attach selected dense focus frames to the LLM request for visual analysis.",
+        help=(
+            "额外对两侧视频分别运行 S1-S4 单侧绝对执行审计；仅写 shadow 结果，"
+            "不改变 severity。用于校准和检测跨配对锚定漂移。"
+        ),
     )
     parser.add_argument(
         "--llm-image-limit",
@@ -363,6 +390,9 @@ def validate_inputs(args: argparse.Namespace) -> dict[str, Path]:
 
     if args.analysis_result_json:
         args.analysis_result_json = validate_optional_file(args.analysis_result_json, "--analysis-result-json")
+
+    if args.comparison_scope_override and args.mode not in {"compare", "improve", "scope"}:
+        raise SystemExit("--comparison-scope-override 仅可用于 compare、improve 或 scope 模式。")
 
     return inputs
 
@@ -684,6 +714,7 @@ def build_analysis(
             "tier": args.product_tier,  # 运营客单价档；None 时 derive 退回模型判断
             "target_market": args.target_market,
             "core_selling_points": args.core_selling_points,
+            "primary_selling_point": args.primary_selling_point,
             "target_user": args.target_user,
             "purchase_motivation": args.purchase_motivation or "",
             "creator_profile": args.creator_profile,
@@ -775,8 +806,10 @@ def print_scope_summary(
 ) -> None:
     """scope 模式不生成报告，只回显可审计的资格结果。"""
     print(f"Run directory: {run_dir}")
-    print(f"comparison scope: {eligibility.get('scope', 'uncertain')}")
-    print(f"direct product stages: {','.join(eligibility.get('direct_product_stages') or []) or 'none'}")
+    print(f"identity relation: {eligibility.get('identity_relation', 'uncertain')}")
+    print(f"substitution relation: {eligibility.get('substitution_relation', 'uncertain')}")
+    print(f"comparison status: {eligibility.get('overall_status', 'uncertain')}")
+    print(f"comparable stages: {','.join(eligibility.get('comparable_stages') or []) or 'none'}")
     print(f"reason: {eligibility.get('reason') or '未提供'}")
     print(f"ffmpeg: {'ok' if deps['ffmpeg'] else 'missing'}")
     print(f"whisper: {deps['whisper'] or 'missing'}")

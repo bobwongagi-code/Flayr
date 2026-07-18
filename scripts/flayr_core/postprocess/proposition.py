@@ -572,7 +572,7 @@ def _absolute_status(stage_id: str, flag: dict[str, Any] | None) -> tuple[str, s
         if flag.get("compliance_risk") is True:
             return "risky", "CTA 存在夸大或无法核实的承诺"
         if flag.get("module_type") == "D" and flag.get("computed_depends_on_valid_s4", flag.get("depends_on_valid_s4")) is False:
-            return "weak", "效果总结型 CTA 缺少有效 S4 输出支撑"
+            return "complete", "购买动作成立；效果总结素材未通过 S4 依赖审计"
         return "complete", "结尾购买动作成立"
     return "unknown", "未知阶段"
 
@@ -623,10 +623,9 @@ def materialize_quality_audits(result: dict[str, Any], analysis: dict[str, Any] 
         stage["computed_stage_standard_delivery"] = computed_delivery
         declared_delivery = str(stage.get("stage_standard_delivery") or "").strip()
         if declared_delivery in {"benchmark_only", "creator_only", "both", "none"} and declared_delivery != computed_delivery:
-            _append_qa_warning(
-                result,
-                f"[Q20] {stage_id} stage_standard_delivery={declared_delivery} 与结构化 flags 计算值 {computed_delivery} 不一致。",
-            )
+            # 模型声明只作审计保留，最终展示和下游消费必须以已归一的结构化 flags 为准。
+            stage["model_stage_standard_delivery"] = declared_delivery
+        stage["stage_standard_delivery"] = computed_delivery
 
     if len(stages) >= 5 and isinstance(stages[4], dict):
         anchors = ((matrix.get("S5") or {}).get("trust_multipliers") or []) if isinstance(matrix.get("S5"), dict) else []
@@ -661,3 +660,24 @@ def materialize_quality_audits(result: dict[str, Any], analysis: dict[str, Any] 
             }
         stages[5]["cta_anchor_audit"] = audit
     result["absolute_quality"] = absolute
+    shadow = (analysis or {}).get("absolute_execution_shadow") if isinstance(analysis, dict) else None
+    if not isinstance(shadow, dict):
+        return
+    roles = shadow.get("roles") if isinstance(shadow.get("roles"), dict) else {}
+    shadow_view: dict[str, Any] = {
+        "status": str(shadow.get("status") or "unknown"),
+        "errors": list(shadow.get("errors") or []),
+        "roles": {},
+    }
+    for role in ("creator", "benchmark"):
+        role_audit = roles.get(role)
+        role_stages = role_audit.get("stages") if isinstance(role_audit, dict) else None
+        if not isinstance(role_stages, dict):
+            continue
+        shadow_view["roles"][role] = {stage_id: value for stage_id, value in role_stages.items() if isinstance(value, dict)}
+        for index, stage in enumerate(stages, start=1):
+            stage_id = f"S{index}"
+            if isinstance(stage, dict) and stage_id in role_stages and isinstance(role_stages[stage_id], dict):
+                # shadow 只保留供评测读取的单侧结果；derive 严禁读取该字段。
+                stage[f"{role}_absolute_execution_shadow"] = role_stages[stage_id]
+    result["absolute_execution_shadow"] = shadow_view

@@ -62,8 +62,6 @@ def align_stage_flag_evidence(result: dict[str, Any]) -> None:
             continue
         for role in ("benchmark", "creator"):
             flag = stage.get(f"{role}_{flag_name}")
-            if not isinstance(flag, dict):
-                continue
             stage_key = f"{role}_evidence_ids"
             stage_ids = [
                 str(value)
@@ -71,6 +69,34 @@ def align_stage_flag_evidence(result: dict[str, Any]) -> None:
                 if str(value).strip()
             ]
             units = understanding.get(role, {}).get("evidence_units", [])
+            # 多模态判断和阶段主结论消费同一批锁定事实。模型可能在 channel_evidence_ids
+            # 引用同阶段真实单元，却漏把它同步到主 evidence_ids；只将同侧、真实且与阶段
+            # 时间相交的引用并入主列表，未知或跨时段引用仍留给 validator 阻断。
+            multimodal = stage.get(f"{role}_multimodal")
+            channel_refs = multimodal.get("channel_evidence_ids") if isinstance(multimodal, dict) else None
+            if isinstance(channel_refs, dict):
+                multimodal_ids = list(dict.fromkeys(
+                    str(value)
+                    for refs in channel_refs.values()
+                    if isinstance(refs, list)
+                    for value in refs
+                    if str(value).strip() and "_NO_" not in str(value)
+                ))
+                valid_multimodal_ids = {
+                    str(unit.get("id"))
+                    for unit in units
+                    if isinstance(unit, dict)
+                    and str(unit.get("id")) in multimodal_ids
+                    and evidence_overlaps_range(unit, stage.get(f"{role}_time_range"))
+                }
+                for evidence_id in multimodal_ids:
+                    if evidence_id in valid_multimodal_ids and evidence_id not in stage_ids:
+                        stage_ids.append(evidence_id)
+                if stage_ids:
+                    stage[stage_key] = stage_ids
+
+            if not isinstance(flag, dict):
+                continue
             flag_ids = [str(value) for value in flag.get("evidence_ids", []) if str(value).strip()]
             flag_units = [
                 unit
@@ -106,6 +132,81 @@ def align_stage_flag_evidence(result: dict[str, Any]) -> None:
                 stage[f"{role}_quote"] = str(reliable_unit.get("voiceover") or "")
                 stage[f"{role}_quote_zh"] = str(reliable_unit.get("voiceover_zh") or "")
                 continue
+
+
+def reconcile_s3_s4_evidence_coherence(result: dict[str, Any]) -> None:
+    """收紧 S3 真实使用与 S4 因果桥的跨阶段一致性。
+
+    该规则不从文字猜动作，只消费模型已明确给出的三个可复核观察：
+    - action_target_contact_met：产品/材料是否真实作用于目标对象；
+    - action_application_change_visible：动作是否新施加/位移/激活材料，或直接改变目标状态；
+    - critical_action_continuity_met：关键作用动作和目标状态变化是否可追踪。
+
+    任一明确为 false 时，不能再同时把 S3 记为真实使用；若 S4 有结果，结果仍可存在，
+    但必须标记为“只有结果、未见过程”，不得借 S3 建立因果桥。None 保持旧结果兼容。
+    """
+    stages = result.get("stage_analysis")
+    if not isinstance(stages, list) or len(stages) < 4:
+        return
+    s3, s4 = stages[2], stages[3]
+    if not isinstance(s3, dict) or not isinstance(s4, dict):
+        return
+
+    for role in ("creator", "benchmark"):
+        usage = s3.get(f"{role}_s3")
+        effect = s4.get(f"{role}_s4")
+        if not isinstance(usage, dict):
+            continue
+        missing_contact = usage.get("action_target_contact_met") is False
+        missing_application_change = usage.get("action_application_change_visible") is False
+        broken_continuity = usage.get("critical_action_continuity_met") is False
+        if missing_contact or missing_application_change or broken_continuity:
+            # 真实使用不能由空中比划、已有材料上的触碰、准备镜头或跳到完成态来补足。
+            usage["usage_process_visible"] = False
+            usage["real_usage_met"] = False
+            usage["core_selling_point_visible"] = False
+            usage["action_proof_met"] = False
+            reasons: list[str] = []
+            if missing_contact:
+                reasons.append("未见产品或材料实际作用于目标对象")
+            if missing_application_change:
+                reasons.append("未见动作新施加/位移/激活材料或改变目标状态")
+            if broken_continuity:
+                reasons.append("关键动作与目标状态变化之间存在跳剪")
+            reason = "；".join(reasons)
+            current_usage_reason = str(usage.get("usage_reason") or "").strip()
+            if reason and reason not in current_usage_reason:
+                usage["usage_reason"] = f"{current_usage_reason}；{reason}".strip("；")
+
+            if isinstance(effect, dict) and effect.get("effect_visible") is True:
+                effect["result_only_without_process"] = True
+                effect["process_linked_effect"] = False
+                current_effect_reason = str(effect.get("effect_reason") or "").strip()
+                bridge_reason = f"S3 未形成可复核过程，效果不能作为过程因果闭环：{reason}"
+                if bridge_reason not in current_effect_reason:
+                    effect["effect_reason"] = f"{current_effect_reason}；{bridge_reason}".strip("；")
+
+        # 主分析的摘要布尔也必须跟随复核后的 flags；否则旧的 has_* 会在 derive 中覆盖新事实。
+        if any(
+            key in usage
+            for key in (
+                "action_target_contact_met",
+                "action_application_change_visible",
+                "critical_action_continuity_met",
+            )
+        ):
+            s3[f"{role}_has_usage_demo"] = (
+                usage.get("usage_process_visible") is True
+                and usage.get("real_usage_met") is True
+                and usage.get("action_proof_met") is not False
+                and usage.get("action_target_contact_met") is not False
+                and usage.get("action_application_change_visible") is not False
+                and usage.get("critical_action_continuity_met") is not False
+            )
+        if isinstance(effect, dict) and any(
+            key in effect for key in ("visual_difference_observed", "module_constraints_met")
+        ):
+            s4[f"{role}_has_effect_demo"] = effect.get("effect_visible") is True
 
 
 def bind_improvement_benchmark_reference(item: dict[str, Any], stage: dict[str, Any]) -> None:
@@ -168,6 +269,25 @@ def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
     for role, code in (("benchmark", "B"), ("creator", "C")):
         quote = str(cta.get(f"{role}_quote") or "")
         flag = cta.get(f"{role}_s6") if isinstance(cta.get(f"{role}_s6"), dict) else {}
+        has_direct_or_path = (
+            flag.get("direct_order_met") is True
+            or flag.get("action_path_clear") is True
+        )
+        has_valid_soft_invitation = (
+            flag.get("soft_purchase_invitation_met") is True
+            and flag.get("offer_or_incentive_clear") is True
+        )
+        if flag.get("exists") is True and not has_direct_or_path and not has_valid_soft_invitation:
+            # S6 的“软促单”必须同时有面向观众的购买邀请和明确利益点。
+            # 单纯总结效果、展示产品或暗示值得购买不是 CTA，不能留给 derive 当作有效促单。
+            flag["exists"] = False
+            flag["soft_purchase_invitation_met"] = False
+            flag["module_fit_met"] = False
+            flag["ending_position_met"] = False
+            flag["evidence_ids"] = []
+            previous_reason = str(flag.get("cta_reason") or "").strip()
+            reason = "未见明确下单/路径，且不满足“购买邀请+利益点”的软促单定义，按无 CTA 处理。"
+            flag["cta_reason"] = f"{previous_reason} {reason}".strip()
         units = result.get("video_understanding", {}).get(role, {}).get("evidence_units", [])
         flag_ids = [str(value) for value in flag.get("evidence_ids", []) if str(value).strip()]
         referenced = [
@@ -175,7 +295,14 @@ def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
             if isinstance(unit, dict) and str(unit.get("id")) in flag_ids and "_NO_CTA" not in str(unit.get("id"))
         ]
         referenced_text = json.dumps(referenced, ensure_ascii=False)
-        has_positive_flag = flag.get("exists") is True and flag.get("direct_order_met") is True and bool(referenced)
+        has_positive_flag = (
+            flag.get("exists") is True
+            and (
+                has_direct_or_path
+                or has_valid_soft_invitation
+            )
+            and bool(referenced)
+        )
         has_positive_text = bool(
             re.search(
                 r"\b(beli|troli|klik|cart|checkout|order|link|shop)\b|购买|下单|购物车|点击|购买号召|购买指令",
@@ -213,6 +340,176 @@ def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
         cta[f"{role}_quote_zh"] = ""
         cta[f"{role}_visual_evidence"] = [placeholder["visual_fact"]]
         cta[f"{role}_support_status"] = "visual_only"
+
+    def has_valid_cta(role: str) -> bool:
+        flag = cta.get(f"{role}_s6")
+        if not isinstance(flag, dict) or flag.get("exists") is not True:
+            return False
+        return (
+            flag.get("direct_order_met") is True
+            or flag.get("action_path_clear") is True
+            or (
+                flag.get("soft_purchase_invitation_met") is True
+                and flag.get("offer_or_incentive_clear") is True
+            )
+        )
+
+    benchmark_has_cta = has_valid_cta("benchmark")
+    creator_has_cta = has_valid_cta("creator")
+    if not benchmark_has_cta and not creator_has_cta:
+        conclusion = "双方结尾均未出现明确购买指令、购买路径，或“购买邀请+利益点”的软促单组合；S6 不构成相对差距，但两者均未完成促单。"
+        cta["gap"] = conclusion
+        cta["gap_summary"] = [conclusion]
+        cta["evidence"] = ["双方的结尾均未引用到可验证的购买或点击指令。"]
+    elif creator_has_cta and not benchmark_has_cta:
+        conclusion = "达人结尾提供了有效 CTA，标杆未形成有效 CTA；S6 不构成达人的相对差距。"
+        cta["gap"] = conclusion
+        cta["gap_summary"] = [conclusion]
+    elif benchmark_has_cta and not creator_has_cta:
+        conclusion = "标杆结尾提供了有效 CTA，达人未形成有效 CTA；达人缺少促进下单的明确收口。"
+        cta["gap"] = conclusion
+        cta["gap_summary"] = [conclusion]
+
+
+_S5_VALID_BASES = {
+    "authority",
+    "traceable_data",
+    "independent_user",
+    "social_consensus",
+    "process_transparency",
+}
+
+
+def _s5_absent_flag(reason: str) -> dict[str, Any]:
+    """把无法由锁定事实证明的 S5 统一收敛为“未涉及”。"""
+    return {
+        "exists": False,
+        "module_type": "unknown",
+        "trust_evidence_type": "none",
+        "trust_basis": "none",
+        "trust_source_evidence_ids": [],
+        "trust_source_visible": False,
+        "trust_source_credible": False,
+        "trust_claim_specific": False,
+        "product_relevance_met": False,
+        "independent_trust_purpose": False,
+        "duplicates_other_stage": False,
+        "voice_only": False,
+        "risky_or_unsupported": False,
+        "start_seconds": 0.0,
+        "end_seconds": 0.0,
+        "trust_reason": reason,
+        "evidence_ids": [],
+        "proposition_ids": [],
+    }
+
+
+def _valid_s5_source_ids(flag: dict[str, Any], units: list[Any]) -> list[str]:
+    """只接受当前 S5 已引用的、带同类型来源信号的事实单元。"""
+    basis = str(flag.get("trust_basis") or "")
+    if basis not in _S5_VALID_BASES:
+        return []
+    source_ids = [str(value).strip() for value in flag.get("trust_source_evidence_ids", []) if str(value).strip()]
+    evidence_ids = [str(value).strip() for value in flag.get("evidence_ids", []) if str(value).strip()]
+    # 修复模型漏填 source_ids 的情况，但绝不从未被 S5 引用的其它时间段“借”背书。
+    candidates = list(dict.fromkeys([*source_ids, *evidence_ids]))
+    valid: list[str] = []
+    for unit in units:
+        if not isinstance(unit, dict):
+            continue
+        unit_id = str(unit.get("id") or "").strip()
+        if unit_id not in candidates:
+            continue
+        signals = {str(item).strip() for item in unit.get("trust_source_signals", []) if str(item).strip()}
+        reference = str(unit.get("trust_source_reference") or "").strip()
+        if basis in signals and reference:
+            valid.append(unit_id)
+    return valid
+
+
+def _set_s5_absent_stage_side(stage: dict[str, Any], role: str) -> None:
+    label = "标杆" if role == "benchmark" else "达人"
+    stage[f"{role}_summary"] = f"{label}未提供可核验的独立信任材料。"
+    stage[f"{role}_key_message"] = stage[f"{role}_summary"]
+    stage[f"{role}_quote"] = ""
+    stage[f"{role}_quote_zh"] = ""
+    stage[f"{role}_support_status"] = "visual_only"
+    stage[f"{role}_visual_evidence"] = ["未引用到可核验的独立信任来源。"]
+
+
+def _s5_improvement_targets_benchmark(item: dict[str, Any]) -> bool:
+    target = str(item.get("target_stage") or "").upper()
+    if re.search(r"\bS5\b", target):
+        return True
+    return not target and bool(re.search(r"信任|背书|认证|口碑|证言", str(item.get("title") or "")))
+
+
+def reconcile_s5_trust_sources(result: dict[str, Any], source_signals_required: bool) -> None:
+    """以 Stage1 锁定来源为准收敛 S5，避免规格、促销或无来源说法触发 LLM repair。"""
+    if not source_signals_required:
+        return
+    stages = result.get("stage_analysis", [])
+    if len(stages) < 5 or not isinstance(stages[4], dict):
+        return
+    stage = stages[4]
+    understanding = result.get("video_understanding", {})
+    valid_roles: dict[str, bool] = {}
+    reconciled: list[dict[str, str]] = []
+    for role in ("creator", "benchmark"):
+        key = f"{role}_s5"
+        flag = stage.get(key)
+        if not isinstance(flag, dict):
+            continue
+        units = understanding.get(role, {}).get("evidence_units", [])
+        source_ids = _valid_s5_source_ids(flag, units if isinstance(units, list) else [])
+        basis = str(flag.get("trust_basis") or "unknown")
+        has_valid_source = (
+            flag.get("exists") is True
+            and flag.get("independent_trust_purpose") is True
+            and flag.get("duplicates_other_stage") is not True
+            and flag.get("trust_claim_specific") is True
+            and flag.get("product_relevance_met") is True
+            and basis in _S5_VALID_BASES
+            and bool(source_ids)
+        )
+        if has_valid_source:
+            flag["trust_source_evidence_ids"] = source_ids
+            valid_roles[role] = True
+            continue
+        reason = "未找到与 S5 结论同类型、可核验的 Stage1 信任来源，按未涉及处理。"
+        stage[key] = _s5_absent_flag(reason)
+        valid_roles[role] = False
+        _set_s5_absent_stage_side(stage, role)
+        reconciled.append({"role": role, "basis": basis, "reason": reason})
+
+    benchmark_valid = valid_roles.get("benchmark") is True
+    creator_valid = valid_roles.get("creator") is True
+    if not benchmark_valid and not creator_valid:
+        stage["gap"] = "双方均未提供可核验的独立信任材料，S5 不构成独立差距。"
+        stage["gap_summary"] = [stage["gap"]]
+        stage["severity"] = "small"
+    elif benchmark_valid and not creator_valid:
+        stage["gap"] = "标杆提供了可核验的独立信任材料，达人未提供对应来源。"
+        stage["gap_summary"] = [stage["gap"]]
+    elif creator_valid and not benchmark_valid:
+        stage["gap"] = "达人提供了可核验的独立信任材料，标杆未提供；S5 不构成达人差距。"
+        stage["gap_summary"] = [stage["gap"]]
+        stage["severity"] = "small"
+
+    if not benchmark_valid:
+        result["improvements"] = [
+            item
+            for item in result.get("improvements", [])
+            if not isinstance(item, dict) or not _s5_improvement_targets_benchmark(item)
+        ]
+    if reconciled:
+        warnings = result.get("qa_warnings") if isinstance(result.get("qa_warnings"), list) else []
+        warnings.extend(
+            f"S5 来源校验：{item['role']}侧 {item['basis']} 未被锁定事实来源支持，已归一为未涉及。"
+            for item in reconciled
+        )
+        result["qa_warnings"] = warnings
+        result["s5_source_reconciliation"] = reconciled
 
 # endregion
 

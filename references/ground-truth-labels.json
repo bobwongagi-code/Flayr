@@ -1,0 +1,153 @@
+{
+  "schema_version": 2,
+  "source": "ground-truth-labels.md",
+  "policy": {
+    "severity_order": ["small", "medium", "large"],
+    "purpose": "人工裁决的机器可读副本，只用于评测，不参与分析或 severity 推导。stages 仅记录达人相对标杆的不足程度；stage_relations 记录比较方向但暂不参与准确率。na 表示该阶段不适用，不计入准确率。",
+    "holdout_policy": "已被用于规则讨论的样本标记为 seen_validation，不得再称为盲测。",
+    "blind_policy": "blind 标签必须由人工在规则冻结后、模型结果打开前录入；对应 validation-inputs 样本 group 必须为 blind，且视频路径不得复用历史开发样本。"
+  },
+  "samples": {
+    "are_xie": {
+      "partition": "calibration",
+      "stages": {"S1": "large", "S2": "medium", "S3": "small", "S4": "large", "S5": "large", "S6": "small"}
+    },
+    "kakwanreview": {
+      "partition": "calibration",
+      "stages": {"S1": "large", "S2": "medium", "S3": "medium", "S4": "small", "S5": "small", "S6": "large"}
+    },
+    "tashadiyana": {
+      "partition": "calibration",
+      "stages": {"S1": "medium", "S2": "small", "S3": "medium", "S4": "large", "S5": "small", "S6": "small"}
+    },
+    "carslan-b0": {
+      "partition": "calibration",
+      "stages": {"S1": "large", "S2": "medium", "S3": "medium", "S4": "medium", "S5": "small", "S6": "small"}
+    },
+    "simplus": {
+      "partition": "calibration",
+      "stages": {"S1": "medium", "S2": "medium", "S3": "medium", "S4": "medium", "S5": "small", "S6": "small"}
+    },
+    "wukoubo-c0": {
+      "partition": "calibration",
+      "stages": {"S1": "medium", "S2": "small", "S3": "medium", "S4": "medium", "S5": "small", "S6": "small"}
+    },
+    "wukoubo-c1": {
+      "partition": "seen_validation",
+      "stages": {"S1": "medium", "S2": "medium", "S3": "medium", "S4": "medium", "S5": "small", "S6": "small"}
+    },
+    "youkoubo-c0": {
+      "partition": "seen_validation",
+      "stages": {"S1": "large", "S2": "medium", "S3": "medium", "S4": "medium", "S5": "small", "S6": "small"}
+    },
+    "youkoubo-c1": {
+      "partition": "seen_validation",
+      "stages": {"S1": "large", "S2": "large", "S3": "large", "S4": "large", "S5": "small", "S6": "large"}
+    },
+    "carslan-b1": {
+      "partition": "seen_validation",
+      "stages": {"S1": "large", "S2": "medium", "S3": "medium", "S4": "medium", "S5": "small", "S6": "small"}
+    },
+    "colorkey-b1": {
+      "partition": "seen_validation",
+      "stages": {"S1": "medium", "S2": "medium", "S3": "medium", "S4": "medium", "S5": "small", "S6": "small"}
+    },
+    "colorblu-c0": {
+      "partition": "blind",
+      "stages": {"S1": "small", "S2": "small", "S3": "large", "S4": "large", "S5": "na", "S6": "small"},
+      "key_events": [
+        {
+          "id": "benchmark_real_tile_application",
+          "role": "benchmark",
+          "stage": "S3",
+          "time_range": [0.0, 5.3],
+          "channels_any": ["visual_fact"]
+        },
+        {
+          "id": "benchmark_load_bearing_result",
+          "role": "benchmark",
+          "stage": "S4",
+          "time_range": [10.7, 18.9],
+          "channels_any": ["visual_fact"]
+        }
+      ]
+    },
+    "colorblu-c1": {
+      "partition": "blind",
+      "stages": {"S1": "medium", "S2": "small", "S3": "large", "S4": "large", "S5": "na", "S6": "small"}
+    },
+    "carslan-powder-c0": {
+      "partition": "blind",
+      "stages": {"S1": "medium", "S2": "small", "S3": "small", "S4": "medium", "S5": "small", "S6": "small"},
+      "stage_relations": {"S6": "creator_better"},
+      "global_observations": [
+        "麦克风始终贴近嘴边且随动作晃动，持续分散对产品和讲述的注意力。",
+        "黑色与银色版本被并列介绍，未给出明确的肤质选择重点，卖点与画面焦点分散。"
+      ],
+      "key_events": [
+        {
+          "id": "benchmark_detailed_powder_application",
+          "role": "benchmark",
+          "stage": "S3",
+          "time_range": [15.0, 31.0],
+          "required_functions": ["S3_usage"],
+          "channels_any": ["visual_fact"]
+        },
+        {
+          "id": "benchmark_oil_control_finish_closeup",
+          "role": "benchmark",
+          "stage": "S4",
+          "time_range": [31.0, 40.7],
+          "required_functions": ["S4_effect"],
+          "channels_any": ["visual_fact"]
+        }
+      ]
+    },
+    "carslan-powder-c1": {
+      "partition": "blind",
+      "stages": {"S1": "medium", "S2": "small", "S3": "medium", "S4": "large", "S5": "small", "S6": "na"},
+      "global_observations": [
+        "将清凉感和轻薄感作为主卖点，但两者缺乏可视化证明空间，不适合作为短视频的主信息。"
+      ]
+    },
+    "colorkey-lip-c0": {
+      "partition": "blind",
+      "stages": {"S1": "small", "S2": "small", "S3": "medium", "S4": "large", "S5": "na", "S6": "small"},
+      "global_observations": [
+        "口红内容的核心竞争在色彩、肤色匹配和上唇效果；只展示口红本体或基础涂抹，在同类高可视化内容中缺乏吸引力。"
+      ],
+      "key_events": [
+        {
+          "id": "benchmark_shade_swatch_against_skin",
+          "role": "benchmark",
+          "stage": "S2",
+          "time_range": [4.0, 9.0],
+          "required_functions": ["S2_intro"],
+          "channels_any": ["visual_fact"]
+        },
+        {
+          "id": "benchmark_precise_lip_application",
+          "role": "benchmark",
+          "stage": "S3",
+          "time_range": [13.0, 25.0],
+          "required_functions": ["S3_usage"],
+          "channels_any": ["visual_fact"]
+        },
+        {
+          "id": "benchmark_multi_shade_lip_finish",
+          "role": "benchmark",
+          "stage": "S4",
+          "time_range": [25.0, 48.0],
+          "required_functions": ["S4_effect"],
+          "channels_any": ["visual_fact"]
+        }
+      ]
+    },
+    "colorkey-lip-c1": {
+      "partition": "blind",
+      "evaluation_scope": "whole_video_observation",
+      "overall_verdict": "not_viable",
+      "overall_reason": "视频只展示口红本体和手部试色；在口红竞争激烈、可视化展示成熟的内容环境中，用户缺少继续观看的理由，因此本质上不应采用这种拍法。"
+    }
+  }
+}

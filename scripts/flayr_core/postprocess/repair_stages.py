@@ -275,11 +275,11 @@ def infer_s1_boundary_candidate(role: str, result: dict[str, Any], analysis: dic
         second = segments[1]
         start = float(second.get("start") or 0.0)
         if 0 < start <= 12:
-            first_fact = find_early_evidence_for_role(role, result)
+            # 只能用相邻 SRT 句判这个候选边界。早段 fact 常把多句口播合并为
+            # 一个单元；把它混进来会把后段的“推荐/产品名”错误投射到第二句起点。
             text = " ".join(
                 [
-                    str(first_fact.get("voiceover_zh") or ""),
-                    str(first_fact.get("information") or ""),
+                    str(first.get("text") or ""),
                     str(second.get("text") or ""),
                 ]
             )
@@ -486,62 +486,88 @@ def stabilize_stage_severity(result: dict[str, Any]) -> None:
 
 
 def apply_comparison_eligibility(result: dict[str, Any]) -> None:
-    """标出不能做产品级优劣比较的阶段，不把它们伪造成 small 差距。
+    """按阶段比较合同限制差距结论，不用整体商品关系替阶段作答。"""
+    contract = result.get("comparison_contract") or result.get("comparison_eligibility")
+    if not isinstance(contract, dict):
+        return
+    from ..llm.parse import normalize_comparison_contract
 
-    跨品或仅创意参考时，S2-S5 保留各自观察到的事实，供人借鉴镜头和叙事；
-    但不得拿不同产品的卖点、过程或效果直接推导达人相对标杆的商业差距。
-    """
-    eligibility = result.get("comparison_eligibility")
-    if not isinstance(eligibility, dict):
+    contract = normalize_comparison_contract(contract)
+    result["comparison_contract"] = contract
+    result["comparison_eligibility"] = contract
+    stage_contracts = contract.get("stage_eligibility")
+    if not isinstance(stage_contracts, dict):
         return
-    scope = str(eligibility.get("scope") or "uncertain").strip()
-    allowed = {str(item).upper() for item in eligibility.get("direct_product_stages", [])}
-    if scope in {"same_product", "comparable_variant"}:
-        return
-    reason = str(eligibility.get("reason") or "两条视频的产品级比较资格不足。").strip()
+    default_reason = str(contract.get("reason") or "两条视频在该阶段缺少共同比较合同。").strip()
     for stage in result.get("stage_analysis", []):
         if not isinstance(stage, dict):
             continue
         code = stage_code(stage)
-        if code not in {"S2", "S3", "S4", "S5"} or code in allowed:
+        stage_contract = stage_contracts.get(code)
+        if not isinstance(stage_contract, dict):
             continue
-        stage["comparison_status"] = "not_directly_comparable"
+        status = str(stage_contract.get("status") or "not_comparable")
+        reason = str(stage_contract.get("basis") or default_reason).strip()
+        stage["comparison_contract"] = dict(stage_contract)
+        if status == "direct":
+            stage["comparison_basis"] = "product_direct"
+            stage.pop("comparison_status", None)
+            stage.pop("comparison_reason", None)
+            continue
+        if status == "structural":
+            stage["comparison_basis"] = "structure_execution"
+            stage["comparison_status"] = "structural_comparison"
+            stage["comparison_reason"] = reason
+            continue
+        stage["comparison_status"] = "not_applicable" if status == "not_applicable" else "not_directly_comparable"
         stage["comparison_reason"] = reason
         trace = stage.get("severity_derivation")
         if isinstance(trace, dict):
             trace["direct_product_comparison_eligible"] = False
 
-    # 主模型在锁定资格前已生成的总览、结论，常会残留“本品效果弱于另一品”这类表述。
-    # 这不是可通过报告展示层过滤解决的问题：JSON 也是下游报告/接口的权威来源。
-    # 因此跨品时统一改为范围声明，只保留阶段卡中的本品事实作为创意参考。
-    summary = comparison_scope_summary(eligibility)
-    result["one_line_summary"] = summary
-    result["executive_summary"] = summary
-    result["one_line_verdict"] = "本次为跨品创意参考，不输出 S2-S5 的产品级优劣结论。"
-    result["key_conclusions"] = [
-        summary,
-        "S2-S5 保留达人自身的卖点、使用、效果与信任事实，供借鉴镜头和叙事；不据此判定达人优于或劣于标杆。",
-    ]
+    if contract.get("overall_status") != "full_direct":
+        result["comparison_scope_note"] = comparison_scope_summary(contract)
 
 
 def comparison_scope_summary(eligibility: dict[str, Any]) -> str:
-    """为非同品比较生成不会重新引入伪产品结论的总览说明。"""
-    scope = str(eligibility.get("scope") or "uncertain").strip()
+    """按阶段资格生成范围说明，不把结构可比误写成产品优劣可比。"""
+    from ..llm.parse import normalize_comparison_contract
+
+    eligibility = normalize_comparison_contract(eligibility)
+    identity = str(eligibility.get("identity_relation") or "uncertain").strip()
+    substitution = str(eligibility.get("substitution_relation") or "uncertain").strip()
+    overall = str(eligibility.get("overall_status") or "uncertain").strip()
     reason = str(eligibility.get("reason") or "两条视频的产品级比较资格不足。").strip()
-    allowed = {str(item).upper() for item in eligibility.get("direct_product_stages", [])}
-    allowed_labels = []
-    if "S1" in allowed:
-        allowed_labels.append("S1 Hook")
-    if "S6" in allowed:
-        allowed_labels.append("S6 CTA")
-    allowed_text = "、".join(allowed_labels) if allowed_labels else "无产品级直接比较阶段"
-    if scope == "creative_reference_only":
-        prefix = "两条视频并非同一具体产品，本次仅作创意结构参考。"
-    elif scope == "cross_product":
-        prefix = "两条视频属于不同产品，本次不作产品级优劣比较。"
-    else:
-        prefix = "两条视频的产品对应关系无法确认，本次不作产品级优劣比较。"
-    return f"{prefix}允许参考的结构阶段：{allowed_text}；S2-S5 仅作创意参考。{reason}"
+    stage_contracts = eligibility.get("stage_eligibility") if isinstance(eligibility.get("stage_eligibility"), dict) else {}
+    stage_labels = {
+        "S1": "S1 Hook",
+        "S2": "S2 产品引出",
+        "S3": "S3 使用过程",
+        "S4": "S4 效果呈现",
+        "S5": "S5 信任放大",
+        "S6": "S6 CTA",
+    }
+    structural = [
+        stage_labels[stage] for stage in stage_labels
+        if isinstance(stage_contracts.get(stage), dict) and stage_contracts[stage].get("status") == "structural"
+    ]
+    skipped = [
+        stage_labels[stage] for stage in stage_labels
+        if isinstance(stage_contracts.get(stage), dict)
+        and stage_contracts[stage].get("status") in {"not_applicable", "not_comparable"}
+    ]
+    if overall == "full_direct":
+        return "两条视频属于同品或同产品家族，S1-S6 可直接比较。"
+    if overall == "selective_structural":
+        structural_text = "、".join(structural) or "无"
+        skipped_text = "、".join(skipped) or "无"
+        return (
+            f"两条视频为不同产品但存在{('强' if substitution == 'strong_substitute' else '部分')}替代关系；"
+            f"仅在共同消费者任务下比较内容执行：{structural_text}；不比较或未涉及：{skipped_text}。{reason}"
+        )
+    if overall == "not_comparable":
+        return f"两条视频属于不可替代的不同产品，不输出 S1-S6 差距结论。{reason}"
+    return f"两条视频的商品关系或替代关系无法确认，暂不输出 S1-S6 差距结论。{reason}"
 
 
 def stabilize_improvement_priorities(result: dict[str, Any]) -> None:
@@ -556,7 +582,7 @@ def stabilize_improvement_priorities(result: dict[str, Any]) -> None:
         target = improvement_stage_code(item)
         if not improvement_is_actionable(item, target):
             continue
-        if str(stages.get(target, {}).get("comparison_status") or "") == "not_directly_comparable":
+        if str(stages.get(target, {}).get("comparison_status") or "") in {"not_directly_comparable", "not_applicable"}:
             excluded_by_scope = True
             continue
         cta_label = " ".join(str(item.get(key) or "") for key in ("target_stage", "title"))

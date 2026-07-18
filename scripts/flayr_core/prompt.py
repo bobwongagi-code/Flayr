@@ -9,7 +9,7 @@
   - 凝聚度：prompt 装配是独立子系统，不应混在 CLI harness 里
   - 变更频率：prompt 内容每次 LLM 调优都要改，CLI 参数几乎不动
 
-依赖：仅依赖 artifacts（帧 manifest 读取）和 utils（read_optional_text）。
+依赖：artifacts（帧 manifest 读取）、market（市场知识路由）和 utils（文本读取）。
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from .artifacts import (
     get_frame_entries,
     sample_evenly,
 )
+from .market import render_market_knowledge as render_market_context
 from .shot_track import render_shot_track_markdown
 from .speech_mode import speech_mode_prompt
 from .stage_ownership import CERTIFICATION_OWNERSHIP_PROMPT, apply_certification_ownership_policy
@@ -212,14 +213,9 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
 
 
 def render_market_knowledge(analysis: dict[str, Any]) -> str:
-    """按目标市场加载知识库；auto 下仅作文化视角提示，不当作已确认事实。"""
+    """按目标市场加载共性/专属知识；市场知识不替代视频事实。"""
     market = str(analysis.get("product", {}).get("target_market") or "auto").lower()
-    text = read_optional_text(ROOT / "references" / "market-knowledge-my.md")
-    if market == "my":
-        return "目标市场已指定为马来西亚（my）。以下知识库可用于商业判断，但不得直接在报告中呈现。\n\n" + text
-    if market == "sea":
-        return "目标市场已指定为东南亚泛化（sea）。使用第一层东南亚共性知识；马来专属层仅作相似市场提示，不能当成确定事实。\n\n" + text
-    return "目标市场未确认（auto）。以下 SEA/MY seed 仅作文化视角和误判防护提示；发现明确马来语或马来市场信号时可提高权重，但不得当作已确认事实。\n\n" + text
+    return render_market_context(market)
 
 
 def speech_status(role_dir: Path, info: dict[str, Any]) -> str:

@@ -21,7 +21,9 @@ from typing import Any
 
 from ..utils import run_command, write_text
 
-LLM_CURL_MAX_TIME_SECONDS = 900
+LLM_CURL_MAX_TIME_SECONDS = 1800
+LLM_CURL_LOW_SPEED_LIMIT_BYTES_PER_SECOND = 1
+LLM_CURL_LOW_SPEED_TIME_SECONDS = 180
 LLM_CURL_RETRIES = 2
 LLM_MAX_OUTPUT_TOKENS = 32768
 VIDEO_DATA_URL_MAX_DURATION_SECONDS = 180.0
@@ -54,7 +56,16 @@ def read_llm_api_key(args: argparse.Namespace) -> str:
     return completed.stdout.strip()
 
 
-def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path) -> str:
+def call_llm_api(
+    api_url: str,
+    api_key: str,
+    payload_path: Path,
+    raw_path: Path,
+    *,
+    max_time_seconds: int = LLM_CURL_MAX_TIME_SECONDS,
+    low_speed_time_seconds: int = LLM_CURL_LOW_SPEED_TIME_SECONDS,
+    retries: int = LLM_CURL_RETRIES,
+) -> str:
     """流式（SSE）调用 OpenAI 兼容 chat completions，分块拼装后合成标准 completion JSON 返回。
 
     为什么流式：非流式下大响应体会被网络/代理按体积静默截断（无错误、finish_reason=None、
@@ -84,6 +95,9 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
     except OSError:
         pass
 
+    max_time_seconds = max(1, int(max_time_seconds))
+    low_speed_time_seconds = max(1, int(low_speed_time_seconds))
+    retries = max(0, int(retries))
     curl_command = [
         "curl",
         "-sS",
@@ -93,7 +107,11 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
         "--connect-timeout",
         "30",
         "--max-time",
-        str(LLM_CURL_MAX_TIME_SECONDS),
+        str(max_time_seconds),
+        "--speed-limit",
+        str(LLM_CURL_LOW_SPEED_LIMIT_BYTES_PER_SECOND),
+        "--speed-time",
+        str(low_speed_time_seconds),
         "-H",
         f"@{auth_path}",
         "-H",
@@ -101,16 +119,17 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
         "--data-binary",
         f"@{req_path}",
         api_url,
-        "-o",
-        str(sse_path),
     ]
 
     last_error = ""
     try:
-        for attempt in range(LLM_CURL_RETRIES + 1):
-            completed = run_command(curl_command)
+        for attempt in range(retries + 1):
+            attempt_sse_path = sse_path.with_name(f"{sse_path.stem}.attempt-{attempt + 1}.sse")
+            completed = run_command([*curl_command, "-o", str(attempt_sse_path)])
             if completed.returncode != 0:
-                body = sse_path.read_text(encoding="utf-8", errors="replace").strip()[:400] if sse_path.is_file() else ""
+                if attempt_sse_path.is_file():
+                    shutil.copyfile(attempt_sse_path, sse_path)
+                body = attempt_sse_path.read_text(encoding="utf-8", errors="replace").strip()[:400] if attempt_sse_path.is_file() else ""
                 last_error = completed.stderr.strip() or completed.stdout.strip() or "curl failed"
                 if body:
                     last_error = f"{last_error}\n{body}"
@@ -118,8 +137,9 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
                 if not is_retryable_error(last_error):
                     break
             else:
-                content, usage, complete, finish_reason = parse_sse_stream(sse_path)
+                content, usage, complete, finish_reason = parse_sse_stream(attempt_sse_path)
                 if complete and content and finish_reason != "length":
+                    shutil.copyfile(attempt_sse_path, sse_path)
                     response: dict[str, Any] = {
                         "choices": [{"message": {"content": content}, "finish_reason": finish_reason or "stop"}]
                     }
@@ -139,7 +159,9 @@ def call_llm_api(api_url: str, api_key: str, payload_path: Path, raw_path: Path)
                 else:
                     # 流被中途截断（无 [DONE]/finish_reason）→ 传输问题，可重试。
                     last_error = "流式响应不完整（连接在 [DONE] 前中断）" if content else "流式响应无内容"
-            if attempt >= LLM_CURL_RETRIES:
+                    if attempt_sse_path.is_file():
+                        shutil.copyfile(attempt_sse_path, sse_path)
+            if attempt >= retries:
                 break
             time.sleep(5 * (attempt + 1))
         raise SystemExit(f"LLM streaming request failed: {last_error}")
@@ -167,6 +189,7 @@ def is_retryable_error(error_text: str) -> bool:
         marker in lowered
         for marker in (
             "timed out", "timeout", "connection reset", "recv failure", "empty reply",
+            "transfer closed with outstanding read data", "curl: (18)",
             "framing layer", "http/2", "429", "too many requests",
             "500", "502", "503", "504", "internal_server_error", "backend",
             "could not resolve", "connection refused",

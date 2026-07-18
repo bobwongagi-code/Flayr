@@ -276,10 +276,12 @@ def normalize_short_video_proof_plan(value: Any) -> dict[str, Any] | None:
             break
 
     anchor_id = str(value.get("s4_anchor_candidate_id") or "").strip()
+    primary_id = str(value.get("primary_candidate_id") or "").strip()
     source = normalize_choice(value.get("selection_source"), _PROOF_PLAN_SOURCES, "model_category_default")
     confidence = normalize_choice(value.get("anchor_confidence"), {"high", "low"}, "low")
     plan = {
         "candidates": candidates,
+        "primary_candidate_id": primary_id,
         "s4_anchor_candidate_id": anchor_id,
         "selection_source": source,
         "anchor_confidence": confidence,
@@ -291,6 +293,11 @@ def normalize_short_video_proof_plan(value: Any) -> dict[str, Any] | None:
     if not candidates:
         plan["validation_reason"] = "至少需要一个卖点 candidate"
         return plan
+    if primary_id and primary_id not in seen_ids:
+        plan["validation_reason"] = "primary_candidate_id 必须指向 candidates 中的一项"
+        return plan
+    if not primary_id:
+        plan["primary_candidate_id"] = max(candidates, key=_proof_plan_rank)["id"]
     s4_candidates = [candidate for candidate in candidates if candidate["delivery_stage"] == "S4"]
     if not s4_candidates:
         if anchor_id:

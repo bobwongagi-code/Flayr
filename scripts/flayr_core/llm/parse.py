@@ -16,7 +16,16 @@ from pathlib import Path
 from typing import Any
 
 from ..artifacts import format_seconds
+from ..multimodal import (
+    MULTIMODAL_CHANNELS,
+    MULTIMODAL_DOMINANT_CHANNELS,
+    MULTIMODAL_EFFECTS,
+    MULTIMODAL_IMPACTS,
+    MULTIMODAL_RELATIONS,
+)
 from ..stage_catalog import stage_tuples
+from ..structure_modules import canonical_module_id, stage1_event_catalog
+from ..s1_landing import LANDING_MOTIVATION_MECHANISMS, LANDING_SHADOW_CONDITIONS
 from .analysis_contract import AnalysisContractError, validate_raw_analysis_envelope
 from .json_codec import escape_unquoted_string_quotes, parse_json_text, remove_trailing_commas
 from .product_profile import normalize_category_profile, normalize_product_profile
@@ -75,6 +84,37 @@ def normalize_demo_flag(value: Any) -> bool | None:
     if token in {"false", "no", "0"}:
         return False
     return None
+
+
+def normalize_multimodal_assessment(value: Any) -> dict[str, Any] | None:
+    """归一单侧阶段级跨模态净效果；不在解析层推断渠道语义。"""
+    if not isinstance(value, dict):
+        return None
+    raw_impacts = value.get("channel_impacts") if isinstance(value.get("channel_impacts"), dict) else {}
+    raw_evidence = (
+        value.get("channel_evidence_ids") if isinstance(value.get("channel_evidence_ids"), dict) else {}
+    )
+    return {
+        "channel_impacts": {
+            channel: normalize_choice(raw_impacts.get(channel), MULTIMODAL_IMPACTS, "unknown")
+            for channel in MULTIMODAL_CHANNELS
+        },
+        "channel_evidence_ids": {
+            channel: normalize_evidence(raw_evidence.get(channel))
+            for channel in MULTIMODAL_CHANNELS
+        },
+        "dominant_channel": normalize_choice(
+            value.get("dominant_channel"), MULTIMODAL_DOMINANT_CHANNELS, "unknown"
+        ),
+        "cross_channel_relation": normalize_choice(
+            value.get("cross_channel_relation"), MULTIMODAL_RELATIONS, "unknown"
+        ),
+        "integrated_effect": normalize_choice(
+            value.get("integrated_effect"), MULTIMODAL_EFFECTS, "unknown"
+        ),
+        "compensation_applied": normalize_demo_flag(value.get("compensation_applied")),
+        "integration_reason": str(value.get("integration_reason") or "").strip(),
+    }
 
 
 _HOOK_TYPE_LETTERS = {"A", "B", "C", "D", "E", "F", "G"}
@@ -244,6 +284,28 @@ def hook_reason_window_leaks(reason: str, boundary_seconds: float | None, tolera
     return bool(vals and max(vals) > boundary_seconds + tolerance)
 
 
+def normalize_landing_shadow(value: Any) -> dict[str, Any]:
+    """归一 S1 shadow 合同；总判断只由四个子条件确定性派生，不接受模型自报。"""
+    source = value if isinstance(value, dict) else {}
+    conditions = {
+        key: normalize_demo_flag(source.get(key))
+        for key in LANDING_SHADOW_CONDITIONS
+    }
+    values = list(conditions.values())
+    shadow_met = all(value is True for value in values) if all(value is not None for value in values) else None
+    failure_reasons = [key for key, condition in conditions.items() if condition is False]
+    mechanism = str(source.get("stay_motivation_mechanism") or "unknown").strip().lower()
+    if mechanism not in LANDING_MOTIVATION_MECHANISMS:
+        mechanism = "other"
+    return {
+        "landing_conditions": conditions,
+        "landing_shadow_met": shadow_met,
+        "landing_failure_reasons": failure_reasons,
+        "stay_motivation_mechanism": mechanism,
+        "landing_shadow_reason": str(source.get("landing_shadow_reason") or "").strip(),
+    }
+
+
 def normalize_hook_flags(value: Any) -> dict[str, Any] | None:
     """归一单侧 S1 钩子结构化 flag。整体缺失（非 dict）→None，derive 见 None 回退模型执行分（优雅降级）。
     形状：{exists: bool|None, type: A-G|unknown, dims:{camera/copy/sound/rhythm: bool}, anchors_proposition: bool|None}。
@@ -259,7 +321,7 @@ def normalize_hook_flags(value: Any) -> dict[str, Any] | None:
     landing_met = normalize_demo_flag(value.get("landing_met"))
     if landing_window_leak and landing_met is True:
         landing_met = False
-    return {
+    normalized = {
         "exists": normalize_demo_flag(value.get("exists")),
         "type": normalize_hook_type(value.get("type")),
         "dims": {
@@ -281,6 +343,17 @@ def normalize_hook_flags(value: Any) -> dict[str, Any] | None:
         "anchors_proposition": normalize_demo_flag(value.get("anchors_proposition")),
         "proposition_ids": normalize_proposition_ids(value.get("proposition_ids")),
     }
+    shadow_source = value.get("landing_conditions") if isinstance(value.get("landing_conditions"), dict) else {}
+    shadow_source = {
+        **shadow_source,
+        "stay_motivation_mechanism": value.get("stay_motivation_mechanism"),
+        "landing_shadow_reason": value.get("landing_shadow_reason"),
+    }
+    normalized.update(normalize_landing_shadow(shadow_source))
+    normalized["landing_shadow_window_leak"] = hook_reason_window_leaks(
+        normalized["landing_shadow_reason"], boundary_seconds
+    )
+    return normalized
 
 
 def normalize_s2_flags(value: Any) -> dict[str, Any] | None:
@@ -324,6 +397,11 @@ def normalize_s3_flags(value: Any) -> dict[str, Any] | None:
         "core_selling_point_visible": normalize_demo_flag(value.get("core_selling_point_visible")),
         "process_framing_met": process_framing_met,
         "action_proof_met": normalize_demo_flag(value.get("action_proof_met")),
+        # S3 的"真实使用"需要证明产品/材料真正作用于目标对象，动作本身有新施加/位移/激活或目标状态变化，
+        # 且关键状态变化没有被跳剪吞掉。旧结果缺字段时保留 None，由 derive 走既有兼容路径；新主链会被 validate 强制要求。
+        "action_target_contact_met": normalize_demo_flag(value.get("action_target_contact_met")),
+        "action_application_change_visible": normalize_demo_flag(value.get("action_application_change_visible")),
+        "critical_action_continuity_met": normalize_demo_flag(value.get("critical_action_continuity_met")),
         "demonstrated_selling_points": normalize_evidence(value.get("demonstrated_selling_points")),
         "missing_selling_points": normalize_evidence(value.get("missing_selling_points")),
         "scene_mode": normalize_s3_scene_mode(value.get("scene_mode")),
@@ -410,6 +488,7 @@ def normalize_s6_flags(value: Any) -> dict[str, Any] | None:
         "module_type": normalize_s6_type(value.get("module_type")),
         "direct_order_met": normalize_demo_flag(value.get("direct_order_met")),
         "action_path_clear": normalize_demo_flag(value.get("action_path_clear")),
+        "soft_purchase_invitation_met": normalize_demo_flag(value.get("soft_purchase_invitation_met")),
         "offer_or_incentive_clear": normalize_demo_flag(value.get("offer_or_incentive_clear")),
         "price_anchor_met": normalize_demo_flag(value.get("price_anchor_met")),
         "urgency_evidence_met": normalize_demo_flag(value.get("urgency_evidence_met")),
@@ -427,6 +506,56 @@ def normalize_s6_flags(value: Any) -> dict[str, Any] | None:
         "evidence_ids": normalize_evidence(value.get("evidence_ids")),
         "proposition_ids": normalize_proposition_ids(value.get("proposition_ids")),
     }
+
+
+def normalize_absolute_execution_shadow(role: str, value: Any) -> dict[str, Any] | None:
+    """归一单侧 absolute-execution shadow，不让可选审计阻断主分析。
+
+    返回 None 表示该次审计无有效输出；调用方应记录失败原因并继续主链。该结果
+    只供对照和晋级门槛使用，当前不参与 severity 推导。
+    """
+    if not isinstance(value, dict):
+        return None
+    items = value.get("stage_execution")
+    if not isinstance(items, list):
+        return None
+    statuses = {"missing", "weak", "competent", "strong"}
+    scores = {0, 0.5, 1, 2}
+    normalized: dict[str, dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("stage") or "").strip().upper()
+        if code not in {"S1", "S2", "S3", "S4"} or code in normalized:
+            continue
+        raw_score = item.get("score")
+        if isinstance(raw_score, bool):
+            continue
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError):
+            continue
+        if score not in scores:
+            continue
+        status = str(item.get("status") or "").strip().lower()
+        if status not in statuses:
+            continue
+        confidence = str(item.get("confidence") or "").strip().lower()
+        if confidence not in {"high", "medium", "low"}:
+            confidence = "low"
+        normalized[code] = {
+            "score": int(score) if score.is_integer() else score,
+            "status": status,
+            "reason": str(item.get("reason") or "").strip(),
+            "evidence_ids": normalize_evidence(item.get("evidence_ids")),
+            "proposition_ids": normalize_proposition_ids(item.get("proposition_ids")),
+            "confidence": confidence,
+            "source": "single_video_shadow",
+            "role": role,
+        }
+    if set(normalized) != {"S1", "S2", "S3", "S4"}:
+        return None
+    return {"role": role, "stages": normalized}
 
 
 def normalize_base_frame_suitability(value: Any, best_time: Any) -> str:
@@ -548,12 +677,7 @@ def normalize_product_coverage(value: Any) -> str:
 
 
 def normalize_module_id(value: Any, index: int) -> str:
-    normalized = str(value or "").strip().upper()
-    if normalized == "UNKNOWN":
-        return "unknown"
-    if re.fullmatch(rf"S{index}-[A-Z]", normalized):
-        return normalized
-    return "unknown"
+    return canonical_module_id(value, index)
 
 
 def normalize_voice_performance(value: Any) -> dict[str, Any]:
@@ -624,35 +748,221 @@ def normalize_promise_chain(value: Any) -> dict[str, Any]:
     }
 
 
+def normalize_temporal_evidence_mode(value: Any) -> str:
+    mode = str(value or "unknown").strip().lower()
+    return mode if mode in {"full_temporal", "focused_temporal", "static_only", "unknown"} else "unknown"
+
+
+def normalize_ratio(value: Any) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def normalize_ratio_map(value: Any) -> dict[str, float]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(key).strip(): normalize_ratio(ratio)
+        for key, ratio in value.items()
+        if str(key).strip()
+    }
+
+
+def normalize_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+
+
+def normalize_selling_point_observations(value: Any, valid_ids: set[str]) -> list[dict[str, Any]]:
+    observations = value if isinstance(value, list) else []
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(observations[:6], start=1):
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        normalized.append(
+            {
+                "id": str(item.get("id") or f"SP{index}").strip(),
+                "candidate_id": str(item.get("candidate_id") or "").strip(),
+                "text": text,
+                "visual_share": normalize_ratio(item.get("visual_share")),
+                "speech_share": normalize_ratio(item.get("speech_share")),
+                "proof_mode_observed": str(item.get("proof_mode_observed") or "unknown").strip(),
+                "proof_signal_present": normalize_bool_flag(item.get("proof_signal_present")),
+                "evidence_ids": [
+                    str(evidence_id).strip()
+                    for evidence_id in item.get("evidence_ids") or []
+                    if str(evidence_id).strip() in valid_ids
+                ],
+            }
+        )
+    return normalized
+
+
+def normalize_variant_decision_rule(value: Any, valid_ids: set[str]) -> dict[str, Any]:
+    item = value if isinstance(value, dict) else {}
+    return {
+        "speech_explains_choice": normalize_bool_flag(item.get("speech_explains_choice")),
+        "visual_comparison_present": normalize_bool_flag(item.get("visual_comparison_present")),
+        "reason": str(item.get("reason") or "").strip(),
+        "evidence_ids": [
+            str(evidence_id).strip()
+            for evidence_id in item.get("evidence_ids") or []
+            if str(evidence_id).strip() in valid_ids
+        ],
+    }
+
+
+def normalize_attention_competitors(value: Any, valid_ids: set[str]) -> list[dict[str, Any]]:
+    competitors = value if isinstance(value, list) else []
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(competitors[:6], start=1):
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("object_label") or "").strip()
+        if not label:
+            continue
+        normalized.append(
+            {
+                "id": str(item.get("id") or f"AC{index}").strip(),
+                "object_label": label,
+                "time_ranges": normalize_string_list(item.get("time_ranges")),
+                "persistent_motion": normalize_bool_flag(item.get("persistent_motion")),
+                "high_salience": normalize_bool_flag(item.get("high_salience")),
+                "participates_in_product_task": normalize_bool_flag(item.get("participates_in_product_task")),
+                "occludes_proof_area": normalize_bool_flag(item.get("occludes_proof_area")),
+                "evidence_ids": [
+                    str(evidence_id).strip()
+                    for evidence_id in item.get("evidence_ids") or []
+                    if str(evidence_id).strip() in valid_ids
+                ],
+            }
+        )
+    return normalized
+
+
+def normalize_attention_scan_audit(value: Any, valid_ids: set[str]) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "recording_equipment_visible": normalize_bool_flag(source.get("recording_equipment_visible")),
+        "foreground_non_task_object_visible": normalize_bool_flag(source.get("foreground_non_task_object_visible")),
+        "notes": str(source.get("notes") or "").strip(),
+        "evidence_ids": [
+            str(evidence_id).strip()
+            for evidence_id in source.get("evidence_ids") or []
+            if str(evidence_id).strip() in valid_ids
+        ],
+    }
+
+
+def normalize_variant_unit_fields(unit: dict[str, Any]) -> dict[str, Any]:
+    variant_ids = normalize_string_list(unit.get("variant_ids"))
+    raw_visual = unit.get("variant_visual_shares")
+    raw_speech = unit.get("variant_speech_shares")
+    visual_shares = normalize_ratio_map(raw_visual)
+    speech_shares = normalize_ratio_map(raw_speech)
+    allowed = set(variant_ids)
+    keys_valid = set(visual_shares).issubset(allowed) and set(speech_shares).issubset(allowed)
+    values_valid = all(
+        isinstance(value, (int, float)) and 0 <= float(value) <= 1
+        for source in (raw_visual, raw_speech)
+        if isinstance(source, dict)
+        for value in source.values()
+    )
+    totals_valid = sum(visual_shares.values()) <= 1.05 and sum(speech_shares.values()) <= 1.05
+    relation_mode = str(unit.get("variant_relation_mode") or "none").strip().lower()
+    if relation_mode not in {"single_focus", "explicit_comparison", "sequence", "ambiguous", "none"}:
+        relation_mode = "ambiguous"
+    comparison_purpose_explicit = normalize_bool_flag(unit.get("comparison_purpose_explicit"))
+    required_fields_present = all(
+        key in unit
+        for key in (
+            "variant_ids", "variant_visual_shares", "variant_speech_shares",
+            "variant_relation_mode", "comparison_purpose_explicit",
+        )
+    )
+    has_variant_observation = bool(variant_ids) and bool(visual_shares or speech_shares)
+    shape_valid = (
+        (not variant_ids and relation_mode == "none" and not visual_shares and not speech_shares)
+        or (relation_mode == "single_focus" and has_variant_observation and bool(visual_shares))
+        # 比较和顺序可以跨相邻 evidence unit 完成；当前单元只出现一个变体仍是合法观察。
+        or (relation_mode == "explicit_comparison" and has_variant_observation and comparison_purpose_explicit is True)
+        or (relation_mode in {"sequence", "ambiguous", "none"} and has_variant_observation)
+    )
+    variant_data_valid = required_fields_present and keys_valid and values_valid and totals_valid and shape_valid
+    primary_variant_id = ""
+    confident = False
+    if variant_data_valid and relation_mode == "single_focus" and visual_shares:
+        candidate_id, share = max(visual_shares.items(), key=lambda item: item[1])
+        if share >= 0.70:
+            primary_variant_id = candidate_id
+            confident = True
+    elif variant_data_valid and relation_mode == "explicit_comparison" and comparison_purpose_explicit is True:
+        confident = True
+    return {
+        "variant_ids": variant_ids,
+        "variant_visual_shares": visual_shares,
+        "variant_speech_shares": speech_shares,
+        "variant_relation_mode": relation_mode,
+        "comparison_purpose_explicit": comparison_purpose_explicit,
+        "primary_variant_id": primary_variant_id,
+        "variant_attribution_confident": confident,
+        "variant_data_valid": variant_data_valid,
+        "attention_competitor_ids": normalize_string_list(unit.get("attention_competitor_ids")),
+    }
+
+
 def normalize_video_understanding(value: Any) -> dict[str, Any]:
     source = value if isinstance(value, dict) else {}
     normalized: dict[str, Any] = {}
     for role in ("benchmark", "creator"):
         item = source.get(role) if isinstance(source.get(role), dict) else {}
         units = item.get("evidence_units") if isinstance(item.get("evidence_units"), list) else []
+        normalized_units = []
+        for index, unit in enumerate(units, start=1):
+            if not isinstance(unit, dict):
+                continue
+            normalized_unit = {
+                "id": str(unit.get("id") or f"{role[0].upper()}{index}").strip(),
+                "time_range": str(unit.get("time_range") or "").strip(),
+                "information": str(unit.get("information") or "").strip(),
+                "voiceover": str(unit.get("voiceover") or "").strip(),
+                "voiceover_zh": str(unit.get("voiceover_zh") or "").strip(),
+                "visual_fact": str(unit.get("visual_fact") or "").strip(),
+                "subtitle_fact": str(unit.get("subtitle_fact") or "").strip(),
+                "audio_fact": str(unit.get("audio_fact") or "").strip(),
+                "product_visible": normalize_bool_flag(unit.get("product_visible")),
+                "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
+                # F 项背书劈成两个纯观察信道（替代焊死判断的 third_party_endorsement）：
+                "endorsement_verbal": normalize_bool_flag(unit.get("endorsement_verbal")),
+                "endorsement_visual": normalize_bool_flag(unit.get("endorsement_visual")),
+                "trust_source_signals": normalize_s5_source_signals(unit.get("trust_source_signals")),
+                "trust_source_reference": str(unit.get("trust_source_reference") or "").strip(),
+                "functions": normalize_functions(unit.get("functions")),
+            }
+            normalized_unit.update(normalize_variant_unit_fields(unit))
+            normalized_units.append(normalized_unit)
+        normalized_units = normalized_units[:20]
+        valid_ids = {unit["id"] for unit in normalized_units}
+        raw_gate_status = item.get("gate_observation_status") if isinstance(item.get("gate_observation_status"), dict) else {}
         normalized[role] = {
             "content_summary": str(item.get("content_summary") or "").strip(),
             "communication_strategy": str(item.get("communication_strategy") or "").strip(),
-            "evidence_units": [
-                {
-                    "id": str(unit.get("id") or f"{role[0].upper()}{index}").strip(),
-                    "time_range": str(unit.get("time_range") or "").strip(),
-                    "information": str(unit.get("information") or "").strip(),
-                    "voiceover": str(unit.get("voiceover") or "").strip(),
-                    "voiceover_zh": str(unit.get("voiceover_zh") or "").strip(),
-                    "visual_fact": str(unit.get("visual_fact") or "").strip(),
-                    "subtitle_fact": str(unit.get("subtitle_fact") or "").strip(),
-                    "product_visible": normalize_bool_flag(unit.get("product_visible")),
-                    "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
-                    # F 项背书劈成两个纯观察信道（替代焊死判断的 third_party_endorsement）：
-                    "endorsement_verbal": normalize_bool_flag(unit.get("endorsement_verbal")),
-                    "endorsement_visual": normalize_bool_flag(unit.get("endorsement_visual")),
-                    "trust_source_signals": normalize_s5_source_signals(unit.get("trust_source_signals")),
-                    "trust_source_reference": str(unit.get("trust_source_reference") or "").strip(),
-                }
-                for index, unit in enumerate(units, start=1)
-                if isinstance(unit, dict)
-            ][:20],
+            "temporal_evidence_mode": normalize_temporal_evidence_mode(item.get("temporal_evidence_mode")),
+            "selling_point_observations": normalize_selling_point_observations(item.get("selling_point_observations"), valid_ids),
+            "variant_decision_rule": normalize_variant_decision_rule(item.get("variant_decision_rule"), valid_ids),
+            "attention_scan_audit": normalize_attention_scan_audit(item.get("attention_scan_audit"), valid_ids),
+            "attention_competitors": normalize_attention_competitors(item.get("attention_competitors"), valid_ids),
+            "gate_observation_status": normalize_gate_observation_status(raw_gate_status, item, normalized_units),
+            "evidence_units": normalized_units,
+            # Stage1 锁定 facts 的审计字段必须进入最终产物；不得由 Stage2 回显内容覆盖。
+            "evidence_checklist": normalize_fact_evidence_checklist(item.get("evidence_checklist"), valid_ids),
+            "structure_event_checks": normalize_structure_event_checks(item.get("structure_event_checks"), valid_ids),
         }
     return normalized
 
@@ -803,6 +1113,10 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 "painpoint_relevance": normalize_painpoint_relevance(item.get("painpoint_relevance")),
                 # 到位标准达成事实（全阶段统一，见 prompt 对照表；先收集，暂不卡分）
                 "stage_standard_delivery": normalize_stage_standard_delivery(item.get("stage_standard_delivery")),
+                # 阶段级跨模态综合：保留各渠道事实，并显式记录主导渠道、交互关系和净效果。
+                # 缺失时为 None，旧结果继续走既有 stage flags，保证历史兼容。
+                "creator_multimodal": normalize_multimodal_assessment(item.get("creator_multimodal")),
+                "benchmark_multimodal": normalize_multimodal_assessment(item.get("benchmark_multimodal")),
                 # S1 Hook 结构化 flag（仅 S1 有意义）：四维 dims 推执行分、exists 红线、anchors 命题锚。
                 # 缺失为 None → derive 回退模型执行分（优雅降级）。模型在 Stage2 产出（切片 B 接线）。
                 "creator_hook": normalize_hook_flags(item.get("creator_hook")),
@@ -878,7 +1192,12 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
         "executive_summary": executive_summary,
         "holistic_assessment": normalize_holistic_assessment(result.get("holistic_assessment")),
         "key_conclusions": key_conclusions,
-        "comparison_eligibility": normalize_comparison_eligibility(result.get("comparison_eligibility")),
+        "comparison_contract": normalize_comparison_contract(
+            result.get("comparison_contract") or result.get("comparison_eligibility")
+        ),
+        "comparison_eligibility": normalize_comparison_eligibility(
+            result.get("comparison_contract") or result.get("comparison_eligibility")
+        ),
         "product_visibility": normalize_product_visibility(result.get("product_visibility")),
         "category_profile": normalize_category_profile(result.get("category_profile")),
         "product_profile": normalize_product_profile(result.get("product_profile")),
@@ -899,39 +1218,165 @@ _FUNCTION_ENUM = {"S1_hook", "S2_intro", "S3_usage", "S4_effect", "S5_trust", "S
 _IDENTITY_BASIS = {"visible", "spoken", "subtitle", "mixed", "unknown"}
 _IDENTITY_CONFIDENCE = {"high", "medium", "low"}
 _COMPARISON_SCOPES = {
-    "same_product", "comparable_variant", "creative_reference_only", "cross_product", "uncertain",
+    "same_product", "comparable_variant", "same_task_structure", "creative_reference_only", "cross_product", "uncertain",
 }
+_COMPARISON_SCOPE_ORIGINS = {"facts", "operator_certified"}
+_IDENTITY_RELATIONS = {"exact_product", "same_product_family", "different_product", "uncertain"}
+_SUBSTITUTION_RELATIONS = {"same_solution", "strong_substitute", "partial_substitute", "none", "uncertain"}
+_STAGE_COMPARISON_STATUSES = {"direct", "structural", "not_applicable", "not_comparable"}
+_ALL_STAGE_CODES = ("S1", "S2", "S3", "S4", "S5", "S6")
 
 
-def normalize_video_product_identity(value: Any) -> dict[str, str]:
+def normalize_video_product_identity(value: Any) -> dict[str, Any]:
     """归一单视频中实际观察到的产品身份，不允许用声明产品补空。"""
     value = value if isinstance(value, dict) else {}
     return {
         "brand_or_product_name": str(value.get("brand_or_product_name") or "").strip(),
+        "brand": str(value.get("brand") or "").strip(),
+        "product_line": str(value.get("product_line") or "").strip(),
         "product_category": str(value.get("product_category") or "").strip(),
-        "form_factor": str(value.get("form_factor") or "").strip(),
+        "functional_form": str(value.get("functional_form") or value.get("form_factor") or "").strip(),
+        "form_factor": str(value.get("functional_form") or value.get("form_factor") or "").strip(),
+        "variant_attributes": normalize_evidence(value.get("variant_attributes")),
+        "core_job": str(value.get("core_job") or "").strip(),
+        "target_object": str(value.get("target_object") or "").strip(),
+        "use_mechanism": str(value.get("use_mechanism") or "").strip(),
+        "desired_outcome": str(value.get("desired_outcome") or "").strip(),
         "identity_basis": normalize_choice(value.get("identity_basis"), _IDENTITY_BASIS, "unknown"),
         "confidence": normalize_choice(value.get("confidence"), _IDENTITY_CONFIDENCE, "low"),
     }
 
 
-def normalize_comparison_eligibility(value: Any) -> dict[str, Any]:
-    """归一产品级对比资格，先供审计与指标过滤，暂不静默改写阶段严重度。"""
+def normalize_comparison_contract(value: Any) -> dict[str, Any]:
+    """归一商品关系与阶段级可比合同，并由合同派生旧 scope 兼容视图。"""
     value = value if isinstance(value, dict) else {}
-    scope = normalize_choice(value.get("scope"), _COMPARISON_SCOPES, "uncertain")
-    stages: list[str] = []
-    if isinstance(value.get("direct_product_stages"), list):
-        for item in value["direct_product_stages"]:
-            token = str(item or "").upper().strip()
-            if token in {"S1", "S2", "S3", "S4", "S5", "S6"} and token not in stages:
-                stages.append(token)
-    if scope in {"creative_reference_only", "cross_product"}:
-        stages = [stage for stage in stages if stage not in {"S2", "S3", "S4", "S5"}]
-    return {
-        "scope": scope,
-        "direct_product_stages": stages,
-        "reason": str(value.get("reason") or "").strip(),
+    legacy_scope = normalize_choice(value.get("scope"), _COMPARISON_SCOPES, "uncertain")
+    identity_relation = normalize_choice(value.get("identity_relation"), _IDENTITY_RELATIONS, "uncertain")
+    substitution_relation = normalize_choice(value.get("substitution_relation"), _SUBSTITUTION_RELATIONS, "uncertain")
+
+    # 旧结果迁移：只恢复旧 scope 能明确表达的语义，绝不从包装文字猜商品关系。
+    if identity_relation == "uncertain":
+        if legacy_scope == "same_product":
+            identity_relation, substitution_relation = "exact_product", "same_solution"
+        elif legacy_scope == "comparable_variant":
+            identity_relation, substitution_relation = "same_product_family", "same_solution"
+        elif legacy_scope in {"same_task_structure", "creative_reference_only"}:
+            identity_relation = "different_product"
+            substitution_relation = "strong_substitute" if legacy_scope == "same_task_structure" else "partial_substitute"
+        elif legacy_scope == "cross_product":
+            identity_relation, substitution_relation = "different_product", "none"
+
+    shared = value.get("shared_job") if isinstance(value.get("shared_job"), dict) else {}
+    shared_job = {
+        "same_consumer_job": normalize_bool_flag(shared.get("same_consumer_job")),
+        "same_target_object": normalize_bool_flag(shared.get("same_target_object")),
+        "same_desired_outcome": normalize_bool_flag(shared.get("same_desired_outcome")),
+        "same_purchase_decision": normalize_bool_flag(shared.get("same_purchase_decision")),
+        "complement_or_dependency": normalize_bool_flag(shared.get("complement_or_dependency")),
+        "reason": str(shared.get("reason") or "").strip(),
+        "evidence_ids": normalize_evidence(shared.get("evidence_ids")),
     }
+
+    # 兼容旧的人工 same_task_structure 结果：该 scope 本身代表运营已确认共同任务，
+    # 旧文件没有 shared_job 字段时补回其原有语义，避免迁移后被误降级。
+    if legacy_scope == "same_task_structure" and not shared:
+        shared_job.update(
+            {
+                "same_consumer_job": True,
+                "same_target_object": True,
+                "same_desired_outcome": True,
+                "same_purchase_decision": True,
+                "complement_or_dependency": False,
+                "reason": "由旧版人工确认的同任务结构对标迁移。",
+            }
+        )
+
+    if identity_relation in {"exact_product", "same_product_family"}:
+        substitution_relation = "same_solution"
+    elif identity_relation == "different_product" and substitution_relation == "strong_substitute":
+        hard_gates = (
+            shared_job["same_consumer_job"] is True,
+            shared_job["same_target_object"] is True,
+            shared_job["same_desired_outcome"] is True,
+            shared_job["same_purchase_decision"] is True,
+            shared_job["complement_or_dependency"] is False,
+        )
+        if not all(hard_gates):
+            substitution_relation = "partial_substitute"
+
+    raw_stage_eligibility = value.get("stage_eligibility") if isinstance(value.get("stage_eligibility"), dict) else {}
+    legacy_stages = {
+        str(item or "").upper().strip()
+        for item in value.get("direct_product_stages", [])
+        if str(item or "").upper().strip() in _ALL_STAGE_CODES
+    }
+    stage_eligibility: dict[str, dict[str, Any]] = {}
+    for stage in _ALL_STAGE_CODES:
+        raw = raw_stage_eligibility.get(stage) if isinstance(raw_stage_eligibility.get(stage), dict) else {}
+        status = normalize_choice(raw.get("status"), _STAGE_COMPARISON_STATUSES, "not_comparable")
+        if not raw and stage in legacy_stages:
+            status = "direct" if identity_relation in {"exact_product", "same_product_family"} else "structural"
+        if identity_relation in {"exact_product", "same_product_family"}:
+            status = "direct"
+        elif identity_relation == "uncertain" or substitution_relation in {"none", "uncertain"}:
+            status = "not_comparable"
+        elif status == "direct":
+            status = "structural"
+        stage_eligibility[stage] = {
+            "status": status,
+            "basis": str(raw.get("basis") or "").strip(),
+            "shared_contract": str(raw.get("shared_contract") or "").strip(),
+            "restrictions": normalize_evidence(raw.get("restrictions")),
+            "evidence_ids": normalize_evidence(raw.get("evidence_ids")),
+        }
+
+    comparable_stages = [
+        stage for stage in _ALL_STAGE_CODES
+        if stage_eligibility[stage]["status"] in {"direct", "structural"}
+    ]
+    if identity_relation in {"exact_product", "same_product_family"}:
+        overall_status = "full_direct"
+    elif identity_relation == "uncertain" or substitution_relation == "uncertain":
+        overall_status = "uncertain"
+    elif not comparable_stages:
+        overall_status = "not_comparable"
+    else:
+        overall_status = "selective_structural"
+
+    if identity_relation == "exact_product":
+        scope = "same_product"
+    elif identity_relation == "same_product_family":
+        scope = "comparable_variant"
+    elif substitution_relation == "strong_substitute":
+        scope = "same_task_structure"
+    elif substitution_relation == "partial_substitute":
+        scope = "creative_reference_only"
+    elif identity_relation == "different_product":
+        scope = "cross_product"
+    else:
+        scope = "uncertain"
+
+    return {
+        "identity_relation": identity_relation,
+        "substitution_relation": substitution_relation,
+        "shared_job": shared_job,
+        "stage_eligibility": stage_eligibility,
+        "overall_status": overall_status,
+        "comparable_stages": comparable_stages,
+        "scope": scope,
+        "direct_product_stages": comparable_stages,
+        "reason": str(value.get("reason") or "").strip(),
+        "scope_origin": normalize_choice(value.get("scope_origin"), _COMPARISON_SCOPE_ORIGINS, "facts"),
+        "facts_scope": normalize_choice(value.get("facts_scope"), _COMPARISON_SCOPES, "uncertain"),
+        "facts_reason": str(value.get("facts_reason") or "").strip(),
+        "evidence_ids": normalize_evidence(value.get("evidence_ids")),
+        "confidence": normalize_choice(value.get("confidence"), _IDENTITY_CONFIDENCE, "low"),
+    }
+
+
+def normalize_comparison_eligibility(value: Any) -> dict[str, Any]:
+    """旧字段兼容入口；返回同一份三层合同，scope 仅为派生视图。"""
+    return normalize_comparison_contract(value)
 
 
 def normalize_functions(value: Any) -> list[str] | None:
@@ -948,6 +1393,60 @@ def normalize_functions(value: Any) -> list[str] | None:
     return out or None
 
 
+def normalize_fact_evidence_checklist(value: Any, valid_ids: set[str]) -> list[dict[str, Any]]:
+    """归一品命题检查表，只保留当前锁定 evidence_units 的引用。"""
+    checklist = value if isinstance(value, list) else []
+    return [
+        {
+            "item": str(item.get("item") or "").strip(),
+            "covered": normalize_bool_flag(item.get("covered")) is True,
+            "evidence_ids": [
+                str(evidence_id).strip()
+                for evidence_id in item.get("evidence_ids") or []
+                if str(evidence_id).strip() in valid_ids
+            ],
+            "channels": [
+                str(channel).strip()
+                for channel in item.get("channels") or []
+                if str(channel).strip() in {"visual", "voiceover", "subtitle"}
+            ],
+        }
+        for item in checklist
+        if isinstance(item, dict) and str(item.get("item") or "").strip()
+    ]
+
+
+def normalize_structure_event_checks(value: Any, valid_ids: set[str]) -> list[dict[str, Any]]:
+    """按结构库事件目录补齐 Stage1 观测，防止模型省略 false 项造成不可比。"""
+    catalog = stage1_event_catalog()
+    catalog_ids = {str(item["id"]) for item in catalog}
+    raw_checks = value if isinstance(value, list) else []
+    event_by_module = {
+        str(item.get("module_id") or "").strip().upper(): item
+        for item in raw_checks
+        if isinstance(item, dict) and str(item.get("module_id") or "").strip().upper() in catalog_ids
+    }
+    normalized: list[dict[str, Any]] = []
+    for catalog_item in catalog:
+        module_id = str(catalog_item["id"])
+        item = event_by_module.get(module_id)
+        if not isinstance(item, dict):
+            normalized.append({"module_id": module_id, "present": False, "evidence_ids": []})
+            continue
+        normalized.append(
+            {
+                "module_id": module_id,
+                "present": normalize_bool_flag(item.get("present")) is True,
+                "evidence_ids": [
+                    str(evidence_id).strip()
+                    for evidence_id in item.get("evidence_ids") or []
+                    if str(evidence_id).strip() in valid_ids
+                ],
+            }
+        )
+    return normalized
+
+
 def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
     code = "B" if role == "benchmark" else "C"
     units = result.get("evidence_units")
@@ -957,16 +1456,29 @@ def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dic
         "content_summary": str(result.get("content_summary") or "").strip(),
         "communication_strategy": str(result.get("communication_strategy") or "").strip(),
         "product_identity": normalize_video_product_identity(result.get("product_identity")),
+        "temporal_evidence_mode": normalize_temporal_evidence_mode(result.get("temporal_evidence_mode")),
         "evidence_units": [],
     }
     for index, unit in enumerate(units[:8], start=1):
         if not isinstance(unit, dict):
             continue
-        normalized["evidence_units"].append(
-            {
+        information = str(unit.get("information") or "").strip()
+        if not information:
+            # information 只作检索摘要；模型漏填时从同一锁定事实单元回填，不能因此丢掉完整感官证据。
+            information = "；".join(
+                text
+                for text in (
+                    str(unit.get("visual_fact") or "").strip(),
+                    str(unit.get("voiceover_zh") or unit.get("voiceover") or "").strip(),
+                    str(unit.get("subtitle_fact") or "").strip(),
+                    str(unit.get("audio_fact") or "").strip(),
+                )
+                if text
+            )
+        normalized_unit = {
                 "id": normalized_fact_id(unit.get("id"), code, index),
                 "time_range": str(unit.get("time_range") or "").strip(),
-                "information": str(unit.get("information") or "").strip(),
+                "information": information,
                 "voiceover": str(unit.get("voiceover") or "").strip(),
                 "voiceover_zh": str(unit.get("voiceover_zh") or "").strip(),
                 "visual_fact": str(unit.get("visual_fact") or "").strip(),
@@ -982,9 +1494,65 @@ def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dic
                 # 这段支撑哪些带货功能（多选，描述性）；nullable，老 facts 缺失为 None
                 "functions": normalize_functions(unit.get("functions")),
             }
-        )
+        normalized_unit.update(normalize_variant_unit_fields(unit))
+        normalized["evidence_units"].append(normalized_unit)
     validate_single_video_facts(role, normalized, analysis)
+    valid_ids = {unit["id"] for unit in normalized["evidence_units"]}
+    normalized["selling_point_observations"] = normalize_selling_point_observations(
+        result.get("selling_point_observations"), valid_ids
+    )
+    normalized["variant_decision_rule"] = normalize_variant_decision_rule(result.get("variant_decision_rule"), valid_ids)
+    normalized["attention_scan_audit"] = normalize_attention_scan_audit(result.get("attention_scan_audit"), valid_ids)
+    normalized["attention_competitors"] = normalize_attention_competitors(result.get("attention_competitors"), valid_ids)
+    raw_gate_status = result.get("gate_observation_status") if isinstance(result.get("gate_observation_status"), dict) else {}
+    normalized["gate_observation_status"] = normalize_gate_observation_status(
+        raw_gate_status, result, normalized["evidence_units"]
+    )
+    normalized["evidence_checklist"] = normalize_fact_evidence_checklist(result.get("evidence_checklist"), valid_ids)
+    normalized["structure_event_checks"] = normalize_structure_event_checks(result.get("structure_event_checks"), valid_ids)
     return normalized
+
+
+def normalize_gate_observation_status(
+    value: dict[str, Any],
+    raw_side: dict[str, Any],
+    units: list[dict[str, Any]],
+) -> dict[str, str]:
+    """门控观察完整性不能由空数组推断；模型必须显式完成扫描且数据形状合法。"""
+    selling_complete = (
+        value.get("selling_point_route") == "complete"
+        and isinstance(raw_side.get("selling_point_observations"), list)
+        and bool(raw_side.get("selling_point_observations"))
+    )
+    observed_units = [
+        unit for unit in units
+        if "_NO_" not in str(unit.get("id") or "").upper()
+    ]
+    focus_complete = (
+        value.get("variant_focus") == "complete"
+        and isinstance(raw_side.get("variant_decision_rule"), dict)
+        and bool(observed_units)
+        and all(unit.get("variant_data_valid") is True for unit in observed_units)
+    )
+    attention_audit = raw_side.get("attention_scan_audit") if isinstance(raw_side.get("attention_scan_audit"), dict) else {}
+    recording_checked = isinstance(attention_audit.get("recording_equipment_visible"), bool)
+    foreground_checked = isinstance(attention_audit.get("foreground_non_task_object_visible"), bool)
+    visible_competitor = (
+        attention_audit.get("recording_equipment_visible") is True
+        or attention_audit.get("foreground_non_task_object_visible") is True
+    )
+    attention_complete = (
+        value.get("attention_scan") == "complete"
+        and isinstance(raw_side.get("attention_competitors"), list)
+        and recording_checked
+        and foreground_checked
+        and (not visible_competitor or bool(raw_side.get("attention_competitors")))
+    )
+    return {
+        "selling_point_route": "complete" if selling_complete else "unknown",
+        "variant_focus": "complete" if focus_complete else "unknown",
+        "attention_scan": "complete" if attention_complete else "unknown",
+    }
 
 
 def normalized_fact_id(value: Any, code: str, index: int) -> str:

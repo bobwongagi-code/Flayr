@@ -16,20 +16,26 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 from typing import Any
 
 from ..artifacts import parse_time_range_seconds
 from ..llm.parse import (
+    hook_reason_window_leaks,
     is_effective_voiceover,
     normalized_transcript_text,
     read_transcript_text,
 )
+from ..multimodal import (
+    MULTIMODAL_CHANNELS,
+    MULTIMODAL_DOMINANT_CHANNELS,
+    MULTIMODAL_EFFECTS,
+    MULTIMODAL_IMPACTS,
+    MULTIMODAL_RELATIONS,
+)
+from ..s1_landing import LANDING_MOTIVATION_MECHANISMS, LANDING_SHADOW_CONDITIONS
 from ..stage_ownership import CERTIFICATION_OWNER_STAGE, contains_certification, is_certification_owner_stage
+from ..structure_modules import official_module_ids
 from .utils import evidence_overlaps_range
-
-
-ROOT = Path(__file__).resolve().parents[3]
 
 
 def _role_claim_payload(stage: dict[str, Any], role: str) -> dict[str, Any]:
@@ -188,10 +194,49 @@ def validate_quality_contract(result: dict[str, Any], analysis: dict[str, Any]) 
     validate_s4_effect_flags(result, analysis)
     validate_s5_trust_flags(result, analysis)
     validate_s6_cta_flags(result, analysis)
+    validate_multimodal_assessments(result, analysis)
     validate_chain_relationships(result, analysis)
     validate_stage_time_coherence(result)
     validate_product_visibility(result, analysis)
     validate_narrative_evidence_consistency(result)
+    validate_global_gate_observations(result)
+
+
+def validate_global_gate_observations(result: dict[str, Any]) -> None:
+    """门控观察缺失只能降级为 unknown，绝不能被空数组伪装成 pass。"""
+    understanding = result.get("video_understanding") if isinstance(result.get("video_understanding"), dict) else {}
+    findings = {
+        str(item.get("id") or ""): item
+        for item in (result.get("global_diagnosis") or {}).get("findings", [])
+        if isinstance(item, dict)
+    }
+    warnings: list[str] = []
+    status_to_gate = {
+        "selling_point_route": "selling_point_route",
+        "variant_focus": "focus_coherence",
+        "attention_scan": "attention_cleanliness",
+    }
+    for role in ("creator", "benchmark"):
+        side = understanding.get(role) if isinstance(understanding.get(role), dict) else {}
+        status = side.get("gate_observation_status") if isinstance(side.get("gate_observation_status"), dict) else {}
+        for status_key, gate_id in status_to_gate.items():
+            if status.get(status_key) == "complete":
+                continue
+            warnings.append(f"{role}.{status_key} 门控观察未完成，已按 unknown 降级")
+            if role == "creator" and str(findings.get(gate_id, {}).get("impact") or "") != "unknown":
+                raise SystemExit(f"{gate_id} 在 creator 观察未完成时不得输出确定性结论。")
+        invalid_units = [
+            str(unit.get("id") or "")
+            for unit in side.get("evidence_units") or []
+            if (
+                isinstance(unit, dict)
+                and "_NO_" not in str(unit.get("id") or "").upper()
+                and unit.get("variant_data_valid") is not True
+            )
+        ]
+        if invalid_units:
+            warnings.append(f"{role} 变体数据不一致：{', '.join(invalid_units)}")
+    append_qa_warnings(result, warnings)
 
 
 # Q19 用：S6 口播/字幕中的购买指令信号，与 repair.align_timed_cta 的关键词口径一致。
@@ -319,15 +364,6 @@ def validate_module_ids(result: dict[str, Any]) -> None:
         raise SystemExit("模块编号不符合 QA-RULES： " + "；".join(invalid))
 
 
-def official_module_ids() -> set[str]:
-    """从结构库标题中提取官方模块编号，避免手写列表漂移。"""
-    path = ROOT / "structure_library_full.md"
-    if not path.is_file():
-        return set()
-    text = path.read_text(encoding="utf-8", errors="ignore")
-    return set(re.findall(r"^###\s+(S[1-6]-[A-Z])[:：]", text, flags=re.M))
-
-
 def validate_s1_hook_flags(result: dict[str, Any], analysis: dict[str, Any]) -> None:
     """S1 hook flag 化硬门禁：新主链必须产出结构化 hook facts。
 
@@ -378,6 +414,29 @@ def validate_s1_hook_flags(result: dict[str, Any], analysis: dict[str, Any]) -> 
             errors.append(f"S1 {key}.landing_window_leak 必须是 bool")
         if hook.get("anchors_proposition") not in {True, False}:
             errors.append(f"S1 {key}.anchors_proposition 必须是 bool")
+        conditions = hook.get("landing_conditions")
+        if not isinstance(conditions, dict):
+            errors.append(f"S1 {key}.landing_conditions 必须是 object")
+        else:
+            for condition in LANDING_SHADOW_CONDITIONS:
+                if conditions.get(condition) not in {True, False}:
+                    errors.append(f"S1 {key}.landing_conditions.{condition} 必须是 bool")
+        expected_shadow = (
+            all(conditions.get(condition) is True for condition in LANDING_SHADOW_CONDITIONS)
+            if isinstance(conditions, dict)
+            and all(conditions.get(condition) in {True, False} for condition in LANDING_SHADOW_CONDITIONS)
+            else None
+        )
+        if expected_shadow is not None and hook.get("landing_shadow_met") is not expected_shadow:
+            errors.append(f"S1 {key}.landing_shadow_met 必须由四项条件确定性派生")
+        mechanism = str(hook.get("stay_motivation_mechanism") or "").strip().lower()
+        if mechanism not in LANDING_MOTIVATION_MECHANISMS:
+            errors.append(f"S1 {key}.stay_motivation_mechanism 非法")
+        shadow_reason = str(hook.get("landing_shadow_reason") or "").strip()
+        if not shadow_reason:
+            errors.append(f"S1 {key}.landing_shadow_reason 不能为空")
+        if hook.get("landing_shadow_window_leak") is True or hook_reason_window_leaks(shadow_reason, boundary):
+            errors.append(f"S1 {key}.landing_shadow_reason 引用了 Hook 边界后的材料")
     if errors:
         raise SystemExit("S1 hook flag 输出不完整：" + "；".join(errors))
 
@@ -460,6 +519,9 @@ def validate_s3_usage_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
             "core_selling_point_visible",
             "process_framing_met",
             "action_proof_met",
+            "action_target_contact_met",
+            "action_application_change_visible",
+            "critical_action_continuity_met",
             "usage_context_fit",
             "continuity_met",
             "richness_met",
@@ -470,6 +532,9 @@ def validate_s3_usage_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
             "multi_scene_role_adaptation_met",
             "role_design_met",
             "role_interaction_met",
+            "distinct_personas_met",
+            "steps_clear_met",
+            "pov_immersive_met",
             "fake_or_staged",
         ):
             if flag.get(bool_key) not in {True, False}:
@@ -664,7 +729,12 @@ def validate_s6_cta_flags(result: dict[str, Any], analysis: dict[str, Any]) -> N
             "exists",
             "direct_order_met",
             "action_path_clear",
+            "soft_purchase_invitation_met",
             "offer_or_incentive_clear",
+            "price_anchor_met",
+            "urgency_evidence_met",
+            "gift_stack_met",
+            "guarantee_clear_met",
             "urgency_met",
             "product_value_recalled",
             "module_fit_met",
@@ -690,6 +760,97 @@ def validate_s6_cta_flags(result: dict[str, Any], analysis: dict[str, Any]) -> N
             errors.append(f"S6 {key}.evidence_ids 不能为空")
     if errors:
         raise SystemExit("S6 CTA flag 输出不完整：" + "；".join(errors))
+
+
+def validate_multimodal_assessments(result: dict[str, Any], analysis: dict[str, Any]) -> None:
+    """跨模态综合门禁：渠道事实必须完整、可追溯，净效果不能与渠道信号自相矛盾。"""
+    stages = [stage for stage in result.get("stage_analysis", []) if isinstance(stage, dict)]
+    has_any = any(
+        isinstance(stage.get(f"{role}_multimodal"), dict)
+        for stage in stages
+        for role in ("creator", "benchmark")
+    )
+    if not analysis.get("multimodal_assessment_required") and not has_any:
+        return
+
+    errors: list[str] = []
+    evidential_impacts = {"strong_positive", "positive", "negative", "strong_negative"}
+    stage_functions = {
+        "S1": "S1_hook",
+        "S2": "S2_intro",
+        "S3": "S3_usage",
+        "S4": "S4_effect",
+        "S5": "S5_trust",
+        "S6": "S6_cta",
+    }
+    understanding = result.get("video_understanding") if isinstance(result.get("video_understanding"), dict) else {}
+    for index, stage in enumerate(stages, start=1):
+        stage_id = f"S{index}"
+        for role in ("creator", "benchmark"):
+            key = f"{role}_multimodal"
+            assessment = stage.get(key)
+            if not isinstance(assessment, dict):
+                errors.append(f"{stage_id} 缺少 {key}")
+                continue
+            impacts = assessment.get("channel_impacts")
+            evidence = assessment.get("channel_evidence_ids")
+            if not isinstance(impacts, dict) or not isinstance(evidence, dict):
+                errors.append(f"{stage_id} {key} 渠道对象不完整")
+                continue
+            stage_refs = {str(item) for item in stage.get(f"{role}_evidence_ids") or [] if str(item).strip()}
+            # 阶段主引用是报告摘要用的代表证据，不必穷举该阶段所有渠道事实。多模态字段
+            # 还可引用 Stage1 已锁定为同阶段功能的其它单元；否则摘要只选一帧时会把真实
+            # 的声音/画面证据误报成“跨阶段”。没有 functions 的旧结果仍只认主引用。
+            role_understanding = understanding.get(role) if isinstance(understanding.get(role), dict) else {}
+            locked_stage_refs = {
+                str(unit.get("id"))
+                for unit in role_understanding.get("evidence_units") or []
+                if isinstance(unit, dict)
+                and stage_functions[stage_id] in {str(value) for value in unit.get("functions") or []}
+            }
+            allowed_refs = stage_refs | locked_stage_refs
+            for channel in MULTIMODAL_CHANNELS:
+                impact = impacts.get(channel)
+                if impact not in MULTIMODAL_IMPACTS:
+                    errors.append(f"{stage_id} {key}.channel_impacts.{channel} 非法")
+                refs = evidence.get(channel)
+                if not isinstance(refs, list):
+                    errors.append(f"{stage_id} {key}.channel_evidence_ids.{channel} 必须是数组")
+                    continue
+                if impact in evidential_impacts and not refs:
+                    errors.append(f"{stage_id} {key}.{channel} 声称有影响但没有证据")
+                missing = [str(item) for item in refs if str(item) not in allowed_refs]
+                if missing:
+                    errors.append(f"{stage_id} {key}.{channel} 引用非本阶段证据：{','.join(missing)}")
+
+            dominant = assessment.get("dominant_channel")
+            relation = assessment.get("cross_channel_relation")
+            effect = assessment.get("integrated_effect")
+            if dominant not in MULTIMODAL_DOMINANT_CHANNELS:
+                errors.append(f"{stage_id} {key}.dominant_channel 非法")
+            if relation not in MULTIMODAL_RELATIONS:
+                errors.append(f"{stage_id} {key}.cross_channel_relation 非法")
+            if effect not in MULTIMODAL_EFFECTS:
+                errors.append(f"{stage_id} {key}.integrated_effect 非法")
+            if assessment.get("compensation_applied") not in {True, False}:
+                errors.append(f"{stage_id} {key}.compensation_applied 必须是 bool")
+            if not str(assessment.get("integration_reason") or "").strip():
+                errors.append(f"{stage_id} {key}.integration_reason 不能为空")
+
+            dominant_impact = impacts.get(dominant) if dominant in MULTIMODAL_CHANNELS else None
+            if effect in {"strong", "effective"} and dominant_impact not in {"strong_positive", "positive"}:
+                errors.append(f"{stage_id} {key} 净效果有效但主导渠道不是正向")
+            if effect == "strong" and "strong_positive" not in impacts.values():
+                errors.append(f"{stage_id} {key} strong 缺少强正向渠道")
+            if effect == "strong" and "strong_negative" in impacts.values():
+                errors.append(f"{stage_id} {key} 同时存在强负向渠道，不能判 strong")
+            if assessment.get("compensation_applied") is True:
+                if dominant_impact != "strong_positive":
+                    errors.append(f"{stage_id} {key} 补偿成立但主导渠道不够强")
+                if not any(impact in {"neutral", "negative", "absent"} for impact in impacts.values()):
+                    errors.append(f"{stage_id} {key} 补偿成立但没有被补偿的弱/缺失渠道")
+    if errors:
+        raise SystemExit("跨模态综合输出不完整：" + "；".join(errors))
 
 
 def validate_chain_relationships(result: dict[str, Any], analysis: dict[str, Any]) -> None:
@@ -729,7 +890,8 @@ def validate_chain_relationships(result: dict[str, Any], analysis: dict[str, Any
         if str(chain.get("broken_at") or "").strip() not in {"S2", "S3", "S4", "none", "unknown"}:
             errors.append("promise_chain.broken_at 必须是 S2/S3/S4/none/unknown")
         break_reason = str(chain.get("break_reason") or "")
-        if any(token in break_reason for token in ("S5", "S6", "CTA", "促单", "下单", "购买指令", "转化链条")):
+        # “转化链条”本身不等于 S5/S6；S1-S4 的承诺、证明和效果也可构成转化链路。
+        if any(token in break_reason for token in ("S5", "S6", "CTA", "促单", "下单", "购买指令")):
             errors.append("promise_chain.break_reason 只能审计 S1-S4，不得把 S5/S6/CTA 作为断点")
     if errors:
         raise SystemExit("S3/S4 关系或 S1-S4 承诺链输出不完整：" + "；".join(errors))

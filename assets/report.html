@@ -75,6 +75,21 @@
       padding: 12px 14px;
     }
     .verdict-value { margin-top: 4px; font-size: 18px; font-weight: 700; }
+    /* 视频级商业门控 */
+    .root-diagnosis { display: grid; gap: 10px; }
+    .root-finding { background: var(--panel); border: 1px solid var(--line); border-left-width: 4px; border-radius: 8px; padding: 14px 16px; }
+    .root-blocking { border-left-color: var(--bad); }
+    .root-major { border-left-color: var(--warn); }
+    .root-minor { border-left-color: #667085; }
+    .root-finding-head { display: flex; align-items: center; gap: 10px; }
+    .root-impact { font-size: 12px; font-weight: 700; color: var(--muted); }
+    .root-blocking .root-impact { color: var(--bad); }
+    .root-major .root-impact { color: var(--warn); }
+    .root-summary { margin: 10px 0 6px; font-weight: 650; }
+    .root-finding p { margin: 6px 0; }
+    .root-reliability { padding: 10px 12px; border: 1px dashed var(--line); border-radius: 7px; color: var(--muted); }
+    .commercial-order { padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: #f9fafb; }
+    .cause-note { grid-column: 1 / -1; padding: 9px 11px; border-left: 3px solid var(--warn); border-radius: 4px 6px 6px 4px; background: #fff7ed; color: #7a2e0e; font-size: 12px; }
     /* 关键结论 */
     .conclusion-list { list-style: none; padding-left: 0; }
     .conclusion-list li { padding: 8px 0; border-bottom: 1px solid var(--line); line-height: 1.6; }
@@ -207,6 +222,8 @@
     <section class="overview-grid">
       {{overview_cards}}
     </section>
+
+    {{global_diagnosis}}
 
     <h2>关键结论</h2>
     <section class="card">

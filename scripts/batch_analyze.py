@@ -72,6 +72,9 @@ def build_command(job: dict, out_dir: Path, common_args: list[str]) -> list[str]
     proposition_key = str(job.get("proposition_key") or "").strip()
     if proposition_key:
         command.extend(["--proposition-key", proposition_key])
+    comparison_scope_override = str(job.get("comparison_scope_override") or "").strip()
+    if comparison_scope_override:
+        command.extend(["--comparison-scope-override", comparison_scope_override])
     return command
 
 

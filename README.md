@@ -114,7 +114,6 @@ python3 scripts/flayr.py \
   --llm-model qwen3.5-omni-plus \
   --llm-api-url https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions \
   --llm-api-key-keychain-service VidLingo.Qwen \
-  --llm-include-images \
   improve
 ```
 
@@ -128,7 +127,7 @@ python3 scripts/flayr.py \
 | `--llm-model` | 全模态模型名称（推荐 qwen3.5-omni-plus） |
 | `--llm-api-url` | OpenAI 兼容 API 端点 |
 | `--llm-api-key-keychain-service` | macOS Keychain 服务名（或用 `--llm-api-key-env` 走环境变量） |
-| `--llm-include-images` | 启用 LLM 分析（触发两阶段 omni 调用） |
+| `--llm-include-images` | 默认启用：完整 Step-0 + 单视频事实抽取 + omni 对比链；`--no-llm-include-images` 仅保留给旧文本路径兼容调试 |
 | `--whisper-model` | Whisper 模型文件路径 |
 | `--skip-whisper` | 跳过转写（用于调试） |
 | `--ocr-mode auto/on/off` | 字幕 OCR 轨。默认 `auto`：检测到 DashScope 配置和 key 且非 dry-run 时自动开启；`off` 可关闭 |

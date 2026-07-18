@@ -166,6 +166,7 @@ def build_evidence_sensory_inputs(
     analysis: dict[str, Any],
     facts: dict[str, Any],
     frames_per_unit: int = 1,
+    window_end_seconds: float | None = None,
 ) -> list[dict[str, Any]]:
     """为阶段二对比判断准备每条 evidence_unit 的关键帧 + 切片音频。"""
     content: list[dict[str, Any]] = []
@@ -182,8 +183,13 @@ def build_evidence_sensory_inputs(
             if not uid or not time_range:
                 continue
             start, end = parse_time_range_seconds(time_range, duration)
-            label = f"{role} {uid} @ {time_range}"
-            frames = select_frames_for_time_range(info, time_range, limit=frames_per_unit)
+            if window_end_seconds is not None:
+                if start >= window_end_seconds:
+                    continue
+                end = min(end, window_end_seconds)
+            clipped_range = f"{start:.2f}s - {end:.2f}s"
+            label = f"{role} {uid} @ {clipped_range}"
+            frames = select_frames_for_time_range(info, clipped_range, limit=frames_per_unit)
             for fr in frames:
                 frame_path = Path(str(fr.get("path") or ""))
                 if not frame_path.is_file():
