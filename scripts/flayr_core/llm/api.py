@@ -31,6 +31,34 @@ VIDEO_DATA_URL_MAX_BYTES = 24 * 1024 * 1024
 VIDEO_TRANSCODE_TIMEOUT_SECONDS = 300
 
 
+def is_agent_plan_api_url(api_url: str) -> bool:
+    """Return whether the endpoint is Volcano Engine Agent Plan's OpenAI-compatible API."""
+    normalized = str(api_url or "").lower().rstrip("/")
+    return "ark.cn-beijing.volces.com/api/plan/" in normalized
+
+
+def is_doubao_model(model: str) -> bool:
+    """Return whether the configured analysis model is a Doubao family model."""
+    return str(model or "").strip().lower().startswith("doubao-")
+
+
+def supports_standalone_audio(api_url: str) -> bool:
+    """Whether chat content may contain OpenAI-style ``input_audio`` blocks."""
+    # Agent Plan rejects standalone input_audio blocks. Other compatible
+    # providers retain the existing behavior unless a capability test proves otherwise.
+    return not is_agent_plan_api_url(api_url)
+
+
+def supports_native_audio_analysis(api_url: str, model: str = "") -> bool:
+    """Whether the configured analysis path can directly perceive the audio waveform.
+
+    This differs from video transport support. Agent Plan accepts MP4 input, but the
+    currently available Seed 2.0 models did not perceive embedded speech in capability
+    tests and reject standalone input_audio, so they must use transcript + local QC.
+    """
+    return bool(str(model or "").strip()) and not is_agent_plan_api_url(api_url)
+
+
 def read_llm_api_key(args: argparse.Namespace) -> str:
     """优先从环境变量读取 API key，回退到 macOS Keychain。"""
     # env 与 keychain 两条路径都 strip：尾换行混进 Authorization 头会把请求体顶空（400 Request body is required）

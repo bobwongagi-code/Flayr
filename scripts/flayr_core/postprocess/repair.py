@@ -32,6 +32,7 @@ from .repair_evidence import (
     improvement_reference_stage,
     materialize_spoken_stage_evidence,
     normalized_quote_clause,
+    prune_multimodal_evidence_to_stage,
     reconcile_s3_s4_evidence_coherence,
     reconcile_s5_trust_sources,
     reconcile_unsupported_cta,
@@ -90,6 +91,7 @@ __all__ = [
     "deduplicate_stage_quotes",
     "split_quote_clauses",
     "normalized_quote_clause",
+    "prune_multimodal_evidence_to_stage",
     # repair_claims
     "downgrade_unverified_sensitive_claims",
     "derive_product_visibility",

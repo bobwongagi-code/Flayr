@@ -3,7 +3,7 @@
 三个 public 函数：
   - run_comparison_scope_preflight  只建立锁定事实与双视频产品比较资格
   - run_large_model_analysis        从 analysis_input.md 跑完整分析，写出 analysis_result.json
-  - parse_and_validate_llm_result   解析模型原始输出，必要时做一次 repair 重试
+  - parse_and_validate_llm_result   解析模型原始输出，并按 provider 执行受限 repair
   - merge_analysis_result           把外部提供的 analysis_result.json 合并进 analysis dict
 
 所有入口通过 finalize_analysis_result 走同一条完整处理链，避免外部 JSON 和实时 LLM
@@ -21,9 +21,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..multimodal import sanitize_audio_observations
 from ..utils import write_json, write_text
 from ..structure_modules import canonical_module_id
-from .api import call_llm_api, extract_chat_completion_text, read_llm_api_key
+from .api import (
+    call_llm_api,
+    extract_chat_completion_text,
+    is_doubao_model,
+    read_llm_api_key,
+    supports_native_audio_analysis,
+)
 from .analysis_contract import AnalysisContractError, validate_normalized_analysis_contract
 from .parse import (
     normalize_analysis_result,
@@ -40,6 +47,7 @@ from .payload import (
     build_comparison_eligibility_payload,
     build_absolute_execution_shadow_payload,
     build_llm_comparison_payload,
+    build_llm_patch_repair_payload,
     build_llm_payload,
     build_llm_repair_payload,
     build_product_foundation_payload,
@@ -168,6 +176,9 @@ def finalize_analysis_result(
     if locked_video_understanding:
         result["video_understanding"] = locked_video_understanding
     normalized = normalize_analysis_result(result)
+    audio_assessment = analysis.get("audio_assessment") if isinstance(analysis, dict) else {}
+    native_audio = bool((audio_assessment or {}).get("native_audio_analysis", True))
+    sanitize_audio_observations(normalized, native_audio)
     try:
         validate_normalized_analysis_contract(normalized)
     except AnalysisContractError as exc:
@@ -355,7 +366,13 @@ def run_large_model_analysis(
         analysis["s6_flags_required"] = True
         analysis["multimodal_assessment_required"] = True
         analysis_input = analysis_input_path.read_text(encoding="utf-8")
-        payload = build_llm_comparison_payload(args.llm_model, analysis_input, facts, analysis)
+        payload = build_llm_comparison_payload(
+            args.llm_model,
+            analysis_input,
+            facts,
+            analysis,
+            api_url=args.llm_api_url,
+        )
     else:
         facts = None
         payload = build_llm_payload(args.llm_model, analysis_input_path.read_text(encoding="utf-8"), [])
@@ -435,45 +452,29 @@ def parse_and_validate_llm_result(
     analysis: dict[str, Any],
     locked_video_understanding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """解析 LLM 输出并跑全套校验；首次失败时构造 repair payload 再跑一次。"""
+    """解析 LLM 输出并跑全套校验；Doubao 局部补丁，Qwen/兼容模型完整 repair 一次。"""
     raw_result: dict[str, Any] | None = None
     try:
         raw_result = parse_json_text(raw_result_text)
-        result = _process_llm_result(
-            raw_result,
-            analysis,
-            analysis_input,
-            locked_video_understanding,
-        )
-        refined = maybe_refine_low_confidence_stages(
-            args=args,
-            api_key=api_key,
-            raw_result=raw_result,
-            result=result,
-            analysis_input=analysis_input,
-            run_dir=run_dir,
-            analysis=analysis,
-            locked_video_understanding=locked_video_understanding,
-        )
-        visually_checked = maybe_apply_s4_visual_verifier(
-            args=args,
-            api_key=api_key,
-            result=refined,
-            analysis=analysis,
-            run_dir=run_dir,
-        )
-        return maybe_reconcile_final_improvements(
-            args=args,
-            api_key=api_key,
-            result=visually_checked,
-            analysis=analysis,
-            analysis_input=analysis_input,
-            locked_video_understanding=locked_video_understanding,
-            run_dir=run_dir,
+        return _finish_validated_llm_result(
+            args, api_key, raw_result, analysis_input, run_dir, analysis, locked_video_understanding
         )
     except SystemExit as exc:
         first_error = str(exc)
 
+    if is_doubao_model(args.llm_model):
+        return _repair_doubao_result_with_patches(
+            args=args,
+            api_key=api_key,
+            raw_result=raw_result or {},
+            first_error=first_error,
+            analysis_input=analysis_input,
+            run_dir=run_dir,
+            analysis=analysis,
+            locked_video_understanding=locked_video_understanding,
+        )
+
+    # Qwen/其它兼容模型保留原有的一次完整 repair 行为。
     repair_payload = build_llm_repair_payload(
         args.llm_model,
         raw_result_text,
@@ -485,46 +486,171 @@ def parse_and_validate_llm_result(
     repair_request_path = run_dir / "llm_repair_request.json"
     repair_response_path = run_dir / "llm_repair_response.json"
     write_json(repair_request_path, repair_payload)
-    repair_raw_text = call_llm_api(args.llm_api_url, api_key, repair_request_path, repair_response_path)
-    write_text(repair_response_path, repair_raw_text)
-
-    repair_result_text = extract_chat_completion_text(json.loads(repair_raw_text))
+    # Repair 也必须复用 JSON 完整性保护；模型偶发返回残缺 JSON 时只重取修复结果，
+    # 不能让一次格式故障迫使整条昂贵的多模态分析从头重跑。
+    repair_result_text = fetch_json_completion(
+        args,
+        api_key,
+        repair_request_path,
+        repair_response_path,
+    )
+    raw_repair_result = raw_result or {}
     try:
         raw_repair_result = preserve_valid_repair_sections(raw_result, parse_json_text(repair_result_text))
-        result = _process_llm_result(
-            raw_repair_result,
-            analysis,
-            analysis_input,
-            locked_video_understanding,
-        )
-        refined = maybe_refine_low_confidence_stages(
-            args=args,
-            api_key=api_key,
-            raw_result=raw_repair_result,
-            result=result,
-            analysis_input=analysis_input,
-            run_dir=run_dir,
-            analysis=analysis,
-            locked_video_understanding=locked_video_understanding,
-        )
-        visually_checked = maybe_apply_s4_visual_verifier(
-            args=args,
-            api_key=api_key,
-            result=refined,
-            analysis=analysis,
-            run_dir=run_dir,
-        )
-        return maybe_reconcile_final_improvements(
-            args=args,
-            api_key=api_key,
-            result=visually_checked,
-            analysis=analysis,
-            analysis_input=analysis_input,
-            locked_video_understanding=locked_video_understanding,
-            run_dir=run_dir,
+        return _finish_validated_llm_result(
+            args, api_key, raw_repair_result, analysis_input, run_dir, analysis, locked_video_understanding
         )
     except SystemExit as exc:
         raise SystemExit(f"LLM output repair failed. First error: {first_error}. Repair error: {exc}") from exc
+
+
+def _repair_doubao_result_with_patches(
+    *,
+    args: argparse.Namespace,
+    api_key: str,
+    raw_result: dict[str, Any],
+    first_error: str,
+    analysis_input: str,
+    run_dir: Path,
+    analysis: dict[str, Any],
+    locked_video_understanding: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Doubao 专属：最多两轮局部补丁，不重写已正确的完整分析。"""
+    current = json.loads(json.dumps(raw_result, ensure_ascii=False))
+    error = first_error
+    for round_index in (1, 2):
+        payload = build_llm_patch_repair_payload(
+            args.llm_model,
+            current,
+            error,
+            locked_video_understanding,
+        )
+        suffix = "" if round_index == 1 else f"_round{round_index}"
+        request_path = run_dir / f"llm_patch_repair{suffix}_request.json"
+        response_path = run_dir / f"llm_patch_repair{suffix}_response.json"
+        write_json(request_path, payload)
+        patch_text = fetch_json_completion(args, api_key, request_path, response_path)
+        patch_result = parse_json_text(patch_text)
+        current = apply_llm_json_patches(current, patch_result)
+        try:
+            return _finish_validated_llm_result(
+                args, api_key, current, analysis_input, run_dir, analysis, locked_video_understanding
+            )
+        except SystemExit as exc:
+            error = str(exc)
+    raise SystemExit(
+        "Doubao local repair failed after two rounds. "
+        f"First error: {first_error}. Final repair error: {error}"
+    )
+
+
+_PATCH_LOCKED_ROOTS = {
+    "video_understanding",
+    "comparison_contract",
+    "comparison_eligibility",
+    "category_profile",
+    "product_profile",
+}
+_PATCH_LOCKED_FIELDS = {"evidence_ids", "proposition_ids", "severity"}
+
+
+def apply_llm_json_patches(base: dict[str, Any], patch_result: dict[str, Any]) -> dict[str, Any]:
+    """安全应用 Doubao 返回的局部 JSON Pointer；锁定事实与评分字段不可改。"""
+    patches = patch_result.get("patches")
+    if not isinstance(patches, list) or not 1 <= len(patches) <= 128:
+        raise SystemExit("Doubao patch repair 必须输出 1-128 条 patches。")
+    updated = json.loads(json.dumps(base, ensure_ascii=False))
+    for patch in patches:
+        if not isinstance(patch, dict) or "value" not in patch:
+            raise SystemExit("Doubao patch repair 含无效 patch。")
+        path = str(patch.get("path") or "")
+        tokens = [_decode_json_pointer_token(token) for token in path.split("/")[1:]] if path.startswith("/") else []
+        evidence_path = any(token == "evidence_ids" or token.endswith("_evidence_ids") for token in tokens)
+        if (
+            not tokens
+            or tokens[0] in _PATCH_LOCKED_ROOTS
+            or evidence_path
+            or any(token in _PATCH_LOCKED_FIELDS for token in tokens)
+        ):
+            raise SystemExit(f"Doubao patch repair 路径不允许修改：{path}")
+        parent, final_token = _resolve_patch_parent(updated, tokens, path)
+        if isinstance(parent, dict):
+            parent[final_token] = patch["value"]
+        elif isinstance(parent, list) and final_token.isdigit() and int(final_token) < len(parent):
+            parent[int(final_token)] = patch["value"]
+        else:
+            raise SystemExit(f"Doubao patch repair 路径无效：{path}")
+    return updated
+
+
+def _resolve_patch_parent(root: dict[str, Any], tokens: list[str], path: str) -> tuple[Any, str]:
+    current: Any = root
+    for token in tokens[:-1]:
+        if isinstance(current, dict) and token in current:
+            current = current[token]
+            continue
+        if isinstance(current, list):
+            if token in {"S1", "S2", "S3", "S4", "S5", "S6"}:
+                match = next(
+                    (item for item in current if isinstance(item, dict) and str(item.get("stage") or "")[:2] == token),
+                    None,
+                )
+                if match is not None:
+                    current = match
+                    continue
+            if token.isdigit() and int(token) < len(current):
+                current = current[int(token)]
+                continue
+        raise SystemExit(f"Doubao patch repair 路径不存在：{path}")
+    return current, tokens[-1]
+
+
+def _decode_json_pointer_token(token: str) -> str:
+    return token.replace("~1", "/").replace("~0", "~")
+
+
+def _finish_validated_llm_result(
+    args: argparse.Namespace,
+    api_key: str,
+    raw_result: dict[str, Any],
+    analysis_input: str,
+    run_dir: Path,
+    analysis: dict[str, Any],
+    locked_video_understanding: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """处理已解析结果，并统一执行 Phase C、S4 复核和提升点收口。"""
+    result = _process_llm_result(
+        raw_result,
+        analysis,
+        analysis_input,
+        locked_video_understanding,
+    )
+    refined = maybe_refine_low_confidence_stages(
+        args=args,
+        api_key=api_key,
+        raw_result=raw_result,
+        result=result,
+        analysis_input=analysis_input,
+        run_dir=run_dir,
+        analysis=analysis,
+        locked_video_understanding=locked_video_understanding,
+    )
+    visually_checked = maybe_apply_s4_visual_verifier(
+        args=args,
+        api_key=api_key,
+        result=refined,
+        analysis=analysis,
+        run_dir=run_dir,
+    )
+    return maybe_reconcile_final_improvements(
+        args=args,
+        api_key=api_key,
+        result=visually_checked,
+        analysis=analysis,
+        analysis_input=analysis_input,
+        locked_video_understanding=locked_video_understanding,
+        run_dir=run_dir,
+    )
 
 
 def preserve_valid_repair_sections(
@@ -1100,6 +1226,12 @@ def _apply_operator_scope_override(
     """
     if override != "same_task_structure":
         return facts_eligibility
+    raw_stage_eligibility = (
+        facts_eligibility.get("stage_eligibility")
+        if isinstance(facts_eligibility.get("stage_eligibility"), dict)
+        else {}
+    )
+    raw_s5 = raw_stage_eligibility.get("S5") if isinstance(raw_stage_eligibility.get("S5"), dict) else None
     overridden = normalize_comparison_contract(facts_eligibility)
     overridden["scope_origin"] = "operator_certified"
     overridden["facts_scope"] = str(facts_eligibility.get("scope") or "uncertain")
@@ -1117,9 +1249,26 @@ def _apply_operator_scope_override(
             }
         )
         overridden["shared_job"] = shared
+        stage_eligibility = dict(overridden.get("stage_eligibility") or {})
+        for stage in ("S1", "S2", "S3", "S4", "S6"):
+            current = dict(stage_eligibility.get(stage) or {})
+            current.update(
+                {
+                    "status": "structural",
+                    "basis": "运营已确认双方共享消费者任务、目标结果与购买决策，仅比较该阶段的内容结构和执行完成度。",
+                    "shared_contract": "同任务强替代产品的结构对标",
+                }
+            )
+            stage_eligibility[stage] = current
+        if raw_s5 is not None:
+            s5 = dict(raw_s5)
+            if s5.get("status") == "direct":
+                s5["status"] = "structural"
+            stage_eligibility["S5"] = s5
+        overridden["stage_eligibility"] = stage_eligibility
+        shared["reason"] = "运营确认双方共享消费者任务、作用对象、目标结果与购买决策。"
     overridden["reason"] = (
-        "运营确认双方共享消费者任务与替代关系；各阶段仍按已锁定 stage_eligibility 单独决定是否可比，"
-        "不得据此固定开放 S1-S4/S6。"
+        "运营确认双方属于同任务强替代产品；S1-S4/S6 只做结构对标，S5 仍按实际背书事实决定。"
     )
     return normalize_comparison_contract(overridden)
 
@@ -1242,11 +1391,21 @@ def run_video_fact_extraction(
         cached = None if args.llm_dry_run else _read_cache_result(cache_path, "fact_result")
         if cached is not None:
             cached.setdefault("temporal_evidence_mode", "unknown")
+            sanitize_audio_observations(
+                {"video_understanding": {role: cached}, "stage_analysis": []},
+                supports_native_audio_analysis(args.llm_api_url, args.llm_model),
+            )
             facts[role] = cached
             write_json(result_path, cached)
             continue
         visual_inputs = select_role_visual_inputs(videos[role], role, per_role_limit)
-        payload = build_video_fact_payload(args.llm_model, role, analysis, visual_inputs)
+        payload = build_video_fact_payload(
+            args.llm_model,
+            role,
+            analysis,
+            visual_inputs,
+            api_url=args.llm_api_url,
+        )
         request_path = run_dir / f"llm_facts_{role}_request.json"
         response_path = run_dir / f"llm_facts_{role}_response.json"
         write_json(request_path, payload)
@@ -1254,6 +1413,10 @@ def run_video_fact_extraction(
             continue
         result_text = fetch_json_completion(args, api_key, request_path, response_path)
         fact_result = normalize_video_fact_result(role, parse_json_text(result_text), analysis)
+        sanitize_audio_observations(
+            {"video_understanding": {role: fact_result}, "stage_analysis": []},
+            supports_native_audio_analysis(args.llm_api_url, args.llm_model),
+        )
         # 能力状态取自实际请求载荷，不让模型猜自己是否看到了连续视频。
         fact_result["temporal_evidence_mode"] = "full_temporal" if payload_has_video(payload) else "static_only"
         facts[role] = fact_result

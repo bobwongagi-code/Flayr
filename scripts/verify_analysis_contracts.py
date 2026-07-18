@@ -2878,7 +2878,7 @@ class _OcrArgs:
 
 os.environ["FLAYR_TEST_OPENAI_KEY"] = "not-a-dashscope-key"
 _should_ocr, _ocr_key, _ocr_reason = resolve_ocr_policy(_OcrArgs())
-check("OCR 非 DashScope 配置快速禁用", not _should_ocr and _ocr_reason == "disabled_non_dashscope_config")
+check("OCR 非视觉模型配置快速禁用", not _should_ocr and _ocr_reason == "disabled_non_vision_config")
 os.environ.pop("FLAYR_TEST_OPENAI_KEY", None)
 
 with tempfile.TemporaryDirectory() as tmp:

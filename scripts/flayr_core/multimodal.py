@@ -56,7 +56,7 @@ MULTIMODAL_STAGE_POLICIES = {
 
 MULTIMODAL_PROMPT_CONTRACT = (
     "每个 S1-S6 stage 必须分别输出 creator_multimodal 与 benchmark_multimodal。先读取该侧阶段内全部画面、"
-    "口播语义、屏幕文字、BGM/音效/语气/剪辑节奏，再判断它们组合后的净效果；禁止按最弱渠道一票否决，"
+    "口播语义、屏幕文字和剪辑节奏，再判断它们组合后的净效果；禁止按最弱渠道一票否决，"
     "也禁止把四个渠道等权相加。channel_impacts 的枚举：strong_positive=该渠道直接承担阶段核心任务；"
     "positive=明确增强；neutral=存在但不 materially 改变结果；negative=制造理解成本或轻度干扰；"
     "strong_negative=与主信号冲突或明显抢走注意力；absent=没有该渠道；unknown=证据不足。"
@@ -90,12 +90,18 @@ def multimodal_output_example() -> dict[str, Any]:
     }
 
 
-def render_multimodal_prompt_contract() -> str:
+def render_multimodal_prompt_contract(native_audio_analysis: bool = True) -> str:
     """主分析、Repair 与 Phase C 共用的唯一多模态综合合同文本。"""
+    audio_rule = (
+        "当前模型可直接感知音轨；语气、BGM、音效只作观察记录，不得改变 integrated_effect、执行分或 severity。"
+        if native_audio_analysis
+        else "当前模型不能直接感知音轨。sound_rhythm 必须为 unknown、证据数组为空；不得判断语气、BGM、音效或用其影响任何结论。口播语义仅来自转录文本。"
+    )
     return "\n".join(
         [
             "## S1-S6 跨模态综合合同",
             MULTIMODAL_PROMPT_CONTRACT,
+            audio_rule,
             "各阶段渠道可替代性等级、必要信号与补偿边界：",
             json.dumps(MULTIMODAL_CHANNEL_REQUIREMENTS, ensure_ascii=False, indent=2),
             "每侧输出结构示例：",
@@ -107,13 +113,39 @@ def render_multimodal_prompt_contract() -> str:
 _EFFECT_SCORE = {"missing": 0.0, "weak": 0.5, "effective": 1.0, "strong": 2.0}
 
 
+def _commercial_effect_score(assessment: dict[str, Any]) -> float | None:
+    """Derive commercial net effect from observable content channels only.
+
+    sound_rhythm remains available for observation but can never affect severity.
+    """
+    impacts = assessment.get("channel_impacts")
+    if not isinstance(impacts, dict):
+        return None
+    content_impacts = [str(impacts.get(channel) or "unknown") for channel in ("visual", "speech", "text")]
+    known = [impact for impact in content_impacts if impact not in {"unknown", "absent"}]
+    if not known:
+        return None
+    positive = any(impact in {"strong_positive", "positive"} for impact in known)
+    model_score = _EFFECT_SCORE.get(str(assessment.get("integrated_effect") or "unknown"))
+    if model_score is None:
+        if "strong_positive" in known:
+            return 1.0 if "strong_negative" in known else 2.0
+        if "positive" in known:
+            return 0.5 if "strong_negative" in known else 1.0
+        return 0.0 if "strong_negative" in known else 0.5
+    if model_score >= 1.0 and not positive:
+        return 0.0 if "strong_negative" in known else 0.5
+    if model_score == 2.0 and "strong_negative" in known:
+        return 1.0
+    return model_score
+
+
 def multimodal_execution(stage_id: str, stage: dict[str, Any], role: str, base_exec: float | None) -> float | None:
     """把综合净效果放进各阶段硬约束内；旧结果缺字段时保留原执行分。"""
     assessment = stage.get(f"{role}_multimodal")
     if not isinstance(assessment, dict):
         return base_exec
-    effect = str(assessment.get("integrated_effect") or "unknown")
-    effect_score = _EFFECT_SCORE.get(effect)
+    effect_score = _commercial_effect_score(assessment)
     if effect_score is None:
         return base_exec
 
@@ -158,3 +190,42 @@ def channel_requirement_for(stage_id: str) -> dict[str, str]:
 
 def has_multimodal_assessment(stage: dict[str, Any]) -> bool:
     return any(isinstance(stage.get(f"{role}_multimodal"), dict) for role in ("creator", "benchmark"))
+
+
+def sanitize_audio_observations(result: dict[str, Any], native_audio_analysis: bool) -> None:
+    """Remove unsupported audio judgments while preserving transcript semantics."""
+    if native_audio_analysis:
+        return
+    for stage in result.get("stage_analysis") or []:
+        if not isinstance(stage, dict):
+            continue
+        stage["voice_performance"] = {
+            "pace": "未评估",
+            "energy": "未评估",
+            "key_pause": False,
+            "note": "当前模型未直接感知音轨，不评价语气、BGM或音效。",
+        }
+        for role in ("creator", "benchmark"):
+            assessment = stage.get(f"{role}_multimodal")
+            if not isinstance(assessment, dict):
+                continue
+            impacts = assessment.get("channel_impacts")
+            if isinstance(impacts, dict):
+                impacts["sound_rhythm"] = "unknown"
+            evidence = assessment.get("channel_evidence_ids")
+            if isinstance(evidence, dict):
+                evidence["sound_rhythm"] = []
+            if assessment.get("dominant_channel") == "sound_rhythm":
+                assessment["dominant_channel"] = "unknown"
+    holistic = result.get("holistic_assessment")
+    if isinstance(holistic, dict):
+        holistic["pace_and_emotion"] = "当前模型未直接感知音轨；本项不评价语气、BGM或音效。"
+    understanding = result.get("video_understanding")
+    if isinstance(understanding, dict):
+        for role in ("creator", "benchmark"):
+            side = understanding.get(role)
+            if not isinstance(side, dict):
+                continue
+            for unit in side.get("evidence_units") or []:
+                if isinstance(unit, dict) and "audio_fact" in unit:
+                    unit["audio_fact"] = "当前模型未直接感知音轨，未评估语气、BGM或音效。"

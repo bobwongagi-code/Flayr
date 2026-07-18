@@ -1,4 +1,4 @@
-"""flayr_core.subtitle_track：字幕轨预处理（读光 OCR）。
+"""flayr_core.subtitle_track：字幕轨预处理（多模态 OCR）。
 
 为什么存在：omni 看视频能"理解字幕想表达什么"，但逐字认字会错
 （实测把 TikTok 读成 Daiso），且把多行字幕糊成一长串。带货视频的字幕条
@@ -9,7 +9,7 @@
 字幕条识别准且能逐行切分；但对产品瓶身倾斜小字不稳（会退回纯坐标无文字），
 那部分不在本模块职责内，仍由 omni 理解 + 人工兜底。
 
-调用方式：稀疏抽帧（默认每 ~2.5s 取 1 帧）调读光 qwen-vl-ocr，
+调用方式：稀疏抽帧（默认每 ~2.5s 取 1 帧）调用配置的视觉模型，
 合并相邻相同字幕，产出 subtitle_track.json。返回纯坐标无文字时重试一次，
 仍失败则该帧标记 ocr_unreadable 跳过，不中断整条 pipeline。
 """
@@ -26,17 +26,18 @@ from .llm.api import call_llm_api, extract_chat_completion_text, image_to_data_u
 from .utils import write_json
 
 
-OCR_MODEL = "qwen-vl-ocr"
+OCR_MODEL = "doubao-seed-2.0-lite"
 # 稀疏抽帧目标间隔（秒）：字幕变化通常持续数秒，2.5s 采样够用且把调用量砍半。
 SAMPLE_INTERVAL_SEC = 2.5
-# 读光 OCR 的 OpenAI 兼容端点（与主分析同一个 base，模型不同）。
-OCR_API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+# 默认复用 Agent Plan 的多模态模型；调用方会传入当前分析端点和模型。
+OCR_API_URL = "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions"
 OCR_REQUEST_MAX_TIME_SECONDS = 90
 OCR_REQUEST_LOW_SPEED_TIME_SECONDS = 45
-# ⚠️ 关键：实测中文指令"请识别…按行输出"会触发读光的【检测模式】（返回纯坐标无文字），
-# 导致约 40% 帧假阴性。简洁英文指令稳定走【识别模式】，且比无指令多读出小字（如瓶身 12hrs）。
-# 改这句前务必用真实帧回归测试，别再写"按行/逐行/输出位置"这类暗示检测的措辞。
-OCR_INSTRUCTION = "Output the text content of this image."
+# 只取短视频内容字幕，避免把平台 UI、水印和包装字混进权威字幕轨。
+OCR_INSTRUCTION = (
+    "只输出画面中用于视频内容表达的屏幕字幕原文，每行一条。"
+    "忽略软件界面、状态栏、按钮、产品包装和水印。不要解释；没有则输出 NONE。"
+)
 
 
 def build_subtitle_track(
@@ -151,8 +152,8 @@ def ocr_frame_with_retry(
 
 
 def build_ocr_payload(frame_path: Path, model: str) -> dict[str, Any]:
-    """读光 qwen-vl-ocr 请求体。min/max_pixels 控制识别分辨率。"""
-    return {
+    """OpenAI-compatible vision OCR request payload."""
+    payload = {
         "model": model,
         "messages": [
             {
@@ -168,8 +169,12 @@ def build_ocr_payload(frame_path: Path, model: str) -> dict[str, Any]:
                 ],
             }
         ],
-        "max_tokens": 600,
+        "temperature": 0.0,
+        "max_tokens": 2048,
     }
+    if "doubao" in str(model or "").lower():
+        payload["thinking"] = {"type": "disabled"}
+    return payload
 
 
 def parse_ocr_lines(text: str) -> list[str]:

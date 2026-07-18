@@ -134,6 +134,51 @@ def align_stage_flag_evidence(result: dict[str, Any]) -> None:
                 continue
 
 
+def prune_multimodal_evidence_to_stage(result: dict[str, Any]) -> None:
+    """在阶段证据最终收口后，裁掉跨模态字段里已不属于该阶段的旧引用。
+
+    只做集合交集，不新增证据：允许集合由阶段主引用与 Stage1 锁定的同阶段
+    ``functions`` 共同构成。这样 S5 等后续专项修复收窄主引用后，不会留下
+    已过期的渠道引用，也不需要让 LLM repair 改写 evidence ids。
+    """
+    stage_functions = {
+        "S1": "S1_hook",
+        "S2": "S2_intro",
+        "S3": "S3_usage",
+        "S4": "S4_effect",
+        "S5": "S5_trust",
+        "S6": "S6_cta",
+    }
+    understanding = result.get("video_understanding") if isinstance(result.get("video_understanding"), dict) else {}
+    for index, stage in enumerate(result.get("stage_analysis", []), start=1):
+        if not isinstance(stage, dict):
+            continue
+        stage_id = f"S{index}"
+        function = stage_functions.get(stage_id)
+        for role in ("creator", "benchmark"):
+            assessment = stage.get(f"{role}_multimodal")
+            channel_refs = assessment.get("channel_evidence_ids") if isinstance(assessment, dict) else None
+            if not isinstance(channel_refs, dict):
+                continue
+            allowed = {
+                str(item)
+                for item in stage.get(f"{role}_evidence_ids") or []
+                if str(item).strip()
+            }
+            role_understanding = understanding.get(role) if isinstance(understanding.get(role), dict) else {}
+            allowed.update(
+                str(unit.get("id"))
+                for unit in role_understanding.get("evidence_units") or []
+                if isinstance(unit, dict)
+                and function in {str(value) for value in unit.get("functions") or []}
+            )
+            for channel, refs in channel_refs.items():
+                if isinstance(refs, list):
+                    channel_refs[channel] = [
+                        str(item) for item in refs if str(item).strip() and str(item) in allowed
+                    ]
+
+
 def reconcile_s3_s4_evidence_coherence(result: dict[str, Any]) -> None:
     """收紧 S3 真实使用与 S4 因果桥的跨阶段一致性。
 

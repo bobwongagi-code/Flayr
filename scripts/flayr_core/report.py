@@ -377,12 +377,19 @@ def render_overview_cards(analysis: dict[str, Any], run_dir: Path) -> str:
     """
     product = analysis.get("product", {})
     videos = analysis.get("videos", {})
+    audio = analysis.get("audio_assessment") if isinstance(analysis.get("audio_assessment"), dict) else {}
+    audio_boundary = (
+        "口播内容来自转录；当前模型不直接评价音轨表现。"
+        if audio.get("native_audio_analysis") is False
+        else "语气、BGM、音效仅作观察，不参与差距等级。"
+    )
     cards = [
         "\n".join(
             [
                 '<div class="overview-card">',
                 '<div class="label">产品</div>',
                 f'<div class="value">{escape(product.get("name") or "未填写")}</div>',
+                f'<div class="meta">{escape(audio_boundary)}</div>',
                 "</div>",
             ]
         ),
@@ -406,8 +413,33 @@ def render_video_card(label: str, info: dict[str, Any]) -> str:
             rows.append('<div class="video-thumb">')
             rows.append(f'<img src="{escape(image_src)}" alt="{escape(label)}代表帧">')
             rows.append("</div>")
+    rows.extend(render_audio_quality_rows(info.get("audio_quality")))
     rows.append("</div>")
     return "\n".join(rows)
+
+
+def render_audio_quality_rows(value: Any) -> list[str]:
+    quality = value if isinstance(value, dict) else {}
+    if not quality:
+        return []
+    status = str(quality.get("status") or "unavailable")
+    labels = {"ok": "音频技术质量正常", "warning": "音频质量需关注", "unavailable": "音频质量不可用"}
+    rows = [f'<div class="meta">{escape(labels.get(status, "音频质量不可用"))}</div>']
+    issues = quality.get("hard_issues") if isinstance(quality.get("hard_issues"), list) else []
+    for issue in issues[:2]:
+        if isinstance(issue, dict) and issue.get("message"):
+            rows.append(f'<div class="meta">{escape(issue["message"])}</div>')
+    metrics = quality.get("metrics") if isinstance(quality.get("metrics"), dict) else {}
+    lufs = metrics.get("integrated_lufs")
+    silence = metrics.get("silence_ratio")
+    metric_parts = []
+    if isinstance(lufs, (int, float)):
+        metric_parts.append(f"{lufs:g} LUFS")
+    if isinstance(silence, (int, float)):
+        metric_parts.append(f"静音 {silence * 100:.0f}%")
+    if metric_parts:
+        rows.append(f'<div class="meta">{escape(" · ".join(metric_parts))}</div>')
+    return rows
 
 
 def representative_frame(info: dict[str, Any]) -> dict[str, Any] | None:

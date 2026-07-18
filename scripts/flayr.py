@@ -13,7 +13,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from flayr_core.llm.api import read_llm_api_key
+from flayr_core.audio_quality import analyze_audio_quality
+from flayr_core.llm.api import read_llm_api_key, supports_native_audio_analysis
 from flayr_core.llm.pipeline import (
     apply_finalized_analysis_result,
     merge_analysis_result,
@@ -43,8 +44,8 @@ from flayr_core.whisper import run_whisper
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNS_DIR = ROOT / "runs"
-PREPROCESS_CACHE_SCHEMA_VERSION = 1
-PREPROCESS_PIPELINE_VERSION = "2026-07-11.1"
+PREPROCESS_CACHE_SCHEMA_VERSION = 2
+PREPROCESS_PIPELINE_VERSION = "2026-07-18.1"
 
 
 def main() -> int:
@@ -253,7 +254,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto", "on", "off"),
         default="auto",
         help=(
-            "Subtitle OCR mode. auto enables DashScope qwen-vl-ocr when a DashScope API key "
+            "Subtitle OCR mode. auto reuses the configured multimodal LLM when an API key "
             "is available and this is not --llm-dry-run; on forces OCR; off disables OCR."
         ),
     )
@@ -567,6 +568,7 @@ def process_video(
             "stage": "representative frames for S1-S6 from full-video frames",
         },
         "audio_path": None,
+        "audio_quality": {},
         "transcript_path": None,
         "transcript_segments_path": None,
         "transcription_status": "not_started",
@@ -586,6 +588,10 @@ def process_video(
             result["duration_seconds"] = probe_duration_seconds(video_path)
         extract_frames(video_path, frames_dir, focus_frames_dir, result)
         extract_audio(video_path, role_dir / "audio.wav", result)
+        result["audio_quality"] = analyze_audio_quality(
+            Path(result["audio_path"]) if result.get("audio_path") else None,
+            result.get("duration_seconds"),
+        )
     else:
         result["errors"].append("ffmpeg missing: skipped frame and audio extraction")
 
@@ -613,13 +619,19 @@ def process_video(
     result["shot_track_status"] = shot_track.get("status")
     result["shot_track_path"] = str(role_dir / "shot_track.json") if shot_track.get("shots") else None
 
-    # 字幕轨：读光 OCR。默认 auto：有 DashScope key 且非 dry-run 时自动开启；
+    # 字幕轨：多模态 OCR。默认 auto：有兼容视觉模型 key 且非 dry-run 时自动开启；
     # 没 key/调试时降级为 disabled，不影响主流程。
     result["subtitle_track_status"] = "disabled_by_policy"
     result["subtitle_track_path"] = None
     should_ocr, ocr_key, ocr_disabled_reason = resolve_ocr_policy(args)
     if should_ocr:
-        subtitle_track = build_subtitle_track(role_dir, result, ocr_key)
+        subtitle_track = build_subtitle_track(
+            role_dir,
+            result,
+            ocr_key,
+            api_url=args.llm_api_url,
+            model=args.llm_model,
+        )
         result["subtitle_track_status"] = subtitle_track.get("status")
         if subtitle_track.get("segments"):
             result["subtitle_track_path"] = str(role_dir / "subtitle_track.json")
@@ -640,6 +652,11 @@ def process_video(
 
 def ensure_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> None:
     """Ensure reused preprocessing also has secondary evidence artifacts."""
+    if not isinstance(info.get("audio_quality"), dict) or not info.get("audio_quality"):
+        info["audio_quality"] = analyze_audio_quality(
+            Path(str(info["audio_path"])) if info.get("audio_path") else None,
+            info.get("duration_seconds"),
+        )
     if not isinstance(info.get("speech_mode"), dict) or not info.get("speech_mode", {}).get("mode"):
         info["speech_mode"] = classify_speech_mode(role_dir, info)
     existing = info.get("video_evidence") if isinstance(info.get("video_evidence"), dict) else {}
@@ -666,21 +683,29 @@ def resolve_ocr_policy(args: argparse.Namespace) -> tuple[bool, str, str]:
         return False, "", "disabled_by_policy"
     api_key = read_llm_api_key(args).strip()
     if not api_key:
-        return False, "", "disabled_no_dashscope_key"
-    if not looks_like_dashscope_config(args):
-        return False, "", "disabled_non_dashscope_config"
+        return False, "", "disabled_no_ocr_key"
+    if not looks_like_vision_config(args):
+        return False, "", "disabled_non_vision_config"
     if mode == "on":
         return True, api_key, ""
     return True, api_key, ""
 
 
-def looks_like_dashscope_config(args: argparse.Namespace) -> bool:
+def looks_like_vision_config(args: argparse.Namespace) -> bool:
     values = [
         str(getattr(args, "llm_api_url", "") or "").lower(),
         str(getattr(args, "llm_api_key_keychain_service", "") or "").lower(),
         str(getattr(args, "llm_model", "") or "").lower(),
     ]
-    return any("dashscope" in value or "qwen" in value for value in values)
+    return any(
+        marker in value
+        for value in values
+        for marker in ("dashscope", "qwen", "api/plan/", "doubao")
+    )
+
+
+# Compatibility alias for external scripts that imported the old helper.
+looks_like_dashscope_config = looks_like_vision_config
 
 
 def build_analysis(
@@ -701,6 +726,7 @@ def build_analysis(
     #   llm_completed   —— LLM 分析已成功合并（由 merge_analysis_result 改写）
     improvements_status = "not_applicable" if args.mode == "breakdown" else "llm_unavailable"
 
+    native_audio = supports_native_audio_analysis(args.llm_api_url, args.llm_model)
     return {
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "mode": args.mode,
@@ -721,6 +747,12 @@ def build_analysis(
             "notes": args.product_notes,
         },
         "dependencies": deps,
+        "audio_assessment": {
+            "native_audio_analysis": native_audio,
+            "mode": "native_audio_observation" if native_audio else "transcript_plus_local_qc",
+            "commercial_contribution": "observation_only",
+            "severity_policy": "excluded",
+        },
         "videos": videos,
         "stage_analysis": stage_analysis,
         "improvements": improvements if args.mode in {"compare", "improve"} else [],

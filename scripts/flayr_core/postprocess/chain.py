@@ -39,6 +39,7 @@ from .repair import (
     fill_missing_evidence_references,
     ground_stage_visual_evidence,
     materialize_spoken_stage_evidence,
+    prune_multimodal_evidence_to_stage,
     reconcile_s3_s4_evidence_coherence,
     reconcile_s5_trust_sources,
     reconcile_unsupported_cta,
@@ -121,6 +122,7 @@ def apply_postprocess_chain(normalized: dict[str, Any], analysis: dict[str, Any]
     reconcile_s5_trust_sources(                                                # repair      S5 只接受 Stage1 同类型可核验来源
         normalized, analysis.get("s5_source_signals_required") is True
     )
+    prune_multimodal_evidence_to_stage(normalized)                            # repair      专项收口后裁掉过期的渠道证据引用
     materialize_cross_stage_inputs(normalized, analysis)                       # proposition 品命题矩阵 + S1→S2/S4→S6 跨阶段输入
     stabilize_stage_severity(normalized)                                      # repair      severity 阶段归属漂移校准
     derive_severity_from_facts(normalized, analysis)                          # derive      4d 执行分+权重表确定性推导（成功则覆盖，缺事实保留上游结果；含晃动封顶）

@@ -54,7 +54,7 @@ python3 scripts/flayr.py improve \
 8. Generate `analysis_input.md` for large-model diagnosis.
 9. If `--llm-model` is provided, call the configured OpenAI-compatible chat endpoint to generate `analysis_result.json`.
    Use `--llm-include-images` when the model should inspect Hook/CTA focus frames directly; keep `--llm-image-limit` modest, such as 8 to 12 images.
-   Validate the model JSON against the schema. If JSON syntax or required fields fail, run one repair request and only then fail loudly.
+   Validate the model JSON against the schema. Shared deterministic normalization resolves only mechanical contradictions. Doubao may apply at most two locked local JSON patches; Qwen-compatible providers retain one full repair request. Facts, evidence references, proposition references, and severity remain immutable during Doubao repair.
 10. If a large-model result exists, pass it with `--analysis-result-json` and merge it back into the report.
 11. Analyze videos through the 6-slot commerce structure: Hook, product intro, usage, result, trust, CTA.
 12. For compare/improve mode, produce stage-level gaps and top 3 to 5 improvements.
@@ -107,10 +107,10 @@ If dependencies are missing, report the missing tool and continue only for outpu
 
 For `whisper-cli` or `whisper-cpp`, pass `--whisper-model` when the default `models/ggml-base.en.bin` is not available.
 
-For Qwen / 千问 on this Mac, use the DashScope OpenAI-compatible endpoint and the VidLingo Keychain item:
-`--llm-api-url https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions --llm-api-key-keychain-service VidLingo.Qwen`.
+For Flayr model analysis on this Mac, use Volcano Engine Agent Plan:
+`--llm-model doubao-seed-2.0-lite --llm-api-url https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions --llm-api-key-keychain-service Flayr.AgentPlan`.
 
-Subtitle OCR runs in `--ocr-mode auto` by default: enable it when using DashScope/Qwen config and an API key is available, and disable it with `--no-ocr` for fast local debugging. OCR improves on-screen subtitle grounding and is low cost, but it adds per-frame API latency.
+Subtitle OCR runs in `--ocr-mode auto` by default and reuses the configured Agent Plan visual model. Disable it with `--no-ocr` for fast local debugging. OCR improves on-screen subtitle grounding and is low cost, but it adds per-frame API latency.
 
 Proposal AI demo clips are optional and off by default. Use `--proposal-video-backend dashscope-i2v`
 to generate Wan image-to-video samples from local creator frames. Use `--proposal-video-backend dashscope-s2v`

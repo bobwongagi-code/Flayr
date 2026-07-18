@@ -25,13 +25,23 @@ from ..stage_ownership import (
 )
 from ..subtitle_track import render_subtitle_track_markdown
 from ..video_evidence import parse_srt_segments
-from .api import audio_to_mp3_data_url, video_to_data_url
+from .api import (
+    audio_to_mp3_data_url,
+    supports_native_audio_analysis,
+    supports_standalone_audio,
+    video_to_data_url,
+)
 from .media import build_evidence_sensory_inputs
 
 ROOT = Path(__file__).resolve().parents[3]
 PHASE_C_WINDOW_PADDING_SECONDS = 2.0
 PHASE_C_REVIEW_FPS = 3.0
 PHASE_C_REVIEW_MAX_WIDTH = 480
+
+
+def full_analysis_output_budget(model: str) -> int:
+    """Output budget for Flayr's full six-stage JSON contract."""
+    return 32768 if "doubao" in str(model or "").lower() else 16384
 
 
 def read_text_if_exists(path: Path) -> str:
@@ -330,6 +340,7 @@ def build_video_fact_payload(
     role: str,
     analysis: dict[str, Any],
     visual_inputs: list[dict[str, str]],
+    api_url: str = "",
 ) -> dict[str, Any]:
     """单视频事实抽取请求 payload。
 
@@ -342,6 +353,7 @@ def build_video_fact_payload(
     code = "B" if role == "benchmark" else "C"
     role_dir = Path(str(info.get("work_dir") or ""))
     mode_prompt = speech_mode_prompt(info.get("speech_mode") if isinstance(info.get("speech_mode"), dict) else {})
+    native_audio = supports_native_audio_analysis(api_url, model)
 
     # 优先走原生视频；失败则降级为抽帧。
     video_path = Path(str(info.get("path") or ""))
@@ -349,9 +361,14 @@ def build_video_fact_payload(
     native_video = video_data_url is not None
 
     visual_source_hint = (
-        "随请求附带本视频的原生画面（已抽帧为连续序列）、完整音轨，以及 Hook/CTA 时间线证据图。"
+        "随请求附带本视频的原生画面（已抽帧为连续序列）以及 Hook/CTA 时间线证据图。"
         if native_video
-        else "随请求附带本视频的若干关键帧/时间线证据图和完整音频。"
+        else "随请求附带本视频的若干关键帧/时间线证据图。"
+    )
+    audio_capability_rule = (
+        "你可直接感知音轨；语气、BGM和音效只记录客观观察，不判断其商业贡献。"
+        if native_audio
+        else "你不能直接感知音轨。口播语义只以转录文本为准；audio_fact 必须写未直接感知音轨，不得判断语气、BGM或音效。"
     )
 
     # 品地基命题注入（Step-0 产出）：告诉事实抽取器该重点盯哪些证据，只导观察不下结论；无地基则退回通用抽取。
@@ -570,7 +587,11 @@ def build_video_fact_payload(
                     {"type": "image_url", "image_url": {"url": item["data_url"], "detail": "low"}},
                 ]
             )
-        audio_data_url = audio_to_mp3_data_url(role_dir / "audio.wav")
+        audio_data_url = (
+            audio_to_mp3_data_url(role_dir / "audio.wav")
+            if native_audio and supports_standalone_audio(api_url)
+            else None
+        )
         if audio_data_url is not None:
             content.append(
                 {"type": "text", "text": "以下是本视频的完整音频，用于判断 BGM、口播语气、特殊音效。"}
@@ -583,11 +604,12 @@ def build_video_fact_payload(
         "你是单视频事实抽取器。只输出严格 JSON，不要 Markdown。"
         "只分析当前这一条视频，禁止引用、比较或猜测另一条视频。"
         f"{visual_source_hint}"
-        "你能同时看到连续画面、听到声音。严格按用户消息中『观察方法』一节的全部维度逐项观察、不漏项"
+        f"{audio_capability_rule}"
+        "严格按用户消息中『观察方法』一节的可用维度逐项观察、不漏项"
         "（含镜头语言/取景完整性、遮挡与 UI 危险区、画中画小窗、拍摄视角、口播与画面对齐、四轨对齐），"
         "必须先读取用户消息中的 speech_mode/证据组织模式，并按其证据优先级组织事实："
         "spoken 以口播时间线为骨架；subtitle_driven 以 OCR 字幕轨为文案骨架；visual_driven 以画面变化和镜头轨为骨架；"
-        "music_driven 以画面变化、BGM/节奏/音效为骨架。无有效口播时 voiceover 与 voiceover_zh 必须留空，"
+        "music_driven 在可直接感知音轨时以画面变化、BGM/节奏/音效为骨架；否则只按画面变化组织。无有效口播时 voiceover 与 voiceover_zh 必须留空，"
         "不得把屏幕字幕、画面文案或你对画面的理解伪装成口播。"
         "按带货短视频的天然结构（钩子→产品引出→使用过程→效果呈现→信任放大→促单）找证据切分 evidence_units，"
         "目标是抽出对分析带货视频有价值的事实，而非随意找转折点；输出 4 到 8 条，沿时间线排列，id 必须使用指定前缀，"
@@ -1047,6 +1069,7 @@ def build_llm_comparison_payload(
     analysis_input: str,
     facts: dict[str, Any],
     analysis: dict[str, Any] | None = None,
+    api_url: str = "",
 ) -> dict[str, Any]:
     """基于已校验的单视频事实清单做对比分析的 payload。
 
@@ -1362,7 +1385,8 @@ def build_llm_comparison_payload(
         "如果 S1-S4 已闭环但 CTA 弱，chain_closed 仍应为 true、broken_at=none，CTA 问题留给 S6。"
         "S1 承诺、S2 答案、S3 证明目标、S4 结果必须尽量指向同一个产品命题；不要把不同卖点拼成假闭环。"
     )
-    multimodal_block = render_multimodal_prompt_contract()
+    native_audio = bool(((analysis or {}).get("audio_assessment") or {}).get("native_audio_analysis", True))
+    multimodal_block = render_multimodal_prompt_contract(native_audio)
     user_text = "\n\n".join(
         [
             context,
@@ -1435,13 +1459,12 @@ def build_llm_comparison_payload(
     payload = build_llm_payload(model, user_text, [])
     # temperature=0：对比判断要可复现，消除 severity 在边界 case（如 S3）上的抖动。
     payload["temperature"] = 0.0
-    # 16384：观察到 8192 在 qwen-vl-max-latest 下被截断（中文 schema + 完整 stage_analysis + 多条 improvements）。
-    # qwen 支持到 16K-32K，提到 16K 留出余量。如还不够可继续调，或在 prompt 里强制精简。
-    payload["max_tokens"] = 16384
+    # Agent Plan 实测完整六阶段 JSON 会超过 16K；直接给足预算，避免先截断再整次重发。
+    payload["max_tokens"] = full_analysis_output_budget(model)
 
     # Phase B：把每条 evidence 的关键帧 + 切片音频挂到 user message（增强判断的感官输入）。
     if analysis is not None:
-        sensory = build_evidence_sensory_inputs(analysis, facts)
+        sensory = build_evidence_sensory_inputs(analysis, facts, api_url=api_url)
         if sensory:
             user_msg = payload["messages"][1]
             base_text = user_msg["content"] if isinstance(user_msg["content"], str) else ""
@@ -1450,8 +1473,8 @@ def build_llm_comparison_payload(
                 {
                     "type": "text",
                     "text": (
-                        "## 各 evidence 对应的画面帧与切片音频（仅辅助判断声画质感，不可据此新增或改写事实）\n"
-                        "下面按 role 和 evidence id 附上对应时段的关键帧与音频。"
+                        "## 各 evidence 对应的感官切片（仅辅助判断声画质感，不可据此新增或改写事实）\n"
+                        "下面按 role 和 evidence id 附上对应时段的画面与原声。"
                         "请按 S1-S6 功能阶段自行对齐两条视频的 evidence 做横向对比。"
                     ),
                 },
@@ -1505,6 +1528,7 @@ def build_stage_review_payload(
     这是一次性回看，不允许模型继续索要素材；事实清单仍是唯一事实源。
     """
     target_codes = normalize_stage_codes(stage_codes)[:2]
+    native_audio = bool((analysis.get("audio_assessment") or {}).get("native_audio_analysis", True))
     target_stages = [
         stage for stage in current_result.get("stage_analysis", [])
         if stage_code(stage.get("stage")) in target_codes
@@ -1793,7 +1817,7 @@ def build_stage_review_payload(
                     s4_contract,
                     s5_contract,
                     s6_contract,
-                    render_multimodal_prompt_contract(),
+                    render_multimodal_prompt_contract(native_audio),
                     "只输出严格 JSON，不要 Markdown。",
                     "输出格式：",
                     json.dumps(
@@ -2039,10 +2063,10 @@ def build_llm_repair_payload(
 ) -> dict[str, Any]:
     """JSON 修复请求 payload。校验失败时由 pipeline 触发。
 
-    设 max_tokens=16384 与 build_llm_comparison_payload 一致；
-    否则 qwen 等 provider 默认 max_tokens 偏低，重新输出完整结构会被截断成残缺 JSON。
+    与 build_llm_comparison_payload 使用同一输出预算；否则重新输出完整结构会被截断。
     """
     locked_facts_block = ""
+    native_audio = bool(((analysis or {}).get("audio_assessment") or {}).get("native_audio_analysis", True))
     if locked_video_understanding:
         locked_facts_block = json.dumps(locked_video_understanding, ensure_ascii=False, indent=2)
     foundation = (analysis or {}).get("product_foundation") or {}
@@ -2051,7 +2075,7 @@ def build_llm_repair_payload(
     repair_contract_block = json.dumps(repair_contract, ensure_ascii=False, indent=2)
     return {
         "model": model,
-        "max_tokens": 16384,
+        "max_tokens": full_analysis_output_budget(model),
         "messages": [
             {
                 "role": "system",
@@ -2065,7 +2089,7 @@ def build_llm_repair_payload(
                     "提供了 transcript.srt 时，以其时间戳重新校对口播对应阶段；"
                     + CERTIFICATION_OWNERSHIP_PROMPT
                     + "一条事实只归属一个主要阶段；口播提及但画面不可见时标记 voice_only。"
-                    + render_multimodal_prompt_contract()
+                    + render_multimodal_prompt_contract(native_audio)
                     + "每个阶段必须补齐 creator_multimodal 与 benchmark_multimodal；只能引用该侧该阶段已有 evidence_ids，不得为补多模态字段新增事实。"
                     "S1 Hook 必须补齐 creator_hook 与 benchmark_hook 两个对象，字段为 exists(bool)、type(A-G 或 unknown)、dims{camera,copy,sound,rhythm}(bool)、hook_boundary_seconds(number)、hook_boundary_reason(非空)、s2_start_signal(非空)、landing_met(bool)、landing_reason(非空)、window_evidence(非空)、landing_window_leak(bool)、anchors_proposition(bool)、proposition_ids(数组)。exists 只判是否有具体面向用户的留人尝试；弱 Hook 可以 exists=true、landing_met=false，不能与完全无 Hook 混淆。"
                     "hook_boundary_seconds 按 structure_library_full.md 的 S1 留人机制→S2 产品引出/解决方案承接功能切换判断，不得写死固定秒数；S2-A 承接式引出可早于产品实物或产品名出现，不能等产品画面才切 S2。"
@@ -2103,4 +2127,52 @@ def build_llm_repair_payload(
             },
         ],
         "temperature": 0.0,
+    }
+
+
+def build_llm_patch_repair_payload(
+    model: str,
+    raw_result: dict[str, Any],
+    error_message: str,
+    locked_video_understanding: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """为 Doubao 构造局部 JSON Pointer 修复请求，避免重写整份长结果。"""
+    stage_codes = set(re.findall(r"\bS[1-6]\b", str(error_message or "").upper()))
+    selected_stages = [
+        stage
+        for stage in raw_result.get("stage_analysis", [])
+        if isinstance(stage, dict)
+        and (not stage_codes or str(stage.get("stage") or "").upper()[:2] in stage_codes)
+    ]
+    context: dict[str, Any] = {"stage_analysis": selected_stages}
+    for key in ("s3_s4_relationship", "promise_chain", "improvements"):
+        if key in str(error_message) and key in raw_result:
+            context[key] = raw_result[key]
+    locked_facts = locked_video_understanding if isinstance(locked_video_understanding, dict) else {}
+    text = "\n\n".join(
+        [
+            "校验错误：\n" + str(error_message or ""),
+            "需要修复的当前局部结构：\n" + json.dumps(context, ensure_ascii=False, indent=2),
+            "已锁定事实仅供核对，不允许修改：\n" + json.dumps(locked_facts, ensure_ascii=False)[:12000],
+        ]
+    )
+    return {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "你是 Flayr 局部 JSON 修复器。不要重写完整分析，只输出严格 JSON："
+                    '{"patches":[{"path":"/stage_analysis/S3/creator_s3/field","value":false}]}。'
+                    "path 使用 JSON Pointer；stage_analysis 下用 S1-S6 作为阶段定位符，不用数组下标。"
+                    "只修校验错误明确指出的字段及维持字段机械一致性所必需的相邻字段。"
+                    "不得修改 video_understanding、comparison_contract、category_profile、product_profile、"
+                    "evidence_ids、proposition_ids、口播、画面事实、severity 或 improvements 文案。"
+                    "缺失但不适用的 bool 填 false；不得通过删除字段规避校验。不要 Markdown，不要解释。"
+                ),
+            },
+            {"role": "user", "content": [{"type": "text", "text": text}]},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 8192,
     }

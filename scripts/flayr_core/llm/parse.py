@@ -86,32 +86,63 @@ def normalize_demo_flag(value: Any) -> bool | None:
 
 
 def normalize_multimodal_assessment(value: Any) -> dict[str, Any] | None:
-    """归一单侧阶段级跨模态净效果；不在解析层推断渠道语义。"""
+    """归一单侧阶段级跨模态净效果，并收口可由渠道事实确定的机械一致性。"""
     if not isinstance(value, dict):
         return None
     raw_impacts = value.get("channel_impacts") if isinstance(value.get("channel_impacts"), dict) else {}
     raw_evidence = (
         value.get("channel_evidence_ids") if isinstance(value.get("channel_evidence_ids"), dict) else {}
     )
+    impacts = {
+        channel: normalize_choice(raw_impacts.get(channel), MULTIMODAL_IMPACTS, "unknown")
+        for channel in MULTIMODAL_CHANNELS
+    }
+    dominant = normalize_choice(value.get("dominant_channel"), MULTIMODAL_DOMINANT_CHANNELS, "unknown")
+    effect = normalize_choice(value.get("integrated_effect"), MULTIMODAL_EFFECTS, "unknown")
+    content_channels = ("visual", "speech", "text")
+    positive_channels = [
+        channel for channel in content_channels
+        if impacts[channel] in {"strong_positive", "positive"}
+    ]
+    if dominant == "sound_rhythm":
+        dominant = "unknown"
+    if effect in {"strong", "effective"} and impacts.get(dominant) not in {"strong_positive", "positive"}:
+        dominant = next(
+            (channel for channel in positive_channels if impacts[channel] == "strong_positive"),
+            positive_channels[0] if positive_channels else dominant,
+        )
+    if effect in {"strong", "effective"} and not positive_channels:
+        effect = (
+            "weak"
+            if any(impacts[channel] not in {"absent", "unknown"} for channel in content_channels)
+            else "missing"
+        )
+    if effect == "strong" and not any(impacts[channel] == "strong_positive" for channel in content_channels):
+        effect = "effective" if positive_channels else "weak"
+    if effect == "strong" and any(impacts[channel] == "strong_negative" for channel in content_channels):
+        effect = "effective"
+    compensation = normalize_demo_flag(value.get("compensation_applied")) is True
+    if compensation and not (
+        impacts.get(dominant) == "strong_positive"
+        and any(
+            impacts[channel] in {"neutral", "negative", "absent"}
+            for channel in content_channels
+            if channel != dominant
+        )
+    ):
+        compensation = False
     return {
-        "channel_impacts": {
-            channel: normalize_choice(raw_impacts.get(channel), MULTIMODAL_IMPACTS, "unknown")
-            for channel in MULTIMODAL_CHANNELS
-        },
+        "channel_impacts": impacts,
         "channel_evidence_ids": {
             channel: normalize_evidence(raw_evidence.get(channel))
             for channel in MULTIMODAL_CHANNELS
         },
-        "dominant_channel": normalize_choice(
-            value.get("dominant_channel"), MULTIMODAL_DOMINANT_CHANNELS, "unknown"
-        ),
+        "dominant_channel": dominant,
         "cross_channel_relation": normalize_choice(
             value.get("cross_channel_relation"), MULTIMODAL_RELATIONS, "unknown"
         ),
-        "integrated_effect": normalize_choice(
-            value.get("integrated_effect"), MULTIMODAL_EFFECTS, "unknown"
-        ),
-        "compensation_applied": normalize_demo_flag(value.get("compensation_applied")),
+        "integrated_effect": effect,
+        "compensation_applied": compensation,
         "integration_reason": str(value.get("integration_reason") or "").strip(),
     }
 
@@ -354,6 +385,14 @@ def normalize_s3_flags(value: Any) -> dict[str, Any] | None:
     process_framing_met = normalize_demo_flag(value.get("process_framing_met"))
     if process_framing_met is None:
         process_framing_met = True
+    scene_mode = normalize_s3_scene_mode(value.get("scene_mode"))
+    overlays = normalize_presentation_overlays(value.get("presentation_overlays"))
+
+    def mode_flag(key: str, applicable: bool) -> bool | None:
+        if not applicable:
+            return False
+        return normalize_demo_flag(value.get(key))
+
     return {
         "exists": normalize_demo_flag(value.get("exists")),
         "module_type": normalize_s3_type(value.get("module_type")),
@@ -371,21 +410,21 @@ def normalize_s3_flags(value: Any) -> dict[str, Any] | None:
         "critical_action_continuity_met": normalize_demo_flag(value.get("critical_action_continuity_met")),
         "demonstrated_selling_points": normalize_evidence(value.get("demonstrated_selling_points")),
         "missing_selling_points": normalize_evidence(value.get("missing_selling_points")),
-        "scene_mode": normalize_s3_scene_mode(value.get("scene_mode")),
+        "scene_mode": scene_mode,
         "usage_context_fit": normalize_demo_flag(value.get("usage_context_fit")),
         "continuity_met": normalize_demo_flag(value.get("continuity_met")),
         "richness_met": normalize_demo_flag(value.get("richness_met")),
-        "single_scene_continuity_met": normalize_demo_flag(value.get("single_scene_continuity_met")),
-        "single_scene_variation_met": normalize_demo_flag(value.get("single_scene_variation_met")),
-        "multi_scene_logic_met": normalize_demo_flag(value.get("multi_scene_logic_met")),
-        "multi_scene_transition_met": normalize_demo_flag(value.get("multi_scene_transition_met")),
-        "multi_scene_role_adaptation_met": normalize_demo_flag(value.get("multi_scene_role_adaptation_met")),
-        "role_design_met": normalize_demo_flag(value.get("role_design_met")),
-        "role_interaction_met": normalize_demo_flag(value.get("role_interaction_met")),
-        "distinct_personas_met": normalize_demo_flag(value.get("distinct_personas_met")),
-        "steps_clear_met": normalize_demo_flag(value.get("steps_clear_met")),
-        "pov_immersive_met": normalize_demo_flag(value.get("pov_immersive_met")),
-        "presentation_overlays": normalize_presentation_overlays(value.get("presentation_overlays")),
+        "single_scene_continuity_met": mode_flag("single_scene_continuity_met", scene_mode == "single_scene"),
+        "single_scene_variation_met": mode_flag("single_scene_variation_met", scene_mode == "single_scene"),
+        "multi_scene_logic_met": mode_flag("multi_scene_logic_met", scene_mode == "multi_scene"),
+        "multi_scene_transition_met": mode_flag("multi_scene_transition_met", scene_mode == "multi_scene"),
+        "multi_scene_role_adaptation_met": mode_flag("multi_scene_role_adaptation_met", scene_mode == "multi_scene"),
+        "role_design_met": mode_flag("role_design_met", scene_mode == "multi_person"),
+        "role_interaction_met": mode_flag("role_interaction_met", scene_mode == "multi_person"),
+        "distinct_personas_met": mode_flag("distinct_personas_met", scene_mode == "multi_person"),
+        "steps_clear_met": mode_flag("steps_clear_met", "step_breakdown" in overlays),
+        "pov_immersive_met": mode_flag("pov_immersive_met", "first_person" in overlays),
+        "presentation_overlays": overlays,
         "fake_or_staged": normalize_demo_flag(value.get("fake_or_staged")),
         "start_seconds": normalize_hook_boundary_seconds(value.get("start_seconds")),
         "end_seconds": normalize_hook_boundary_seconds(value.get("end_seconds")),

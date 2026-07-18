@@ -20,6 +20,7 @@ import flayr
 from flayr_core import proposal_video, subtitle_track, translation, utils, video, voice_clone
 from flayr_core.report import executive_summary, render_global_cause_note, render_global_diagnosis, render_improvement_meta, stage_skipped
 from flayr_core.llm import api as llm_api
+from flayr_core.llm import media as llm_media
 from flayr_core.llm import pipeline
 from flayr_core.llm.analysis_contract import (
     AnalysisContractError,
@@ -40,6 +41,8 @@ from flayr_core.llm.payload import (
     build_llm_comparison_payload,
     build_llm_repair_payload,
     build_stage_review_payload,
+    build_video_fact_payload,
+    full_analysis_output_budget,
     build_video_identity_payload,
     load_brand_proposition,
     resolve_brand_key,
@@ -56,7 +59,7 @@ from flayr_core.llm.parse import (
     normalize_video_understanding,
 )
 from flayr_core.multimodal import channel_requirement_for, multimodal_execution
-from flayr_core.llm.pipeline import preserve_valid_repair_sections
+from flayr_core.llm.pipeline import apply_llm_json_patches, preserve_valid_repair_sections
 from flayr_core.postprocess.proposition import materialize_cross_stage_inputs, materialize_quality_audits
 from flayr_core.postprocess.chain import stamp_comparison_eligibility
 from flayr_core.postprocess.derive import _derive_one, _s3_usage_exec, _s4_effect_exec, _s6_cta_exec
@@ -64,6 +67,7 @@ from flayr_core.postprocess.global_diagnosis import materialize_global_diagnosis
 from flayr_core.postprocess.repair import (
     align_stage_flag_evidence,
     apply_comparison_eligibility,
+    prune_multimodal_evidence_to_stage,
     reconcile_s3_s4_evidence_coherence,
     reconcile_unsupported_cta,
     reconcile_s5_trust_sources,
@@ -137,6 +141,37 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(normalized["channel_impacts"]["visual"], "strong_positive")
         self.assertEqual(normalized["channel_impacts"]["speech"], "unknown")
         self.assertEqual(normalized["channel_evidence_ids"]["visual"], ["C1"])
+
+    def test_multimodal_normalization_repairs_mechanical_contradictions(self) -> None:
+        normalized = normalize_multimodal_assessment(
+            {
+                "channel_impacts": {
+                    "visual": "positive",
+                    "speech": "neutral",
+                    "text": "absent",
+                    "sound_rhythm": "neutral",
+                },
+                "dominant_channel": "speech",
+                "integrated_effect": "effective",
+                "compensation_applied": True,
+            }
+        )
+        self.assertEqual(normalized["dominant_channel"], "visual")
+        self.assertFalse(normalized["compensation_applied"])
+
+        no_positive = normalize_multimodal_assessment(
+            {
+                "channel_impacts": {
+                    "visual": "neutral",
+                    "speech": "negative",
+                    "text": "absent",
+                    "sound_rhythm": "neutral",
+                },
+                "dominant_channel": "visual",
+                "integrated_effect": "strong",
+            }
+        )
+        self.assertEqual(no_positive["integrated_effect"], "weak")
 
     def test_channel_requirement_axis_is_canonical(self) -> None:
         self.assertEqual(channel_requirement_for("S1")["level"], "any_channel_sufficient")
@@ -823,7 +858,7 @@ class ArchitectureContractTests(unittest.TestCase):
                     frame,
                     "secret",
                     "https://example.test/v1/chat/completions",
-                    "qwen-vl-ocr",
+                    "vision-test",
                     root,
                     0,
                 )
@@ -833,6 +868,84 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertEqual(call.call_args.kwargs["max_time_seconds"], 90)
             self.assertEqual(call.call_args.kwargs["low_speed_time_seconds"], 45)
             self.assertEqual(call.call_args.kwargs["retries"], 0)
+
+    def test_agent_plan_capabilities_use_embedded_video_audio(self) -> None:
+        url = "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions"
+        self.assertTrue(llm_api.is_agent_plan_api_url(url))
+        self.assertFalse(llm_api.supports_standalone_audio(url))
+        self.assertTrue(llm_api.supports_standalone_audio("https://example.test/v1/chat/completions"))
+        self.assertEqual(full_analysis_output_budget("doubao-seed-2.0-lite"), 32768)
+        self.assertEqual(full_analysis_output_budget("other-model"), 16384)
+
+    def test_agent_plan_stage2_uses_native_clips_not_input_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "creator.mp4"
+            video.write_bytes(b"placeholder")
+            analysis = {
+                "videos": {
+                    "creator": {
+                        "path": str(video),
+                        "work_dir": str(root),
+                        "duration_seconds": 5.0,
+                    }
+                }
+            }
+            facts = {"creator": {"evidence_units": [{"id": "C1", "time_range": "0.0s - 2.0s"}]}}
+            with mock.patch.object(llm_media, "video_to_data_url", return_value="data:video/mp4;base64,AA=="):
+                content = llm_media.build_evidence_sensory_inputs(
+                    analysis,
+                    facts,
+                    api_url="https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions",
+                )
+            types = [item.get("type") for item in content]
+            self.assertIn("video_url", types)
+            self.assertNotIn("input_audio", types)
+
+    def test_agent_plan_stage2_merges_evidence_to_provider_video_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            videos: dict[str, object] = {}
+            facts: dict[str, object] = {}
+            for role in ("benchmark", "creator"):
+                video = root / f"{role}.mp4"
+                video.write_bytes(b"placeholder")
+                videos[role] = {
+                    "path": str(video),
+                    "work_dir": str(root),
+                    "duration_seconds": 12.0,
+                }
+                facts[role] = {
+                    "evidence_units": [
+                        {"id": f"{role[0].upper()}{index}", "time_range": f"{index}.0s - {index + 1}.0s"}
+                        for index in range(6)
+                    ]
+                }
+            with mock.patch.object(llm_media, "video_to_data_url", return_value="data:video/mp4;base64,AA==") as encode:
+                content = llm_media.build_evidence_sensory_inputs(
+                    {"videos": videos},
+                    facts,
+                    api_url="https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions",
+                )
+            video_blocks = [item for item in content if item.get("type") == "video_url"]
+            labels = "\n".join(str(item.get("text") or "") for item in content if item.get("type") == "text")
+            self.assertEqual(len(video_blocks), 10)
+            self.assertEqual(encode.call_count, 10)
+            for role_prefix in ("B", "C"):
+                for index in range(6):
+                    self.assertIn(f"{role_prefix}{index}", labels)
+
+    def test_agent_plan_stage1_fallback_does_not_emit_unsupported_audio(self) -> None:
+        analysis = {"videos": {"creator": {"path": "", "work_dir": ""}}}
+        payload = build_video_fact_payload(
+            "doubao-seed-2.0-lite",
+            "creator",
+            analysis,
+            [],
+            api_url="https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions",
+        )
+        content = payload["messages"][1]["content"]
+        self.assertNotIn("input_audio", [item.get("type") for item in content])
 
     def test_llm_transfer_closed_error_is_retryable(self) -> None:
         self.assertTrue(
@@ -1330,9 +1443,38 @@ class ArchitectureContractTests(unittest.TestCase):
             "same_task_structure",
         )
         self.assertEqual(eligibility["scope"], "same_task_structure")
-        self.assertEqual(eligibility["direct_product_stages"], [])
+        self.assertEqual(eligibility["direct_product_stages"], ["S1", "S2", "S3", "S4", "S6"])
         self.assertEqual(eligibility["scope_origin"], "operator_certified")
         self.assertEqual(eligibility["facts_scope"], "cross_product")
+
+    def test_same_task_structure_override_makes_stage_contract_consistent(self) -> None:
+        eligibility = pipeline._apply_operator_scope_override(
+            {
+                "identity_relation": "different_product",
+                "substitution_relation": "none",
+                "shared_job": {
+                    "same_consumer_job": False,
+                    "same_target_object": False,
+                    "same_desired_outcome": False,
+                    "same_purchase_decision": False,
+                    "complement_or_dependency": False,
+                },
+                "stage_eligibility": {
+                    **{
+                        stage: {"status": "not_comparable", "basis": "产品身份不同"}
+                        for stage in ("S1", "S2", "S3", "S4", "S6")
+                    },
+                    "S5": {"status": "not_applicable", "basis": "双方均无背书"},
+                },
+                "reason": "产品身份不同。",
+            },
+            "same_task_structure",
+        )
+        for stage in ("S1", "S2", "S3", "S4", "S6"):
+            self.assertEqual(eligibility["stage_eligibility"][stage]["status"], "structural")
+        self.assertEqual(eligibility["stage_eligibility"]["S5"]["status"], "not_applicable")
+        self.assertTrue(eligibility["shared_job"]["same_consumer_job"])
+        self.assertIn("运营确认", eligibility["shared_job"]["reason"])
 
     def test_facts_eligibility_keeps_scope_and_audit_fields_consistent(self) -> None:
         eligibility = pipeline._stamp_facts_eligibility(
@@ -2276,6 +2418,82 @@ class ArchitectureContractTests(unittest.TestCase):
     def test_stage_flag_normalization_preserves_proposition_ids(self) -> None:
         normalized = normalize_s3_flags({"proposition_ids": ["selling.1", "selling.1"], "evidence_ids": ["C1"]})
         self.assertEqual(normalized["proposition_ids"], ["selling.1"])
+
+    def test_s3_normalization_defaults_only_non_applicable_mode_flags(self) -> None:
+        normalized = normalize_s3_flags(
+            {
+                "scene_mode": "single_scene",
+                "presentation_overlays": [],
+                "multi_scene_logic_met": True,
+                "steps_clear_met": True,
+            }
+        )
+        self.assertIsNone(normalized["single_scene_continuity_met"])
+        self.assertIsNone(normalized["single_scene_variation_met"])
+        self.assertFalse(normalized["multi_scene_logic_met"])
+        self.assertFalse(normalized["role_design_met"])
+        self.assertFalse(normalized["steps_clear_met"])
+        self.assertFalse(normalized["pov_immersive_met"])
+
+    def test_doubao_patch_repair_updates_stage_by_code_and_locks_facts(self) -> None:
+        base = {
+            "video_understanding": {"creator": {"evidence_units": [{"id": "C1"}]}},
+            "stage_analysis": [
+                {
+                    "stage": "S3 使用过程",
+                    "severity": "medium",
+                    "creator_s3": {"evidence_ids": ["C1"]},
+                }
+            ],
+        }
+        repaired = apply_llm_json_patches(
+            base,
+            {"patches": [{"path": "/stage_analysis/S3/creator_s3/multi_scene_logic_met", "value": False}]},
+        )
+        self.assertFalse(repaired["stage_analysis"][0]["creator_s3"]["multi_scene_logic_met"])
+        self.assertNotIn("multi_scene_logic_met", base["stage_analysis"][0]["creator_s3"])
+
+        for path in (
+            "/video_understanding/creator/evidence_units",
+            "/stage_analysis/S3/creator_s3/evidence_ids",
+            "/stage_analysis/S3/creator_evidence_ids",
+            "/stage_analysis/S3/creator_multimodal/channel_evidence_ids/visual",
+            "/stage_analysis/S3/severity",
+        ):
+            with self.assertRaises(SystemExit):
+                apply_llm_json_patches(base, {"patches": [{"path": path, "value": []}]})
+
+    def test_multimodal_evidence_is_pruned_after_stage_specific_repair(self) -> None:
+        result = {
+            "video_understanding": {
+                "creator": {
+                    "evidence_units": [
+                        {"id": "C3", "functions": ["S4_effect"]},
+                        {"id": "C4", "functions": ["S5_trust"]},
+                    ]
+                }
+            },
+            "stage_analysis": [
+                {}, {}, {}, {},
+                {
+                    "creator_evidence_ids": ["C4"],
+                    "creator_multimodal": {
+                        "channel_evidence_ids": {
+                            "visual": ["C4"],
+                            "speech": ["C3", "C4"],
+                        }
+                    },
+                },
+            ],
+        }
+        prune_multimodal_evidence_to_stage(result)
+        refs = result["stage_analysis"][4]["creator_multimodal"]["channel_evidence_ids"]
+        self.assertEqual(refs["visual"], ["C4"])
+        self.assertEqual(refs["speech"], ["C4"])
+
+    def test_provider_detection_keeps_doubao_repair_provider_specific(self) -> None:
+        self.assertTrue(llm_api.is_doubao_model("doubao-seed-2.0-lite"))
+        self.assertFalse(llm_api.is_doubao_model("qwen-omni-turbo"))
 
     def test_proposition_trace_links_s3_s4_and_does_not_change_severity(self) -> None:
         foundation = self._proposition_foundation()

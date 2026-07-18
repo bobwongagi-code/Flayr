@@ -33,20 +33,21 @@ from flayr_core.llm.payload import build_llm_comparison_payload, load_brand_prop
 from flayr_core.llm.pipeline import _process_llm_result
 from flayr_core.utils import write_json
 
-API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-MODEL = "qwen3.5-omni-plus"
-KEYCHAIN_SERVICE = "VidLingo.Qwen"
+API_URL = "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions"
+MODEL = "doubao-seed-2.0-lite"
+KEYCHAIN_SERVICE = "Flayr.AgentPlan"
 
 
-def count_modalities(payload: dict) -> tuple[int, int, int]:
-    """统计 user message 里 text / image_url / input_audio 数量。"""
+def count_modalities(payload: dict) -> tuple[int, int, int, int]:
+    """统计 user message 里的多模态块数量。"""
     content = payload["messages"][1]["content"]
     if isinstance(content, str):
-        return (1, 0, 0)
+        return (1, 0, 0, 0)
     t = sum(1 for c in content if isinstance(c, dict) and c.get("type") == "text")
     i = sum(1 for c in content if isinstance(c, dict) and c.get("type") == "image_url")
     a = sum(1 for c in content if isinstance(c, dict) and c.get("type") == "input_audio")
-    return (t, i, a)
+    v = sum(1 for c in content if isinstance(c, dict) and c.get("type") == "video_url")
+    return (t, i, a, v)
 
 
 def get_stage(result: dict[str, Any], stage_prefix: str) -> dict[str, Any]:
@@ -347,8 +348,8 @@ def main() -> None:
     analysis["s6_flags_required"] = True
     analysis_input = (run / "analysis_input.md").read_text(encoding="utf-8")
 
-    payload = build_llm_comparison_payload(MODEL, analysis_input, facts, analysis)
-    t, i, a = count_modalities(payload)
+    payload = build_llm_comparison_payload(MODEL, analysis_input, facts, analysis, api_url=API_URL)
+    t, i, a, v = count_modalities(payload)
     size_mb = len(json.dumps(payload)) / 1048576
     payload_meta = {
         "model": MODEL,
@@ -357,16 +358,17 @@ def main() -> None:
         "text_count": t,
         "image_count": i,
         "audio_count": a,
+        "video_count": v,
         "size_mb": round(size_mb, 2),
         "postprocess": "_process_llm_result",
     }
-    print(f"[payload] text={t} image={i} audio={a} | {size_mb:.2f} MB", flush=True)
+    print(f"[payload] text={t} image={i} audio={a} video={v} | {size_mb:.2f} MB", flush=True)
 
-    # 硬校验：Phase B 必须挂上音频
-    if a == 0:
-        print("❌ 音频段数为 0 —— Phase B 感官素材未生效，停止。", flush=True)
+    # Agent Plan 用带原声视频片段；旧 provider 可继续用独立音频块。
+    if a == 0 and v == 0:
+        print("❌ 感官片段为 0 —— Phase B 感官素材未生效，停止。", flush=True)
         sys.exit(1)
-    print(f"✅ 感官素材已挂载：{i} 帧 + {a} 段音频", flush=True)
+    print(f"✅ 感官素材已挂载：{i} 帧 + {a} 段音频 + {v} 段视频", flush=True)
 
     write_json(run / "dev_stage2_request.json", payload)
     if args.dry:
@@ -381,7 +383,7 @@ def main() -> None:
 
     api_key = "" if args.reuse_existing else read_llm_api_key(_Args()).strip()
     if not api_key and not args.reuse_existing:
-        print("❌ 无 API key（keychain VidLingo.Qwen）"); sys.exit(1)
+        print("❌ 无 API key（keychain Flayr.AgentPlan）"); sys.exit(1)
 
     if args.reuse_existing:
         records = [
