@@ -11,7 +11,7 @@ Flayr 接收一条**爆款参考视频**和一条**达人视频**，结合连续
 | 能力 | 说明 |
 |------|------|
 | 视频转写 | Whisper 本地转写，支持东南亚语言（马来语/泰语/印尼语）自动识别，提供权威口播时间戳 |
-| 视频理解 | 豆包 Seed 2.0 Lite（Agent Plan）读取连续画面；口播语义来自 Whisper，音轨由本地技术质检补充 |
+| 视频理解 | 多模态视觉模型读取连续画面；口播语义来自 Whisper，音轨由本地技术质检补充 |
 | 音频边界 | 音量、静音和峰值风险是可复核硬质检；语气/BGM/音效只作观察，不进入差距等级 |
 | 结构化分析 | 对照 Chimera 6 槽位结构库（S1-S6），逐段对比达人与爆款差距 |
 | 改进建议 | 按 GMV 杠杆排序的提升点，含话术、画面、AI 改造 prompt |
@@ -118,9 +118,9 @@ python3 scripts/flayr.py \
   --creator-video 达人.mp4 \
   --product-name "儿童牙膏" \
   --whisper-model /path/to/ggml-large-v3-turbo-q5_0.bin \
-  --llm-model doubao-seed-2.0-lite \
-  --llm-api-url https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions \
-  --llm-api-key-keychain-service Flayr.AgentPlan \
+  --llm-model qwen3.6-plus \
+  --llm-api-url https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions \
+  --llm-api-key-keychain-service VidLingo.Qwen \
   improve
 ```
 
@@ -131,13 +131,13 @@ python3 scripts/flayr.py \
 | `--benchmark-video` | 爆款参考视频路径 |
 | `--creator-video` | 达人视频路径 |
 | `--product-name` | 产品名称 |
-| `--llm-model` | 全模态模型名称（推荐 `doubao-seed-2.0-lite`） |
+| `--llm-model` | 多模态视觉模型名称（推荐 `qwen3.6-plus`） |
 | `--llm-api-url` | OpenAI 兼容 API 端点 |
 | `--llm-api-key-keychain-service` | macOS Keychain 服务名（或用 `--llm-api-key-env` 走环境变量） |
 | `--llm-include-images` | 默认启用：完整 Step-0 + 单视频事实抽取 + omni 对比链；`--no-llm-include-images` 仅保留给旧文本路径兼容调试 |
 | `--whisper-model` | Whisper 模型文件路径 |
 | `--skip-whisper` | 跳过转写（用于调试） |
-| `--ocr-mode auto/on/off` | 字幕 OCR 轨。默认 `auto`：复用 Agent Plan 视觉模型和 key；`off` 可关闭 |
+| `--ocr-mode auto/on/off` | 字幕 OCR 轨。默认 `auto`：复用分析模型的视觉能力和 key；`off` 可关闭 |
 
 ### 提案样片 AI 后端（可选）
 
@@ -150,7 +150,7 @@ python3 scripts/flayr.py ... improve \
   --llm-api-key-keychain-service <DashScope服务名>
 ```
 
-Wan/CosyVoice 是独立的 DashScope 可选服务，不属于 Qwen 分析链；默认关闭。当前命令行复用分析 key，使用 Agent Plan 分析时不要同时开启这些后端。
+Wan/CosyVoice 是独立的 DashScope 可选服务，不属于 Qwen 分析链；默认关闭。
 
 | 参数 | 说明 |
 |------|------|

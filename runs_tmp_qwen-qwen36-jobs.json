@@ -1,0 +1,244 @@
+{
+  "experiment": "qwen-qwen36-v2-polar-gmv-fix",
+  "provider": "qwen",
+  "common_args": [
+    "--llm-model",
+    "qwen3.6-plus",
+    "--llm-api-url",
+    "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+    "--llm-api-key-keychain-service",
+    "VidLingo.Qwen",
+    "--llm-include-images",
+    "--llm-image-limit",
+    "12",
+    "--ocr-mode",
+    "auto"
+  ],
+  "jobs": [
+    {
+      "name": "are_xie",
+      "creator": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/are_xie/达人视频.mp4",
+      "benchmark": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/are_xie/爆款视频.mp4",
+      "args": [
+        "--product-name",
+        "Pentavite",
+        "--product-category",
+        "保健品 - 女性生理期营养补充",
+        "--target-market",
+        "my"
+      ],
+      "proposition_key": "are_xie",
+      "output_dir": "runs/qwen-qwen36-v2/are_xie"
+    },
+    {
+      "name": "kakwanreview",
+      "creator": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/kakwanreview/达人视频.mp4",
+      "benchmark": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/kakwanreview/标杆视频.mp4",
+      "args": [
+        "--product-name",
+        "一次性马桶刷",
+        "--product-category",
+        "清洁用品 - 一次性马桶刷",
+        "--target-market",
+        "my"
+      ],
+      "proposition_key": "kakwanreview",
+      "output_dir": "runs/qwen-qwen36-v2/kakwanreview"
+    },
+    {
+      "name": "tashadiyana",
+      "creator": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/tashadiyana/达人视频.mp4",
+      "benchmark": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/tashadiyana/爆款视频-无小孩出镜.mp4",
+      "args": [
+        "--product-name",
+        "儿童泡沫牙膏",
+        "--product-category",
+        "口腔护理 - 儿童泡沫牙膏",
+        "--target-market",
+        "my"
+      ],
+      "proposition_key": "tashadiyana",
+      "output_dir": "runs/qwen-qwen36-v2/tashadiyana"
+    },
+    {
+      "name": "wukoubo-c0",
+      "creator": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/wukoubo/达人视频.mp4",
+      "benchmark": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/wukoubo/标杆视频.mp4",
+      "args": [
+        "--product-name",
+        "便携榨汁机",
+        "--product-category",
+        "小家电 - 便携榨汁机",
+        "--target-market",
+        "my"
+      ],
+      "proposition_key": "juicer",
+      "output_dir": "runs/qwen-qwen36-v2/wukoubo-c0"
+    },
+    {
+      "name": "carslan-b0",
+      "creator": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/达人视频.mp4",
+      "benchmark": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/标杆视频.mp4",
+      "args": [
+        "--product-name",
+        "CARSLAN 卡姿兰定妆粉饼",
+        "--product-category",
+        "美妆 - 定妆",
+        "--target-market",
+        "auto"
+      ],
+      "proposition_key": "carslan",
+      "output_dir": "runs/qwen-qwen36-v2/carslan-b0"
+    },
+    {
+      "name": "simplus",
+      "creator": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/simplus/达人视频.mp4",
+      "benchmark": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/simplus/标杆simplus.mp4",
+      "args": [
+        "--product-name",
+        "挂烫机",
+        "--product-category",
+        "家用电器 - 挂烫机",
+        "--target-market",
+        "auto"
+      ],
+      "proposition_key": "simplus",
+      "output_dir": "runs/qwen-qwen36-v2/simplus"
+    },
+    {
+      "name": "wukoubo-c1",
+      "creator": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/wukoubo/达人视频1.mp4",
+      "benchmark": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/wukoubo/标杆视频.mp4",
+      "args": [
+        "--product-name",
+        "便携榨汁机",
+        "--product-category",
+        "小家电 - 便携榨汁机",
+        "--target-market",
+        "my"
+      ],
+      "proposition_key": "juicer",
+      "output_dir": "runs/qwen-qwen36-v2/wukoubo-c1"
+    },
+    {
+      "name": "youkoubo-c0",
+      "creator": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/youkoubo/达人视频.mp4",
+      "benchmark": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/youkoubo/标杆视频1.mp4",
+      "args": [
+        "--product-name",
+        "便携榨汁机",
+        "--product-category",
+        "小家电 - 便携榨汁机",
+        "--target-market",
+        "my"
+      ],
+      "proposition_key": "juicer",
+      "output_dir": "runs/qwen-qwen36-v2/youkoubo-c0"
+    },
+    {
+      "name": "carslan-b1",
+      "creator": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/达人视频.mp4",
+      "benchmark": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/标杆视频1.mp4",
+      "args": [
+        "--product-name",
+        "CARSLAN 卡姿兰定妆粉饼",
+        "--product-category",
+        "美妆 - 定妆",
+        "--target-market",
+        "auto"
+      ],
+      "proposition_key": "carslan",
+      "output_dir": "runs/qwen-qwen36-v2/carslan-b1"
+    },
+    {
+      "name": "colorkey-b1",
+      "creator": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/达人视频.mp4",
+      "benchmark": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/标杆视频1.mp4",
+      "args": [
+        "--product-name",
+        "COLORKEY 珂拉琪面膜",
+        "--product-category",
+        "护肤 - 面膜",
+        "--target-market",
+        "auto"
+      ],
+      "proposition_key": "colorkey",
+      "output_dir": "runs/qwen-qwen36-v2/colorkey-b1"
+    },
+    {
+      "name": "colorblu-c0",
+      "creator": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/Color blu/达人.mp4",
+      "benchmark": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/Color blu/标杆1.3万单.mp4",
+      "args": [
+        "--product-name",
+        "Color Blu 快干防水密封剂",
+        "--product-category",
+        "五金工具 / 五金 / 胶水、胶带、密封条",
+        "--target-market",
+        "th"
+      ],
+      "proposition_key": "colorblu_waterproof_sealant",
+      "output_dir": "runs/qwen-qwen36-v2/colorblu-c0"
+    },
+    {
+      "name": "colorblu-c1",
+      "creator": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/Color blu/达人1.mp4",
+      "benchmark": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/Color blu/标杆1.3万单.mp4",
+      "args": [
+        "--product-name",
+        "Color Blu 快干防水密封剂",
+        "--product-category",
+        "五金工具 / 五金 / 胶水、胶带、密封条",
+        "--target-market",
+        "th"
+      ],
+      "proposition_key": "colorblu_waterproof_sealant",
+      "output_dir": "runs/qwen-qwen36-v2/colorblu-c1"
+    },
+    {
+      "name": "carslan-powder-c0",
+      "creator": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/达人粉饼.mp4",
+      "benchmark": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/标杆粉饼.mp4",
+      "args": [
+        "--product-name",
+        "CARSLAN 2.0 控油粉饼",
+        "--product-category",
+        "美妆个护 / 美妆 / 散粉",
+        "--target-market",
+        "th"
+      ],
+      "proposition_key": "carslan",
+      "output_dir": "runs/qwen-qwen36-v2/carslan-powder-c0"
+    },
+    {
+      "name": "carslan-powder-c1",
+      "creator": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/达人粉饼1.mp4",
+      "benchmark": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/标杆粉饼.mp4",
+      "args": [
+        "--product-name",
+        "CARSLAN 2.0 控油粉饼",
+        "--product-category",
+        "美妆个护 / 美妆 / 散粉",
+        "--target-market",
+        "th"
+      ],
+      "proposition_key": "carslan",
+      "output_dir": "runs/qwen-qwen36-v2/carslan-powder-c1"
+    },
+    {
+      "name": "colorkey-lip-c0",
+      "creator": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/达人口红1.mp4",
+      "benchmark": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/标杆口红.mp4",
+      "args": [
+        "--product-name",
+        "COLORKEY Silky Creamy Matte Lip Mud 唇彩",
+        "--product-category",
+        "美妆个护 / 美妆 / 口红与唇彩",
+        "--target-market",
+        "th"
+      ],
+      "proposition_key": "colorkey_lip_mud",
+      "output_dir": "runs/qwen-qwen36-v2/colorkey-lip-c0"
+    }
+  ]
+}
