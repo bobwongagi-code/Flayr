@@ -11,7 +11,7 @@
      权重政策（W 表）在代码。
   ④ 事实不支撑则不判断：双方执行分均为 0、或 S5 双方均无真背书 → "均未涉及"，不进公式。
 
-架构不变量：推导失败（字段缺失/不合法/任何异常）必须优雅降级——保留模型 severity 和
+架构不变量：推导失败（字段缺失/不合法/任何异常）必须优雅降级--保留模型 severity 和
 既有 stabilize 护栏结果，把原因写进 severity_derivation.status，绝不抛错拖垮主分析流程。
 每阶段附 severity_derivation 算法溯源（E/W/C/S/依据），满足可解释证据链要求。
 
@@ -31,7 +31,7 @@ from .repair import has_hard_endorsement
 ARCHETYPE_W: dict[str, dict[str, float]] = {
     # 高决策门槛 + 功能理性（口服保健品/护肤等）：信任背书与效果验证是说服核心
     # 2026-06-12 任务5 首次重拟合（60 标签，S1 锁框架红线不进搜索）：
-    # 理性 S3 1.0→1.2、感官 S2/S3 1.0→1.6——中段呈现权重整体上调，36/60→40/60 severe 7→5
+    # 理性 S3 1.0→1.2、感官 S2/S3 1.0→1.6--中段呈现权重整体上调，36/60→40/60 severe 7→5
     # 2026-06-12 晃动信号上线后二次拟合：理性 S2/S3 1.2→1.4（45/60 severe 2）
     # 2026-06-13 repeat5 稳定口径三次拟合：理性 S3 1.4→1.6（众数语料 43→44/60 severe 2）
     "high_decision_rational": {"S1": 1.5, "S2": 1.4, "S3": 1.6, "S4": 1.4, "S5": 1.6, "S6": 1.2},
@@ -50,10 +50,10 @@ _DEMO_RE = re.compile(r"闻|嗅|按压|挤出|涂抹|擦拭|冲水|冲洗|冲净
 def _reconcile_operator_tier(profile: dict[str, Any] | None, analysis: dict[str, Any] | None) -> None:
     """运营档位优先（降级链）：运营给的 price_tier 覆盖模型世界知识判断。
 
-    price_tier 需要的是"该品牌型号的实际市场价位"——视频通常不报价、模型对本地品牌
+    price_tier 需要的是"该品牌型号的实际市场价位"--视频通常不报价、模型对本地品牌
     价位无谱，运营（领域专家）最可靠。降级链：运营档位 > 模型判断（model_fallback）。
     触发器（2026-06-13）：impulse+high 时 impulse_low_price 原型（背书权重 0.6）可能不适用，
-    告警人工复议——这是 price_tier 在当前架构唯一的非冗余价值点。
+    告警人工复议--这是 price_tier 在当前架构唯一的非冗余价值点。
     """
     if not isinstance(profile, dict):
         return
@@ -76,7 +76,7 @@ def _select_archetype(profile: dict[str, Any] | None) -> str | None:
         return None
     if profile.get("decision_threshold") == "impulse":
         return "impulse_low_price"
-    # 框架"客单越低 CTA 权重越高"：低客单+功能性日用品按冲动品原型处理——
+    # 框架"客单越低 CTA 权重越高"：低客单+功能性日用品按冲动品原型处理--
     # round3 实测模型对马桶刷的 decision_threshold 在 considered/impulse 间摆（4:1），
     # 而 price_tier=low 稳定，政策锚定在稳的事实上。
     if profile.get("price_tier") == "low" and profile.get("drive_type") == "functional":
@@ -103,7 +103,7 @@ _NO_ENDORSEMENT = _Endorsement(False, False, False)
 
 def _side_endorsement(result: dict[str, Any], side: str) -> _Endorsement:
     """从 Stage1 facts 聚合该侧硬背书存在性（口播/画面各一）：代码聚合、不让 Stage2 重判（绕过判断层）。
-    作用域：该侧【全部 unit】——证书/背书出现在任一 unit 即算，不依赖 functions 阶段标记
+    作用域：该侧【全部 unit】--证书/背书出现在任一 unit 即算，不依赖 functions 阶段标记
     （functions 是模型 descriptive 输出、会误标，挂上去会漏检真背书；背书归不归 S5 由本就只在 S5 闸消费保证）。"""
     vu = result.get("video_understanding")
     side_vu = vu.get(side) if isinstance(vu, dict) else None
@@ -753,7 +753,7 @@ def _s6_cta_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
         if flag.get("compliance_risk") is True:
             return 0.5 if direct or path or soft_invitation else 0.0
         if not direct and not path:
-            # 结尾的“感兴趣/需要的朋友 + 明确优惠”仍是软促单：没有路径，绝对质量仍弱，
+            # 结尾的"感兴趣/需要的朋友 + 明确优惠"仍是软促单：没有路径，绝对质量仍弱，
             # 但不能与完全没有面向用户购买动作混为一谈。
             if soft_invitation and flag.get("offer_or_incentive_clear") is True:
                 return 1.5 if fit else 1.0
@@ -941,7 +941,7 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
     c_demo = stage.get("creator_has_effect_demo")
     if b_demo is None and c_demo is None:
         b_demo, c_demo = bool(_DEMO_RE.search(b_vis)), bool(_DEMO_RE.search(c_vis))
-    # S3 使用过程放大：模型基于结构库 S3-A~E 判出的布尔。无正则兜底——布尔缺失（存量结果）
+    # S3 使用过程放大：模型基于结构库 S3-A~E 判出的布尔。无正则兜底--布尔缺失（存量结果）
     # 则不触发，保留 S3 旧空白行为（derive.py 此前无任何 S3 专属逻辑）。用严格 is True/is False，
     # 仅在明确"标杆演示了使用、达人没演"时放大，不确定（None）不触发，保守。
     b_usage = stage.get("benchmark_has_usage_demo")
@@ -960,7 +960,7 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
         if stage_id == "S1" and not multimodal_active and _s1_bench_anchors_only(stage, relevance):
             return finish({"status": "derived", "severity": "medium", "E": 0,
                            "reason": reason + "；命题锚下限：标杆钩子锚定本品核心命题、达人只做泛留人"})
-        # S4 的基础执行分是离散档，可能把“双方都有可信效果”都压成 1.0；若既有
+        # S4 的基础执行分是离散档，可能把"双方都有可信效果"都压成 1.0；若既有
         # 结构化观察已明确标杆强且最大化、达人仅清楚但单薄，应在持平红线前保留
         # medium 差距。双方效果仍须满足可信门槛，不能由口播或氛围替代视觉证据。
         if stage_id == "S4":
@@ -968,13 +968,20 @@ def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] 
             if thin_floor:
                 return finish({"status": "derived", "severity": "medium", "E": 0,
                                "reason": reason + thin_reason})
+        # 极性红线软化（2026-07）：
+        # E≤0 不总是意味着"没差距"--执行分为离散档，可能把真差距的 creator/bench 压在同档。
+        # 在 E≤0 且 model 已出更可靠判断时，保留模型原判，避免把模型正确的 medium/large 压成 small。
+        model = stage.get("model_severity") or stage.get("severity")
+        if isinstance(model, str) and model.strip() in {"medium", "large"}:
+            return finish({"status": "derived", "severity": model, "E": 0,
+                           "reason": reason + "；执行分持平但模型判定存在差距，保留模型原判"})
         return finish({"status": "derived", "severity": "small", "E": 0,
                        "reason": reason + "；达人持平或更优（亮点，零差距红线）"})
 
     w = (weights or {}).get(stage_id, 1.0)
     # 痛点命中系数：差距落在核心决策因素上 → 放大；与痛点无关 → 衰减；事实完全缺失 → 中性。
     # 只作用于卖点链相关阶段（S1 钩子选题 + S2-S5）：S6 促单功能与产品痛点正交
-    # （CTA 差距永远不会"命中痛点"，按 0.8 惩罚是范畴错误——round4 kakwan S6 实证），
+    # （CTA 差距永远不会"命中痛点"，按 0.8 惩罚是范畴错误--round4 kakwan S6 实证），
     # 促单的消费者侧权重已由客单价编入 W（冲动品 1.8）。
     if stage_id == "S6":
         c_factor = 1.0
@@ -1081,7 +1088,7 @@ def derive_severity_from_facts(result: dict[str, Any], analysis: dict[str, Any] 
     archetype = _select_archetype(profile)
     weights = ARCHETYPE_W.get(archetype) if archetype else None
     painpoints = _painpoint_tokens([str(p) for p in (profile or {}).get("painpoints") or [] if str(p).strip()])
-    # S5 硬背书：从 Stage1 facts 代码聚合每侧 ①②，绕过 Stage2 判断。仅 S5 闸消费——无 S5 阶段则不算
+    # S5 硬背书：从 Stage1 facts 代码聚合每侧 ①②，绕过 Stage2 判断。仅 S5 闸消费--无 S5 阶段则不算
     endorsement = ({side: _side_endorsement(result, side) for side in ("creator", "benchmark")}
                    if any("S5" in str(s.get("stage") or "") for s in stages if isinstance(s, dict)) else {})
 
