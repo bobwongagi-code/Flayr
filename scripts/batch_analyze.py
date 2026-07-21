@@ -23,7 +23,7 @@ jobs.json 格式：
 
 约定：
 - 每个 job 输出到 runs/sample-<name>（或 job["output_dir"]）。
-- 已有 analysis_result.json 的 job 自动跳过（断点续跑）；失败的 job 没有该文件，
+- 已有 analysis.json 的 job 自动跳过（断点续跑）；失败的 job 没有该文件，
   重新启动 runner 会自动重试它。
 - 自动加 --reuse-preprocessing：同一 output-dir 重跑时复用已有抽帧/转写/轨，省时。
 - 一个 job 失败只标 failed，不影响其余 job。
@@ -208,7 +208,7 @@ def _run_jobs(
     status: dict = {"started": now(), "concurrency": concurrency, "jobs": {}}
     for job in jobs:
         out = job_output_dir(job, runs_dir)
-        done = (out / "analysis_result.json").is_file()
+        done = (out / "analysis.json").is_file()
         status["jobs"][job["name"]] = {"state": "done" if done else "pending", "output_dir": str(out)}
     write_status(status_path, status)
 
@@ -243,7 +243,7 @@ def _run_jobs(
                     continue
                 log_file.close()
                 out = job_output_dir(job, runs_dir)
-                ok = (out / "analysis_result.json").is_file()
+                ok = proc.returncode == 0 and (out / "analysis.json").is_file()
                 status["jobs"][job["name"]].update(
                     {"state": "done" if ok else "failed", "rc": proc.returncode, "ended": now()}
                 )
@@ -267,11 +267,12 @@ def _run_jobs(
         raise
 
     done_n = sum(1 for item in status["jobs"].values() if item["state"] == "done")
+    failed_n = sum(1 for item in status["jobs"].values() if item["state"] == "failed")
     status["finished"] = now()
     status["summary"] = f"{done_n}/{len(jobs)} done"
     write_status(status_path, status)
-    print(f"[batch] 完成 {status['summary']}")
-    return 0
+    print(f"[batch] {status['summary']}")
+    return 1 if failed_n else 0
 
 
 if __name__ == "__main__":
