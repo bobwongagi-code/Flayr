@@ -225,3 +225,33 @@ def _merge_evidence_windows(
             }
         )
     return merged
+
+
+def _merge_short_evidence_windows(
+    windows: list[dict[str, Any]],
+    minimum_seconds: float,
+) -> list[dict[str, Any]]:
+    """Merge sub-minimum adjacent units so providers never receive invalid tiny clips."""
+    merged: list[dict[str, Any]] = []
+    index = 0
+    while index < len(windows):
+        current = dict(windows[index])
+        if float(current["end"]) - float(current["start"]) >= minimum_seconds:
+            merged.append(current)
+            index += 1
+            continue
+        if index + 1 < len(windows):
+            following = windows[index + 1]
+            current["label"] = f"{current['label']}+{following['label']}"
+            current["end"] = max(float(current["end"]), float(following["end"]))
+            merged.append(current)
+            index += 2
+            continue
+        if merged:
+            merged[-1]["label"] = f"{merged[-1]['label']}+{current['label']}"
+            merged[-1]["end"] = max(float(merged[-1]["end"]), float(current["end"]))
+        else:
+            merged.append(current)
+        index += 1
+    return merged
+
