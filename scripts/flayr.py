@@ -467,6 +467,30 @@ def _file_metadata(path: Any, include_sha256: bool = False) -> dict[str, Any] | 
     return metadata
 
 
+def _git_commit_sha() -> str:
+    """返回当前 git commit short hash，不可用时回退 'unknown'。"""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5)
+        return result.stdout.strip() if result.returncode == 0 else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _binary_version(bin_deps: dict[str, Any], key: str) -> str:
+    """返回工具路径 + 版本第一行，不可用返回 'missing'。"""
+    path = deps.get(key) if isinstance(bin_deps, dict) else None
+    if not path:
+        return "missing"
+    try:
+        result = subprocess.run([str(path), "-version"], capture_output=True, text=True, timeout=5)
+        line = result.stdout.split('\n')[0] if result.stdout else "unknown"
+        return f"{path}:{line.strip()}"
+    except Exception:
+        return f"{path}:run_failed"
+
+
 def build_preprocess_fingerprint(
     video_path: Path,
     deps: dict[str, Any],
@@ -476,15 +500,16 @@ def build_preprocess_fingerprint(
     return {
         "cache_schema_version": PREPROCESS_CACHE_SCHEMA_VERSION,
         "pipeline_version": PREPROCESS_PIPELINE_VERSION,
+        "code_commit": _git_commit_sha(),
         "source_video": _file_metadata(video_path, include_sha256=True),
         "media_tools": {
-            "ffmpeg": str(deps.get("ffmpeg") or ""),
-            "ffprobe": str(deps.get("ffprobe") or ""),
+            "ffmpeg": _binary_version(deps, "ffmpeg"),
+            "ffprobe": _binary_version(deps, "ffprobe"),
         },
         "transcription": {
             "skip_whisper": bool(getattr(args, "skip_whisper", False)),
             "requested_language": str(getattr(args, "whisper_language", "auto") or "auto"),
-            "command": str(deps.get("whisper") or ""),
+            "command": _binary_version(deps, "whisper"),
             "model": _file_metadata(deps.get("whisper_model")),
             "thai_model": _file_metadata(deps.get("whisper_model_th")),
         },
@@ -509,7 +534,7 @@ def load_existing_video_result(
     role_dir: Path,
     expected_fingerprint: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """复用上次预处理；缺少或不匹配指纹的缓存一律重抽。"""
+    """复用上次预处理；缺少、不匹配、未完成的缓存一律重抽。"""
     cache = role_dir / "_preprocess.json"
     if not cache.is_file():
         return None
@@ -519,9 +544,19 @@ def load_existing_video_result(
         return None
     if info.get("preprocess_fingerprint") != expected_fingerprint:
         return None
+    if not info.get("preprocess_completed"):
+        return None
     frames_dir = Path(str(info.get("frames_dir") or ""))
     transcript = Path(str(info.get("transcript_path") or ""))
-    if not frames_dir.is_dir() or not transcript.is_file():
+    if not frames_dir.is_dir():
+        return None
+    if not transcript.is_file() or _is_stale_placeholder(transcript):
+        return None
+    segment_path = Path(str(info.get("transcript_segments_path") or transcript.with_name(transcript.stem + ".txt")))
+    if not segment_path.is_file() or _is_stale_placeholder(segment_path):
+        return None
+    audio_path = Path(str(info.get("audio_path") or ""))
+    if audio_path and not audio_path.is_file():
         return None
     return info
 
@@ -646,6 +681,7 @@ def process_video(
     result["preprocess_fingerprint"] = build_preprocess_fingerprint(video_path, deps, args)
 
     # 落盘预处理结果，供 --reuse-preprocessing 下次复用（即使本次 LLM 阶段后续失败也已写）。
+    result["preprocess_completed"] = True
     write_json(role_dir / "_preprocess.json", result)
     return result
 
@@ -854,3 +890,25 @@ def print_scope_summary(
 
 if __name__ == "__main__":
     sys.exit(main())
+
+def _git_commit_sha() -> str:
+    """返回当前 git commit short hash，不可用时回退 'unknown'。"""
+    try:
+        result = subprocess.run(
+            ["git", "-C", __file__, "rev-parse", "--short", "HEAD"],
+        capture_output=True, text=True, timeout=5)
+        return result.stdout.strip() if result.returncode == 0 else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _binary_version(bin_path: str | None) -> str:
+    """返回 ffmpeg/ffprobe 版本字符串，不可用返回 'missing'。"""
+    if not bin_path:
+        return "missing"
+    try:
+        result = subprocess.run([bin_path, "-version"], capture_output=True, text=True, timeout=5)
+        line = result.stdout.split('\n')[0] if result.stdout else "unknown"
+        return line.strip()
+    except Exception:
+        return "missing"

@@ -83,7 +83,7 @@ from ..postprocess.validate import (
 
 
 # 修改 build_video_fact_payload 的语义合同后必须递增，避免旧 facts 与新判断规则混用。
-VIDEO_FACT_CACHE_SCHEMA_VERSION = 7
+VIDEO_FACT_CACHE_SCHEMA_VERSION = 8
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +314,9 @@ def _video_fact_cache_key(args: argparse.Namespace, analysis: dict[str, Any], ro
         "source_video_sha256": _source_video_hash(analysis, role),
         "role": role,
         "llm_model": str(args.llm_model or ""),
+        "llm_api_url": str(args.llm_api_url or ""),
         "foundation_digest": _stable_digest(foundation),
+        "temperature": 0.0,
     }
 
 
