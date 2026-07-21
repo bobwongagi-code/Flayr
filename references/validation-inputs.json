@@ -2,7 +2,10 @@
   "schema_version": 4,
   "description": "Flayr 从零验证输入清单。primary 用于主回归；已参与规则讨论的历史 holdout 已降级为 seen_validation，不得用于最终泛化验收。产品级 GT 统计必须先通过锁定事实的 comparison_eligibility 审计。",
   "comparison_eligibility_policy": {
-    "product_gt_scopes": ["same_product", "comparable_variant"],
+    "product_gt_scopes": [
+      "same_product",
+      "comparable_variant"
+    ],
     "cross_product_scope": "S1/S6 可作结构参考，S2-S5 不纳入产品级 GT、差距或改进统计",
     "same_task_structure_scope": "仅运营显式确认的同类同任务、非同 SKU 样本可用；允许 S1-S4/S6 的结构执行 GT，禁止比较具体配方、参数、品牌或功效优劣，S5 默认不纳入",
     "pending_scope": "未经当前 facts 审计的样本不得进入产品级指标"
@@ -23,10 +26,30 @@
     ],
     "required_ground_truth": {
       "partition": "blind",
-      "stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
-      "severity_values": ["small", "medium", "large"],
-      "stage_oracles": ["creator_execution", "benchmark_execution", "relation", "decision_event_ids", "reason", "confidence"],
-      "decision_gt": ["top_root_causes"]
+      "stages": [
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S5",
+        "S6"
+      ],
+      "severity_values": [
+        "small",
+        "medium",
+        "large"
+      ],
+      "stage_oracles": [
+        "creator_execution",
+        "benchmark_execution",
+        "relation",
+        "decision_event_ids",
+        "reason",
+        "confidence"
+      ],
+      "decision_gt": [
+        "top_root_causes"
+      ]
     }
   },
   "samples": [
@@ -42,7 +65,14 @@
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/are_xie/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "comparable_variant",
-      "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
+      "direct_product_stages": [
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S5",
+        "S6"
+      ],
       "metric_scope": "product_gt"
     },
     {
@@ -56,7 +86,14 @@
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/kakwanreview/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "same_product",
-      "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
+      "direct_product_stages": [
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S5",
+        "S6"
+      ],
       "metric_scope": "product_gt"
     },
     {
@@ -70,7 +107,14 @@
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/tashadiyana/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "same_product",
-      "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
+      "direct_product_stages": [
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S5",
+        "S6"
+      ],
       "metric_scope": "product_gt"
     },
     {
@@ -85,7 +129,14 @@
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/bluetoothwanju/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "comparable_variant",
-      "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
+      "direct_product_stages": [
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S5",
+        "S6"
+      ],
       "metric_scope": "product_gt"
     },
     {
@@ -99,7 +150,9 @@
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/skincare/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "cross_product",
-      "direct_product_stages": ["S1"],
+      "direct_product_stages": [
+        "S1"
+      ],
       "metric_scope": "structure_only"
     },
     {
@@ -114,7 +167,10 @@
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/wukoubo/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "cross_product",
-      "direct_product_stages": ["S1", "S6"],
+      "direct_product_stages": [
+        "S1",
+        "S6"
+      ],
       "metric_scope": "structure_only"
     },
     {
@@ -143,7 +199,14 @@
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "same_product",
-      "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
+      "direct_product_stages": [
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S5",
+        "S6"
+      ],
       "metric_scope": "product_gt"
     },
     {
@@ -157,7 +220,14 @@
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "same_product",
-      "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
+      "direct_product_stages": [
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S5",
+        "S6"
+      ],
       "metric_scope": "product_gt"
     },
     {
@@ -170,7 +240,14 @@
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/paint/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "comparable_variant",
-      "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
+      "direct_product_stages": [
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S5",
+        "S6"
+      ],
       "metric_scope": "product_gt"
     },
     {
@@ -183,7 +260,14 @@
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/simplus/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "comparable_variant",
-      "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
+      "direct_product_stages": [
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S5",
+        "S6"
+      ],
       "metric_scope": "product_gt"
     },
     {
@@ -196,7 +280,10 @@
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/mmx/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "cross_product",
-      "direct_product_stages": ["S1", "S6"],
+      "direct_product_stages": [
+        "S1",
+        "S6"
+      ],
       "metric_scope": "structure_only"
     },
     {
@@ -220,16 +307,6 @@
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/youkoubo/达人视频.mp4"
     },
     {
-      "id": "youkoubo-c1",
-      "group": "seen_validation",
-      "product_name": "便携榨汁机",
-      "product_category": "小家电 - 便携榨汁机",
-      "target_market": "my",
-      "product_tier": "high",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/youkoubo/标杆视频1.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/youkoubo/达人视频1.mp4"
-    },
-    {
       "id": "carslan-b1",
       "group": "seen_validation",
       "product_name": "CARSLAN 卡姿兰定妆粉饼",
@@ -247,10 +324,10 @@
       "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/标杆视频1.mp4",
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/达人视频.mp4"
     },
-  {
-    "id": "colorblu-c0",
-    "proposition_key": "colorblu_waterproof_sealant",
-    "group": "seen_validation",
+    {
+      "id": "colorblu-c0",
+      "proposition_key": "colorblu_waterproof_sealant",
+      "group": "seen_validation",
       "product_name": "Color Blu 快干防水密封剂",
       "product_category": "五金工具 / 五金 / 胶水、胶带、密封条",
       "target_market": "th",
@@ -259,13 +336,19 @@
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/Color blu/达人.mp4",
       "comparison_scope_status": "operator_verified_same_task_structure",
       "comparison_scope": "same_task_structure",
-      "direct_product_stages": ["S1", "S2", "S3", "S4", "S6"],
+      "direct_product_stages": [
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S6"
+      ],
       "metric_scope": "structure_execution_gt"
     },
-  {
-    "id": "colorblu-c1",
-    "proposition_key": "colorblu_waterproof_sealant",
-    "group": "seen_validation",
+    {
+      "id": "colorblu-c1",
+      "proposition_key": "colorblu_waterproof_sealant",
+      "group": "seen_validation",
       "product_name": "Color Blu 快干防水密封剂",
       "product_category": "五金工具 / 五金 / 胶水、胶带、密封条",
       "target_market": "th",
@@ -274,13 +357,19 @@
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/Color blu/达人1.mp4",
       "comparison_scope_status": "operator_verified_same_task_structure",
       "comparison_scope": "same_task_structure",
-      "direct_product_stages": ["S1", "S2", "S3", "S4", "S6"],
+      "direct_product_stages": [
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S6"
+      ],
       "metric_scope": "structure_execution_gt"
     },
-  {
-    "id": "carslan-powder-c0",
-    "proposition_key": "carslan",
-    "group": "seen_validation",
+    {
+      "id": "carslan-powder-c0",
+      "proposition_key": "carslan",
+      "group": "seen_validation",
       "product_name": "CARSLAN 2.0 控油粉饼",
       "product_category": "美妆个护 / 美妆 / 散粉",
       "target_market": "th",
@@ -290,13 +379,20 @@
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/达人粉饼.mp4",
       "comparison_scope_status": "facts_verified_same_product",
       "comparison_scope": "same_product",
-      "direct_product_stages": ["S1", "S2", "S3", "S4", "S5", "S6"],
+      "direct_product_stages": [
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S5",
+        "S6"
+      ],
       "metric_scope": "product_gt"
     },
-  {
-    "id": "carslan-powder-c1",
-    "proposition_key": "carslan",
-    "group": "seen_validation",
+    {
+      "id": "carslan-powder-c1",
+      "proposition_key": "carslan",
+      "group": "seen_validation",
       "product_name": "CARSLAN 2.0 控油粉饼",
       "product_category": "美妆个护 / 美妆 / 散粉",
       "target_market": "th",
@@ -305,7 +401,13 @@
       "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/达人粉饼1.mp4",
       "comparison_scope_status": "operator_verified_same_task_structure",
       "comparison_scope": "same_task_structure",
-      "direct_product_stages": ["S1", "S2", "S3", "S4", "S6"],
+      "direct_product_stages": [
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S6"
+      ],
       "metric_scope": "structure_execution_gt"
     },
     {
