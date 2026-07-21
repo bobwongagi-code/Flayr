@@ -43,12 +43,25 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SAFE_JOB_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-RUNNER_OWNED_FLAGS = {
+RUNNER_OWNED_FLAGS = frozenset({
     "--benchmark-video",
     "--creator-video",
     "--output-dir",
     "--reuse-preprocessing",
-}
+    # 凭据与网络参数：禁止作业覆盖，防止低信任作业配置窃取高信任凭据
+    "--llm-model",
+    "--llm-api-url",
+    "--llm-api-key-env",
+    "--llm-api-key-keychain-service",
+    "--llm-api-key-keychain-account",
+    "--translation-model",
+    "--proposal-video-backend",
+    "--proposal-video-model",
+    "--proposal-video-api-url",
+    "--proposal-video-api-key-keychain-service",
+    "--proposal-video-api-key-keychain-account",
+    "--proposal-video-api-key-env",
+})
 
 
 def now() -> str:
