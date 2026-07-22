@@ -21,16 +21,16 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .artifacts import format_seconds, get_frame_entries, sample_evenly
+from .artifacts import format_seconds, get_frame_entries, parse_timestamp_seconds, sample_evenly
 from .llm.api import call_llm_api, extract_chat_completion_text, image_to_data_url
+from .resources import ResourceBudget, ResourceBudgetExceeded, current_budget, finite_nonnegative
 from .utils import write_json
 
 
-OCR_MODEL = "doubao-seed-2.0-lite"
+OCR_MODEL = ""
 # 稀疏抽帧目标间隔（秒）：字幕变化通常持续数秒，2.5s 采样够用且把调用量砍半。
 SAMPLE_INTERVAL_SEC = 2.5
-# 默认复用 Agent Plan 的多模态模型；调用方会传入当前分析端点和模型。
-OCR_API_URL = "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions"
+OCR_API_URL = ""
 OCR_REQUEST_MAX_TIME_SECONDS = 90
 OCR_REQUEST_LOW_SPEED_TIME_SECONDS = 45
 # 只取短视频内容字幕，避免把平台 UI、水印和包装字混进权威字幕轨。
@@ -47,19 +47,27 @@ def build_subtitle_track(
     api_url: str = OCR_API_URL,
     model: str = OCR_MODEL,
     interval_sec: float = SAMPLE_INTERVAL_SEC,
+    budget: ResourceBudget | None = None,
 ) -> dict[str, Any]:
     """对单个视频的抽帧做字幕 OCR，产出 subtitle_track.json 并返回结果。
 
     ffmpeg 抽帧已由 video.py 完成；本模块只复用 frames manifest，不重新抽帧。
     没有 api_key 或没有帧时返回 disabled 状态，由调用方决定是否跳过。
     """
+    budget = budget or current_budget() or ResourceBudget()
     frames = get_frame_entries(info)
     if not frames:
         return _empty_track("no_frames")
     if not api_key.strip():
         return _empty_track("no_api_key")
+    if not str(api_url or "").strip() or not str(model or "").strip():
+        return _empty_track("no_vision_provider")
 
     duration = info.get("duration_seconds")
+    try:
+        interval_sec = finite_nonnegative(interval_sec, "OCR sample interval")
+    except ValueError:
+        return _empty_track("invalid_interval")
     sampled = sample_frames_by_interval(frames, duration, interval_sec)
 
     raw_dir = role_dir / "ocr_raw"
@@ -67,12 +75,16 @@ def build_subtitle_track(
 
     frame_results: list[dict[str, Any]] = []
     for index, entry in enumerate(sampled):
+        if budget is not None and budget.ocr_calls >= budget.limits.max_ocr_calls:
+            break
         frame_path = Path(str(entry.get("path") or ""))
-        timestamp = float(entry.get("timestamp_seconds") or 0.0)
+        timestamp = parse_timestamp_seconds(entry.get("timestamp_seconds"))
+        if timestamp is None:
+            continue
         if not frame_path.is_file():
             continue
         lines, status = ocr_frame_with_retry(
-            frame_path, api_key, api_url, model, raw_dir, index
+            frame_path, api_key, api_url, model, raw_dir, index, budget=budget
         )
         frame_results.append(
             {
@@ -107,11 +119,19 @@ def sample_frames_by_interval(
     """按目标时间间隔稀疏取帧。帧已是 1fps，所以约等于每 interval_sec 取 1 帧。"""
     if interval_sec <= 0:
         return frames
-    dur = float(duration) if isinstance(duration, (int, float)) and duration else 0.0
-    if dur <= 0:
-        # 没时长信息时退化为按帧数估算
+    if duration is None or str(duration).strip() == "":
+        dur = None
+    else:
+        try:
+            dur = finite_nonnegative(duration, "video duration")
+        except ValueError:
+            return []
+    if dur is None:
+        # 没有时长信息时才允许按帧数估算；非法时长不能伪装成缺失。
         target = max(1, round(len(frames) / max(1.0, interval_sec)))
         return sample_evenly(frames, target)
+    if dur <= 0:
+        return []
     target = max(1, int(dur // interval_sec) + 1)
     return sample_evenly(frames, target)
 
@@ -123,6 +143,7 @@ def ocr_frame_with_retry(
     model: str,
     raw_dir: Path,
     index: int,
+    budget: ResourceBudget | None = None,
 ) -> tuple[list[str], str]:
     """对单帧 OCR；返回纯坐标无文字时重试一次，仍失败则标 ocr_unreadable。"""
     for attempt in range(2):
@@ -138,8 +159,12 @@ def ocr_frame_with_retry(
                 max_time_seconds=OCR_REQUEST_MAX_TIME_SECONDS,
                 low_speed_time_seconds=OCR_REQUEST_LOW_SPEED_TIME_SECONDS,
                 retries=0,
+                budget=budget,
+                call_kind="ocr",
             )
         except SystemExit as exc:
+            if "budget" in str(exc).lower() or "exceeded" in str(exc).lower():
+                return [], f"ocr_budget_exhausted: {str(exc)[:80]}"
             if attempt == 0:
                 continue
             return [], f"ocr_request_failed: {str(exc)[:80]}"
@@ -172,8 +197,6 @@ def build_ocr_payload(frame_path: Path, model: str) -> dict[str, Any]:
         "temperature": 0.0,
         "max_tokens": 2048,
     }
-    if "doubao" in str(model or "").lower():
-        payload["thinking"] = {"type": "disabled"}
     return payload
 
 

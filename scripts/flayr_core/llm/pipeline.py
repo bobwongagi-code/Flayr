@@ -13,23 +13,27 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as dt
 import hashlib
 import json
 import re
+import subprocess
+import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 from ..multimodal import sanitize_audio_observations
 from ..utils import write_json, write_text
+from ..analysis_model import ANALYSIS_RESULT_CONTRACT, AnalysisResult, schema_sha256
 from ..structure_modules import canonical_module_id
 from .api import (
     call_llm_api,
     extract_chat_completion_text,
-    is_doubao_model,
     read_llm_api_key,
-    supports_native_audio_analysis,
+    can_analyze_native_audio,
 )
 from .analysis_contract import AnalysisContractError, validate_normalized_analysis_contract
 from .parse import (
@@ -47,7 +51,6 @@ from .payload import (
     build_comparison_eligibility_payload,
     build_absolute_execution_shadow_payload,
     build_llm_comparison_payload,
-    build_llm_patch_repair_payload,
     build_llm_payload,
     build_llm_repair_payload,
     build_product_foundation_payload,
@@ -60,6 +63,7 @@ from .payload import (
 from .s4_visual_verifier import maybe_apply_s4_visual_verifier
 from .media import select_role_visual_inputs
 from ..postprocess import apply_postprocess_chain
+from ..postprocess.audit import MAX_CHANGE_ENTRIES, PostprocessAudit, build_field_sources
 from ..postprocess.derive import critical_severity_stages
 from ..postprocess.global_diagnosis import materialize_global_diagnosis
 from ..postprocess.health_rewrite import (
@@ -84,6 +88,135 @@ from ..postprocess.validate import (
 
 # 修改 build_video_fact_payload 的语义合同后必须递增，避免旧 facts 与新判断规则混用。
 VIDEO_FACT_CACHE_SCHEMA_VERSION = 8
+PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION = 2
+CACHE_RECORD_SCHEMA_VERSION = 1
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _analysis_artifact_dir(analysis: dict[str, Any]) -> Path | None:
+    """Return the trusted per-run directory used for provenance artifacts."""
+    value = analysis.get("run_dir") if isinstance(analysis, dict) else None
+    if not value:
+        return None
+    try:
+        return Path(str(value)).expanduser().resolve()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+
+
+def _write_raw_model_response(
+    run_dir: Path,
+    *,
+    result: dict[str, Any] | None = None,
+    raw_text: str | None = None,
+    overwrite: bool = False,
+) -> None:
+    """Preserve the original model payload before normalization or repair."""
+    path = run_dir / "raw_model_response.json"
+    if path.exists() and not overwrite:
+        return
+    if raw_text is not None:
+        record: dict[str, Any] = {"source_format": "raw_text", "raw_text": str(raw_text)}
+        if isinstance(result, dict):
+            record["parsed_result"] = result
+        write_json(path, record)
+    elif isinstance(result, dict):
+        write_json(path, result)
+    else:
+        write_json(path, {"source_format": "raw_text", "raw_text": ""})
+
+
+def _refresh_final_derived_artifact(
+    analysis: dict[str, Any],
+    normalized: dict[str, Any],
+    metadata_fields: tuple[str, ...] = (),
+) -> None:
+    """Keep final_derived_result aligned with metadata attached after finalization."""
+    _merge_postprocess_audit(analysis, normalized, metadata_fields=metadata_fields)
+
+
+def _merge_postprocess_audit(
+    analysis: dict[str, Any],
+    normalized: dict[str, Any],
+    audit: PostprocessAudit | None = None,
+    metadata_fields: tuple[str, ...] = (),
+) -> None:
+    """Append post-finalization changes without losing the canonical final artifact."""
+    artifact_dir = _analysis_artifact_dir(analysis)
+    if artifact_dir is None or not (artifact_dir / "final_derived_result.json").is_file():
+        return
+    log_path = artifact_dir / "postprocess_change_log.json"
+    try:
+        log = json.loads(log_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        log = {"schema_version": 1, "change_count": 0, "truncated": False, "changes": []}
+    if not isinstance(log, dict):
+        log = {"schema_version": 1, "change_count": 0, "truncated": False, "changes": []}
+    changes = list(log.get("changes")) if isinstance(log, dict) and isinstance(log.get("changes"), list) else []
+    if audit is not None:
+        room = max(0, MAX_CHANGE_ENTRIES - len(changes))
+        changes.extend(audit.changes[:room])
+        audit_truncated = audit.truncated or len(audit.changes) > room
+    else:
+        audit_truncated = False
+    existing_metadata_paths = {
+        str(change.get("path"))
+        for change in changes
+        if isinstance(change, dict) and change.get("rule") == "pipeline.attach_result_metadata"
+    }
+    metadata_truncated = False
+    for field in metadata_fields:
+        path = f"/{field}"
+        if field not in normalized or path in existing_metadata_paths:
+            continue
+        if len(changes) >= MAX_CHANGE_ENTRIES:
+            metadata_truncated = True
+            continue
+        changes.append(
+            {
+                "path": path,
+                "old": {"present": False},
+                "new": {"present": True},
+                "rule": "pipeline.attach_result_metadata",
+                "kind": "deterministic_derivation",
+                "evidence": [],
+            }
+        )
+    raw_result: dict[str, Any] = {}
+    normalized_result: dict[str, Any] = {}
+    try:
+        raw_artifact = json.loads((artifact_dir / "raw_model_response.json").read_text(encoding="utf-8"))
+        if isinstance(raw_artifact, dict):
+            raw_result = raw_artifact.get("parsed_result") if isinstance(raw_artifact.get("parsed_result"), dict) else raw_artifact
+        loaded_normalized = json.loads(
+            (artifact_dir / "validated_normalized_result.json").read_text(encoding="utf-8")
+        )
+        if isinstance(loaded_normalized, dict):
+            normalized_result = loaded_normalized
+    except (OSError, json.JSONDecodeError):
+        pass
+    trace_result = copy.deepcopy(normalized)
+    trace_result.pop("postprocess_provenance", None)
+    log_was_truncated = bool(log.get("truncated")) if isinstance(log, dict) else False
+    field_sources = build_field_sources(
+        raw_result,
+        normalized_result,
+        trace_result,
+        changes,
+        truncated=log_was_truncated or audit_truncated or metadata_truncated,
+    )
+    if isinstance(log, dict):
+        log["field_sources"] = field_sources
+        log["changes"] = changes
+        log["change_count"] = len(changes)
+        log["truncated"] = bool(log.get("truncated")) or audit_truncated or metadata_truncated
+        provenance = normalized.get("postprocess_provenance")
+        if isinstance(provenance, dict):
+            provenance["change_count"] = len(changes)
+            provenance["change_log_truncated"] = log["truncated"]
+            provenance["field_sources"] = field_sources
+    write_json(log_path, log)
+    write_json(artifact_dir / "final_derived_result.json", normalized)
 
 
 # ---------------------------------------------------------------------------
@@ -123,39 +256,7 @@ def apply_finalized_analysis_result(
 ) -> None:
     """把已完成校验的结果写回主 analysis；此处不得再次做后处理。"""
     phase_c_review = normalized.get("phase_c_review")
-    analysis["executive_summary"] = normalized["executive_summary"]
-    analysis["one_line_summary"] = normalized["one_line_summary"]
-    analysis["one_line_verdict"] = normalized["one_line_verdict"]
-    analysis["holistic_assessment"] = normalized["holistic_assessment"]
-    analysis["key_conclusions"] = normalized.get("key_conclusions", [])
-    analysis["comparison_contract"] = normalized.get("comparison_contract", {})
-    analysis["comparison_eligibility"] = normalized.get("comparison_eligibility", {})
-    analysis["product_visibility"] = normalized["product_visibility"]
-    analysis["loop_closure"] = normalized["loop_closure"]
-    analysis["video_understanding"] = normalized["video_understanding"]
-    analysis["stage_analysis"] = normalized["stage_analysis"]
-    analysis["improvements"] = normalized["improvements"]
-    for key in (
-        "category_profile",
-        "product_profile",
-        "s3_s4_relationship",
-        "promise_chain",
-        "product_proposition_contract",
-        "cross_stage_state",
-        "proposition_trace",
-        "absolute_quality",
-        "absolute_execution_shadow",
-        "computed_loop_closure",
-        "qa_warnings",
-        "quality_audit",
-        "improvement_reconciliation",
-        "s4_visual_verifier",
-        "global_diagnosis",
-        "commercial_priorities",
-        "commercial_priority_summary",
-    ):
-        if key in normalized:
-            analysis[key] = normalized[key]
+    AnalysisResult.from_mapping(normalized).project_into(analysis)
     if isinstance(phase_c_review, dict):
         analysis["phase_c_review"] = phase_c_review
     analysis["improvements_status"] = "llm_completed"
@@ -174,32 +275,97 @@ def finalize_analysis_result(
     locked_video_understanding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """所有 LLM 结果入口共用的唯一规范化、修补和校验链。"""
+    artifact_dir = _analysis_artifact_dir(analysis)
+    if artifact_dir is not None:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        _write_raw_model_response(artifact_dir, result=result)
+    audit = PostprocessAudit() if artifact_dir is not None else None
+    raw_snapshot = copy.deepcopy(result)
+
     if locked_video_understanding:
+        before = copy.deepcopy(result) if audit is not None else None
         result["video_understanding"] = locked_video_understanding
+        if audit is not None:
+            audit.record(before, result, "pipeline.lock_video_understanding")
+
+    before_normalize = copy.deepcopy(result) if audit is not None else None
     normalized = normalize_analysis_result(result)
+    if audit is not None:
+        audit.record(before_normalize, normalized, "pipeline.normalize_analysis_result")
     audio_assessment = analysis.get("audio_assessment") if isinstance(analysis, dict) else {}
     native_audio = bool((audio_assessment or {}).get("native_audio_analysis", True))
-    sanitize_audio_observations(normalized, native_audio)
+    if audit is None:
+        sanitize_audio_observations(normalized, native_audio)
+    else:
+        audit.run(
+            normalized,
+            "pipeline.sanitize_audio_observations",
+            sanitize_audio_observations,
+            normalized,
+            native_audio,
+        )
     try:
         validate_normalized_analysis_contract(normalized)
     except AnalysisContractError as exc:
         raise SystemExit(str(exc)) from exc
-    apply_postprocess_chain(normalized, analysis)
+
+    validated_snapshot = copy.deepcopy(normalized)
+    if artifact_dir is not None:
+        write_json(artifact_dir / "validated_normalized_result.json", validated_snapshot)
+
+    apply_postprocess_chain(normalized, analysis, audit=audit)
+
+    def audited_step(rule: str, function: Any, *args: Any) -> None:
+        if audit is None:
+            function(*args)
+        else:
+            audit.run(normalized, rule, function, *args)
+
     validate_evidence_alignment(normalized)
     validate_stage_ownership(normalized)
-    sanitize_health_recommendations(normalized, analysis_input)
-    sanitize_child_toothpaste_recommendations(normalized, analysis_input)
-    stabilize_improvement_priorities(normalized)
-    ground_improvement_evidence(normalized)
-    stabilize_improvement_priorities(normalized)
+    audited_step("postprocess.sanitize_health_recommendations", sanitize_health_recommendations, normalized, analysis_input)
+    audited_step(
+        "postprocess.sanitize_child_toothpaste_recommendations",
+        sanitize_child_toothpaste_recommendations,
+        normalized,
+        analysis_input,
+    )
+    audited_step("postprocess.stabilize_improvement_priorities.tail_1", stabilize_improvement_priorities, normalized)
+    audited_step("postprocess.ground_improvement_evidence", ground_improvement_evidence, normalized)
+    audited_step("postprocess.stabilize_improvement_priorities.tail_2", stabilize_improvement_priorities, normalized)
     validate_analysis_dimensions(normalized)
     validate_recommendation_safety(normalized, analysis_input)
     validate_creator_script_language(normalized, analysis_input)
-    remove_unverified_brand_models(normalized, analysis)
-    clamp_result_time_ranges(normalized, analysis)
+    audited_step("postprocess.remove_unverified_brand_models", remove_unverified_brand_models, normalized, analysis)
+    audited_step("postprocess.clamp_result_time_ranges", clamp_result_time_ranges, normalized, analysis)
     # 全局门控须在提升点完成最终过滤后生成，避免商业优先级引用已被清除的建议。
-    materialize_global_diagnosis(normalized, analysis)
+    audited_step("postprocess.materialize_global_diagnosis", materialize_global_diagnosis, normalized, analysis)
     validate_quality_contract(normalized, analysis)
+
+    if artifact_dir is not None and audit is not None:
+        field_sources = build_field_sources(
+            raw_snapshot,
+            validated_snapshot,
+            normalized,
+            audit.changes,
+            truncated=audit.truncated,
+        )
+        provenance = {
+            "schema_version": 1,
+            "result_contract": ANALYSIS_RESULT_CONTRACT.metadata(),
+            "raw_model_response": "raw_model_response.json",
+            "validated_normalized_result": "validated_normalized_result.json",
+            "final_derived_result": "final_derived_result.json",
+            "field_change_log": "postprocess_change_log.json",
+            "change_count": len(audit.changes),
+            "change_log_truncated": audit.truncated,
+            "field_sources": field_sources,
+        }
+        normalized["postprocess_provenance"] = provenance
+        change_log = audit.as_dict()
+        change_log["field_sources"] = field_sources
+        write_json(artifact_dir / "postprocess_change_log.json", change_log)
+        write_json(artifact_dir / "final_derived_result.json", normalized)
     return normalized
 
 
@@ -217,9 +383,14 @@ def merge_analysis_result(analysis: dict[str, Any], result_path: Path, analysis_
         # 外部导入也必须使用和主链相同的 S5 来源门禁，避免入口不同导致背书结论漂移。
         analysis["s5_source_signals_required"] = True
     phase_c_review = result.get("phase_c_review")
+    artifact_dir = _analysis_artifact_dir(analysis)
+    if artifact_dir is not None:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        _write_raw_model_response(artifact_dir, result=result, overwrite=True)
     normalized = finalize_analysis_result(result, analysis, analysis_input)
     if isinstance(phase_c_review, dict):
         normalized["phase_c_review"] = phase_c_review
+        _refresh_final_derived_artifact(analysis, normalized, ("phase_c_review",))
     apply_finalized_analysis_result(analysis, normalized, result_path)
 
 
@@ -242,18 +413,40 @@ def fetch_json_completion(
     重试 max_attempts 次仍不完整，则返回最后一次内容，交由下游 repair 兜底。
     """
     last_text = ""
+    logical_request_id = uuid.uuid4().hex
+    outer_retry_reason = ""
+    try:
+        payload_text = payload_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SystemExit(f"LLM request payload is unavailable: {payload_path}") from exc
+    # The caller may have created this file in the run directory for debugging,
+    # but the transport must only receive a short-lived copy.
+    payload_path.unlink(missing_ok=True)
     for attempt in range(max_attempts):
         request_options = {}
         if request_max_time_seconds is not None:
             request_options["max_time_seconds"] = request_max_time_seconds
-        try:
-            raw_text = call_llm_api(args.llm_api_url, api_key, payload_path, raw_path, **request_options)
-        except SystemExit:
-            # 底层已做同一 SSE 请求的传输重试；仍失败时重取完整响应，不能让单次网络中断终止整条 pipeline。
-            if attempt + 1 >= max_attempts:
-                raise
-            time.sleep(5 * (attempt + 1))
-            continue
+        with tempfile.TemporaryDirectory(prefix=".llm-request.", dir=payload_path.parent) as request_dir:
+            ephemeral_payload = Path(request_dir) / "request.json"
+            write_text(ephemeral_payload, payload_text)
+            try:
+                raw_text = call_llm_api(
+                    args.llm_api_url,
+                    api_key,
+                    ephemeral_payload,
+                    raw_path,
+                    budget=getattr(args, "_resource_budget", None),
+                    request_id=logical_request_id,
+                    initial_retry_reason=outer_retry_reason,
+                    **request_options,
+                )
+            except SystemExit as exc:
+                # 底层已做同一 SSE 请求的传输重试；仍失败时重取完整响应，不能让单次网络中断终止整条 pipeline。
+                if attempt + 1 >= max_attempts:
+                    raise
+                outer_retry_reason = str(exc)[:200]
+                time.sleep(5 * (attempt + 1))
+                continue
         raw = json.loads(raw_text)
         last_text = extract_chat_completion_text(raw)
         try:
@@ -265,6 +458,7 @@ def fetch_json_completion(
                 break
             if attempt + 1 >= max_attempts:
                 break
+            outer_retry_reason = "invalid JSON in completed model response"
     return last_text
 
 
@@ -290,22 +484,126 @@ def _cache_path(run_dir: Path, namespace: str, key: dict[str, Any]) -> Path | No
     return run_dir.parent / namespace / f"{_stable_digest(key)}.json"
 
 
-def _read_cache_result(path: Path | None, result_key: str) -> dict[str, Any] | None:
+def _read_cache_result(
+    path: Path | None,
+    result_key: str,
+    expected_key: dict[str, Any] | None = None,
+    validator: Any = None,
+) -> dict[str, Any] | None:
     if path is None or not path.is_file():
         return None
     try:
         cached = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    result = cached.get(result_key) if isinstance(cached, dict) else None
-    return result if isinstance(result, dict) else None
+    if not isinstance(cached, dict):
+        return None
+    if cached.get("cache_record_schema_version") != CACHE_RECORD_SCHEMA_VERSION:
+        return None
+    if cached.get("completion_status") != "completed":
+        return None
+    if cached.get("result_schema_sha256") != schema_sha256():
+        return None
+    if expected_key is not None and any(cached.get(key) != value for key, value in expected_key.items()):
+        return None
+    result = cached.get(result_key)
+    if not isinstance(result, dict):
+        return None
+    serialized = json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    artifact = cached.get("artifact")
+    if not isinstance(artifact, dict):
+        return None
+    if artifact.get("size_bytes") != len(serialized.encode("utf-8")):
+        return None
+    if artifact.get("sha256") != hashlib.sha256(serialized.encode("utf-8")).hexdigest():
+        return None
+    if validator is not None and not validator(result):
+        return None
+    return result
 
 
 def _write_cache_result(path: Path | None, record: dict[str, Any]) -> None:
     if path is None:
         return
+    result_key = next((key for key in ("foundation", "fact_result") if key in record), None)
+    if result_key is None or not isinstance(record.get(result_key), dict):
+        raise ValueError("cache record must contain a structured result")
+    result = record[result_key]
+    serialized = json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    record = {
+        **record,
+        "cache_record_schema_version": CACHE_RECORD_SCHEMA_VERSION,
+        "completion_status": "completed",
+        "result_schema_sha256": schema_sha256(),
+        "artifact": {
+            "size_bytes": len(serialized.encode("utf-8")),
+            "sha256": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+        },
+    }
     path.parent.mkdir(parents=True, exist_ok=True)
     write_json(path, record)
+
+
+def _git_commit_sha() -> str:
+    """Return the current code identity without making cache reuse depend on git availability."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(_REPO_ROOT), "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return completed.stdout.strip() if completed.returncode == 0 else "unknown"
+
+
+def _sha256_file(path: Path) -> str:
+    if not path.is_file():
+        return "missing"
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _cache_reference_digests() -> dict[str, str]:
+    """Hash code and reference material that changes the meaning of an LLM request."""
+    candidates = [
+        _REPO_ROOT / "scripts" / "flayr_core" / "llm" / "pipeline.py",
+        _REPO_ROOT / "scripts" / "flayr_core" / "llm" / "payload.py",
+        _REPO_ROOT / "scripts" / "flayr_core" / "market.py",
+        _REPO_ROOT / "scripts" / "flayr_core" / "structure_modules.py",
+        _REPO_ROOT / "structure_library_full.md",
+        _REPO_ROOT / "QA-RULES.md",
+    ]
+    references_dir = _REPO_ROOT / "references"
+    if references_dir.is_dir():
+        candidates.extend(sorted(path for path in references_dir.iterdir() if path.is_file()))
+    return {
+        str(path.relative_to(_REPO_ROOT)): _sha256_file(path)
+        for path in candidates
+        if path.exists()
+    }
+
+
+def _product_context_digest(analysis: dict[str, Any]) -> str:
+    product = analysis.get("product") if isinstance(analysis.get("product"), dict) else {}
+    brand = analysis.get("brand_proposition") if isinstance(analysis.get("brand_proposition"), dict) else {}
+    return _stable_digest({"product": product, "brand_proposition": brand})
+
+
+def _product_foundation_cache_key(args: argparse.Namespace, analysis: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "cache_schema_version": PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION,
+        "code_commit": _git_commit_sha(),
+        "llm_model": str(args.llm_model or ""),
+        "llm_api_url": str(args.llm_api_url or ""),
+        "temperature": 0.0,
+        "product_context_digest": _product_context_digest(analysis),
+        "reference_digests": _cache_reference_digests(),
+    }
 
 
 def _video_fact_cache_key(args: argparse.Namespace, analysis: dict[str, Any], role: str) -> dict[str, Any]:
@@ -317,8 +615,29 @@ def _video_fact_cache_key(args: argparse.Namespace, analysis: dict[str, Any], ro
         "llm_model": str(args.llm_model or ""),
         "llm_api_url": str(args.llm_api_url or ""),
         "foundation_digest": _stable_digest(foundation),
+        "product_context_digest": _product_context_digest(analysis),
+        "code_commit": _git_commit_sha(),
+        "reference_digests": _cache_reference_digests(),
+        "llm_image_limit": int(getattr(args, "llm_image_limit", 0) or 0),
+        "target_market": str(((analysis.get("product") or {}).get("target_market") or "auto")),
         "temperature": 0.0,
+        "seed": None,
     }
+
+
+def _is_valid_foundation_cache(value: dict[str, Any]) -> bool:
+    return bool(
+        isinstance(value.get("category_profile"), dict)
+        or isinstance(value.get("product_profile"), dict)
+    )
+
+
+def _is_valid_video_fact_cache(role: str, value: dict[str, Any], analysis: dict[str, Any]) -> bool:
+    try:
+        normalize_video_fact_result(role, copy.deepcopy(value), analysis)
+    except (Exception, SystemExit):
+        return False
+    return True
 
 
 def run_large_model_analysis(
@@ -350,7 +669,7 @@ def run_large_model_analysis(
             analysis["product_foundation"] = foundation
         facts = run_video_fact_extraction(args, analysis, run_dir, api_key)
         if args.llm_dry_run:
-            print(f"LLM dry run: fact request payloads written to {run_dir}")
+            print("LLM dry run: fact request payloads constructed in memory; no request artifacts retained")
             return None
         maybe_run_absolute_execution_shadow(args, analysis, facts, run_dir, api_key)
         comparison_contract = establish_comparison_eligibility(args, facts, run_dir, api_key)
@@ -375,6 +694,7 @@ def run_large_model_analysis(
             facts,
             analysis,
             api_url=args.llm_api_url,
+            budget=getattr(args, "_resource_budget", None),
         )
     else:
         facts = None
@@ -384,7 +704,8 @@ def run_large_model_analysis(
     write_json(payload_path, payload)
 
     if args.llm_dry_run:
-        print(f"LLM dry run: request payload written to {payload_path}")
+        payload_path.unlink(missing_ok=True)
+        print("LLM dry run: request payload constructed in memory; no request artifact retained")
         return None
 
     raw_path = run_dir / "llm_response.json"
@@ -455,29 +776,20 @@ def parse_and_validate_llm_result(
     analysis: dict[str, Any],
     locked_video_understanding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """解析 LLM 输出并跑全套校验；Doubao 局部补丁，Qwen/兼容模型完整 repair 一次。"""
+    """解析 LLM 输出并跑全套校验；失败时执行一次完整 JSON repair。"""
     raw_result: dict[str, Any] | None = None
     try:
         raw_result = parse_json_text(raw_result_text)
+        _write_raw_model_response(run_dir, result=raw_result, raw_text=raw_result_text, overwrite=True)
         return _finish_validated_llm_result(
             args, api_key, raw_result, analysis_input, run_dir, analysis, locked_video_understanding
         )
     except SystemExit as exc:
+        if raw_result is None:
+            _write_raw_model_response(run_dir, raw_text=raw_result_text, overwrite=True)
         first_error = str(exc)
 
-    if is_doubao_model(args.llm_model):
-        return _repair_doubao_result_with_patches(
-            args=args,
-            api_key=api_key,
-            raw_result=raw_result or {},
-            first_error=first_error,
-            analysis_input=analysis_input,
-            run_dir=run_dir,
-            analysis=analysis,
-            locked_video_understanding=locked_video_understanding,
-        )
-
-    # Qwen/其它兼容模型保留原有的一次完整 repair 行为。
+    # 所有 provider 统一使用一次完整 JSON repair，避免 provider 专属补丁协议。
     repair_payload = build_llm_repair_payload(
         args.llm_model,
         raw_result_text,
@@ -507,111 +819,6 @@ def parse_and_validate_llm_result(
         raise SystemExit(f"LLM output repair failed. First error: {first_error}. Repair error: {exc}") from exc
 
 
-def _repair_doubao_result_with_patches(
-    *,
-    args: argparse.Namespace,
-    api_key: str,
-    raw_result: dict[str, Any],
-    first_error: str,
-    analysis_input: str,
-    run_dir: Path,
-    analysis: dict[str, Any],
-    locked_video_understanding: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """Doubao 专属：最多两轮局部补丁，不重写已正确的完整分析。"""
-    current = json.loads(json.dumps(raw_result, ensure_ascii=False))
-    error = first_error
-    for round_index in (1, 2):
-        payload = build_llm_patch_repair_payload(
-            args.llm_model,
-            current,
-            error,
-            locked_video_understanding,
-        )
-        suffix = "" if round_index == 1 else f"_round{round_index}"
-        request_path = run_dir / f"llm_patch_repair{suffix}_request.json"
-        response_path = run_dir / f"llm_patch_repair{suffix}_response.json"
-        write_json(request_path, payload)
-        patch_text = fetch_json_completion(args, api_key, request_path, response_path)
-        patch_result = parse_json_text(patch_text)
-        current = apply_llm_json_patches(current, patch_result)
-        try:
-            return _finish_validated_llm_result(
-                args, api_key, current, analysis_input, run_dir, analysis, locked_video_understanding
-            )
-        except SystemExit as exc:
-            error = str(exc)
-    raise SystemExit(
-        "Doubao local repair failed after two rounds. "
-        f"First error: {first_error}. Final repair error: {error}"
-    )
-
-
-_PATCH_LOCKED_ROOTS = {
-    "video_understanding",
-    "comparison_contract",
-    "comparison_eligibility",
-    "category_profile",
-    "product_profile",
-}
-_PATCH_LOCKED_FIELDS = {"evidence_ids", "proposition_ids", "severity"}
-
-
-def apply_llm_json_patches(base: dict[str, Any], patch_result: dict[str, Any]) -> dict[str, Any]:
-    """安全应用 Doubao 返回的局部 JSON Pointer；锁定事实与评分字段不可改。"""
-    patches = patch_result.get("patches")
-    if not isinstance(patches, list) or not 1 <= len(patches) <= 128:
-        raise SystemExit("Doubao patch repair 必须输出 1-128 条 patches。")
-    updated = json.loads(json.dumps(base, ensure_ascii=False))
-    for patch in patches:
-        if not isinstance(patch, dict) or "value" not in patch:
-            raise SystemExit("Doubao patch repair 含无效 patch。")
-        path = str(patch.get("path") or "")
-        tokens = [_decode_json_pointer_token(token) for token in path.split("/")[1:]] if path.startswith("/") else []
-        evidence_path = any(token == "evidence_ids" or token.endswith("_evidence_ids") for token in tokens)
-        if (
-            not tokens
-            or tokens[0] in _PATCH_LOCKED_ROOTS
-            or evidence_path
-            or any(token in _PATCH_LOCKED_FIELDS for token in tokens)
-        ):
-            raise SystemExit(f"Doubao patch repair 路径不允许修改：{path}")
-        parent, final_token = _resolve_patch_parent(updated, tokens, path)
-        if isinstance(parent, dict):
-            parent[final_token] = patch["value"]
-        elif isinstance(parent, list) and final_token.isdigit() and int(final_token) < len(parent):
-            parent[int(final_token)] = patch["value"]
-        else:
-            raise SystemExit(f"Doubao patch repair 路径无效：{path}")
-    return updated
-
-
-def _resolve_patch_parent(root: dict[str, Any], tokens: list[str], path: str) -> tuple[Any, str]:
-    current: Any = root
-    for token in tokens[:-1]:
-        if isinstance(current, dict) and token in current:
-            current = current[token]
-            continue
-        if isinstance(current, list):
-            if token in {"S1", "S2", "S3", "S4", "S5", "S6"}:
-                match = next(
-                    (item for item in current if isinstance(item, dict) and str(item.get("stage") or "")[:2] == token),
-                    None,
-                )
-                if match is not None:
-                    current = match
-                    continue
-            if token.isdigit() and int(token) < len(current):
-                current = current[int(token)]
-                continue
-        raise SystemExit(f"Doubao patch repair 路径不存在：{path}")
-    return current, tokens[-1]
-
-
-def _decode_json_pointer_token(token: str) -> str:
-    return token.replace("~1", "/").replace("~0", "~")
-
-
 def _finish_validated_llm_result(
     args: argparse.Namespace,
     api_key: str,
@@ -638,6 +845,8 @@ def _finish_validated_llm_result(
         analysis=analysis,
         locked_video_understanding=locked_video_understanding,
     )
+    visual_audit = PostprocessAudit() if _analysis_artifact_dir(analysis) is not None else None
+    visual_before = copy.deepcopy(refined) if visual_audit is not None else None
     visually_checked = maybe_apply_s4_visual_verifier(
         args=args,
         api_key=api_key,
@@ -645,6 +854,9 @@ def _finish_validated_llm_result(
         analysis=analysis,
         run_dir=run_dir,
     )
+    if visual_audit is not None:
+        visual_audit.record(visual_before, visually_checked, "postprocess.s4_visual_verifier")
+        _merge_postprocess_audit(analysis, visually_checked, audit=visual_audit)
     return maybe_reconcile_final_improvements(
         args=args,
         api_key=api_key,
@@ -789,8 +1001,13 @@ def maybe_reconcile_final_improvements(
         if key in result
     }
     try:
-        raw_text = call_llm_api(args.llm_api_url, api_key, request_path, response_path)
-        write_text(response_path, raw_text)
+        raw_text = call_llm_api(
+            args.llm_api_url,
+            api_key,
+            request_path,
+            response_path,
+            budget=getattr(args, "_resource_budget", None),
+        )
         parsed = parse_json_text(extract_chat_completion_text(json.loads(raw_text)))
         additions = parsed.get("improvements") if isinstance(parsed.get("improvements"), list) else []
         merged = merge_reconciled_improvements(result, additions, missing)
@@ -809,13 +1026,19 @@ def maybe_reconcile_final_improvements(
             "requested_stages": missing,
             "reason": f"最终提升点补全失败：{exc}",
         }
+        _refresh_final_derived_artifact(analysis, result, ("improvement_reconciliation",))
         return result
     reconciled.update(preserved)
     reconciled["improvement_reconciliation"] = {
         "applied": True,
         "requested_stages": missing,
-        "response_path": str(response_path),
+        "response_retention": "ephemeral",
     }
+    _refresh_final_derived_artifact(
+        analysis,
+        reconciled,
+        tuple([*preserved.keys(), "improvement_reconciliation"]),
+    )
     return reconciled
 
 
@@ -865,6 +1088,7 @@ def maybe_refine_low_confidence_stages(
         locked_video_understanding,
         result,
         stage_codes,
+        budget=getattr(args, "_resource_budget", None),
     )
     if not payload_has_video(review_payload):
         result["phase_c_review"] = {
@@ -873,14 +1097,20 @@ def maybe_refine_low_confidence_stages(
             "reason": "low_confidence_stages 已声明，但本地视频切片构造失败。",
             "before_stage_analysis": before_stages,
         }
+        _refresh_final_derived_artifact(analysis, result, ("phase_c_review",))
         return result
 
     review_request_path = run_dir / "llm_stage_review_request.json"
     review_response_path = run_dir / "llm_stage_review_response.json"
     write_json(review_request_path, review_payload)
     try:
-        review_raw_text = call_llm_api(args.llm_api_url, api_key, review_request_path, review_response_path)
-        write_text(review_response_path, review_raw_text)
+        review_raw_text = call_llm_api(
+            args.llm_api_url,
+            api_key,
+            review_request_path,
+            review_response_path,
+            budget=getattr(args, "_resource_budget", None),
+        )
         review_text = extract_chat_completion_text(json.loads(review_raw_text))
         review_result = parse_json_text(review_text)
         refined = apply_stage_review_updates(
@@ -898,12 +1128,13 @@ def maybe_refine_low_confidence_stages(
             "reason": f"低置信阶段回看失败：{exc}",
             "before_stage_analysis": before_stages,
         }
+        _refresh_final_derived_artifact(analysis, result, ("phase_c_review",))
         return result
 
     refined["phase_c_review"] = {
         "requested_stages": stage_codes,
         "applied": True,
-        "response_path": str(review_response_path),
+        "response_retention": "ephemeral",
         "notes": review_result.get("review_notes", []),
         "before_stage_analysis": before_stages,
         "after_stage_analysis": [
@@ -912,6 +1143,7 @@ def maybe_refine_low_confidence_stages(
             if isinstance(stage, dict) and stage_code(stage.get("stage")) in stage_codes
         ],
     }
+    _refresh_final_derived_artifact(analysis, refined, ("phase_c_review",))
     return refined
 
 
@@ -1084,22 +1316,23 @@ def establish_product_foundation(
         )
         return None
     cache_path = run_dir / "product_foundation.json"
+    cache_key = _product_foundation_cache_key(args, analysis)
     if getattr(args, "reuse_preprocessing", False) and cache_path.is_file():
-        try:
-            cached = json.loads(cache_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            cached = None
-        if isinstance(cached, dict) and (
-            isinstance(cached.get("category_profile"), dict)
-            or isinstance(cached.get("product_profile"), dict)
-        ):
-            _stamp_proof_contract_source(cached, analysis)
-            return cached
+        foundation = _read_cache_result(
+            cache_path,
+            "foundation",
+            cache_key,
+            validator=_is_valid_foundation_cache,
+        )
+        if foundation is not None:
+            _stamp_proof_contract_source(foundation, analysis)
+            return foundation
     payload = build_product_foundation_payload(args.llm_model, analysis)
     request_path = run_dir / "llm_product_foundation_request.json"
     response_path = run_dir / "llm_product_foundation_response.json"
     write_json(request_path, payload)
     if args.llm_dry_run:
+        request_path.unlink(missing_ok=True)
         return None
     try:
         result_text = fetch_json_completion(
@@ -1170,7 +1403,7 @@ def establish_product_foundation(
     except Exception as exc:  # noqa: BLE001
         print(f"Step-0 品地基确立失败，回退到阶段2 内联产出：{exc}", flush=True)
         return None
-    write_json(cache_path, foundation)
+    _write_cache_result(cache_path, {**cache_key, "foundation": foundation})
     return foundation
 
 
@@ -1392,12 +1625,21 @@ def run_video_fact_extraction(
         result_path = run_dir / f"video_facts_{role}.json"
         cache_key = _video_fact_cache_key(args, analysis, role)
         cache_path = _cache_path(run_dir, ".video_fact_cache", cache_key)
-        cached = None if args.llm_dry_run else _read_cache_result(cache_path, "fact_result")
+        cached = (
+            None
+            if args.llm_dry_run
+            else _read_cache_result(
+                cache_path,
+                "fact_result",
+                cache_key,
+                validator=lambda value: _is_valid_video_fact_cache(role, value, analysis),
+            )
+        )
         if cached is not None:
             cached.setdefault("temporal_evidence_mode", "unknown")
             sanitize_audio_observations(
                 {"video_understanding": {role: cached}, "stage_analysis": []},
-                supports_native_audio_analysis(args.llm_api_url, args.llm_model),
+                can_analyze_native_audio(args.llm_api_url, args.llm_model),
             )
             facts[role] = cached
             write_json(result_path, cached)
@@ -1409,17 +1651,19 @@ def run_video_fact_extraction(
             analysis,
             visual_inputs,
             api_url=args.llm_api_url,
+            budget=getattr(args, "_resource_budget", None),
         )
         request_path = run_dir / f"llm_facts_{role}_request.json"
         response_path = run_dir / f"llm_facts_{role}_response.json"
         write_json(request_path, payload)
         if args.llm_dry_run:
+            request_path.unlink(missing_ok=True)
             continue
         result_text = fetch_json_completion(args, api_key, request_path, response_path)
         fact_result = normalize_video_fact_result(role, parse_json_text(result_text), analysis)
         sanitize_audio_observations(
             {"video_understanding": {role: fact_result}, "stage_analysis": []},
-            supports_native_audio_analysis(args.llm_api_url, args.llm_model),
+            can_analyze_native_audio(args.llm_api_url, args.llm_model),
         )
         # 能力状态取自实际请求载荷，不让模型猜自己是否看到了连续视频。
         fact_result["temporal_evidence_mode"] = "full_temporal" if payload_has_video(payload) else "static_only"
@@ -1452,6 +1696,7 @@ def run_video_identity_extraction(
         result_path = run_dir / f"video_identity_{role}.json"
         write_json(request_path, payload)
         if args.llm_dry_run:
+            request_path.unlink(missing_ok=True)
             continue
         result_text = fetch_json_completion(args, api_key, request_path, response_path)
         identity = {"product_identity": normalize_video_product_identity(parse_json_text(result_text).get("product_identity"))}

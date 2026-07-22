@@ -7,6 +7,7 @@ from pathlib import Path
 
 from scripts.evaluate_analysis import (
     _decision_gt_audit,
+    _event_time_bounds,
     _human_key_event_audit,
     _layer_attribution,
     _phase_c_audit,
@@ -17,6 +18,11 @@ from scripts.evaluate_analysis import (
 
 
 class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
+    def test_gt_event_time_bounds_reject_reverse_and_nonfinite_values(self) -> None:
+        self.assertEqual(_event_time_bounds([1.0, 3.0]), (1.0, 3.0))
+        self.assertIsNone(_event_time_bounds([3.0, 1.0]))
+        self.assertIsNone(_event_time_bounds([float("nan"), 3.0]))
+
     def test_score_bucket_uses_derive_boundaries(self) -> None:
         self.assertEqual(severity_from_score(1.2), "small")
         self.assertEqual(severity_from_score(1.21), "medium")

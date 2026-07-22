@@ -8,13 +8,15 @@ import datetime as dt
 import hashlib
 import json
 import shutil
+import subprocess
 import sys
 import uuid
 from pathlib import Path
 from typing import Any
 
 from flayr_core.audio_quality import analyze_audio_quality
-from flayr_core.llm.api import read_llm_api_key, supports_native_audio_analysis
+from flayr_core.analysis_model import ANALYSIS_RESULT_CONTRACT, placeholder_stages
+from flayr_core.llm.api import can_analyze_native_audio, provider_capabilities, read_llm_api_key
 from flayr_core.llm.pipeline import (
     apply_finalized_analysis_result,
     merge_analysis_result,
@@ -22,10 +24,9 @@ from flayr_core.llm.pipeline import (
     run_large_model_analysis,
 )
 from flayr_core.prompt import write_analysis_input
-from flayr_core.proposal_clip import generate_proposal_clips
-from flayr_core.proposal_video import config_from_args
 from flayr_core.report import write_report
-from flayr_core.stage_catalog import DEFAULT_STAGES
+from flayr_core.resources import ResourceBudget, ResourceBudgetExceeded, finite_nonnegative
+from flayr_core.run_manifest import SUCCESS_MANIFEST_NAME, command_digest, write_success_manifest
 from flayr_core.motion import compute_shake_metric
 from flayr_core.market import normalize_target_market
 from flayr_core.shot_track import build_shot_track
@@ -37,6 +38,7 @@ from flayr_core.video import (
     extract_audio,
     extract_frames,
     probe_duration_seconds,
+    reserve_existing_media_artifacts,
 )
 from flayr_core.video_evidence import build_video_evidence_artifacts
 from flayr_core.whisper import run_whisper
@@ -46,24 +48,64 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNS_DIR = ROOT / "runs"
 PREPROCESS_CACHE_SCHEMA_VERSION = 2
 PREPROCESS_PIPELINE_VERSION = "2026-07-18.1"
+PREPROCESS_ARTIFACT_SCHEMA_VERSION = 1
+_RUN_ROLE_DIRS = frozenset({"benchmark", "creator"})
+_RUN_OUTPUT_FILES = frozenset(
+    {
+        SUCCESS_MANIFEST_NAME,
+        "analysis.json",
+        "analysis_input.md",
+        "analysis_result.json",
+        "comparison_contract.json",
+        "comparison_eligibility.json",
+        "comparison_rejection.json",
+        "degraded_manifest.json",
+        "final_derived_result.json",
+        "postprocess_change_log.json",
+        "product_foundation.json",
+        "raw_model_response.json",
+        "report.html",
+        "validated_normalized_result.json",
+    }
+)
+_RUN_OUTPUT_PREFIXES = (
+    "absolute_execution_",
+    "llm_",
+    "video_facts_",
+    "video_identity_",
+)
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    budget = ResourceBudget()
+    # 所有预处理、OCR、LLM、下载、报告和子进程都从这个 run 级对象取预算。
+    budget.activate()
+    args._resource_budget = budget
 
     deps = check_dependencies(args)
     inputs = validate_inputs(args)
+    source_durations: dict[str, float] = {}
+    for role, path in inputs.items():
+        budget.preflight_source(path)
+        duration = probe_duration_seconds(path)
+        source_durations[role] = budget.register_source(path, duration)
+    deps["source_durations"] = source_durations
     run_dir = create_run_dir(args)
+    # A direct rerun must invalidate an old completion marker before any new
+    # artifact is written. The batch runner also removes invalid markers.
+    (run_dir / SUCCESS_MANIFEST_NAME).unlink(missing_ok=True)
 
     videos: dict[str, dict[str, Any]] = {}
     for role, path in inputs.items():
-        videos[role] = process_video(role, path, run_dir, deps, args)
+        videos[role] = process_video(role, path, run_dir, deps, args, budget=budget)
 
-    analysis = build_analysis(args, run_dir, deps, videos)
+    analysis = build_analysis(args, run_dir, deps, videos, budget=budget)
     analysis_input_path = write_analysis_input(run_dir, analysis)
     if args.mode == "scope":
         eligibility = run_comparison_scope_preflight(args, analysis, run_dir)
+        analysis["resource_budget"] = budget.snapshot()
         write_json(run_dir / "analysis.json", analysis)
         write_analysis_input(run_dir, analysis)
         print_scope_summary(run_dir, deps, videos, eligibility)
@@ -93,28 +135,37 @@ def main() -> int:
                 "improvements": analysis.get("improvements", []),
             },
         )
-    if args.mode in {"compare", "improve"} and not comparison_stopped:
-        voice_key = read_llm_api_key(args).strip() if getattr(args, "with_voice_clone", False) else ""
-        analysis["proposal_clips"] = generate_proposal_clips(
-            run_dir, analysis, config_from_args(args), voice_clone_api_key=voice_key,
-        )
+    analysis["resource_budget"] = budget.snapshot()
     write_json(run_dir / "analysis.json", analysis)
     write_analysis_input(run_dir, analysis)
 
-    if args.mode in {"compare", "improve"} and not comparison_stopped:
-        plan = build_improved_video_plan(analysis)
-        write_json(run_dir / "improved_video_plan.json", plan)
-    else:
-        plan = None
-
-    report_path = write_report(run_dir, analysis, plan)
-    print_summary(run_dir, report_path, deps, videos, plan)
+    analysis["resource_budget"] = budget.snapshot()
+    report_path = write_report(run_dir, analysis, budget=budget)
+    if args.mode in {"compare", "improve"} and analysis.get("analysis_run_state") == "completed":
+        write_success_manifest(
+            run_dir,
+            {
+                "benchmark_video": inputs["benchmark"],
+                **({"creator_video": inputs["creator"]} if "creator" in inputs else {}),
+                **({"analysis_result_json": args.analysis_result_json} if args.analysis_result_json else {}),
+            },
+            analysis,
+            {
+                "mode": args.mode,
+                "code_commit": _git_commit_sha(),
+                "argv_sha256": command_digest(sys.argv[1:]),
+                "llm_model": str(args.llm_model or ""),
+                "llm_api_url": str(args.llm_api_url or ""),
+            },
+        )
+    print_summary(run_dir, report_path, deps, videos)
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Analyze and improve TikTok commerce short videos.",
+        allow_abbrev=False,
     )
     parser.add_argument(
         "mode",
@@ -187,14 +238,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--whisper-model",
         type=Path,
-        default=Path("/Users/wangbo5/Library/Application Support/VidLingo/Models/ggml-large-v3-turbo-q5_0.bin"),
-        help="Model path for whisper-cli or whisper-cpp. 默认本机的 VidLingo large-v3-turbo 模型；部署给别人时改成相对路径或 env 变量。",
+        default=None,
+        help="Model path for whisper-cli or whisper-cpp. Keep machine-specific model paths outside the repository.",
     )
     parser.add_argument(
         "--whisper-model-th",
         type=Path,
-        default=Path("/Users/wangbo5/Library/Application Support/VidLingo/Models/ggml-th-large-v3-q5_0.bin"),
-        help="泰语专用 whisper 模型路径。检测到泰语或显式 -l th 时用它转写；文件缺失时回退到 --whisper-model。",
+        default=None,
+        help="Optional Thai Whisper model path. Keep machine-specific model paths outside the repository.",
     )
     parser.add_argument(
         "--whisper-language",
@@ -294,82 +345,46 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Backward-compatible alias for --ocr-mode off.",
     )
-    parser.add_argument(
-        "--with-voice-clone",
-        action="store_true",
-        help=(
-            "Clone the creator's voice (CosyVoice) and synthesize improvement scripts "
-            "for i2v lip-sync proposal clips. Requires the dashscope SDK (optional dep; "
-            "pip install -r requirements-voice.txt). Reuses the analysis LLM key "
-            "(--llm-api-key-*), which must be a DashScope key. Default off."
-        ),
-    )
-    parser.add_argument(
-        "--proposal-video-backend",
-        choices=("none", "dashscope-i2v", "dashscope-s2v"),
-        default="none",
-        help="Optional AI demo clip backend for Top improvements. Default: none.",
-    )
-    parser.add_argument(
-        "--proposal-video-model",
-        default="",
-        help="Optional Wan model override. Defaults: wan2.6-i2v for i2v, wan2.2-s2v for s2v.",
-    )
-    parser.add_argument(
-        "--proposal-video-api-url",
-        default="",
-        help="Optional DashScope Wan endpoint override. Defaults to the Beijing endpoint for the selected backend.",
-    )
-    parser.add_argument(
-        "--proposal-video-resolution",
-        choices=("480P", "720P", "1080P"),
-        default="720P",
-        help="Resolution tier for generated proposal clips. Default: 720P.",
-    )
-    parser.add_argument(
-        "--proposal-video-timeout",
-        type=int,
-        default=600,
-        help="Seconds to wait for each DashScope video task when backend is enabled. Default: 600.",
-    )
-    parser.add_argument(
-        "--proposal-video-poll-interval",
-        type=int,
-        default=15,
-        help="Seconds between DashScope task polls. Default: 15.",
-    )
-    parser.add_argument(
-        "--proposal-video-submit-only",
-        action="store_true",
-        help="Submit DashScope proposal video tasks but do not wait for completion.",
-    )
-    parser.add_argument(
-        "--proposal-face-image-url",
-        default="",
-        help="Public face image URL fallback for dashscope-s2v. Per-improvement face_image_url overrides this.",
-    )
-    parser.add_argument(
-        "--proposal-line-audio-url",
-        default="",
-        help="Public line audio URL fallback for dashscope-s2v. Per-improvement line_audio_url overrides this.",
-    )
-    parser.add_argument(
-        "--proposal-skip-s2v-detect",
-        action="store_true",
-        help="Skip wan2.2-s2v-detect before dashscope-s2v generation.",
-    )
     return parser
 
 
 def create_run_dir(args: argparse.Namespace) -> Path:
     if args.output_dir:
         run_dir = args.output_dir.expanduser().resolve()
-        run_dir.mkdir(parents=True, exist_ok=True)
+        _prepare_explicit_run_dir(run_dir, reuse=bool(args.reuse_preprocessing))
     else:
         stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         run_dir = DEFAULT_RUNS_DIR / f"{stamp}-{args.mode}-{uuid.uuid4().hex[:8]}"
         run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
+
+
+def _prepare_explicit_run_dir(run_dir: Path, *, reuse: bool) -> None:
+    """Reject mixed output directories and remove only known stale run files."""
+    if run_dir.exists() and not run_dir.is_dir():
+        raise SystemExit(f"--output-dir 不是目录：{run_dir}")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    entries = list(run_dir.iterdir())
+    if not entries:
+        return
+    if not reuse:
+        raise SystemExit(
+            f"--output-dir 已存在且非空：{run_dir}。为避免混入旧产物，请使用新目录，"
+            "或显式添加 --reuse-preprocessing。"
+        )
+    for entry in entries:
+        if entry.is_dir() and not entry.is_symlink() and entry.name in _RUN_ROLE_DIRS:
+            continue
+        if entry.is_file() and (
+            entry.name in _RUN_OUTPUT_FILES
+            or entry.name.startswith(_RUN_OUTPUT_PREFIXES)
+        ):
+            entry.unlink()
+            continue
+        raise SystemExit(
+            f"--output-dir 含有未识别的旧内容：{entry}。请使用新的运行目录，"
+            "不要把非 Flayr 产物与预处理缓存混用。"
+        )
 
 
 def check_dependencies(args: argparse.Namespace) -> dict[str, Any]:
@@ -506,7 +521,7 @@ def _git_commit_sha() -> str:
 
 def _binary_version(bin_deps: dict[str, Any], key: str) -> str:
     """返回工具路径 + 版本第一行，不可用返回 'missing'。"""
-    path = deps.get(key) if isinstance(bin_deps, dict) else None
+    path = bin_deps.get(key) if isinstance(bin_deps, dict) else None
     if not path:
         return "missing"
     try:
@@ -570,7 +585,9 @@ def load_existing_video_result(
         return None
     if info.get("preprocess_fingerprint") != expected_fingerprint:
         return None
-    if not info.get("preprocess_completed"):
+    if info.get("preprocess_completed") is not True:
+        return None
+    if not _preprocess_artifacts_match(role_dir, info.get("preprocess_artifacts")):
         return None
     frames_dir = Path(str(info.get("frames_dir") or ""))
     transcript = Path(str(info.get("transcript_path") or ""))
@@ -581,10 +598,66 @@ def load_existing_video_result(
     segment_path = Path(str(info.get("transcript_segments_path") or transcript.with_name(transcript.stem + ".txt")))
     if not segment_path.is_file() or _is_stale_placeholder(segment_path):
         return None
-    audio_path = Path(str(info.get("audio_path") or ""))
-    if audio_path and not audio_path.is_file():
+    audio_value = str(info.get("audio_path") or "").strip()
+    if audio_value and not Path(audio_value).is_file():
         return None
     return info
+
+
+def _preprocess_artifact_metadata(path: Path) -> dict[str, Any]:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {"size_bytes": path.stat().st_size, "sha256": digest.hexdigest()}
+
+
+def _build_preprocess_artifact_manifest(role_dir: Path) -> dict[str, Any]:
+    """Hash every generated role artifact except the manifest that contains it."""
+    root = role_dir.expanduser().resolve()
+    files: dict[str, dict[str, Any]] = {}
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.name == "_preprocess.json" or path.is_symlink():
+            continue
+        resolved = path.resolve()
+        try:
+            relative = resolved.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        files[relative] = _preprocess_artifact_metadata(resolved)
+    return {"schema_version": PREPROCESS_ARTIFACT_SCHEMA_VERSION, "files": files}
+
+
+def _preprocess_artifacts_match(role_dir: Path, value: Any) -> bool:
+    if not isinstance(value, dict) or value.get("schema_version") != PREPROCESS_ARTIFACT_SCHEMA_VERSION:
+        return False
+    recorded = value.get("files")
+    if not isinstance(recorded, dict) or not recorded:
+        return False
+    root = role_dir.expanduser().resolve()
+    current = _build_preprocess_artifact_manifest(root).get("files")
+    if current != recorded:
+        return False
+    for relative, metadata in recorded.items():
+        candidate = (root / str(relative)).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            return False
+        if not isinstance(metadata, dict) or not candidate.is_file() or candidate.is_symlink():
+            return False
+    return True
+
+
+def _is_stale_placeholder(path: Path) -> bool:
+    """Return whether a cached text artifact is empty or still a pending placeholder."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError:
+        return True
+    if not text:
+        return True
+    return text.startswith(("待转写", "待翻译", "待生成", "pending:"))
 
 
 def process_video(
@@ -593,12 +666,24 @@ def process_video(
     run_dir: Path,
     deps: dict[str, Any],
     args: argparse.Namespace,
+    budget: ResourceBudget | None = None,
 ) -> dict[str, Any]:
     role_dir = run_dir / role
+    budget = budget or getattr(args, "_resource_budget", None)
     if getattr(args, "reuse_preprocessing", False):
         fingerprint = build_preprocess_fingerprint(video_path, deps, args)
         cached = load_existing_video_result(role_dir, fingerprint)
         if cached is not None:
+            try:
+                cached_frames = int(
+                    finite_nonnegative(cached.get("frame_count") or 0, "cached frame count")
+                    + finite_nonnegative(cached.get("focus_frame_count") or 0, "cached focus frame count")
+                )
+            except (TypeError, ValueError) as exc:
+                raise ResourceBudgetExceeded(f"cached frame counts are invalid: {exc}") from exc
+            if budget is not None:
+                budget.reserve_frames(max(0, cached_frames))
+                reserve_existing_media_artifacts(role_dir, budget)
             ensure_video_evidence_artifacts(role_dir, cached)
             print(f"[reuse] {role}: 复用已有预处理（跳过抽帧/转写/OCR）")
             return cached
@@ -646,7 +731,7 @@ def process_video(
 
     if deps["ffmpeg"]:
         if deps["ffprobe"]:
-            result["duration_seconds"] = probe_duration_seconds(video_path)
+            result["duration_seconds"] = deps.get("source_durations", {}).get(role) or probe_duration_seconds(video_path)
         extract_frames(video_path, frames_dir, focus_frames_dir, result)
         extract_audio(video_path, role_dir / "audio.wav", result)
         result["audio_quality"] = analyze_audio_quality(
@@ -692,6 +777,7 @@ def process_video(
             ocr_key,
             api_url=args.llm_api_url,
             model=args.llm_model,
+            budget=budget,
         )
         result["subtitle_track_status"] = subtitle_track.get("status")
         if subtitle_track.get("segments"):
@@ -708,6 +794,7 @@ def process_video(
 
     # 落盘预处理结果，供 --reuse-preprocessing 下次复用（即使本次 LLM 阶段后续失败也已写）。
     result["preprocess_completed"] = True
+    result["preprocess_artifacts"] = _build_preprocess_artifact_manifest(role_dir)
     write_json(role_dir / "_preprocess.json", result)
     return result
 
@@ -762,7 +849,7 @@ def looks_like_vision_config(args: argparse.Namespace) -> bool:
     return any(
         marker in value
         for value in values
-        for marker in ("dashscope", "qwen", "api/plan/", "doubao")
+        for marker in ("dashscope", "qwen")
     )
 
 
@@ -775,11 +862,9 @@ def build_analysis(
     run_dir: Path,
     deps: dict[str, Any],
     videos: dict[str, dict[str, Any]],
+    budget: ResourceBudget | None = None,
 ) -> dict[str, Any]:
-    stage_analysis = [
-        stage_placeholder(stage.name, stage.default_time_range, stage.core_question)
-        for stage in DEFAULT_STAGES
-    ]
+    stage_analysis = placeholder_stages()
     improvements = default_improvements(args.mode)
 
     # improvements_status 取值：
@@ -788,7 +873,8 @@ def build_analysis(
     #   llm_completed   —— LLM 分析已成功合并（由 merge_analysis_result 改写）
     improvements_status = "not_applicable" if args.mode == "breakdown" else "llm_unavailable"
 
-    native_audio = supports_native_audio_analysis(args.llm_api_url, args.llm_model)
+    capabilities = provider_capabilities(args.llm_api_url, args.llm_model)
+    native_audio = can_analyze_native_audio(args.llm_api_url, args.llm_model)
     return {
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "mode": args.mode,
@@ -809,8 +895,12 @@ def build_analysis(
             "notes": args.product_notes,
         },
         "dependencies": deps,
+        "analysis_result_contract": ANALYSIS_RESULT_CONTRACT.metadata(),
+        "resource_budget": budget.snapshot() if budget is not None else {},
         "audio_assessment": {
             "native_audio_analysis": native_audio,
+            "provider_profile": capabilities.profile,
+            "capability_confidence": capabilities.confidence,
             "mode": "native_audio_observation" if native_audio else "transcript_plus_local_qc",
             "commercial_contribution": "observation_only",
             "severity_policy": "excluded",
@@ -820,23 +910,6 @@ def build_analysis(
         "improvements": improvements if args.mode in {"compare", "improve"} else [],
         "improvements_status": improvements_status,
         "analysis_run_state": "not_run",
-        "status": {
-            "video_rendered": False,
-            "reason": "MVP creates an assembly plan first; final improved.mp4 requires timed replacement audio and subtitles.",
-        },
-    }
-
-
-def stage_placeholder(name: str, time_range: str, question: str) -> dict[str, Any]:
-    return {
-        "stage": name,
-        "time_range": time_range,
-        "core_question": question,
-        "benchmark_summary": "待基于关键帧和转录补充。",
-        "creator_summary": "待基于关键帧和转录补充。",
-        "gap": "待人工或模型分析后填写。",
-        "severity": None,
-        "placeholder": True,
     }
 
 
@@ -848,38 +921,11 @@ def default_improvements(mode: str) -> list[dict[str, Any]]:
     return []
 
 
-def build_improved_video_plan(analysis: dict[str, Any]) -> dict[str, Any]:
-    edits = []
-    for item in analysis["improvements"]:
-        edits.append(
-            {
-                "type": "visual_note",
-                "start": item["time_range"],
-                "end": item["time_range"],
-                "problem": item["problem"],
-                "change": item["suggestion"],
-                "gmv_reason": item["gmv_reason"],
-                "evidence": item.get("evidence", []),
-                "creator_script": item.get("creator_script", ""),
-                "requires": ["manual timestamp refinement", "subtitle rewrite", "optional TTS"],
-            }
-        )
-
-    return {
-        "can_render_improved_mp4": False,
-        "reason": "Timed replacement scripts, TTS audio, and exact edit points are not complete yet.",
-        "source_video": analysis["videos"].get("creator", {}).get("path"),
-        "planned_output": str(Path(analysis["run_dir"]) / "improved.mp4"),
-        "edits": edits,
-    }
-
-
 def print_summary(
     run_dir: Path,
     report_path: Path,
     deps: dict[str, Any],
     videos: dict[str, dict[str, Any]],
-    plan: dict[str, Any] | None,
 ) -> None:
     print(f"Run directory: {run_dir}")
     print(f"Report: {report_path}")
@@ -890,10 +936,6 @@ def print_summary(
             f"{role}: frames={info['frame_count']} "
             f"transcript={info['transcription_status']} errors={len(info['errors'])}"
         )
-    if plan:
-        print("improved.mp4: not rendered; improved_video_plan.json created")
-
-
 def print_scope_summary(
     run_dir: Path,
     deps: dict[str, Any],
@@ -918,25 +960,3 @@ def print_scope_summary(
 
 if __name__ == "__main__":
     sys.exit(main())
-
-def _git_commit_sha() -> str:
-    """返回当前 git commit short hash，不可用时回退 'unknown'。"""
-    try:
-        result = subprocess.run(
-            ["git", "-C", __file__, "rev-parse", "--short", "HEAD"],
-        capture_output=True, text=True, timeout=5)
-        return result.stdout.strip() if result.returncode == 0 else "unknown"
-    except Exception:
-        return "unknown"
-
-
-def _binary_version(bin_path: str | None) -> str:
-    """返回 ffmpeg/ffprobe 版本字符串，不可用返回 'missing'。"""
-    if not bin_path:
-        return "missing"
-    try:
-        result = subprocess.run([bin_path, "-version"], capture_output=True, text=True, timeout=5)
-        line = result.stdout.split('\n')[0] if result.stdout else "unknown"
-        return line.strip()
-    except Exception:
-        return "missing"

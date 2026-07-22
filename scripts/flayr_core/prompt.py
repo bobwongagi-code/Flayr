@@ -117,7 +117,7 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
         "5. 每个阶段从原始转写中摘录对应本地语言口播到 benchmark_quote/creator_quote，并附中文翻译；无明确口播则留空；不得将画面未显示的信息写成画面证据。",
         "6. 提升点输出 GMV 杠杆最高的 1-5 条，按优先级排序，不按阶段顺序凑数；CTA 与 Hook 的重大差距优先；必须具体到时间段、画面、话术或节奏。",
         "7. 每个提升点输出 base_frame_suitability。达人全片确有可改造真实基底时写 usable 与 best_base_frame_time；没有目标所需的人物/产品/场景时写 no_suitable_frame，时间留空并要求补拍/补素材。",
-        "8. 每个提升点输出 benchmark_evidence_ids 与 base_frame_evidence_id。标杆参考只能引用所属阶段证据；AI 基底理由只能描述对应达人证据中真实可见的素材，不能把无口播画面写成主播表达。aigc_image_path 在分析阶段留空。",
+        "8. 每个提升点输出 benchmark_evidence_ids 与 base_frame_evidence_id。标杆参考只能引用所属阶段证据；基底理由只能描述对应达人证据中真实可见的素材，不能把无口播画面写成主播表达。",
         "9. 优先选择低成本、高 GMV 杠杆的改法。建议话术必须基于达人素材重新创作，不得复制或轻微改写标杆话术。",
         "10. 建议话术 creator_script 必须使用达人口播语言；creator_script_zh 只用于给中国运营理解。若达人未检测到有效口播或语言不可靠，用标杆语言/目标市场语言写新的达人话术，不要把音乐、噪声或无关字幕复制成建议。",
         "11. 不要臆造品牌、价格、优惠、型号或参数。只有当产品名/转写/画面中明确出现品牌时才能写品牌；不确定时使用产品名或本地语言中的中性产品指代。",

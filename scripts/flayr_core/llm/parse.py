@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ..artifacts import format_seconds
+from ..artifacts import format_seconds, parse_time_range_seconds
 from ..multimodal import (
     MULTIMODAL_CHANNELS,
     MULTIMODAL_DOMINANT_CHANNELS,
@@ -984,12 +984,28 @@ def normalize_severity(value: Any) -> str:
 
 
 def normalize_time_range_value(value: Any) -> str:
-    if isinstance(value, dict):
-        start = value.get("start", value.get("start_time"))
-        end = value.get("end", value.get("end_time"))
-        if isinstance(start, (int, float)) and isinstance(end, (int, float)):
+    if isinstance(value, (dict, list, tuple)):
+        parsed = parse_time_range_seconds(value, None)
+        if parsed is not None:
+            start, end = parsed
             return f"{format_seconds(start)} - {format_seconds(end)}"
-    return str(value or "")
+        return ""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = parse_time_range_seconds(raw, None)
+    if parsed is not None:
+        start, end = parsed
+        return f"{format_seconds(start)} - {format_seconds(end)}"
+    # 结尾相对表达式需要视频时长才能解析；只保留严格形态，其他文本清空。
+    if re.fullmatch(
+        r"(?:最后|末尾|结尾|CTA)\s*\d+(?:\.\d+)?\s*(?:秒|s)?"
+        r"(?:\s*(?:[-~至到])\s*\d+(?:\.\d+)?\s*(?:秒|s)?)?",
+        raw,
+        flags=re.IGNORECASE,
+    ):
+        return raw
+    return ""
 
 
 def normalize_priority(value: Any, fallback: int) -> int:
@@ -1068,9 +1084,12 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
     for index, item in enumerate(stage_analysis):
         if not isinstance(item, dict):
             raise SystemExit("Each stage_analysis item must be an object.")
-        stage_name, default_range, core_question = STAGES[index]
-        benchmark_time_range = normalize_time_range_value(item.get("benchmark_time_range") or item.get("time_range") or default_range)
-        creator_time_range = normalize_time_range_value(item.get("creator_time_range") or item.get("time_range") or default_range)
+        stage_name, _default_range, core_question = STAGES[index]
+        # Stage-specific ranges are evidence, not presentation defaults. Missing
+        # or malformed ranges remain empty and are rejected by time coherence
+        # validation instead of being silently assigned a catalog window.
+        benchmark_time_range = normalize_time_range_value(item.get("benchmark_time_range"))
+        creator_time_range = normalize_time_range_value(item.get("creator_time_range"))
         normalized_stages.append(
             {
                 "stage": str(item.get("stage") or stage_name),
@@ -1175,8 +1194,6 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 "best_base_frame_time": normalized_base_frame_time(item),
                 "base_frame_evidence_id": str(item.get("base_frame_evidence_id") or "").strip(),
                 "base_frame_reason": str(item.get("base_frame_reason") or "").strip(),
-                "aigc_prompt": str(item.get("aigc_prompt") or "").strip(),
-                "aigc_image_path": str(item.get("aigc_image_path") or "").strip(),
                 "expected_effect": str(item.get("expected_effect") or item.get("gmv_reason") or "").strip(),
                 "priority": normalize_priority(item.get("priority"), index),
             }

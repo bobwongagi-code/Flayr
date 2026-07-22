@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .audit import PostprocessAudit
+
 # 通用校验（会抛 SystemExit）
 from .validate import validate_transcript_attribution
 
@@ -98,34 +100,48 @@ def sanitize_promise_chain_scope(normalized: dict[str, Any]) -> None:
     chain["break_reason"] = "前四阶段的承诺、承接、证明与效果已围绕同一产品命题闭环；后续购买引导不属于本字段。"
 
 
-def apply_postprocess_chain(normalized: dict[str, Any], analysis: dict[str, Any]) -> None:
-    """两个 caller 共享的中段流水线。每一步对应一个独立职责模块。"""
-    stamp_product_foundation(normalized, analysis)                           # foundation  Step-0 品地基权威覆盖（须在 derive 前）
-    stamp_comparison_eligibility(normalized, analysis)                       # contract    商品关系 + 阶段级比较资格（facts 独立判定）
-    sanitize_promise_chain_scope(normalized)                                  # repair      S1-S4 承诺链不接收 S6/CTA 断点
-    validate_transcript_attribution(normalized, analysis)                    # validate    跨视频串证据校验
-    align_clear_commerce_evidence(normalized)                                # repair      关键词归位 benchmark 事实
-    bind_timed_transcript_quotes(normalized, analysis)                       # repair      SRT 时间戳回填 quote
-    reconcile_certification_ownership(normalized)                            # claims_my   KKM/认证统一归 S5
-    discard_unreferenced_certification_claims(normalized)                    # claims_my   删除未支撑认证主张
-    align_timed_cta_from_transcript(normalized, analysis)                    # repair      尾段 CTA 时间对齐
-    reconcile_unsupported_cta(normalized)                                    # repair      无 CTA 时补占位 evidence
-    downgrade_unverified_sensitive_claims(normalized)                        # repair      未验证敏感主张降级 voice_only
-    ground_stage_visual_evidence(normalized)                                 # repair      visual_evidence 对齐 evidence_unit
-    deduplicate_stage_quotes(normalized)                                     # repair      跨阶段去重 quote 子句
-    materialize_spoken_stage_evidence(normalized)                            # repair      有口播无时段证据时补 stage 占位
-    align_stage_flag_evidence(normalized)                                     # repair      stage/flag 间先恢复同阶段真实引用
-    fill_missing_evidence_references(normalized)                             # repair      引用仍缺失时才补占位或就近匹配
-    reconcile_s3_s4_evidence_coherence(normalized)                           # repair      S3 真实作用与 S4 因果桥硬一致性
-    derive_product_visibility(normalized, analysis)                          # repair      达人产品出镜标记确定性累加 product_visibility
-    repair_s1_hook_boundaries(normalized, analysis)                           # repair      S1/S2 边界按 SRT/facts 候选收敛，防 Hook 吃掉产品引出
-    reconcile_s5_trust_sources(                                                # repair      S5 只接受 Stage1 同类型可核验来源
-        normalized, analysis.get("s5_source_signals_required") is True
+def apply_postprocess_chain(
+    normalized: dict[str, Any],
+    analysis: dict[str, Any],
+    audit: PostprocessAudit | None = None,
+) -> None:
+    """两个 caller 共享的中段流水线，并可记录每个规则的字段变更。"""
+
+    def step(rule: str, function: Any, *args: Any) -> None:
+        if audit is None:
+            function(*args)
+        else:
+            audit.run(normalized, rule, function, *args)
+
+    step("postprocess.stamp_product_foundation", stamp_product_foundation, normalized, analysis)
+    step("postprocess.stamp_comparison_eligibility", stamp_comparison_eligibility, normalized, analysis)
+    step("postprocess.sanitize_promise_chain_scope", sanitize_promise_chain_scope, normalized)
+    step("postprocess.validate_transcript_attribution", validate_transcript_attribution, normalized, analysis)
+    step("postprocess.align_clear_commerce_evidence", align_clear_commerce_evidence, normalized)
+    step("postprocess.bind_timed_transcript_quotes", bind_timed_transcript_quotes, normalized, analysis)
+    step("postprocess.reconcile_certification_ownership", reconcile_certification_ownership, normalized)
+    step("postprocess.discard_unreferenced_certification_claims", discard_unreferenced_certification_claims, normalized)
+    step("postprocess.align_timed_cta_from_transcript", align_timed_cta_from_transcript, normalized, analysis)
+    step("postprocess.reconcile_unsupported_cta", reconcile_unsupported_cta, normalized)
+    step("postprocess.downgrade_unverified_sensitive_claims", downgrade_unverified_sensitive_claims, normalized)
+    step("postprocess.ground_stage_visual_evidence", ground_stage_visual_evidence, normalized)
+    step("postprocess.deduplicate_stage_quotes", deduplicate_stage_quotes, normalized)
+    step("postprocess.materialize_spoken_stage_evidence", materialize_spoken_stage_evidence, normalized)
+    step("postprocess.align_stage_flag_evidence", align_stage_flag_evidence, normalized)
+    step("postprocess.fill_missing_evidence_references", fill_missing_evidence_references, normalized)
+    step("postprocess.reconcile_s3_s4_evidence_coherence", reconcile_s3_s4_evidence_coherence, normalized)
+    step("postprocess.derive_product_visibility", derive_product_visibility, normalized, analysis)
+    step("postprocess.repair_s1_hook_boundaries", repair_s1_hook_boundaries, normalized, analysis)
+    step(
+        "postprocess.reconcile_s5_trust_sources",
+        reconcile_s5_trust_sources,
+        normalized,
+        analysis.get("s5_source_signals_required") is True,
     )
-    prune_multimodal_evidence_to_stage(normalized)                            # repair      专项收口后裁掉过期的渠道证据引用
-    materialize_cross_stage_inputs(normalized, analysis)                       # proposition 品命题矩阵 + S1→S2/S4→S6 跨阶段输入
-    stabilize_stage_severity(normalized)                                      # repair      severity 阶段归属漂移校准
-    derive_severity_from_facts(normalized, analysis)                          # derive      4d 执行分+权重表确定性推导（成功则覆盖，缺事实保留上游结果；含晃动封顶）
-    apply_comparison_eligibility(normalized)                                  # contract    按阶段资格限制差距与建议
-    materialize_quality_audits(normalized, analysis)                           # proposition 绝对质量层 + S5/S6 命题审计（不覆盖 gap severity）
-    stabilize_improvement_priorities(normalized)                              # repair      Top 改进跟随最终商业判断
+    step("postprocess.prune_multimodal_evidence_to_stage", prune_multimodal_evidence_to_stage, normalized)
+    step("postprocess.materialize_cross_stage_inputs", materialize_cross_stage_inputs, normalized, analysis)
+    step("postprocess.stabilize_stage_severity", stabilize_stage_severity, normalized)
+    step("postprocess.derive_severity_from_facts", derive_severity_from_facts, normalized, analysis)
+    step("postprocess.apply_comparison_eligibility", apply_comparison_eligibility, normalized)
+    step("postprocess.materialize_quality_audits", materialize_quality_audits, normalized, analysis)
+    step("postprocess.stabilize_improvement_priorities", stabilize_improvement_priorities, normalized)

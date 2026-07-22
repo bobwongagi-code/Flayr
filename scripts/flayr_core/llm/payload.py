@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ..artifacts import format_seconds, parse_time_range_seconds
+from ..artifacts import format_seconds, parse_time_range_seconds, parse_timestamp_seconds
 from ..proposition_contract import build_product_proposition_contract
 from ..market import render_market_knowledge
 from ..multimodal import multimodal_output_example, render_multimodal_prompt_contract
@@ -25,10 +25,11 @@ from ..stage_ownership import (
 )
 from ..subtitle_track import render_subtitle_track_markdown
 from ..video_evidence import parse_srt_segments
+from ..resources import ResourceBudget
 from .api import (
     audio_to_mp3_data_url,
-    supports_native_audio_analysis,
-    supports_standalone_audio,
+    can_analyze_native_audio,
+    can_send_standalone_audio,
     video_to_data_url,
 )
 from .media import build_evidence_sensory_inputs
@@ -41,7 +42,7 @@ PHASE_C_REVIEW_MAX_WIDTH = 480
 
 def full_analysis_output_budget(model: str) -> int:
     """Output budget for Flayr's full six-stage JSON contract."""
-    return 32768 if "doubao" in str(model or "").lower() else 16384
+    return 16384
 
 
 def read_text_if_exists(path: Path) -> str:
@@ -175,7 +176,6 @@ def build_product_foundation_payload(model: str, analysis: dict[str, Any]) -> di
         ],
         "temperature": 0.0,
     }
-
 
 def build_comparison_eligibility_payload(model: str, facts: dict[str, Any]) -> dict[str, Any]:
     """根据已锁定的双侧产品身份，判定商品关系、替代关系与逐阶段可比性。"""
@@ -311,7 +311,7 @@ def build_improvement_reconciliation_payload(
         "title,target_stage,gmv_impact,gap_type,time_range,creator_time_range,benchmark_time_range,problem,"
         "benchmark_reference,benchmark_evidence_ids,suggestion,actions,gmv_reason,evidence,creator_script,"
         "creator_script_zh,base_frame_suitability,best_base_frame_time,base_frame_evidence_id,base_frame_reason,"
-        "aigc_prompt,aigc_image_path,expected_effect,priority"
+        "expected_effect,priority"
     )
     prompt = (
         "最终确定性 severity 已完成，但部分 large 阶段没有对应 Top 提升点。"
@@ -319,7 +319,7 @@ def build_improvement_reconciliation_payload(
         "每个缺失阶段输出一项，target_stage 必须来自 missing_large_stages。"
         "建议必须解决该阶段 flags 暴露的真实缺口，并围绕本品命题；参考标杆的功能意图，不能照抄标杆话术。"
         "所有事实、时间和 evidence id 只能来自输入；creator_script 使用达人视频的本地语言，creator_script_zh 给中文。"
-        "若达人本人或素材条件不适合 AIGC，明确写 base_frame_suitability=none，不得伪造画面。\n"
+        "若达人本人或素材条件不适合改造参考，明确写 base_frame_suitability=no_suitable_frame，不得伪造画面。\n"
         f"每项必须含字段：{fields}。\n"
         "只输出严格 JSON：{\"improvements\":[...]}。\n\n"
         + json.dumps(context, ensure_ascii=False, indent=2)
@@ -341,6 +341,7 @@ def build_video_fact_payload(
     analysis: dict[str, Any],
     visual_inputs: list[dict[str, str]],
     api_url: str = "",
+    budget: ResourceBudget | None = None,
 ) -> dict[str, Any]:
     """单视频事实抽取请求 payload。
 
@@ -353,11 +354,11 @@ def build_video_fact_payload(
     code = "B" if role == "benchmark" else "C"
     role_dir = Path(str(info.get("work_dir") or ""))
     mode_prompt = speech_mode_prompt(info.get("speech_mode") if isinstance(info.get("speech_mode"), dict) else {})
-    native_audio = supports_native_audio_analysis(api_url, model)
+    native_audio = can_analyze_native_audio(api_url, model)
 
     # 优先走原生视频；失败则降级为抽帧。
     video_path = Path(str(info.get("path") or ""))
-    video_data_url = video_to_data_url(video_path) if video_path.is_file() else None
+    video_data_url = video_to_data_url(video_path, budget=budget) if video_path.is_file() else None
     native_video = video_data_url is not None
 
     visual_source_hint = (
@@ -588,8 +589,8 @@ def build_video_fact_payload(
                 ]
             )
         audio_data_url = (
-            audio_to_mp3_data_url(role_dir / "audio.wav")
-            if native_audio and supports_standalone_audio(api_url)
+            audio_to_mp3_data_url(role_dir / "audio.wav", budget=budget)
+            if native_audio and can_send_standalone_audio(api_url, model)
             else None
         )
         if audio_data_url is not None:
@@ -947,8 +948,8 @@ def infer_s1_boundary_candidate(
         return None
     first = segments[0]
     second = segments[1]
-    start = float(second.get("start_seconds") or 0.0)
-    if start <= 0 or start > 12:
+    start = parse_timestamp_seconds(second.get("start_seconds"))
+    if start is None or start <= 0 or start > 12:
         return None
 
     first_fact = find_early_evidence_for_role(role, facts)
@@ -1024,8 +1025,8 @@ def get_role_evidence_units(role: str, facts: dict[str, Any]) -> list[dict[str, 
 
 
 def parse_evidence_start(value: Any) -> float:
-    start, _ = parse_time_range_seconds(str(value or ""), None)
-    return start
+    parsed = parse_time_range_seconds(str(value or ""), None)
+    return parsed[0] if parsed is not None else float("inf")
 
 
 def find_s2_start_cue(text: str) -> str:
@@ -1070,6 +1071,7 @@ def build_llm_comparison_payload(
     facts: dict[str, Any],
     analysis: dict[str, Any] | None = None,
     api_url: str = "",
+    budget: ResourceBudget | None = None,
 ) -> dict[str, Any]:
     """基于已校验的单视频事实清单做对比分析的 payload。
 
@@ -1450,7 +1452,7 @@ def build_llm_comparison_payload(
             "打分前必须先输出 product_profile 产品商业 DNA（这是 S1-S6 打分的尺子，先立尺再量）：visualizable、physical_task、hook_proposition、core_selling_points、usage_context、short_video_proof_plan（先列全部候选卖点，再按可视展示空间→功能中心性→理解成本选出一个 S4 anchor，并把其他卖点分流到 S2/S3/S5；不是给产品删卖点）、proof_contract（只引用该 anchor）、core_visual_proposition（旧兼容字段）、visual_proof_points（S4 多视觉证明点；primary 是选中 anchor 的单一可测信号，secondary 是同一 S4 anchor 的补充画面，不能替代 primary）、proof_mode、effect_requires_process、visual_diff_dimensions、trust_multipliers、shooting_requirement、confidence。只报产品事实与品类世界知识。visualizable=no 时 S4 不强求视觉命题，把判断重心放到 S5 信任放大与达人可信度。",
             "每阶段输出 stage_standard_delivery（benchmark_only|creator_only|both|none）：该阶段双方是否有效达到本阶段的『本品到位标准』（见下条对照表锚点）。做到/展示到才算，仅口头讲到不算。先作为事实输出，暂不参与推导。",
             "S1-S6 执行分统一三层判：阶段目标(core_question) → 用了什么做法(module_id/module_fit) → 该做法在【本品】上到位没(execution)。'到位'按阶段查本品锚点、核心目标为主轴次要元素不补偿弱核心；本轮已接入的阶段锚点——S4 效果呈现→锚 visual_proof_points.primary（旧结果回退 core_visual_proposition）；S5 信任放大→锚 trust_multipliers：硬信任（第三方认证/检测/临床/仪器实测/官方背书）有效呈现可达 2，软信任（真实好评/社会认同/向往式对比/使用记录/达人自用）算信任但封顶 1（软不如硬），自述功效/纯参数不算；位置优先——视频开头的此类背书内容算 S1 钩子（留人）、结尾算 S6 CTA，不要按语义把开头/结尾的背书塞进 S5；判'用没用且呈现有效'非'口头说没说'，口播孤证或标志一闪而过最高 0.5；S6 促单→到位=把 structure_library S6 五型各自【适配条件】套上本品特征 category_profile + 命题 product_profile；S1 钩子→到位=把 structure_library S1 七型各自【适配条件】套上本品特征 category_profile + hook_proposition；S2 产品引出→到位=引出自然 + 承接 S1 钩子 + 引出产品身份；S3 使用过程→主轴锚 core_selling_points + 场景层 usage_context：到位=真实使用过程中把核心卖点'演示出来'被看见，场景再丰富人员再多样、卖点没在过程落地仍判弱。打分后必须对 2 分（出色档）做 GMV 推动力核验——仅阶段功能完成且呈现到位还不够，必须确认该侧在该阶段的输出能实际推动观众向购买靠近一步——否则该侧执行分封顶 1。具体判据（两侧各自独立核验）：S1 钩子——不仅留人，还要让观众对被留后看到的内容产生明确的产品期待（留住了但没引出产品好奇心封顶 1）；S2 产品引出——不仅说清是什么，还要与 S1 的痛点/场景形成因果联结，因为问题所以需要这个产品（产品被指名但不构成解决问题封顶 1）；S3 使用过程——不仅演示真实动作，还要让观众在动作中自然感知到卖点成立、产生信心（完成动作但卖点被掩盖封顶 1）；S4 效果呈现——不仅拍出变化，还要让变化与产品之间的因果关系可信（before/after 存在但归因链路不成立封顶 1）；S5 信任——背书须能与本品的购买决策直接关联（弱关联背书信其存在但不封顶，最高 1）；S6 CTA——不仅要给出购买指令，还要与前面建立的产品价值和欲望形成闭环（孤立喊下单封顶 1）。信息量大≠有说服力，动作完成≠打动观众。注意：核验的是 2 分是否成立，0/0.5/1 不受此约束。",
-            "improvements 每项必须含：title,target_stage,gmv_impact,gap_type,time_range,creator_time_range,benchmark_time_range,problem,benchmark_reference,benchmark_evidence_ids,suggestion,actions,gmv_reason,evidence,creator_script,creator_script_zh,base_frame_suitability,best_base_frame_time,base_frame_evidence_id,base_frame_reason,aigc_prompt,aigc_image_path,expected_effect,priority。",
+            "improvements 每项必须含：title,target_stage,gmv_impact,gap_type,time_range,creator_time_range,benchmark_time_range,problem,benchmark_reference,benchmark_evidence_ids,suggestion,actions,gmv_reason,evidence,creator_script,creator_script_zh,base_frame_suitability,best_base_frame_time,base_frame_evidence_id,base_frame_reason,expected_effect,priority。",
             "可额外输出 top-level low_confidence_stages，数组元素只能是 S1-S6；只有当该阶段现有帧/音频不足以支撑 severity 时才填写，最多 2 个。",
             "除 stage_analysis、improvements、video_understanding.evidence_units、low_confidence_stages 和 category_profile.painpoints 外，所有数组最多 1 条。所有描述字段最多一句且不超过 40 个汉字。video_understanding 必须原样使用事实清单，不得新增、改写或跨视频移动 evidence_units。",
         ]
@@ -1459,12 +1461,12 @@ def build_llm_comparison_payload(
     payload = build_llm_payload(model, user_text, [])
     # temperature=0：对比判断要可复现，消除 severity 在边界 case（如 S3）上的抖动。
     payload["temperature"] = 0.0
-    # Agent Plan 实测完整六阶段 JSON 会超过 16K；直接给足预算，避免先截断再整次重发。
+    # Keep one deterministic output budget across compatible providers.
     payload["max_tokens"] = full_analysis_output_budget(model)
 
     # Phase B：把每条 evidence 的关键帧 + 切片音频挂到 user message（增强判断的感官输入）。
     if analysis is not None:
-        sensory = build_evidence_sensory_inputs(analysis, facts, api_url=api_url)
+        sensory = build_evidence_sensory_inputs(analysis, facts, api_url=api_url, budget=budget)
         if sensory:
             user_msg = payload["messages"][1]
             base_text = user_msg["content"] if isinstance(user_msg["content"], str) else ""
@@ -1522,6 +1524,7 @@ def build_stage_review_payload(
     facts: dict[str, Any],
     current_result: dict[str, Any],
     stage_codes: list[str],
+    budget: ResourceBudget | None = None,
 ) -> dict[str, Any]:
     """Phase C：对低置信阶段切原生视频片段，只重判这些阶段。
 
@@ -1842,7 +1845,7 @@ def build_stage_review_payload(
             ),
         }
     ]
-    content.extend(build_stage_review_video_inputs(analysis, target_stages))
+    content.extend(build_stage_review_video_inputs(analysis, target_stages, budget=budget))
     return {
         "model": model,
         "messages": [
@@ -1872,6 +1875,7 @@ def build_stage_review_payload(
 def build_stage_review_video_inputs(
     analysis: dict[str, Any],
     target_stages: list[dict[str, Any]],
+    budget: ResourceBudget | None = None,
 ) -> list[dict[str, Any]]:
     """为 Phase C 低置信阶段附上对应时间窗的原生视频切片。"""
     content: list[dict[str, Any]] = []
@@ -1883,17 +1887,26 @@ def build_stage_review_video_inputs(
             video_path = Path(str(info.get("path") or ""))
             if not video_path.is_file():
                 continue
-            time_range = str(stage.get(f"{role}_time_range") or stage.get("time_range") or "")
-            start, end = parse_time_range_seconds(time_range, info.get("duration_seconds"))
+            time_range = str(stage.get(f"{role}_time_range") or "")
+            parsed = parse_time_range_seconds(time_range, info.get("duration_seconds"))
+            if parsed is None:
+                continue
+            start, end = parsed
             # focused window：阶段 time_range 是模型估计，保留固定缓冲但不回传全片，避免把相邻阶段误当证据。
             padded_start = max(0.0, start - PHASE_C_WINDOW_PADDING_SECONDS)
-            padded_end = min(float(info.get("duration_seconds") or end), end + PHASE_C_WINDOW_PADDING_SECONDS)
+            raw_duration = info.get("duration_seconds")
+            duration_value = parse_timestamp_seconds(raw_duration)
+            if raw_duration is not None and str(raw_duration).strip() and duration_value is None:
+                continue
+            duration_value = end if duration_value is None else duration_value
+            padded_end = min(duration_value, end + PHASE_C_WINDOW_PADDING_SECONDS)
             data_url = video_to_data_url(
                 video_path,
                 fps=PHASE_C_REVIEW_FPS,
                 max_width=PHASE_C_REVIEW_MAX_WIDTH,
                 start=padded_start,
                 duration=max(0.5, padded_end - padded_start),
+                budget=budget,
             )
             if data_url is None:
                 continue
@@ -2013,7 +2026,7 @@ def build_llm_payload(
                     "每个提升点必须输出 base_frame_suitability。只有达人现有画面确实适合作为目标改造基底时，才可写 usable 和 best_base_frame_time；"
                     "如达人素材缺少目标所需的人物、产品或场景，必须写 no_suitable_frame，best_base_frame_time 留空，并在建议中明确需补拍或补素材。"
                     "每项提升点还必须输出 benchmark_evidence_ids 与 base_frame_evidence_id；前者只可指向所属阶段的标杆事实证据，后者必须指向基底帧所在的达人事实证据。"
-                    "base_frame_reason 只能描述该达人证据中真实可见的素材。aigc_prompt 只能基于真实存在的达人原始画面写具体改造提示词，不得把不存在的人物、口播或场景说成已有素材。aigc_image_path 留空。"
+                    "base_frame_reason 只能描述该达人证据中真实可见的素材，不得把不存在的人物、口播或场景说成已有素材。"
                     "严禁臆造品牌、型号、价格、优惠、参数或功效。"
                     "只有产品信息、转写或画面证据明确出现时才能写具体品牌；不确定时用用户提供的产品名或本地语言中的中性产品指代。"
                     "对于维生素、营养补充品等健康品类，不得在建议话术中声称治疗疾病、调节激素、改善月经、排出血块或保证效果；标杆中出现此类表达时只能作为合规风险指出。"
@@ -2100,7 +2113,7 @@ def build_llm_repair_payload(
                     "S5 信任放大必须补齐 creator_s5 与 benchmark_s5 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、trust_evidence_type(hard/soft/mixed/none/unknown)、trust_basis(authority/traceable_data/independent_user/social_consensus/process_transparency/product_claim/offer_or_spec/none/unknown)、trust_source_evidence_ids(数组；只允许引用 Stage1 同类型且带来源说明的证据)、trust_source_visible(bool)、trust_source_credible(bool)、trust_claim_specific(bool)、product_relevance_met(bool)、independent_trust_purpose(bool)、duplicates_other_stage(bool)、voice_only(bool)、risky_or_unsupported(bool)、start_seconds(number)、end_seconds(number)、trust_reason(非空)、evidence_ids(数组；exists=false 或 trust_evidence_type=none/unknown 可为空)、proposition_ids(数组)。"
                     "S6 CTA 必须补齐 creator_s6 与 benchmark_s6 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、direct_order_met(bool)、action_path_clear(bool)、soft_purchase_invitation_met(bool)、offer_or_incentive_clear(bool)、price_anchor_met(bool)、urgency_evidence_met(bool)、gift_stack_met(bool)、guarantee_clear_met(bool)、urgency_met(bool)、product_value_recalled(bool)、module_fit_met(bool)、ending_position_met(bool)、depends_on_valid_s4(bool)、compliance_risk(bool)、start_seconds(number)、end_seconds(number)、cta_reason(非空)、evidence_ids(数组；exists=false 可为空)、proposition_ids(数组)。"
                     "必须补齐 s3_s4_relationship 和 promise_chain；promise_chain.chain_closed 必须是 bool，broken_at 只能是 S2/S3/S4/none/unknown；promise_chain 只审计 S1-S4，不得把 S5/S6/CTA/促单/下单问题写成承诺链断点。"
-                    "提升点必须保留 benchmark_evidence_ids、base_frame_suitability、best_base_frame_time、base_frame_evidence_id、base_frame_reason 和 aigc_prompt；无可用达人素材时写 no_suitable_frame 且时间与 base_frame_evidence_id 留空。aigc_image_path 留空。"
+                    "提升点必须保留 benchmark_evidence_ids、base_frame_suitability、best_base_frame_time、base_frame_evidence_id 和 base_frame_reason；无可用达人素材时写 no_suitable_frame 且时间与 base_frame_evidence_id 留空。"
                     "修复 improvements 时也必须遵循达人框架约束、卖点适配权重和标杆功能意图转译，不得把 benchmark_reference 直接改写成 suggestion。"
                     "健康品类建议不得声称调节激素、改善月经、治疗症状或虚构优惠。建议话术必须重新设计，不得复制标杆原句。"
                     "输出必须精炼，每个描述字段最多一句，improvements 按 GMV 杠杆排序保留 1-5 条；不要为凑数编造。"
@@ -2127,52 +2140,4 @@ def build_llm_repair_payload(
             },
         ],
         "temperature": 0.0,
-    }
-
-
-def build_llm_patch_repair_payload(
-    model: str,
-    raw_result: dict[str, Any],
-    error_message: str,
-    locked_video_understanding: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """为 Doubao 构造局部 JSON Pointer 修复请求，避免重写整份长结果。"""
-    stage_codes = set(re.findall(r"\bS[1-6]\b", str(error_message or "").upper()))
-    selected_stages = [
-        stage
-        for stage in raw_result.get("stage_analysis", [])
-        if isinstance(stage, dict)
-        and (not stage_codes or str(stage.get("stage") or "").upper()[:2] in stage_codes)
-    ]
-    context: dict[str, Any] = {"stage_analysis": selected_stages}
-    for key in ("s3_s4_relationship", "promise_chain", "improvements"):
-        if key in str(error_message) and key in raw_result:
-            context[key] = raw_result[key]
-    locked_facts = locked_video_understanding if isinstance(locked_video_understanding, dict) else {}
-    text = "\n\n".join(
-        [
-            "校验错误：\n" + str(error_message or ""),
-            "需要修复的当前局部结构：\n" + json.dumps(context, ensure_ascii=False, indent=2),
-            "已锁定事实仅供核对，不允许修改：\n" + json.dumps(locked_facts, ensure_ascii=False)[:12000],
-        ]
-    )
-    return {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "你是 Flayr 局部 JSON 修复器。不要重写完整分析，只输出严格 JSON："
-                    '{"patches":[{"path":"/stage_analysis/S3/creator_s3/field","value":false}]}。'
-                    "path 使用 JSON Pointer；stage_analysis 下用 S1-S6 作为阶段定位符，不用数组下标。"
-                    "只修校验错误明确指出的字段及维持字段机械一致性所必需的相邻字段。"
-                    "不得修改 video_understanding、comparison_contract、category_profile、product_profile、"
-                    "evidence_ids、proposition_ids、口播、画面事实、severity 或 improvements 文案。"
-                    "缺失但不适用的 bool 填 false；不得通过删除字段规避校验。不要 Markdown，不要解释。"
-                ),
-            },
-            {"role": "user", "content": [{"type": "text", "text": text}]},
-        ],
-        "temperature": 0.0,
-        "max_tokens": 8192,
     }

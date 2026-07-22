@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..artifacts import format_seconds, parse_time_range_seconds, select_frames_for_time_range
+from ..artifacts import format_seconds, parse_time_range_seconds, parse_timestamp_seconds, select_frames_for_time_range
 from ..postprocess.derive import derive_severity_from_facts
 from ..postprocess.repair import reconcile_s3_s4_evidence_coherence, stabilize_improvement_priorities
 from ..utils import write_json, write_text
@@ -41,7 +41,11 @@ def maybe_apply_s4_visual_verifier(
     contract_reason = _visual_verifier_skip_reason(result)
     review_s4 = not bool(contract_reason)
     payload = build_s4_visual_verifier_payload(
-        getattr(args, "llm_model", ""), result, analysis, review_s4=review_s4
+        getattr(args, "llm_model", ""),
+        result,
+        analysis,
+        review_s4=review_s4,
+        budget=getattr(args, "_resource_budget", None),
     )
     if payload is None:
         result["s4_visual_verifier"] = {"applied": False, "reason": "缺少 S3/S4 帧证据，跳过视觉复核。"}
@@ -51,8 +55,13 @@ def maybe_apply_s4_visual_verifier(
     response_path = run_dir / "llm_s4_visual_verifier_response.json"
     write_json(request_path, payload)
     try:
-        raw_text = call_llm_api(getattr(args, "llm_api_url"), api_key, request_path, response_path)
-        write_text(response_path, raw_text)
+        raw_text = call_llm_api(
+            getattr(args, "llm_api_url"),
+            api_key,
+            request_path,
+            response_path,
+            budget=getattr(args, "_resource_budget", None),
+        )
         parsed = parse_json_text(extract_chat_completion_text(json.loads(raw_text)))
         applied = apply_s4_visual_verifier_result(result, parsed, analysis, review_s4=review_s4)
     except (Exception, SystemExit) as exc:  # verifier 是降级增强，不允许拖垮主链
@@ -61,7 +70,7 @@ def maybe_apply_s4_visual_verifier(
 
     result["s4_visual_verifier"] = {
         "applied": applied,
-        "response_path": str(response_path),
+        "response_retention": "ephemeral",
         "reason": (
             "已用原片时序复核覆盖 S3 使用真实性与 S4 视觉质量字段。"
             if applied and review_s4
@@ -81,6 +90,7 @@ def build_s4_visual_verifier_payload(
     analysis: dict[str, Any],
     *,
     review_s4: bool = True,
+    budget: Any = None,
 ) -> dict[str, Any] | None:
     """构造 S3/S4 原片短片优先、静帧兜底的独立复核 payload。"""
     s4 = _s4_stage(result)
@@ -130,8 +140,8 @@ def build_s4_visual_verifier_payload(
 
     role_payloads = []
     for role in ("creator", "benchmark"):
-        s3_video = _collect_stage_video(role, s3, analysis, "S3") if s3 else None
-        s4_video = _collect_stage_video(role, s4, analysis, "S4") if review_s4 else None
+        s3_video = _collect_stage_video(role, s3, analysis, "S3", budget=budget) if s3 else None
+        s4_video = _collect_stage_video(role, s4, analysis, "S4", budget=budget) if review_s4 else None
         s3_frames = _collect_stage_frames(role, s3, result, analysis, "s3", limit=3) if s3 else []
         s4_frames = _collect_stage_frames(role, s4, result, analysis, "s4", limit=3) if review_s4 else []
         if not s3_video and not s4_video and not s3_frames and not s4_frames:
@@ -310,6 +320,7 @@ def _collect_stage_video(
     stage: dict[str, Any],
     analysis: dict[str, Any],
     stage_code: str,
+    budget: Any = None,
 ) -> dict[str, str] | None:
     """截取指定阶段原片；时序动作判断优先消费短片，静帧只作定位兜底。"""
     videos = analysis.get("videos") if isinstance(analysis.get("videos"), dict) else {}
@@ -317,10 +328,16 @@ def _collect_stage_video(
     video_path = Path(str(info.get("path") or ""))
     if not video_path.is_file():
         return None
-    time_range = str(stage.get(f"{role}_time_range") or stage.get("time_range") or "")
+    time_range = str(stage.get(f"{role}_time_range") or "")
     duration = info.get("duration_seconds")
-    start, end = parse_time_range_seconds(time_range, duration)
-    duration_value = float(duration) if isinstance(duration, (int, float)) else end
+    parsed = parse_time_range_seconds(time_range, duration)
+    if parsed is None:
+        return None
+    start, end = parsed
+    duration_value = parse_timestamp_seconds(duration)
+    if duration is not None and str(duration).strip() and duration_value is None:
+        return None
+    duration_value = end if duration_value is None else duration_value
     padded_start = max(0.0, start - TEMPORAL_REVIEW_PADDING_SECONDS)
     padded_end = min(duration_value, end + TEMPORAL_REVIEW_PADDING_SECONDS) if duration_value > 0 else end
     if padded_end <= padded_start:
@@ -331,6 +348,7 @@ def _collect_stage_video(
         max_width=TEMPORAL_REVIEW_MAX_WIDTH,
         start=padded_start,
         duration=padded_end - padded_start,
+        budget=budget,
     )
     if data_url is None:
         return None

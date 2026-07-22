@@ -25,6 +25,7 @@ from .artifacts import (
     get_focus_frame_entries,
     get_frame_entries,
     get_stage_frame_entries,
+    parse_timestamp_seconds,
     sample_evenly,
 )
 from .utils import write_json, write_text
@@ -363,23 +364,25 @@ def parse_srt_time_range(line: str) -> tuple[float | None, float | None]:
     parts = line.split("-->")
     if len(parts) != 2:
         return None, None
-    return parse_srt_timestamp(parts[0]), parse_srt_timestamp(parts[1])
+    start = parse_srt_timestamp(parts[0])
+    end = parse_srt_timestamp(parts[1])
+    if start is None or end is None or end < start:
+        return None, None
+    return start, end
 
 
 def parse_srt_timestamp(value: str) -> float | None:
-    match = re.search(r"(\d+):(\d+):(\d+)(?:[,.](\d+))?", value.strip())
-    if not match:
+    normalized = str(value or "").strip()
+    if not re.fullmatch(r"\d+:\d{2}:\d{2}(?:[.,]\d+)?", normalized):
         return None
-    hours, minutes, seconds, millis = match.groups()
-    fraction = float(f"0.{millis}") if millis else 0.0
-    return int(hours) * 3600 + int(minutes) * 60 + int(seconds) + fraction
+    return parse_timestamp_seconds(normalized.replace(",", "."))
 
 
 def build_timeline_views(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]:
     if Image is None or ImageDraw is None:
         return {}
-    duration = info.get("duration_seconds")
-    if not isinstance(duration, (int, float)) or duration <= 0:
+    duration = parse_timestamp_seconds(info.get("duration_seconds"))
+    if duration is None or duration <= 0:
         return {}
     out_dir = role_dir / "timeline_views"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -451,13 +454,15 @@ def write_timeline_view(
 def frames_for_range(info: dict[str, Any], start: float, end: float, limit: int) -> list[dict[str, Any]]:
     focus = [
         entry for entry in get_focus_frame_entries(info)
-        if start <= float(entry.get("timestamp_seconds", 0.0)) <= end
+        if (timestamp := parse_timestamp_seconds(entry.get("timestamp_seconds"))) is not None
+        and start <= timestamp <= end
     ]
     if focus:
         return sample_evenly(focus, limit)
     full = [
         entry for entry in get_frame_entries(info)
-        if start <= float(entry.get("timestamp_seconds", 0.0)) <= end
+        if (timestamp := parse_timestamp_seconds(entry.get("timestamp_seconds"))) is not None
+        and start <= timestamp <= end
     ]
     return sample_evenly(full, limit)
 
@@ -519,10 +524,10 @@ def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 
 
 def format_seconds(value: Any) -> str:
-    try:
-        return f"{float(value):.1f}s"
-    except (TypeError, ValueError):
+    parsed = parse_timestamp_seconds(value)
+    if parsed is None:
         return "?.?s"
+    return f"{parsed:.1f}s"
 
 
 def wrap_text(text: str, width: int) -> list[str]:

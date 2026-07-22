@@ -23,6 +23,7 @@ if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 from flayr_core.structure_modules import stage1_event_catalog
+from flayr_core.artifacts import parse_time_range_seconds
 from flayr_core.postprocess.derive import (
     CRITICAL_BAND,
     TH_MEDIUM,
@@ -418,16 +419,7 @@ def _flag_chain_audit(result: dict[str, Any], sample_id: str) -> list[dict[str, 
 
 
 def _event_time_bounds(value: Any) -> tuple[float, float] | None:
-    if isinstance(value, list) and len(value) == 2:
-        try:
-            start, end = float(value[0]), float(value[1])
-        except (TypeError, ValueError):
-            return None
-        return (min(start, end), max(start, end))
-    parts = re.findall(r"\d+(?:\.\d+)?", str(value or ""))
-    if len(parts) < 2:
-        return None
-    return float(parts[0]), float(parts[1])
+    return parse_time_range_seconds(value, None)
 
 
 def _ranges_overlap(left: tuple[float, float], right: tuple[float, float]) -> bool:

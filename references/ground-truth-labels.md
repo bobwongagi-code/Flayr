@@ -15,7 +15,7 @@
 | kakwanreview | `…/kakwanreview/达人视频.mp4` | `…/kakwanreview/标杆视频.mp4` |
 | tashadiyana | `…/tashadiyana/达人视频.mp4` | `…/tashadiyana/爆款视频-无小孩出镜.mp4` |
 
-（根路径：`/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/`）
+（根路径：`${FLAYR_VALIDATION_ROOT}/`）
 
 ## 标签
 

@@ -2,7 +2,7 @@
 
 为什么存在：omni 看连续帧能"感觉到"画面变化，但给不出精确的镜头切点时间戳
 （它只会说"大概第几秒有个转场"）。镜头切点是带货视频的硬结构信号——
-阶段切分、Phase C 回看、提案样片切片都需要切在真正的镜头边界上，
+阶段切分、Phase C 回看、证据片段切片都需要切在真正的镜头边界上，
 不能切出半个转场。
 
 和 subtitle_track（字幕轨）、transcript.srt（口播轨）一样，这是一条
@@ -18,7 +18,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from .artifacts import format_seconds
+from .artifacts import format_seconds, parse_timestamp_seconds
+from .resources import finite_nonnegative
 from .utils import run_command, write_json
 
 
@@ -55,7 +56,10 @@ def build_shot_track(
     if not video_path.is_file():
         return _empty_track("video_missing")
 
-    duration = float(duration_seconds) if isinstance(duration_seconds, (int, float)) else 0.0
+    try:
+        duration = finite_nonnegative(duration_seconds, "shot track duration", maximum=24 * 60 * 60.0)
+    except ValueError:
+        return _empty_track("invalid_duration")
 
     candidates = detect_scene_candidates(ffmpeg, video_path)
     cut_points, target = select_adaptive_cuts(candidates, duration)
@@ -107,9 +111,13 @@ def detect_scene_candidates(ffmpeg: str, video_path: Path) -> list[tuple[float, 
     pending_time: float | None = None
     for time_str, score_str in re.findall(r"pts_time:([0-9.]+)|scene_score=([0-9.]+)", text):
         if time_str:
-            pending_time = float(time_str)
+            pending_time = parse_timestamp_seconds(time_str)
         elif score_str and pending_time is not None:
-            candidates.append((pending_time, float(score_str)))
+            score = parse_timestamp_seconds(score_str)
+            if score is None:
+                pending_time = None
+                continue
+            candidates.append((pending_time, score))
             pending_time = None
     candidates.sort(key=lambda item: item[0])
     return candidates

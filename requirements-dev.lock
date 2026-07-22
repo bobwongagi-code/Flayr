@@ -1,0 +1,5 @@
+# Flayr development/CI lock file.
+# Runtime analysis uses Python's standard library plus external media tools.
+# Pillow is optional at runtime, but pinned here so evidence-rendering tests
+# use a reproducible implementation in development and CI.
+Pillow==11.3.0

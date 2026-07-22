@@ -1,14 +1,14 @@
-"""LLM 分析结果的程序侧结构契约。
+"""LLM 分析结果的边界校验。
 
-此模块只约束稳定的结果骨架，不承载阶段业务规则。模型提示仍使用
-references/analysis-output-schema.json；运行时校验统一从这里读取，避免
-parse 与 pipeline 对阶段数量、顺序和顶层结构各自维护一份判断。
+稳定字段、运行时投影和结果生命周期由 ``flayr_core.analysis_model`` 统一
+声明；本模块只负责把外部数据校验到该领域模型可以消费的最小形状。
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from ..analysis_model import ANALYSIS_RESULT_CONTRACT, AnalysisResult
 from ..stage_catalog import DEFAULT_STAGES
 
 
@@ -16,18 +16,9 @@ class AnalysisContractError(ValueError):
     """LLM 结果不满足程序处理所需的最小结构。"""
 
 
-RESULT_STAGE_COUNT = len(DEFAULT_STAGES)
+RESULT_STAGE_COUNT = ANALYSIS_RESULT_CONTRACT.stage_count
 IMPROVEMENT_COUNT_RANGE = (1, 5)
-NORMALIZED_TOP_LEVEL_FIELDS = (
-    "one_line_summary",
-    "executive_summary",
-    "holistic_assessment",
-    "product_visibility",
-    "loop_closure",
-    "video_understanding",
-    "stage_analysis",
-    "improvements",
-)
+NORMALIZED_TOP_LEVEL_FIELDS = ANALYSIS_RESULT_CONTRACT.normalized_required_fields
 
 
 def validate_raw_analysis_envelope(result: Any) -> dict[str, Any]:
@@ -48,11 +39,12 @@ def validate_raw_analysis_envelope(result: Any) -> dict[str, Any]:
 
 def validate_normalized_analysis_contract(result: dict[str, Any]) -> None:
     """校验归一化后的公共骨架，避免后处理链在畸形结果上继续运行。"""
-    missing = [field for field in NORMALIZED_TOP_LEVEL_FIELDS if field not in result]
+    model = AnalysisResult.from_mapping(result)
+    missing = model.missing_normalized_fields()
     if missing:
         raise AnalysisContractError(f"normalized analysis_result missing fields: {', '.join(missing)}.")
 
-    stage_analysis = result["stage_analysis"]
+    stage_analysis = model.stages()
     if not isinstance(stage_analysis, list) or len(stage_analysis) != RESULT_STAGE_COUNT:
         raise AnalysisContractError(f"normalized analysis_result must contain {RESULT_STAGE_COUNT} stages.")
 

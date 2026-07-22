@@ -2525,6 +2525,7 @@ from flayr import (  # noqa: E402
     create_run_dir,
     load_existing_video_result,
     resolve_ocr_policy,
+    _build_preprocess_artifact_manifest,
 )
 from flayr_core.stage_ownership import CERTIFICATION_OWNERSHIP_PROMPT  # noqa: E402
 from flayr_core.stage_catalog import DEFAULT_STAGES, fallback_artifact_ranges, stage_tuples  # noqa: E402
@@ -2627,7 +2628,15 @@ with tempfile.TemporaryDirectory() as tmp:
     cache_deps = {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "whisper": "whisper-cli", "whisper_model": None, "whisper_model_th": None}
     fingerprint = build_preprocess_fingerprint(video_path, cache_deps, cache_args)
     (role_dir / "_preprocess.json").write_text(
-        json.dumps({"frames_dir": str(frames_dir), "transcript_path": str(transcript_path), "preprocess_fingerprint": fingerprint}),
+        json.dumps(
+            {
+                "frames_dir": str(frames_dir),
+                "transcript_path": str(transcript_path),
+                "preprocess_fingerprint": fingerprint,
+                "preprocess_completed": True,
+                "preprocess_artifacts": _build_preprocess_artifact_manifest(role_dir),
+            }
+        ),
         encoding="utf-8",
     )
     check("预处理缓存：同视频同配置命中", load_existing_video_result(role_dir, fingerprint) is not None)
@@ -2651,8 +2660,6 @@ with tempfile.TemporaryDirectory() as tmp:
     check("默认运行目录：同秒任务不复用目录", first_run != second_run and first_run.is_dir() and second_run.is_dir())
 
 from flayr_core import translation as translation_module  # noqa: E402
-from flayr_core import proposal_video as proposal_video_module  # noqa: E402
-from flayr_core import voice_clone as voice_clone_module  # noqa: E402
 
 with tempfile.TemporaryDirectory() as tmp:
     translation_dir = Path(tmp)
@@ -2680,40 +2687,6 @@ with tempfile.TemporaryDirectory() as tmp:
         translation_result.get("translation_status") == "failed"
         and any("network failed" in str(item) for item in translation_result.get("errors", [])),
     )
-
-
-def _curl_capture(module, callback):
-    commands = []
-    original = module.run_command
-
-    def fake_run(command):
-        commands.append(command)
-        if "-o" in command:
-            Path(str(command[command.index("-o") + 1])).write_text("{}", encoding="utf-8")
-        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
-
-    module.run_command = fake_run
-    try:
-        callback()
-    finally:
-        module.run_command = original
-    return commands
-
-
-proposal_commands = _curl_capture(
-    proposal_video_module,
-    lambda: proposal_video_module.curl_json("POST", "https://example.invalid", "secret-key", {}, False),
-)
-voice_commands = _curl_capture(
-    voice_clone_module,
-    lambda: voice_clone_module._curl_json(["https://example.invalid"], "secret-key"),
-)
-all_curl_commands = [command for group in (proposal_commands, voice_commands) for command in group]
-check(
-    "可选视频/音色请求：API key 不进入 curl argv",
-    all("secret-key" not in " ".join(str(item) for item in command) for command in all_curl_commands)
-    and all(any(str(item).startswith("@") for item in command) for command in all_curl_commands),
-)
 
 from collections import Counter  # noqa: E402
 

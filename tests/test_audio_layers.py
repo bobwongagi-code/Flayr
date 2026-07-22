@@ -14,21 +14,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from flayr_core.audio_quality import analyze_audio_quality
-from flayr_core.llm.api import supports_native_audio_analysis
+from flayr_core.llm.api import can_analyze_native_audio
 from flayr_core.multimodal import multimodal_execution, sanitize_audio_observations
 from flayr_core.report import render_audio_quality_rows
 
 
 class AudioLayerTests(unittest.TestCase):
-    def test_agent_plan_is_transcript_plus_local_qc(self) -> None:
-        self.assertFalse(
-            supports_native_audio_analysis(
-                "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions",
-                "doubao-seed-2-0-lite-260215",
-            )
-        )
+    def test_dashscope_qwen_audio_uses_native_analysis_with_local_transcript_fallback(self) -> None:
         self.assertTrue(
-            supports_native_audio_analysis(
+            can_analyze_native_audio(
                 "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
                 "qwen3-omni-flash",
             )

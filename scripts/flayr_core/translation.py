@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -14,13 +15,44 @@ from .utils import read_optional_text, write_json, write_text
 
 
 ROOT = Path(__file__).resolve().parents[2]
+TRANSLATION_CACHE_SCHEMA_VERSION = 1
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _translation_cache_metadata(transcript_path: Path, translation_path: Path) -> dict[str, Any] | None:
+    metadata_path = translation_path.with_suffix(translation_path.suffix + ".meta.json")
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        source_sha256 = _file_sha256(transcript_path)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    if metadata.get("schema_version") != TRANSLATION_CACHE_SCHEMA_VERSION:
+        return None
+    if metadata.get("source_sha256") != source_sha256:
+        return None
+    return metadata
 
 
 def sync_chinese_translation(role_dir: Path, result: dict[str, Any]) -> None:
     translation_path = role_dir / "transcript.zh.txt"
+    transcript_path = role_dir / "transcript.txt"
     result["translation_path"] = str(translation_path)
 
-    if translation_path.exists() and translation_path.read_text(encoding="utf-8").strip():
+    if (
+        transcript_path.is_file()
+        and translation_path.exists()
+        and translation_path.read_text(encoding="utf-8").strip()
+        and _translation_cache_metadata(transcript_path, translation_path) is not None
+    ):
         result["translation_status"] = "completed"
         return
 
@@ -60,6 +92,7 @@ def translate_transcript_with_llm(
     raw_path = role_dir / "translation_response.json"
     write_json(payload_path, payload)
     if args.llm_dry_run:
+        payload_path.unlink(missing_ok=True)
         result["translation_status"] = "dry_run"
         return
 
@@ -70,8 +103,12 @@ def translate_transcript_with_llm(
             result["errors"].append("translation skipped: LLM API key missing")
             return
 
-        raw_text = call_llm_api(args.llm_api_url, api_key, payload_path, raw_path)
-        write_text(raw_path, raw_text)
+        budget = getattr(args, "_resource_budget", None)
+        raw_text = (
+            call_llm_api(args.llm_api_url, api_key, payload_path, raw_path, budget=budget)
+            if budget is not None
+            else call_llm_api(args.llm_api_url, api_key, payload_path, raw_path)
+        )
         translated = extract_chat_completion_text(json.loads(raw_text)).strip()
         translated = sanitize_translation_claims(translated, str(args.product_name or ""))
     except SystemExit as exc:
@@ -89,6 +126,17 @@ def translate_transcript_with_llm(
         return
 
     write_text(translation_path, translated.rstrip() + "\n")
+    write_json(
+        translation_path.with_suffix(translation_path.suffix + ".meta.json"),
+        {
+            "schema_version": TRANSLATION_CACHE_SCHEMA_VERSION,
+            "source_sha256": _file_sha256(transcript_path),
+            "model": model,
+            "payload_sha256": hashlib.sha256(
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+        },
+    )
     result["translation_status"] = "completed"
     result["translation_source"] = {
         "type": "llm",

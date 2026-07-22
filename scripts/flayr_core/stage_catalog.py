@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -40,7 +41,12 @@ def stage_tuples() -> list[tuple[str, str, str]]:
 
 def fallback_artifact_ranges(duration: float) -> list[tuple[str, str, float, float]]:
     """为预处理阶段帧提供回退窗口；不参与最终阶段判定。"""
-    end = max(0.0, duration)
+    try:
+        end = float(duration)
+    except (TypeError, ValueError):
+        return []
+    if not math.isfinite(end) or end < 0:
+        return []
     ranges: list[tuple[str, str, float, float]] = []
     for stage in DEFAULT_STAGES:
         if stage.code == "S6":

@@ -13,6 +13,18 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+build/
+dist/
+*.egg-info/
 
 # 本地配置（可能含密钥/路径）
 .claude/settings.local.json
+
+# 本地批处理/验证清单可能包含绝对媒体路径
+jobs.local.json
+jobs.json
+jobs.*.json
+jobs-*.json
+runs_tmp_*-jobs.json
+references/validation-inputs.local.json
+references/ground-truth-labels.local.json

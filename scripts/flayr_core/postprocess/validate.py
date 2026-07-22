@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
@@ -873,7 +874,10 @@ def validate_stage_time_coherence(result: dict[str, Any]) -> None:
         for index, stage in enumerate(result.get("stage_analysis", []), start=1):
             label = str(stage.get("stage") or "")
             time_range = stage.get(f"{role}_time_range")
-            start, end = parse_time_range_seconds(time_range, None)
+            parsed = parse_time_range_seconds(time_range, None)
+            if parsed is None:
+                raise SystemExit(f"{label} 的 {role}_time_range 无法形成有效时间段：{time_range}")
+            start, end = parsed
             if end <= start:
                 raise SystemExit(f"{label} 的 {role}_time_range 无法形成有效时间段：{time_range}")
             ranges[f"S{index}"] = (start, end)
@@ -931,12 +935,14 @@ def validate_product_visibility(result: dict[str, Any], analysis: dict[str, Any]
 
 def numeric_value(value: Any) -> float | None:
     if isinstance(value, (int, float)):
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else None
     text = str(value or "").strip()
     if not text:
         return None
     match = re.search(r"-?\d+(?:\.\d+)?", text)
-    return float(match.group(0)) if match else None
+    number = float(match.group(0)) if match else None
+    return number if number is None or math.isfinite(number) else None
 
 
 def append_qa_warnings(result: dict[str, Any], warnings: list[str]) -> None:

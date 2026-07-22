@@ -1,6 +1,6 @@
 ---
 name: flayr
-description: Analyze TikTok commerce videos, compare a benchmark video with a creator video, and produce a practical improvement package with extracted frames, transcript artifacts, structured recommendations, an HTML report, and an improved-video assembly plan.
+description: Analyze TikTok commerce videos, compare a benchmark video with a creator video, and produce a practical improvement package with extracted frames, transcript artifacts, structured recommendations, and an HTML report.
 ---
 
 # Flayr
@@ -38,7 +38,7 @@ python3 scripts/flayr.py improve \
 
 ## Workflow
 
-`scripts/flayr.py` is the skill harness: it owns CLI parsing, run-directory setup, orchestration, and output wiring. Core responsibilities live under `scripts/flayr_core/`: video extraction, Whisper, translation, LLM analysis, and report rendering.
+`scripts/flayr.py` is the skill harness: it owns CLI parsing, run-directory setup, orchestration, and output wiring. Core responsibilities live under `scripts/flayr_core/`: video evidence extraction, optional transcription/translation, LLM analysis, and report rendering.
 
 1. Confirm the requested mode and local video paths.
 2. Run dependency checks for `ffmpeg` and a Whisper command.
@@ -54,7 +54,7 @@ python3 scripts/flayr.py improve \
 8. Generate `analysis_input.md` for large-model diagnosis.
 9. If `--llm-model` is provided, call the configured OpenAI-compatible chat endpoint to generate `analysis_result.json`.
    Use `--llm-include-images` when the model should inspect Hook/CTA focus frames directly; keep `--llm-image-limit` modest, such as 8 to 12 images.
-   Validate the model JSON against the schema. Shared deterministic normalization resolves mechanical contradictions; Qwen-compatible providers retain one full repair request. Facts, evidence references, proposition references, and severity remain immutable during repair.
+   Validate the model JSON against the schema. Shared deterministic normalization resolves mechanical contradictions; the configured provider profile controls any supported repair path. Facts, evidence references, proposition references, and severity remain immutable during repair.
 10. If a large-model result exists, pass it with `--analysis-result-json` and merge it back into the report.
 11. Analyze videos through the 6-slot commerce structure: Hook, product intro, usage, result, trust, CTA.
 12. For compare/improve mode, produce stage-level gaps and top 3 to 5 improvements.
@@ -66,8 +66,7 @@ python3 scripts/flayr.py improve \
    - contact sheets and timeline views
    - local-language `transcript.txt`
    - Chinese `transcript.zh.txt`
-   - `improved_video_plan.json`
-14. Only create a final `improved.mp4` when enough timed script and audio replacement data exists. If not, output a precise assembly plan instead of pretending the video was improved.
+14. Do not render or synthesize a replacement video. Keep the report grounded in the original media, evidence frames, local audio checks, and executable improvement suggestions.
 
 ## Analysis Rules
 
@@ -100,22 +99,16 @@ The script checks dependencies but does not install them automatically.
 
 Expected tools:
 
-- `ffmpeg`: frame/audio extraction and future video assembly
+- `ffmpeg`: frame/audio evidence extraction
 - `whisper`, `whisper-cpp`, or `whisper-cli`: speech transcription
 
-If dependencies are missing, report the missing tool and continue only for outputs that do not require it.
+If optional dependencies are missing, record an explicit `degraded` status and continue only for outputs that do not require them. A requested LLM call, response parse, or schema failure is blocking and must return nonzero. Compare/improve without completed LLM analysis also fails by default; use `--allow-degraded` only when that state is intentional.
 
 For `whisper-cli` or `whisper-cpp`, pass `--whisper-model` when the default `models/ggml-base.en.bin` is not available.
 
-For Flayr model analysis, use a compatible vision-language model:
-`--llm-model qwen3.6-plus --llm-api-url https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions --llm-api-key-keychain-service VidLingo.Qwen`.
+For Flayr model analysis, use a configured OpenAI-compatible vision-language model and endpoint supplied by the runtime environment. Do not put credentials, personal Keychain names, or private machine paths in a committed job manifest.
 
 Subtitle OCR runs in `--ocr-mode auto` by default and reuses the configured visual model. Disable it with `--no-ocr` for fast local debugging. OCR improves on-screen subtitle grounding and is low cost, but it adds per-frame API latency.
-
-Proposal AI demo clips are optional and off by default. Use `--proposal-video-backend dashscope-i2v`
-to generate Wan image-to-video samples from local creator frames. Use `--proposal-video-backend dashscope-s2v`
-only when public HTTP(S) face image and line audio URLs are available; `wan2.2-s2v` cannot consume local files directly.
-Do not enable these backends unless the user explicitly wants AI demo generation, because the calls are billed and can take minutes.
 
 Default to `--whisper-language auto`. Southeast Asia commerce videos often use Malay, Thai, Indonesian, or English local口播, so do not force Chinese unless the user explicitly says the video is Chinese.
 
@@ -134,6 +127,6 @@ For normal work, summarize:
 - whether the Chinese translation file exists
 - whether LLM analysis was generated or merged
 - the top improvements selected
-- whether `improved.mp4` was generated or only an assembly plan was produced
+- whether the report has complete evidence and grounded improvement suggestions
 
-Do not over-explain the framework to creators. The HTML report is for operations; the video or video plan is for creator coaching.
+Do not over-explain the framework to creators. The HTML report is for operations and creator coaching.

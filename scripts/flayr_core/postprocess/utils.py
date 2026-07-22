@@ -41,25 +41,31 @@ def read_srt_segments(info: dict[str, Any]) -> list[dict[str, Any]]:
         if not time_line:
             continue
         start_text, end_text = [item.strip() for item in time_line.split("-->", 1)]
+        start = parse_srt_timestamp(start_text)
+        end = parse_srt_timestamp(end_text)
+        if start is None or end is None or end < start:
+            continue
         text_lines = lines[lines.index(time_line) + 1 :]
         if not text_lines:
             continue
         segments.append(
             {
-                "start": parse_srt_timestamp(start_text),
-                "end": parse_srt_timestamp(end_text),
+                "start": start,
+                "end": end,
                 "text": " ".join(text_lines),
             }
         )
     return segments
 
 
-def parse_srt_timestamp(value: str) -> float:
-    normalized = value.replace(",", ".")
-    parts = normalized.split(":")
-    if len(parts) != 3:
-        return 0.0
-    return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+_SRT_TIMESTAMP_RE = re.compile(r"^\d+:\d{2}:\d{2}(?:[.,]\d+)?$")
+
+
+def parse_srt_timestamp(value: str) -> float | None:
+    normalized = str(value or "").strip()
+    if not _SRT_TIMESTAMP_RE.fullmatch(normalized):
+        return None
+    return parse_timestamp_seconds(normalized.replace(",", "."))
 
 
 # ---------------------------------------------------------------------------
@@ -120,9 +126,14 @@ def first_unmapped_overlapping_unit(
 
 def adjacent_review_range(before: dict[str, Any] | None, after: dict[str, Any] | None, fallback: Any) -> str:
     if before and after:
-        _, before_end = parse_time_range_seconds(before.get("time_range"), None)
-        after_start, _ = parse_time_range_seconds(after.get("time_range"), None)
-        if after_start >= before_end:
+        before_range = parse_time_range_seconds(before.get("time_range"), None)
+        after_range = parse_time_range_seconds(after.get("time_range"), None)
+        if before_range is not None and after_range is not None:
+            _, before_end = before_range
+            after_start, _ = after_range
+        else:
+            before_end = after_start = None
+        if before_end is not None and after_start is not None and after_start >= before_end:
             return f"{format_seconds(before_end)} - {format_seconds(max(before_end + 0.5, after_start))}"
     return str(fallback or "")
 
@@ -143,7 +154,10 @@ def evidence_unit_at_time(units: list[Any], timestamp: Any) -> dict[str, Any] | 
     for unit in units:
         if not isinstance(unit, dict):
             continue
-        start, end = parse_time_range_seconds(unit.get("time_range"), None)
+        parsed = parse_time_range_seconds(unit.get("time_range"), None)
+        if parsed is None:
+            continue
+        start, end = parsed
         if start <= seconds <= end:
             return unit
     return None
@@ -170,7 +184,10 @@ def nearest_product_evidence_unit(units: list[Any], timestamp: Any) -> dict[str,
 
 
 def distance_to_time_range(seconds: float, time_range: Any) -> float:
-    start, end = parse_time_range_seconds(time_range, None)
+    parsed = parse_time_range_seconds(time_range, None)
+    if parsed is None:
+        return float("inf")
+    start, end = parsed
     if start <= seconds <= end:
         return 0.0
     return min(abs(seconds - start), abs(seconds - end))
@@ -179,13 +196,19 @@ def distance_to_time_range(seconds: float, time_range: Any) -> float:
 def nearest_evidence_unit(units: Any, time_range: Any) -> dict[str, Any] | None:
     if not isinstance(units, list):
         return None
-    target_start, target_end = parse_time_range_seconds(time_range, None)
+    target_range = parse_time_range_seconds(time_range, None)
+    if target_range is None:
+        return None
+    target_start, target_end = target_range
     target_midpoint = (target_start + target_end) / 2
     candidates: list[tuple[float, dict[str, Any]]] = []
     for unit in units:
         if not isinstance(unit, dict) or not unit.get("id"):
             continue
-        start, end = parse_time_range_seconds(unit.get("time_range"), None)
+        parsed = parse_time_range_seconds(unit.get("time_range"), None)
+        if parsed is None:
+            continue
+        start, end = parsed
         overlap = max(0.0, min(target_end, end) - max(target_start, start))
         midpoint_distance = abs(((start + end) / 2) - target_midpoint)
         candidates.append((-overlap if overlap > 0 else midpoint_distance, unit))
@@ -195,6 +218,10 @@ def nearest_evidence_unit(units: Any, time_range: Any) -> dict[str, Any] | None:
 
 
 def evidence_overlaps_range(unit: dict[str, Any], time_range: Any) -> bool:
-    target_start, target_end = parse_time_range_seconds(time_range, None)
-    start, end = parse_time_range_seconds(unit.get("time_range"), None)
+    target_range = parse_time_range_seconds(time_range, None)
+    unit_range = parse_time_range_seconds(unit.get("time_range"), None)
+    if target_range is None or unit_range is None:
+        return False
+    target_start, target_end = target_range
+    start, end = unit_range
     return min(target_end, end) > max(target_start, start)

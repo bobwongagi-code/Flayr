@@ -17,8 +17,24 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import flayr
-from flayr_core import proposal_video, subtitle_track, translation, utils, video, voice_clone
-from flayr_core.report import executive_summary, render_global_cause_note, render_global_diagnosis, render_improvement_meta, stage_skipped
+from flayr_core import report as report_module, subtitle_track, translation, utils, video
+from flayr_core.report import (
+    ReportAssetContext,
+    executive_summary,
+    render_gap_badge,
+    render_gap_overview,
+    render_global_cause_note,
+    render_global_diagnosis,
+    render_improvement_meta,
+    image_src_for_frame,
+    stage_skipped,
+)
+from flayr_core.artifacts import (
+    build_frame_manifest,
+    parse_time_range_seconds,
+    parse_timestamp_seconds,
+    select_frames_for_time_range,
+)
 from flayr_core.llm import api as llm_api
 from flayr_core.llm import media as llm_media
 from flayr_core.llm import pipeline
@@ -55,15 +71,19 @@ from flayr_core.llm.parse import (
     normalize_multimodal_assessment,
     normalize_module_id,
     normalize_s3_flags,
+    normalize_time_range_value,
     normalize_video_fact_result,
     normalize_video_understanding,
 )
 from flayr_core.multimodal import channel_requirement_for, multimodal_execution
-from flayr_core.llm.pipeline import apply_llm_json_patches, preserve_valid_repair_sections
+from flayr_core.llm.pipeline import preserve_valid_repair_sections
 from flayr_core.postprocess.proposition import materialize_cross_stage_inputs, materialize_quality_audits
+from flayr_core.postprocess.utils import parse_srt_timestamp, read_srt_segments
 from flayr_core.postprocess.chain import stamp_comparison_eligibility
+from flayr_core.postprocess.audit import PostprocessAudit, build_field_sources
 from flayr_core.postprocess.derive import _derive_one, _s3_usage_exec, _s4_effect_exec, _s6_cta_exec
 from flayr_core.postprocess.global_diagnosis import materialize_global_diagnosis
+from flayr_core.video_evidence import parse_srt_time_range
 from flayr_core.postprocess.repair import (
     align_stage_flag_evidence,
     apply_comparison_eligibility,
@@ -92,6 +112,137 @@ from flayr_core.stage_ownership import CERTIFICATION_OWNERSHIP_PROMPT
 
 
 class ArchitectureContractTests(unittest.TestCase):
+    def test_degraded_report_does_not_render_unknown_severity_as_medium(self) -> None:
+        analysis = {
+            "mode": "compare",
+            "analysis_run_state": "degraded",
+            "stage_analysis": [
+                {"stage": "S1 Hook", "severity": None},
+            ],
+        }
+        badge = render_gap_badge(None)
+        overview = render_gap_overview(analysis)
+
+        self.assertIn("未分析", badge)
+        self.assertIn('gap-tile-unknown', overview)
+        self.assertIn('<span class="gap-level">未分析</span>', overview)
+        self.assertNotIn('gap-tile-mid', overview)
+        self.assertNotIn("差距中等", badge)
+        self.assertIn("未完成大模型分析", executive_summary(analysis))
+
+    def test_report_assets_are_confined_to_run_dir_and_cached(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            image = run_dir / "frames" / "frame.png"
+            image.parent.mkdir()
+            image.write_bytes(b"\x89PNG\r\n\x1a\nreport-fixture")
+            outside = root / "outside.png"
+            outside.write_bytes(b"\x89PNG\r\n\x1a\noutside-secret")
+            escaped = run_dir / "escaped.png"
+            escaped.symlink_to(outside)
+
+            assets = ReportAssetContext(run_dir)
+            with mock.patch.object(
+                report_module,
+                "encode_file_data_url",
+                wraps=report_module.encode_file_data_url,
+            ) as encode:
+                first = image_src_for_frame({"path": "frames/frame.png"}, assets)
+                second = image_src_for_frame({"path": str(image)}, assets)
+                self.assertTrue(first.startswith("data:image/png;base64,"))
+                self.assertEqual(first, second)
+                self.assertEqual(encode.call_count, 1)
+
+            self.assertEqual(image_src_for_frame({"path": str(outside)}, assets), "")
+            self.assertEqual(image_src_for_frame({"path": str(escaped)}, assets), "")
+
+    def test_postprocess_audit_records_field_rule_and_evidence(self) -> None:
+        result = {
+            "stage_analysis": [
+                {
+                    "stage": "S1 Hook",
+                    "creator_summary": "old",
+                    "creator_evidence_ids": ["C1"],
+                }
+            ]
+        }
+        audit = PostprocessAudit()
+
+        def mutate(value: dict[str, object]) -> None:
+            value["stage_analysis"][0]["creator_summary"] = "new"
+
+        audit.run(result, "postprocess.test_rule", mutate, result)
+        self.assertEqual(result["stage_analysis"][0]["creator_summary"], "new")
+        self.assertEqual(len(audit.changes), 1)
+        change = audit.changes[0]
+        self.assertEqual(change["path"], "/stage_analysis/0/creator_summary")
+        self.assertEqual(change["old"], "old")
+        self.assertEqual(change["new"], "new")
+        self.assertEqual(change["rule"], "postprocess.test_rule")
+        self.assertEqual(change["evidence"], ["C1"])
+
+    def test_field_sources_cover_unchanged_and_derived_final_fields(self) -> None:
+        raw = {"stage_analysis": [{"severity": "medium", "summary": "model text"}]}
+        normalized = json.loads(json.dumps(raw))
+        final = json.loads(json.dumps(normalized))
+        final["stage_analysis"][0]["severity"] = "large"
+        audit = PostprocessAudit()
+        audit.record(normalized, final, "postprocess.derive_severity")
+
+        sources = build_field_sources(raw, normalized, final, audit.changes)
+        self.assertEqual(sources["coverage"], "complete")
+        severity = sources["fields"]["/stage_analysis/0/severity"]
+        self.assertEqual(severity["source_artifact"], "postprocess_change_log.json")
+        self.assertEqual(severity["rule"], "postprocess.derive_severity")
+        summary = sources["fields"]["/stage_analysis/0/summary"]
+        self.assertEqual(summary["source_artifact"], "raw_model_response.json")
+
+    def test_post_finalize_audit_updates_final_artifact_and_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            provenance = {
+                "schema_version": 1,
+                "change_count": 0,
+                "change_log_truncated": False,
+            }
+            final = {
+                "stage_analysis": [{"stage": "S4 Effect", "severity": "medium"}],
+                "postprocess_provenance": provenance,
+            }
+            (run_dir / "final_derived_result.json").write_text(json.dumps(final), encoding="utf-8")
+            (run_dir / "raw_model_response.json").write_text(
+                json.dumps({"stage_analysis": [{"stage": "S4 Effect", "severity": "medium"}]}),
+                encoding="utf-8",
+            )
+            (run_dir / "validated_normalized_result.json").write_text(
+                json.dumps({"stage_analysis": [{"stage": "S4 Effect", "severity": "medium"}]}),
+                encoding="utf-8",
+            )
+            (run_dir / "postprocess_change_log.json").write_text(
+                json.dumps({"schema_version": 1, "change_count": 0, "truncated": False, "changes": []}),
+                encoding="utf-8",
+            )
+            before = json.loads(json.dumps(final))
+            after = json.loads(json.dumps(final))
+            after["stage_analysis"][0]["severity"] = "large"
+            after["s4_visual_verifier"] = {"applied": True}
+            audit = PostprocessAudit()
+            audit.record(before, after, "postprocess.s4_visual_verifier")
+
+            pipeline._merge_postprocess_audit({"run_dir": str(run_dir)}, after, audit=audit)
+            logged = json.loads((run_dir / "postprocess_change_log.json").read_text(encoding="utf-8"))
+            written = json.loads((run_dir / "final_derived_result.json").read_text(encoding="utf-8"))
+            paths = {change["path"] for change in logged["changes"]}
+            self.assertIn("/stage_analysis/0/severity", paths)
+            self.assertIn("/s4_visual_verifier", paths)
+            self.assertEqual(written, after)
+            self.assertEqual(written["postprocess_provenance"]["change_count"], logged["change_count"])
+            self.assertFalse(written["postprocess_provenance"]["change_log_truncated"])
+            self.assertEqual(written["postprocess_provenance"]["field_sources"]["coverage"], "complete")
+            self.assertIn("/stage_analysis/0/severity", logged["field_sources"]["fields"])
+
     @staticmethod
     def _multimodal(
         role_prefix: str,
@@ -731,6 +882,10 @@ class ArchitectureContractTests(unittest.TestCase):
         legacy = flayr.build_parser().parse_args(["--no-llm-include-images", "compare"])
         self.assertFalse(legacy.llm_include_images)
 
+    def test_cli_does_not_accept_abbreviated_protected_network_flags(self) -> None:
+        with self.assertRaises(SystemExit):
+            flayr.build_parser().parse_args(["compare", "--llm-api-u", "https://attacker.invalid"])
+
     def test_module_id_uses_structure_library_as_the_only_enum_source(self) -> None:
         self.assertEqual(normalize_module_id("S4-F", 4), "S4-F")
         self.assertEqual(normalize_module_id("S4-G", 4), "unknown")
@@ -769,33 +924,40 @@ class ArchitectureContractTests(unittest.TestCase):
             raw_path = root / "response.json"
             payload_path.write_text(json.dumps({"model": "test", "messages": []}), encoding="utf-8")
             calls: list[list[str]] = []
+            stdin_values: list[str | bytes | None] = []
 
-            def fake_run(command: list[str]) -> SimpleNamespace:
+            def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
                 calls.append(command)
-                destination = Path(command[command.index("-o") + 1])
+                stdin_values.append(kwargs.get("stdin_text"))
+                callback = kwargs["stdout_callback"]
+                assert callable(callback)
                 if len(calls) == 1:
-                    destination.write_text('data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n', encoding="utf-8")
+                    callback(b'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n')
                 else:
-                    destination.write_text(
-                        'data: {"choices":[{"delta":{"content":"{}"},"finish_reason":"stop"}]}\n\n'
-                        'data: [DONE]\n',
-                        encoding="utf-8",
+                    callback(
+                        b'data: {"choices":[{"delta":{"content":"{}"},"finish_reason":"stop"}]}\n\n'
+                        b'data: [DONE]\n\n'
                     )
-                return SimpleNamespace(returncode=0, stderr="", stdout="")
+                return SimpleNamespace(returncode=0, stderr="__FLAYR_HTTP_STATUS__200\n", stdout="")
 
-            with mock.patch.object(llm_api, "run_command", side_effect=fake_run), mock.patch.object(llm_api.time, "sleep"):
+            with (
+                mock.patch.object(llm_api, "validate_outbound_url"),
+                mock.patch.object(llm_api, "run_command", side_effect=fake_run),
+                mock.patch.object(llm_api.time, "sleep"),
+            ):
                 raw = llm_api.call_llm_api("https://example.test/v1/chat/completions", "secret", payload_path, raw_path)
 
             self.assertEqual(len(calls), 2)
             self.assertIn("--speed-limit", calls[0])
             self.assertIn("--speed-time", calls[0])
+            self.assertEqual(calls[0][calls[0].index("--max-redirs") + 1], "0")
+            self.assertNotIn("-L", calls[0])
             self.assertEqual(calls[0][calls[0].index("--max-time") + 1], "1800")
             self.assertIn('"finish_reason": "stop"', raw)
-            self.assertTrue(raw_path.is_file())
-            self.assertEqual(
-                sorted(path.name for path in root.iterdir()),
-                ["request.json", "response.json"],
-            )
+            self.assertFalse(raw_path.exists())
+            self.assertEqual(stdin_values, ["Authorization: Bearer secret\n", "Authorization: Bearer secret\n"])
+            self.assertNotIn("secret", " ".join(calls[0]))
+            self.assertEqual(sorted(path.name for path in root.iterdir()), [])
 
     def test_small_json_request_can_set_a_shorter_transport_deadline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -816,6 +978,8 @@ class ArchitectureContractTests(unittest.TestCase):
                 )
             self.assertEqual(output, "{}")
             self.assertEqual(call.call_args.kwargs["max_time_seconds"], 240)
+            self.assertFalse(payload_path.exists())
+            self.assertFalse(response_path.exists())
 
     def test_fetch_json_completion_retries_a_failed_complete_transport_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -832,6 +996,8 @@ class ArchitectureContractTests(unittest.TestCase):
                 output = pipeline.fetch_json_completion(args, "secret", payload_path, response_path, max_attempts=2)
             self.assertEqual(output, "{}")
             self.assertEqual(call.call_count, 2)
+            self.assertFalse(payload_path.exists())
+            self.assertFalse(response_path.exists())
 
     def test_reuse_preprocessing_reuses_existing_product_foundation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -840,19 +1006,46 @@ class ArchitectureContractTests(unittest.TestCase):
                 "category_profile": {"category": "散粉"},
                 "product_profile": {"proof_contract": {"valid": True, "mode": "instant_visual"}},
             }
-            (root / "product_foundation.json").write_text(json.dumps(cached), encoding="utf-8")
-            args = SimpleNamespace(reuse_preprocessing=True, llm_model="test")
+            args = SimpleNamespace(
+                reuse_preprocessing=True,
+                llm_model="test",
+                llm_api_url="https://example.test/v1/chat/completions",
+            )
             analysis = {"product": {"category": "散粉"}}
+            cache_key = pipeline._product_foundation_cache_key(args, analysis)
+            pipeline._write_cache_result(root / "product_foundation.json", {**cache_key, "foundation": cached})
             with mock.patch.object(pipeline, "fetch_json_completion") as request:
                 foundation = pipeline.establish_product_foundation(args, analysis, root, "secret")
             self.assertEqual(foundation["category_profile"]["category"], "散粉")
             request.assert_not_called()
 
+    def test_cache_record_rejects_stale_or_incomplete_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache_path = root / "facts.json"
+            key = {"cache_schema_version": 1, "source_sha256": "source"}
+            fact = {"evidence_units": [{"id": "C1", "time_range": "0.0s - 1.0s"}]}
+            pipeline._write_cache_result(cache_path, {**key, "fact_result": fact})
+            self.assertEqual(pipeline._read_cache_result(cache_path, "fact_result", key), fact)
+
+            corrupted = json.loads(cache_path.read_text(encoding="utf-8"))
+            corrupted["fact_result"]["evidence_units"][0]["id"] = "C2"
+            cache_path.write_text(json.dumps(corrupted), encoding="utf-8")
+            self.assertIsNone(pipeline._read_cache_result(cache_path, "fact_result", key))
+
+            pipeline._write_cache_result(cache_path, {**key, "fact_result": fact})
+            failed = json.loads(cache_path.read_text(encoding="utf-8"))
+            failed["completion_status"] = "failed"
+            cache_path.write_text(json.dumps(failed), encoding="utf-8")
+            self.assertIsNone(pipeline._read_cache_result(cache_path, "fact_result", key))
+
     def test_ocr_uses_short_single_request_timeout_with_outer_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             frame = root / "frame.jpg"
-            frame.write_bytes(b"not-a-real-jpeg")
+            # The media boundary now requires a real file signature; the test
+            # only needs a minimally identifiable JPEG because the API call is mocked.
+            frame.write_bytes(b"\xff\xd8\xff" + b"not-a-real-jpeg")
             with mock.patch.object(subtitle_track, "call_llm_api", side_effect=SystemExit("timeout")) as call:
                 lines, status = subtitle_track.ocr_frame_with_retry(
                     frame,
@@ -869,83 +1062,15 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertEqual(call.call_args.kwargs["low_speed_time_seconds"], 45)
             self.assertEqual(call.call_args.kwargs["retries"], 0)
 
-    def test_agent_plan_capabilities_use_embedded_video_audio(self) -> None:
-        url = "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions"
-        self.assertTrue(llm_api.is_agent_plan_api_url(url))
-        self.assertFalse(llm_api.supports_standalone_audio(url))
-        self.assertTrue(llm_api.supports_standalone_audio("https://example.test/v1/chat/completions"))
-        self.assertEqual(full_analysis_output_budget("doubao-seed-2.0-lite"), 32768)
+    def test_dashscope_qwen_capabilities_are_explicit_and_budget_is_provider_independent(self) -> None:
+        url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+        capabilities = llm_api.provider_capabilities(url, "qwen3-omni-flash")
+        self.assertEqual(capabilities.profile, "dashscope_qwen_compatible")
+        self.assertEqual(capabilities.confidence, "verified_matrix")
+        self.assertTrue(llm_api.can_send_standalone_audio(url, "qwen3-omni-flash"))
+        self.assertTrue(llm_api.can_analyze_native_audio(url, "qwen3-omni-flash"))
+        self.assertFalse(llm_api.can_send_standalone_audio("https://example.test/v1/chat/completions", "vision-test"))
         self.assertEqual(full_analysis_output_budget("other-model"), 16384)
-
-    def test_agent_plan_stage2_uses_native_clips_not_input_audio(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            video = root / "creator.mp4"
-            video.write_bytes(b"placeholder")
-            analysis = {
-                "videos": {
-                    "creator": {
-                        "path": str(video),
-                        "work_dir": str(root),
-                        "duration_seconds": 5.0,
-                    }
-                }
-            }
-            facts = {"creator": {"evidence_units": [{"id": "C1", "time_range": "0.0s - 2.0s"}]}}
-            with mock.patch.object(llm_media, "video_to_data_url", return_value="data:video/mp4;base64,AA=="):
-                content = llm_media.build_evidence_sensory_inputs(
-                    analysis,
-                    facts,
-                    api_url="https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions",
-                )
-            types = [item.get("type") for item in content]
-            self.assertIn("video_url", types)
-            self.assertNotIn("input_audio", types)
-
-    def test_agent_plan_stage2_merges_evidence_to_provider_video_limit(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            videos: dict[str, object] = {}
-            facts: dict[str, object] = {}
-            for role in ("benchmark", "creator"):
-                video = root / f"{role}.mp4"
-                video.write_bytes(b"placeholder")
-                videos[role] = {
-                    "path": str(video),
-                    "work_dir": str(root),
-                    "duration_seconds": 12.0,
-                }
-                facts[role] = {
-                    "evidence_units": [
-                        {"id": f"{role[0].upper()}{index}", "time_range": f"{index}.0s - {index + 1}.0s"}
-                        for index in range(6)
-                    ]
-                }
-            with mock.patch.object(llm_media, "video_to_data_url", return_value="data:video/mp4;base64,AA==") as encode:
-                content = llm_media.build_evidence_sensory_inputs(
-                    {"videos": videos},
-                    facts,
-                    api_url="https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions",
-                )
-            video_blocks = [item for item in content if item.get("type") == "video_url"]
-            labels = "\n".join(str(item.get("text") or "") for item in content if item.get("type") == "text")
-            self.assertEqual(len(video_blocks), 10)
-            self.assertEqual(encode.call_count, 10)
-            for role_prefix in ("B", "C"):
-                for index in range(6):
-                    self.assertIn(f"{role_prefix}{index}", labels)
-
-    def test_agent_plan_stage1_fallback_does_not_emit_unsupported_audio(self) -> None:
-        analysis = {"videos": {"creator": {"path": "", "work_dir": ""}}}
-        payload = build_video_fact_payload(
-            "doubao-seed-2.0-lite",
-            "creator",
-            analysis,
-            [],
-            api_url="https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions",
-        )
-        content = payload["messages"][1]["content"]
-        self.assertNotIn("input_audio", [item.get("type") for item in content])
 
     def test_llm_transfer_closed_error_is_retryable(self) -> None:
         self.assertTrue(
@@ -2435,34 +2560,6 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertFalse(normalized["steps_clear_met"])
         self.assertFalse(normalized["pov_immersive_met"])
 
-    def test_doubao_patch_repair_updates_stage_by_code_and_locks_facts(self) -> None:
-        base = {
-            "video_understanding": {"creator": {"evidence_units": [{"id": "C1"}]}},
-            "stage_analysis": [
-                {
-                    "stage": "S3 使用过程",
-                    "severity": "medium",
-                    "creator_s3": {"evidence_ids": ["C1"]},
-                }
-            ],
-        }
-        repaired = apply_llm_json_patches(
-            base,
-            {"patches": [{"path": "/stage_analysis/S3/creator_s3/multi_scene_logic_met", "value": False}]},
-        )
-        self.assertFalse(repaired["stage_analysis"][0]["creator_s3"]["multi_scene_logic_met"])
-        self.assertNotIn("multi_scene_logic_met", base["stage_analysis"][0]["creator_s3"])
-
-        for path in (
-            "/video_understanding/creator/evidence_units",
-            "/stage_analysis/S3/creator_s3/evidence_ids",
-            "/stage_analysis/S3/creator_evidence_ids",
-            "/stage_analysis/S3/creator_multimodal/channel_evidence_ids/visual",
-            "/stage_analysis/S3/severity",
-        ):
-            with self.assertRaises(SystemExit):
-                apply_llm_json_patches(base, {"patches": [{"path": path, "value": []}]})
-
     def test_multimodal_evidence_is_pruned_after_stage_specific_repair(self) -> None:
         result = {
             "video_understanding": {
@@ -2490,10 +2587,6 @@ class ArchitectureContractTests(unittest.TestCase):
         refs = result["stage_analysis"][4]["creator_multimodal"]["channel_evidence_ids"]
         self.assertEqual(refs["visual"], ["C4"])
         self.assertEqual(refs["speech"], ["C4"])
-
-    def test_provider_detection_keeps_doubao_repair_provider_specific(self) -> None:
-        self.assertTrue(llm_api.is_doubao_model("doubao-seed-2.0-lite"))
-        self.assertFalse(llm_api.is_doubao_model("qwen-omni-turbo"))
 
     def test_proposition_trace_links_s3_s4_and_does_not_change_severity(self) -> None:
         foundation = self._proposition_foundation()
@@ -2584,14 +2677,82 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIs(parse_facade, direct)
 
     def test_command_timeout_is_returned_as_normal_failure(self) -> None:
-        with mock.patch.object(
-            utils.subprocess,
-            "run",
-            side_effect=subprocess.TimeoutExpired(["slow-tool"], 12, stderr="slow"),
-        ):
-            completed = utils.run_command(["slow-tool"], timeout_seconds=12)
+        completed = utils.run_command(
+            [sys.executable, "-c", "import time; time.sleep(2)"],
+            timeout_seconds=1,
+        )
         self.assertEqual(completed.returncode, 124)
-        self.assertIn("timed out after 12s", completed.stderr)
+        self.assertIn("timed out after 1s", completed.stderr)
+
+    def test_run_command_can_send_stdin_without_putting_secret_in_command(self) -> None:
+        completed = utils.run_command(
+            [sys.executable, "-c", "import sys; print(sys.stdin.read())"],
+            stdin_text="secret-header",
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout.strip(), "secret-header")
+
+    def test_time_parsing_rejects_repairable_or_nonfinite_ranges(self) -> None:
+        self.assertEqual(parse_time_range_seconds("3s", 20), (3.0, 3.0))
+        self.assertEqual(parse_time_range_seconds("最后 5 秒", 20), (15.0, 20.0))
+        self.assertIsNone(parse_time_range_seconds("", 20))
+        self.assertIsNone(parse_time_range_seconds("8s - 3s", 20))
+        self.assertIsNone(parse_time_range_seconds("0s - 25s", 20))
+        self.assertIsNone(parse_time_range_seconds("NaN", 20))
+        self.assertIsNone(parse_time_range_seconds("最后 5 秒", None))
+        self.assertEqual(parse_time_range_seconds([0.0, 3.0], 20), (0.0, 3.0))
+        self.assertIsNone(parse_time_range_seconds("标杆 0s - 3s / 达人 0s - 4s", 20))
+        self.assertIsNone(parse_time_range_seconds("备注 3s", 20))
+        self.assertEqual(normalize_time_range_value([0.0, 3.0]), "0.0s - 3.0s")
+        self.assertIsNone(parse_timestamp_seconds("-1s"))
+        self.assertIsNone(parse_timestamp_seconds("inf"))
+        self.assertIsNone(parse_timestamp_seconds("0s - 3s"))
+        self.assertIsNone(parse_timestamp_seconds("时间点 3s"))
+        self.assertIsNone(parse_timestamp_seconds(24 * 60 * 60 + 1))
+
+    def test_time_consumers_do_not_repair_invalid_values(self) -> None:
+        self.assertEqual(normalize_time_range_value("0s - 3s"), "0.0s - 3.0s")
+        self.assertEqual(normalize_time_range_value("8s - 3s"), "")
+        self.assertEqual(normalize_time_range_value("标杆 0s - 3s / 达人 0s - 4s"), "")
+        self.assertIsNone(parse_srt_timestamp("not-a-timestamp"))
+        self.assertIsNone(parse_srt_timestamp("00:61:00,000"))
+        self.assertEqual(parse_srt_time_range("00:00:01,000 --> 00:00:03,000"), (1.0, 3.0))
+        self.assertEqual(parse_srt_time_range("00:00:03,000 --> 00:00:01,000"), (None, None))
+
+    def test_srt_reader_skips_malformed_and_reversed_segments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "transcript.srt"
+            path.write_text(
+                "1\n00:00:03,000 --> 00:00:01,000\nreversed\n\n"
+                "2\n00:00:01,000 --> broken\nmalformed\n\n"
+                "3\n00:00:01,000 --> 00:00:02,000\nvalid\n",
+                encoding="utf-8",
+            )
+            segments = read_srt_segments({"transcript_segments_path": str(path)})
+        self.assertEqual(segments, [{"start": 1.0, "end": 2.0, "text": "valid"}])
+
+    def test_frame_manifest_never_falls_back_to_output_index(self) -> None:
+        frames = [Path("frame_0001.jpg"), Path("frame_0002.jpg")]
+        self.assertEqual([item["timestamp_seconds"] for item in build_frame_manifest(frames)], [None, None])
+        manifest = build_frame_manifest(frames, ["1.25s", "NaN"])
+        self.assertEqual([item["timestamp_seconds"] for item in manifest], [1.25, None])
+        self.assertEqual(video._showinfo_timestamps("[Parsed_showinfo] pts_time:1.25\n", 1), [1.25])
+        self.assertEqual(video._showinfo_timestamps("[Parsed_showinfo] pts_time:1.25\n", 2), [None, None])
+
+    def test_invalid_duration_does_not_become_subtitle_sampling_fallback(self) -> None:
+        frames = [{"path": "frame.jpg", "timestamp_seconds": 0.0}]
+        self.assertEqual(subtitle_track.sample_frames_by_interval(frames, "NaN", 2.5), [])
+        self.assertEqual(subtitle_track.sample_frames_by_interval(frames, None, 2.5), frames)
+
+    def test_invalid_time_range_does_not_select_a_frame(self) -> None:
+        info = {
+            "frames": [
+                {"path": "frame.jpg", "timestamp_seconds": 0.0},
+                {"path": "frame2.jpg", "timestamp_seconds": 5.0},
+            ],
+            "duration_seconds": 10.0,
+        }
+        self.assertEqual(select_frames_for_time_range(info, "9s - 2s"), [])
 
     def test_atomic_write_preserves_existing_artifact_when_replace_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2788,14 +2949,27 @@ class ArchitectureContractTests(unittest.TestCase):
             frames.mkdir(parents=True)
             transcript = role_dir / "transcript.txt"
             transcript.write_text("cached transcript", encoding="utf-8")
+            transcript_segments = role_dir / "transcript.txt"
             args = self._cache_args()
             deps = self._cache_deps()
             fingerprint = flayr.build_preprocess_fingerprint(video, deps, args)
             (role_dir / "_preprocess.json").write_text(
-                json.dumps({"frames_dir": str(frames), "transcript_path": str(transcript), "preprocess_fingerprint": fingerprint}),
+                json.dumps(
+                    {
+                        "frames_dir": str(frames),
+                        "transcript_path": str(transcript),
+                        "transcript_segments_path": str(transcript_segments),
+                        "preprocess_fingerprint": fingerprint,
+                        "preprocess_completed": True,
+                        "preprocess_artifacts": flayr._build_preprocess_artifact_manifest(role_dir),
+                    }
+                ),
                 encoding="utf-8",
             )
             self.assertIsNotNone(flayr.load_existing_video_result(role_dir, fingerprint))
+
+            transcript.write_text("mutated transcript", encoding="utf-8")
+            self.assertIsNone(flayr.load_existing_video_result(role_dir, fingerprint))
 
             video.write_bytes(b"changed-video")
             self.assertIsNone(flayr.load_existing_video_result(role_dir, flayr.build_preprocess_fingerprint(video, deps, args)))
@@ -2825,20 +2999,6 @@ class ArchitectureContractTests(unittest.TestCase):
                 translation.translate_transcript_with_llm(args, "creator", role_dir, result)
         self.assertEqual(result["translation_status"], "failed")
         self.assertTrue(any("network failed" in str(item) for item in result["errors"]))
-
-    def test_optional_provider_curl_commands_do_not_expose_key(self) -> None:
-        proposal_commands = self._capture_curl(
-            proposal_video,
-            lambda: proposal_video.curl_json("POST", "https://example.invalid", "secret-key", {}, False),
-        )
-        voice_commands = self._capture_curl(
-            voice_clone,
-            lambda: voice_clone._curl_json(["https://example.invalid"], "secret-key"),
-        )
-        for command in [*proposal_commands, *voice_commands]:
-            rendered = " ".join(str(item) for item in command)
-            self.assertNotIn("secret-key", rendered)
-            self.assertTrue(any(str(item).startswith("@") for item in command))
 
     @staticmethod
     def _global_result() -> dict[str, object]:
@@ -2910,21 +3070,6 @@ class ArchitectureContractTests(unittest.TestCase):
     @staticmethod
     def _cache_deps() -> dict[str, object]:
         return {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "whisper": "whisper-cli", "whisper_model": None, "whisper_model_th": None}
-
-    @staticmethod
-    def _capture_curl(module: object, callback: object) -> list[list[object]]:
-        commands: list[list[object]] = []
-
-        def fake_run(command: list[object]) -> SimpleNamespace:
-            commands.append(command)
-            if "-o" in command:
-                Path(str(command[command.index("-o") + 1])).write_text("{}", encoding="utf-8")
-            return SimpleNamespace(returncode=0, stdout="{}", stderr="")
-
-        with mock.patch.object(module, "run_command", side_effect=fake_run):
-            callback()
-        return commands
-
 
 if __name__ == "__main__":
     unittest.main()

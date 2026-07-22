@@ -61,8 +61,8 @@
       "product_category": "保健品 - 女性生理期营养补充",
       "target_market": "my",
       "product_tier": "high",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/are_xie/爆款视频.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/are_xie/达人视频.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/are_xie/爆款视频.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/are_xie/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "comparable_variant",
       "direct_product_stages": [
@@ -82,8 +82,8 @@
       "product_name": "一次性马桶刷",
       "product_category": "清洁用品 - 一次性马桶刷",
       "target_market": "my",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/kakwanreview/标杆视频.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/kakwanreview/达人视频.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/kakwanreview/标杆视频.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/kakwanreview/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "same_product",
       "direct_product_stages": [
@@ -103,8 +103,8 @@
       "product_name": "儿童泡沫牙膏",
       "product_category": "口腔护理 - 儿童泡沫牙膏",
       "target_market": "my",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/tashadiyana/爆款视频-无小孩出镜.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/tashadiyana/达人视频.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/tashadiyana/爆款视频-无小孩出镜.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/tashadiyana/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "same_product",
       "direct_product_stages": [
@@ -125,8 +125,8 @@
       "product_category": "潮玩",
       "target_market": "auto",
       "product_tier": "mid",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/bluetoothwanju/标杆视频.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/bluetoothwanju/达人视频.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/bluetoothwanju/标杆视频.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/bluetoothwanju/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "comparable_variant",
       "direct_product_stages": [
@@ -146,8 +146,8 @@
       "product_name": "妆前乳",
       "product_category": "彩妆 - 妆前乳",
       "target_market": "auto",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/skincare/标杆视频.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/skincare/达人视频.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/skincare/标杆视频.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/skincare/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "cross_product",
       "direct_product_stages": [
@@ -163,8 +163,8 @@
       "product_category": "小家电 - 便携榨汁机",
       "target_market": "my",
       "product_tier": "high",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/wukoubo/标杆视频.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/wukoubo/达人视频.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/pobiji/wukoubo/标杆视频.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/pobiji/wukoubo/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "cross_product",
       "direct_product_stages": [
@@ -181,8 +181,8 @@
       "product_category": "小家电 - 便携榨汁机",
       "target_market": "my",
       "product_tier": "high",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/youkoubo/标杆视频1.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/youkoubo/达人视频2.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/pobiji/youkoubo/标杆视频1.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/pobiji/youkoubo/达人视频2.mp4",
       "comparison_scope_status": "verified_uncertain",
       "comparison_scope": "uncertain",
       "direct_product_stages": [],
@@ -195,8 +195,8 @@
       "product_name": "CARSLAN 卡姿兰定妆粉饼",
       "product_category": "美妆 - 定妆",
       "target_market": "auto",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/标杆视频.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/达人视频.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/CARSLAN/标杆视频.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/CARSLAN/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "same_product",
       "direct_product_stages": [
@@ -216,8 +216,8 @@
       "product_name": "COLORKEY 珂拉琪面膜",
       "product_category": "护肤 - 面膜",
       "target_market": "auto",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/标杆视频.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/达人视频.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/COLORKEY/标杆视频.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/COLORKEY/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "same_product",
       "direct_product_stages": [
@@ -236,8 +236,8 @@
       "product_name": "密封胶",
       "product_category": "家用工具",
       "target_market": "auto",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/paint/标杆视频.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/paint/达人视频.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/paint/标杆视频.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/paint/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "comparable_variant",
       "direct_product_stages": [
@@ -256,8 +256,8 @@
       "product_name": "挂烫机",
       "product_category": "家用电器 - 挂烫机",
       "target_market": "auto",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/simplus/标杆simplus.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/simplus/达人视频.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/simplus/标杆simplus.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/simplus/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "comparable_variant",
       "direct_product_stages": [
@@ -276,8 +276,8 @@
       "product_name": "洗地机",
       "product_category": "家电清洁",
       "target_market": "auto",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/mmx/标杆mmx.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/mmx/达人视频.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/mmx/标杆mmx.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/mmx/达人视频.mp4",
       "comparison_scope_status": "verified",
       "comparison_scope": "cross_product",
       "direct_product_stages": [
@@ -293,8 +293,8 @@
       "product_category": "小家电 - 便携榨汁机",
       "target_market": "my",
       "product_tier": "high",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/wukoubo/标杆视频.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/wukoubo/达人视频1.mp4"
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/pobiji/wukoubo/标杆视频.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/pobiji/wukoubo/达人视频1.mp4"
     },
     {
       "id": "youkoubo-c0",
@@ -303,8 +303,8 @@
       "product_category": "小家电 - 便携榨汁机",
       "target_market": "my",
       "product_tier": "high",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/youkoubo/标杆视频1.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/pobiji/youkoubo/达人视频.mp4"
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/pobiji/youkoubo/标杆视频1.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/pobiji/youkoubo/达人视频.mp4"
     },
     {
       "id": "carslan-b1",
@@ -312,8 +312,8 @@
       "product_name": "CARSLAN 卡姿兰定妆粉饼",
       "product_category": "美妆 - 定妆",
       "target_market": "auto",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/标杆视频1.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/达人视频.mp4"
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/CARSLAN/标杆视频1.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/CARSLAN/达人视频.mp4"
     },
     {
       "id": "colorkey-b1",
@@ -321,8 +321,8 @@
       "product_name": "COLORKEY 珂拉琪面膜",
       "product_category": "护肤 - 面膜",
       "target_market": "auto",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/标杆视频1.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/达人视频.mp4"
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/COLORKEY/标杆视频1.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/COLORKEY/达人视频.mp4"
     },
     {
       "id": "colorblu-c0",
@@ -332,8 +332,8 @@
       "product_category": "五金工具 / 五金 / 胶水、胶带、密封条",
       "target_market": "th",
       "core_selling_points": "快干防水密封；用于地面和户外裂缝、水泥、屋顶漏水修补。",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/Color blu/标杆1.3万单.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/Color blu/达人.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/Color blu/标杆1.3万单.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/Color blu/达人.mp4",
       "comparison_scope_status": "operator_verified_same_task_structure",
       "comparison_scope": "same_task_structure",
       "direct_product_stages": [
@@ -353,8 +353,8 @@
       "product_category": "五金工具 / 五金 / 胶水、胶带、密封条",
       "target_market": "th",
       "core_selling_points": "快干防水密封；用于地面和户外裂缝、水泥、屋顶漏水修补。",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/Color blu/标杆1.3万单.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/Color blu/达人1.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/Color blu/标杆1.3万单.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/Color blu/达人1.mp4",
       "comparison_scope_status": "operator_verified_same_task_structure",
       "comparison_scope": "same_task_structure",
       "direct_product_stages": [
@@ -375,8 +375,8 @@
       "target_market": "th",
       "core_selling_points": "无需打底；控油；毛孔模糊；柔雾质地；24 小时防汗持妆。",
       "primary_selling_point": "控油",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/标杆粉饼.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/达人粉饼.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/CARSLAN/标杆粉饼.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/CARSLAN/达人粉饼.mp4",
       "comparison_scope_status": "facts_verified_same_product",
       "comparison_scope": "same_product",
       "direct_product_stages": [
@@ -397,8 +397,8 @@
       "product_category": "美妆个护 / 美妆 / 散粉",
       "target_market": "th",
       "core_selling_points": "无需打底；控油；毛孔模糊；柔雾质地；24 小时防汗持妆。",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/标杆粉饼.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/CARSLAN/达人粉饼1.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/CARSLAN/标杆粉饼.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/CARSLAN/达人粉饼1.mp4",
       "comparison_scope_status": "operator_verified_same_task_structure",
       "comparison_scope": "same_task_structure",
       "direct_product_stages": [
@@ -418,8 +418,8 @@
       "product_category": "美妆个护 / 美妆 / 口红与唇彩",
       "target_market": "th",
       "core_selling_points": "丝绒奶油哑光妆效；色号显色与肤色适配；自然柔和的上唇效果。",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/标杆口红.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/达人口红1.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/COLORKEY/标杆口红.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/COLORKEY/达人口红1.mp4",
       "comparison_scope_status": "pending_facts_audit",
       "comparison_scope": "pending",
       "metric_scope": "pending"
@@ -433,8 +433,8 @@
       "product_category": "美妆个护 / 美妆 / 口红与唇彩",
       "target_market": "th",
       "core_selling_points": "丝绒奶油哑光妆效；色号显色与肤色适配；自然柔和的上唇效果。",
-      "benchmark_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/标杆口红.mp4",
-      "creator_video": "/Users/wangbo5/Documents/Rootify/Rootify电商项目/达人内容能力提升/COLORKEY/达人口红2.mp4",
+      "benchmark_video": "${FLAYR_VALIDATION_ROOT}/COLORKEY/标杆口红.mp4",
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/COLORKEY/达人口红2.mp4",
       "comparison_scope_status": "pending_facts_audit",
       "comparison_scope": "pending",
       "metric_scope": "whole_video_observation"

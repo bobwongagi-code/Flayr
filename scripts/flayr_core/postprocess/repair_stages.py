@@ -13,7 +13,7 @@ import json
 import re
 from typing import Any
 
-from ..artifacts import format_seconds, parse_time_range_seconds
+from ..artifacts import format_seconds, parse_time_range_seconds, parse_timestamp_seconds
 from ..stage_catalog import stage_tuples
 
 STAGES = stage_tuples()
@@ -273,7 +273,9 @@ def infer_s1_boundary_candidate(role: str, result: dict[str, Any], analysis: dic
     if len(segments) >= 2:
         first = segments[0]
         second = segments[1]
-        start = float(second.get("start") or 0.0)
+        start = parse_timestamp_seconds(second.get("start"))
+        if start is None:
+            return None
         if 0 < start <= 12:
             # 只能用相邻 SRT 句判这个候选边界。早段 fact 常把多句口播合并为
             # 一个单元；把它混进来会把后段的“推荐/产品名”错误投射到第二句起点。
@@ -303,7 +305,10 @@ def infer_boundary_from_evidence(role: str, result: dict[str, Any]) -> dict[str,
         return None
     previous = units[0]
     for current in units[1:4]:
-        current_start, _ = parse_time_range_seconds(current.get("time_range"), None)
+        parsed = parse_time_range_seconds(current.get("time_range"), None)
+        if parsed is None:
+            continue
+        current_start, _ = parsed
         if current_start <= 0 or current_start > 12:
             continue
         prev_functions = {str(item) for item in previous.get("functions") or []}
@@ -331,7 +336,12 @@ def find_early_evidence_for_role(role: str, result: dict[str, Any]) -> dict[str,
     units = get_role_evidence_units(role, result)
     if not units:
         return {}
-    return min(units, key=lambda unit: parse_time_range_seconds(unit.get("time_range"), None)[0])
+    timed_units = []
+    for unit in units:
+        parsed = parse_time_range_seconds(unit.get("time_range"), None)
+        if parsed is not None:
+            timed_units.append((parsed[0], unit))
+    return min(timed_units, key=lambda item: item[0])[1] if timed_units else {}
 
 
 def get_role_evidence_units(role: str, result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -401,7 +411,9 @@ def align_timed_cta_from_transcript(result: dict[str, Any], analysis: dict[str, 
     cta = stages[5]
     for role, code in (("benchmark", "B"), ("creator", "C")):
         info = analysis.get("videos", {}).get(role, {})
-        duration = float(info.get("duration_seconds") or 0.0)
+        duration = parse_timestamp_seconds(info.get("duration_seconds"))
+        if duration is None or duration <= 0:
+            continue
         segments = read_srt_segments(info)
         candidates = [
             segment

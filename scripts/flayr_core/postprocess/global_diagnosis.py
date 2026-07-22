@@ -292,7 +292,10 @@ def _attention_finding(
 def _ranges_duration(ranges: list[Any]) -> float:
     intervals: list[tuple[float, float]] = []
     for value in ranges:
-        start, end = parse_time_range_seconds(value, None)
+        parsed = parse_time_range_seconds(value, None)
+        if parsed is None:
+            continue
+        start, end = parsed
         if end > start:
             intervals.append((start, end))
     intervals.sort()
@@ -307,7 +310,11 @@ def _ranges_duration(ranges: list[Any]) -> float:
 
 def _side_duration(side: dict[str, Any]) -> float:
     units = [item for item in side.get("evidence_units") or [] if isinstance(item, dict)]
-    ends = [parse_time_range_seconds(item.get("time_range"), None)[1] for item in units]
+    ends = []
+    for item in units:
+        parsed = parse_time_range_seconds(item.get("time_range"), None)
+        if parsed is not None:
+            ends.append(parsed[1])
     return max(ends, default=0.0)
 
 

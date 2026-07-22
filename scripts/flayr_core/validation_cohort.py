@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +56,12 @@ def sha256_file(path: Path) -> str:
 def sha256_json(value: Any) -> str:
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def resolve_manifest_video_path(value: Any) -> Path:
+    """Resolve a local validation path after expanding its documented env root."""
+    raw = os.path.expandvars(str(value or "")).strip()
+    return Path(raw).expanduser()
 
 
 def manifest_samples(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -230,7 +237,7 @@ def build_cohort_lock(
         if historical_id in sample_ids:
             continue
         for field in ("creator_video", "benchmark_video"):
-            candidate = Path(str(sample.get(field) or "")).expanduser()
+            candidate = resolve_manifest_video_path(sample.get(field))
             if candidate.is_file():
                 historical_hashes.setdefault(sha256_file(candidate), f"{historical_id}.{field}")
 
@@ -246,7 +253,7 @@ def build_cohort_lock(
         videos: dict[str, Any] = {}
         for role, field in (("creator", "creator_video"), ("benchmark", "benchmark_video")):
             try:
-                identity = _file_identity(Path(str(sample.get(field) or "")))
+                identity = _file_identity(resolve_manifest_video_path(sample.get(field)))
             except ValueError as exc:
                 errors.append(f"{sample_id}.{field}: {exc}")
                 continue

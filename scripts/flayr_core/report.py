@@ -2,33 +2,103 @@
 
 from __future__ import annotations
 
-import base64
 import html
-import mimetypes
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .artifacts import format_seconds, select_frame_near_timestamp, select_frames_for_time_range
+from .analysis_model import AnalysisResult
+from .artifacts import format_seconds, parse_timestamp_seconds, select_frame_near_timestamp, select_frames_for_time_range
+from .resources import ResourceBudget, ResourceBudgetExceeded, ResourceLimits, encode_file_data_url
 from .utils import write_text
 
 
 ROOT = Path(__file__).resolve().parents[2]
 REPORT_TEMPLATE = ROOT / "assets" / "report.html"
+REPORT_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+REPORT_MAX_EMBEDDED_BYTES = ResourceLimits().max_report_bytes
 
 
-def write_report(run_dir: Path, analysis: dict[str, Any], plan: dict[str, Any] | None) -> Path:
+@dataclass
+class ReportAssetContext:
+    """Resolve report media only from the current run and cache encodings."""
+
+    run_dir: Path
+    image_cache: dict[Path, str] = field(default_factory=dict)
+    max_embedded_bytes: int = REPORT_MAX_EMBEDDED_BYTES
+    embedded_bytes: int = 0
+
+    def __post_init__(self) -> None:
+        self.run_dir = self.run_dir.expanduser().resolve()
+
+    def safe_file(self, value: Any) -> Path | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.run_dir / candidate
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if not resolved.is_file():
+            return None
+        try:
+            resolved.relative_to(self.run_dir)
+        except ValueError:
+            # resolve(strict=True) follows symlinks, so this rejects symlink
+            # targets that escape the run directory as well as ../ traversal.
+            return None
+        return resolved
+
+    def image_src(self, frame: dict[str, Any]) -> str:
+        path = self.safe_file(frame.get("path"))
+        if path is None:
+            return ""
+        cached = self.image_cache.get(path)
+        if cached is not None:
+            return cached
+        try:
+            encoded = encode_file_data_url(path, max_bytes=REPORT_IMAGE_MAX_BYTES, expected_kind="image")
+        except (OSError, ResourceBudgetExceeded, ValueError):
+            return ""
+        encoded_bytes = len(encoded.encode("utf-8"))
+        if self.embedded_bytes + encoded_bytes > self.max_embedded_bytes:
+            return ""
+        self.embedded_bytes += encoded_bytes
+        self.image_cache[path] = encoded
+        return encoded
+
+def write_report(
+    run_dir: Path,
+    analysis: dict[str, Any],
+    *,
+    budget: ResourceBudget | None = None,
+) -> Path:
     template = REPORT_TEMPLATE.read_text(encoding="utf-8")
+    assets = ReportAssetContext(
+        run_dir,
+        max_embedded_bytes=budget.limits.max_report_bytes if budget is not None else REPORT_MAX_EMBEDDED_BYTES,
+    )
     report = template
     report = report.replace("{{generated_at}}", escape(format_generated_at(analysis.get("generated_at"))))
     report = report.replace("{{executive_summary}}", escape(executive_summary(analysis)))
-    report = report.replace("{{overview_cards}}", render_overview_cards(analysis, run_dir))
+    report = report.replace("{{overview_cards}}", render_overview_cards(analysis, run_dir, assets))
     report = report.replace("{{global_diagnosis}}", render_global_diagnosis(analysis))
     report = report.replace("{{holistic_assessment}}", render_key_conclusions(analysis))
     report = report.replace("{{gap_overview}}", render_gap_overview(analysis))
-    report = report.replace("{{stage_rows}}", render_stage_rows(analysis))
-    report = report.replace("{{improvement_cards}}", render_improvement_cards(analysis))
+    report = report.replace("{{stage_rows}}", render_stage_rows(analysis, assets))
+    report = report.replace("{{improvement_cards}}", render_improvement_cards(analysis, assets))
 
+    report_bytes = report.encode("utf-8")
+    if budget is not None:
+        budget.reserve_report(len(report_bytes))
+    elif len(report_bytes) > ResourceLimits().max_report_bytes:
+        raise ResourceBudgetExceeded(
+            f"report exceeds max_report_bytes={ResourceLimits().max_report_bytes}: {len(report_bytes)} bytes"
+        )
     report_path = run_dir / "report.html"
     write_text(report_path, report)
     return report_path
@@ -49,9 +119,11 @@ def format_generated_at(value: Any) -> str:
     return text
 
 
-def render_stage_rows(analysis: dict[str, Any]) -> str:
+def render_stage_rows(analysis: dict[str, Any], assets: ReportAssetContext | None = None) -> str:
+    assets = assets or ReportAssetContext(Path(str(analysis.get("run_dir") or ".")))
     rows = []
-    stages = analysis["stage_analysis"]
+    result = AnalysisResult.from_mapping(analysis)
+    stages = result.stages()
     benchmark_info = analysis["videos"].get("benchmark", {})
     creator_info = analysis["videos"].get("creator", {})
     understanding = analysis.get("video_understanding", {})
@@ -61,17 +133,23 @@ def render_stage_rows(analysis: dict[str, Any]) -> str:
             rows.append(render_skipped_stage(stage, index, reason))
             continue
 
-        creator_range = stage.get("creator_time_range") or stage.get("time_range", "")
-        benchmark_range = stage.get("benchmark_time_range") or stage.get("time_range", "")
-        creator_cells = role_cells(stage, "creator", creator_info, creator_range, understanding.get("creator", {}))
-        benchmark_cells = role_cells(stage, "benchmark", benchmark_info, benchmark_range, understanding.get("benchmark", {}))
+        # The combined ``time_range`` is display-only and contains both roles.
+        # Never use it to select one role's frames, or evidence can cross sides.
+        creator_range = str(stage.get("creator_time_range") or "")
+        benchmark_range = str(stage.get("benchmark_time_range") or "")
+        creator_cells = role_cells(
+            stage, "creator", creator_info, creator_range, understanding.get("creator", {}), assets
+        )
+        benchmark_cells = role_cells(
+            stage, "benchmark", benchmark_info, benchmark_range, understanding.get("benchmark", {}), assets
+        )
 
         parts = [
             f'<div class="stage" id="{escape(stage_anchor(index))}">',
             # 跨两列的阶段头：阶段名 + 差距等级
             '<div class="stage-header">',
             f"<h3>{escape(stage['stage'])}</h3>",
-            render_gap_badge(stage.get("severity", "medium")),
+            render_gap_badge(stage.get("severity")),
             "</div>",
             render_global_cause_note(stage.get("affected_by_global_issues")),
             # 列头
@@ -174,6 +252,7 @@ def role_cells(
     info: dict[str, Any],
     time_range: str,
     understanding: dict[str, Any],
+    assets: ReportAssetContext,
 ) -> list[str]:
     """返回一个角色的 4 个段落 cell：核心结论 / 口播证据 / 画面截图 / 画面证据。"""
     units = referenced_evidence_units(stage.get(f"{prefix}_evidence_ids", []), understanding)
@@ -202,7 +281,7 @@ def role_cells(
     quote_cell = render_quote(
         quote or stage.get(f"{prefix}_quote"), quote_zh or stage.get(f"{prefix}_quote_zh")
     ) or '<div class="meta">无口播证据。</div>'
-    shot_cell = render_shot_grid(frames)
+    shot_cell = render_shot_grid(frames, assets)
     visual_cell = render_fact_list(visual_evidence)
     return [conclusion_cell, quote_cell, shot_cell, visual_cell]
 
@@ -213,7 +292,14 @@ def render_gap_badge(severity: str) -> str:
         "medium": ("mid", "差距中等"),
         "small": ("low", "差距较小"),
     }
-    normalized = normalize_severity(severity)
+    normalized = severity_value(severity)
+    if normalized is None:
+        return (
+            '<span class="gap-badge gap-unavailable">'
+            '<span class="gap-dot" aria-hidden="true"></span>'
+            '<span>未分析</span>'
+            "</span>"
+        )
     css_level, label = labels[normalized]
     return (
         f'<span class="gap-badge gap-{escape(css_level)}">'
@@ -254,7 +340,12 @@ def split_readable_points(text: Any, limit: int = 3) -> list[str]:
 
 
 def executive_summary(analysis: dict[str, Any]) -> str:
-    eligibility = analysis.get("comparison_contract") or analysis.get("comparison_eligibility")
+    result = AnalysisResult.from_mapping(analysis)
+    state = str(result.get("analysis_run_state") or "").strip().lower()
+    mode = str(result.get("mode") or "").strip().lower()
+    if state == "degraded" or (state == "not_run" and mode in {"compare", "improve"}):
+        return "本报告未完成大模型分析，仅展示预处理和占位信息；阶段差距与提升点不可作为业务判断。"
+    eligibility = result.get("comparison_contract") or result.get("comparison_eligibility")
     if isinstance(eligibility, dict):
         from .llm.parse import normalize_comparison_contract
 
@@ -263,9 +354,9 @@ def executive_summary(analysis: dict[str, Any]) -> str:
         from .postprocess.repair_stages import comparison_scope_summary
 
         summary = str(
-            analysis.get("commercial_priority_summary")
-            or analysis.get("one_line_summary")
-            or analysis.get("executive_summary")
+            result.get("commercial_priority_summary")
+            or result.get("one_line_summary")
+            or result.get("executive_summary")
             or ""
         ).strip()
         scope_note = comparison_scope_summary(eligibility)
@@ -275,18 +366,18 @@ def executive_summary(analysis: dict[str, Any]) -> str:
         from .postprocess.repair_stages import comparison_scope_summary
 
         return comparison_scope_summary(eligibility)
-    commercial_summary = str(analysis.get("commercial_priority_summary") or "").strip()
+    commercial_summary = str(result.get("commercial_priority_summary") or "").strip()
     if commercial_summary:
         return commercial_summary
-    summary = str(analysis.get("one_line_summary") or analysis.get("executive_summary") or "").strip()
+    summary = str(result.get("one_line_summary") or result.get("executive_summary") or "").strip()
     if summary:
         return summary
-    improvements = sorted(analysis.get("improvements", []), key=lambda item: item.get("priority", 999))
+    improvements = sorted(result.improvements(), key=lambda item: item.get("priority", 999))
     if improvements:
         return f"达人视频优先改：{improvements[0].get('title', '核心成交阻力')}。"
     large_stages = [
         item.get("stage", "")
-        for item in analysis.get("stage_analysis", [])
+        for item in result.stages()
         if item.get("severity") == "large"
         and str(item.get("comparison_status") or "") not in {"not_directly_comparable", "not_applicable"}
     ]
@@ -296,7 +387,8 @@ def executive_summary(analysis: dict[str, Any]) -> str:
 
 
 def render_global_diagnosis(analysis: dict[str, Any]) -> str:
-    diagnosis = analysis.get("global_diagnosis") if isinstance(analysis.get("global_diagnosis"), dict) else {}
+    result = AnalysisResult.from_mapping(analysis)
+    diagnosis = result.get("global_diagnosis") if isinstance(result.get("global_diagnosis"), dict) else {}
     findings = [
         item for item in diagnosis.get("findings") or []
         if isinstance(item, dict) and item.get("impact") in {"blocking", "major", "minor"}
@@ -369,12 +461,17 @@ def global_finding_title(gate_id: str) -> str:
     }.get(gate_id, gate_id or "视频级问题")
 
 
-def render_overview_cards(analysis: dict[str, Any], run_dir: Path) -> str:
+def render_overview_cards(
+    analysis: dict[str, Any],
+    run_dir: Path,
+    assets: ReportAssetContext | None = None,
+) -> str:
     """概览仅保留三张卡：产品、标杆视频、达人视频。
 
     视频卡显示时长 + 代表帧缩略图，点击放大。
     （当前放大的是代表帧，不是视频播放；真正视频播放需要内嵌视频文件，体积大，留待后续。）
     """
+    assets = assets or ReportAssetContext(run_dir)
     product = analysis.get("product", {})
     videos = analysis.get("videos", {})
     audio = analysis.get("audio_assessment") if isinstance(analysis.get("audio_assessment"), dict) else {}
@@ -393,13 +490,13 @@ def render_overview_cards(analysis: dict[str, Any], run_dir: Path) -> str:
                 "</div>",
             ]
         ),
-        render_video_card("标杆视频", videos.get("benchmark", {})),
-        render_video_card("达人视频", videos.get("creator", {})),
+        render_video_card("标杆视频", videos.get("benchmark", {}), assets),
+        render_video_card("达人视频", videos.get("creator", {}), assets),
     ]
     return "\n".join(cards)
 
 
-def render_video_card(label: str, info: dict[str, Any]) -> str:
+def render_video_card(label: str, info: dict[str, Any], assets: ReportAssetContext) -> str:
     duration = format_seconds(info.get("duration_seconds"))
     rows = [
         '<div class="overview-card">',
@@ -408,7 +505,7 @@ def render_video_card(label: str, info: dict[str, Any]) -> str:
     ]
     frame = representative_frame(info)
     if frame:
-        image_src = image_src_for_frame(frame)
+        image_src = image_src_for_frame(frame, assets)
         if image_src:
             rows.append('<div class="video-thumb">')
             rows.append(f'<img src="{escape(image_src)}" alt="{escape(label)}代表帧">')
@@ -445,7 +542,10 @@ def render_audio_quality_rows(value: Any) -> list[str]:
 def representative_frame(info: dict[str, Any]) -> dict[str, Any] | None:
     # 取视频中段的一帧作为代表缩略图
     duration = info.get("duration_seconds")
-    mid = float(duration) / 2 if isinstance(duration, (int, float)) and duration else 1.0
+    duration_value = parse_timestamp_seconds(duration)
+    if duration_value is None or duration_value <= 0:
+        return None
+    mid = duration_value / 2
     return select_frame_near_timestamp(info, mid)
 
 
@@ -501,16 +601,21 @@ def collect_key_conclusions(analysis: dict[str, Any], limit: int = 5) -> list[st
 
 def render_gap_overview(analysis: dict[str, Any]) -> str:
     rows = []
-    for index, stage in enumerate(analysis.get("stage_analysis", []), start=1):
+    result = AnalysisResult.from_mapping(analysis)
+    for index, stage in enumerate(result.stages(), start=1):
         short_name, full_name = stage_display_names(stage.get("stage", ""), index)
         skipped, _ = stage_skipped(stage)
         if skipped:
             css_level = "skip"
             label = "不比较" if str(stage.get("comparison_status") or "") == "not_directly_comparable" else "未涉及"
         else:
-            severity = normalize_severity(stage.get("severity"))
-            css_level = {"large": "high", "medium": "mid", "small": "low"}[severity]
-            label = {"large": "差距明显", "medium": "差距中等", "small": "差距较小"}[severity]
+            severity = severity_value(stage.get("severity"))
+            if severity is None:
+                css_level = "unknown"
+                label = "未分析"
+            else:
+                css_level = {"large": "high", "medium": "mid", "small": "low"}[severity]
+                label = {"large": "差距明显", "medium": "差距中等", "small": "差距较小"}[severity]
         rows.append(
             "\n".join(
                 [
@@ -613,14 +718,14 @@ def render_quote(quote: Any, translation: Any) -> str:
     return "\n".join(rows)
 
 
-def render_shot_grid(frames: list[dict[str, Any]]) -> str:
+def render_shot_grid(frames: list[dict[str, Any]], assets: ReportAssetContext) -> str:
     if not frames:
         return '<div class="meta">暂无对应画面。</div>'
-    return "\n".join(["<div class=\"thumb-grid\">", *(render_thumb(frame) for frame in frames), "</div>"])
+    return "\n".join(["<div class=\"thumb-grid\">", *(render_thumb(frame, assets) for frame in frames), "</div>"])
 
 
-def render_thumb(frame: dict[str, Any]) -> str:
-    image_src = image_src_for_frame(frame)
+def render_thumb(frame: dict[str, Any], assets: ReportAssetContext) -> str:
+    image_src = image_src_for_frame(frame, assets)
     if not image_src:
         return '<div class="meta">暂无对应画面。</div>'
     timestamp = format_seconds(frame.get("timestamp_seconds"))
@@ -635,10 +740,10 @@ def render_thumb(frame: dict[str, Any]) -> str:
     )
 
 
-def render_shot(frame: dict[str, Any] | None) -> str:
+def render_shot(frame: dict[str, Any] | None, assets: ReportAssetContext) -> str:
     if not frame or not frame.get("path"):
         return '<div class="meta">暂无对应画面。</div>'
-    image_src = image_src_for_frame(frame)
+    image_src = image_src_for_frame(frame, assets)
     if not image_src:
         return '<div class="meta">暂无对应画面。</div>'
     timestamp = format_seconds(frame.get("timestamp_seconds"))
@@ -653,20 +758,21 @@ def render_shot(frame: dict[str, Any] | None) -> str:
     )
 
 
-def image_src_for_frame(frame: dict[str, Any]) -> str:
-    path = Path(str(frame.get("path") or ""))
-    if not path.exists() or not path.is_file():
-        return ""
-    mime_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
-    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-    return f"data:{mime_type};base64,{encoded}"
+def image_src_for_frame(frame: dict[str, Any], assets: ReportAssetContext | None = None) -> str:
+    # Without an explicit run context, do not trust a result-provided path.
+    return assets.image_src(frame) if assets is not None else ""
 
 
-def render_improvement_cards(analysis: dict[str, Any]) -> str:
-    improvements = sorted(analysis["improvements"], key=lambda item: item.get("priority", 999))
+def render_improvement_cards(
+    analysis: dict[str, Any],
+    assets: ReportAssetContext | None = None,
+) -> str:
+    assets = assets or ReportAssetContext(Path(str(analysis.get("run_dir") or ".")))
+    result = AnalysisResult.from_mapping(analysis)
+    improvements = sorted(result.improvements(), key=lambda item: item.get("priority", 999))
     if not improvements:
         # 根据 improvements_status 给出不同提示，避免空数据被误读为"无问题"
-        status = analysis.get("improvements_status", "not_applicable")
+        status = result.get("improvements_status", "not_applicable")
         if status == "llm_unavailable":
             return (
                 '<div class="card warning">'
@@ -678,13 +784,11 @@ def render_improvement_cards(analysis: dict[str, Any]) -> str:
             return '<div class="card">LLM 本次未给出提升点建议。</div>'
         return '<div class="card">拆解模式暂无对比提升点。</div>'
 
-    proposal_units = proposal_units_by_rank(analysis)
     cards = []
     for rank, item in enumerate(improvements, start=1):
-        creator_range = item.get("creator_time_range") or item.get("time_range", "")
+        creator_range = str(item.get("creator_time_range") or "")
         base_frame_time = item.get("best_base_frame_time") or ""
         creator_frame = select_base_frame(analysis["videos"].get("creator", {}), item)
-        proposal_unit = proposal_units.get(rank)
         cards.append(
             "\n".join(
                 [
@@ -700,97 +804,17 @@ def render_improvement_cards(analysis: dict[str, Any]) -> str:
                     "</ol>",
                     render_expected_effect(item),
                     render_script_block(item),
-                    render_proposal_unit(proposal_unit),
                     "</div>",
-                    '<div class="ai-reference">',
-                    "<h3>AI 改造参考</h3>",
-                    render_ai_visual(item, creator_frame, base_frame_time),
+                    '<div class="material-reference">',
+                    "<h3>素材参考</h3>",
+                    render_material_reference(item, creator_frame, base_frame_time, assets),
                     render_base_frame_reason(item.get("base_frame_reason")),
-                    '<div class="prompt-label">改造方向</div>',
-                    f'<div class="prompt">{escape(item.get("aigc_prompt") or aigc_prompt_fallback(item))}</div>',
                     "</div>",
                     "</div>",
                 ]
             )
         )
     return "\n".join(cards)
-
-
-def proposal_units_by_rank(analysis: dict[str, Any]) -> dict[int, dict[str, Any]]:
-    proposal = analysis.get("proposal_clips", {})
-    units = proposal.get("units", []) if isinstance(proposal, dict) else []
-    result: dict[int, dict[str, Any]] = {}
-    for unit in units:
-        if not isinstance(unit, dict):
-            continue
-        try:
-            rank = int(unit.get("rank"))
-        except (TypeError, ValueError):
-            continue
-        result[rank] = unit
-    return result
-
-
-def render_proposal_unit(unit: dict[str, Any] | None) -> str:
-    if not unit:
-        return ""
-    original_uri = str(unit.get("clip_original_uri") or "").strip()
-    ai_uri = str(unit.get("clip_ai_uri") or "").strip()
-    rows = [
-        '<div class="proposal-unit">',
-        '<div class="proposal-head">',
-        "<h4>提案样片</h4>",
-        f'<span class="proposal-chip">{escape(proposal_status_label(unit))}</span>',
-        "</div>",
-        '<div class="proposal-grid">',
-        render_video_slot("达人原片", original_uri, unit.get("duration_sec")),
-        render_video_slot("AI 示意", ai_uri, unit.get("duration_sec"), placeholder=proposal_ai_placeholder(unit)),
-        "</div>",
-        '<div class="proposal-copy">',
-        f'<div><span class="label-inline">本地话术：</span>{escape(unit.get("line") or "待补充")}</div>',
-    ]
-    if unit.get("line_zh"):
-        rows.append(f'<div class="meta">中文：{escape(unit.get("line_zh"))}</div>')
-    rows.extend(
-        [
-            f'<div class="proposal-rationale"><span class="label-inline">改造理由：</span>{escape(unit.get("rationale") or "待补充")}</div>',
-            "</div>",
-            "</div>",
-        ]
-    )
-    return "\n".join(rows)
-
-
-def proposal_status_label(unit: dict[str, Any]) -> str:
-    status = str(unit.get("ai_generation_status") or "").strip()
-    if status == "ready":
-        return "AI 示意已生成"
-    if status == "submitted":
-        return "AI 任务已提交"
-    return "需达人确认"
-
-
-def proposal_ai_placeholder(unit: dict[str, Any]) -> str:
-    status = str(unit.get("ai_generation_status") or "").strip()
-    if status == "submitted":
-        return f"AI 任务已提交，task_id：{unit.get('ai_task_id') or '待查询'}。"
-    error = str(unit.get("ai_generation_error") or "").strip()
-    if error:
-        return f"AI 示意暂未生成：{error}"
-    return "AI 样片后端未配置，本次先展示原片切片 + 改造文案。"
-
-
-def render_video_slot(label: str, uri: str, duration: Any, placeholder: str = "暂无样片。") -> str:
-    rows = ['<div class="proposal-video-slot">', f'<div class="label">{escape(label)}</div>']
-    if uri:
-        rows.append(
-            f'<video class="proposal-video" controls preload="metadata" src="{escape(uri)}"></video>'
-        )
-        rows.append(f'<div class="proposal-caption">{escape(format_seconds(duration))}</div>')
-    else:
-        rows.append(f'<div class="proposal-empty">{escape(placeholder)}</div>')
-    rows.append("</div>")
-    return "\n".join(rows)
 
 
 def render_improvement_meta(item: dict[str, Any], creator_range: str) -> str:
@@ -822,39 +846,27 @@ def select_base_frame(info: dict[str, Any], item: dict[str, Any]) -> dict[str, A
     return None
 
 
-def render_ai_visual(item: dict[str, Any], frame: dict[str, Any] | None, base_frame_time: str) -> str:
-    generated_path = Path(str(item.get("aigc_image_path") or ""))
-    if generated_path.is_file():
-        return "\n".join(
-            [
-                '<div class="meta">AI 构图参考图 · 包装文字与信息以原实拍为准</div>',
-                render_generated_shot(generated_path),
-            ]
-        )
-    return render_base_frame(item, frame, base_frame_time)
+def render_material_reference(
+    item: dict[str, Any],
+    frame: dict[str, Any] | None,
+    base_frame_time: str,
+    assets: ReportAssetContext,
+) -> str:
+    return render_base_frame(item, frame, base_frame_time, assets)
 
 
-def render_generated_shot(path: Path) -> str:
-    image_src = image_src_for_frame({"path": str(path)})
-    if not image_src:
-        return '<div class="meta">AI 改造图文件不可读取。</div>'
-    return "\n".join(
-        [
-            '<div class="shot">',
-            f'<img src="{escape(image_src)}" alt="AI 改造效果图">',
-            '<div class="shot-caption">AI 构图参考图</div>',
-            "</div>",
-        ]
-    )
-
-
-def render_base_frame(item: dict[str, Any], frame: dict[str, Any] | None, base_frame_time: str) -> str:
+def render_base_frame(
+    item: dict[str, Any],
+    frame: dict[str, Any] | None,
+    base_frame_time: str,
+    assets: ReportAssetContext,
+) -> str:
     if item.get("base_frame_suitability") == "no_suitable_frame" or not frame:
         return '<div class="material-needed">当前达人素材无合适基底帧，需补拍或补充素材。</div>'
     return "\n".join(
         [
             f'<div class="meta">达人基底帧：{escape(base_frame_time)} · 依据 {escape(item.get("base_frame_evidence_id") or "待确认")}</div>',
-            render_shot(frame),
+            render_shot(frame, assets),
         ]
     )
 
@@ -880,16 +892,14 @@ def render_base_frame_reason(value: Any) -> str:
     return f'<div class="base-reason">{escape(reason)}</div>'
 
 
-def aigc_prompt_fallback(item: dict[str, Any]) -> str:
-    suggestion = str(item.get("suggestion") or "").strip()
-    return f"以达人该时间段原始画面为素材，保留真实人物、产品和场景，按以下方向改造：{suggestion}"
+def severity_value(value: Any) -> str | None:
+    severity = str(value or "").strip().lower()
+    return severity if severity in {"large", "medium", "small"} else None
 
 
 def normalize_severity(value: Any) -> str:
-    severity = str(value or "medium").strip().lower()
-    if severity not in {"large", "medium", "small"}:
-        return "medium"
-    return severity
+    """Normalize legacy completed results; unavailable values stay out of rendering paths."""
+    return severity_value(value) or "medium"
 
 
 def escape(value: Any) -> str:

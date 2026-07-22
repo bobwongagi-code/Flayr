@@ -33,9 +33,9 @@ from flayr_core.llm.payload import build_llm_comparison_payload, load_brand_prop
 from flayr_core.llm.pipeline import _process_llm_result
 from flayr_core.utils import write_json
 
-API_URL = "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions"
-MODEL = "doubao-seed-2.0-lite"
-KEYCHAIN_SERVICE = "Flayr.AgentPlan"
+API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+MODEL = "qwen3-omni-flash"
+KEYCHAIN_SERVICE = "Flayr.DashScope"
 
 
 def count_modalities(payload: dict) -> tuple[int, int, int, int]:
@@ -364,7 +364,7 @@ def main() -> None:
     }
     print(f"[payload] text={t} image={i} audio={a} video={v} | {size_mb:.2f} MB", flush=True)
 
-    # Agent Plan 用带原声视频片段；旧 provider 可继续用独立音频块。
+    # 感官素材由当前 provider 能力矩阵决定；这里仅检查至少有画面或音频。
     if a == 0 and v == 0:
         print("❌ 感官片段为 0 —— Phase B 感官素材未生效，停止。", flush=True)
         sys.exit(1)
@@ -372,6 +372,7 @@ def main() -> None:
 
     write_json(run / "dev_stage2_request.json", payload)
     if args.dry:
+        (run / "dev_stage2_request.json").unlink(missing_ok=True)
         print("[dry] 只构建 payload，未调 LLM。")
         return
 
@@ -383,7 +384,7 @@ def main() -> None:
 
     api_key = "" if args.reuse_existing else read_llm_api_key(_Args()).strip()
     if not api_key and not args.reuse_existing:
-        print("❌ 无 API key（keychain Flayr.AgentPlan）"); sys.exit(1)
+        print("❌ 无 API key（keychain Flayr.DashScope）"); sys.exit(1)
 
     if args.reuse_existing:
         records = [

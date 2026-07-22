@@ -281,7 +281,7 @@ def bind_improvement_base_material(item: dict[str, Any], creator_units: list[Any
         item["base_frame_evidence_id"] = ""
         return
     chosen = evidence_unit_at_time(creator_units, item.get("best_base_frame_time"))
-    prompt = " ".join(str(item.get(key) or "") for key in ("suggestion", "aigc_prompt"))
+    prompt = str(item.get("suggestion") or "")
     needs_product = bool(re.search(r"产品|包装|瓶|product|label|bungkusan|troli", prompt, flags=re.IGNORECASE))
     if needs_product and not evidence_mentions_product(chosen):
         chosen = nearest_product_evidence_unit(creator_units, item.get("best_base_frame_time"))
@@ -295,8 +295,9 @@ def bind_improvement_base_material(item: dict[str, Any], creator_units: list[Any
     if needs_product and parse_timestamp_seconds(item.get("best_base_frame_time")) is not None and not evidence_mentions_product(
         evidence_unit_at_time(creator_units, item.get("best_base_frame_time"))
     ):
-        start, _ = parse_time_range_seconds(chosen.get("time_range"), None)
-        item["best_base_frame_time"] = format_seconds(start)
+        parsed = parse_time_range_seconds(chosen.get("time_range"), None)
+        if parsed is not None:
+            item["best_base_frame_time"] = format_seconds(parsed[0])
     visible_fact = str(chosen.get("visual_fact") or chosen.get("information") or "").strip()
     item["base_frame_reason"] = f"来自达人 {item['base_frame_evidence_id']} 的真实素材：{visible_fact}"
 

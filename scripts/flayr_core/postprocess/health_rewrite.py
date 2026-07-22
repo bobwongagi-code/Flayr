@@ -61,7 +61,7 @@ def validate_recommendation_safety(result: dict[str, Any], analysis_input: str) 
         r"折扣",
     ]
     violations: list[str] = []
-    fields = ("suggestion", "creator_script", "creator_script_zh", "aigc_prompt")
+    fields = ("suggestion", "creator_script", "creator_script_zh")
     for index, item in enumerate(result.get("improvements", []), start=1):
         text = "\n".join(str(item.get(field) or "") for field in fields)
         matched = [
@@ -165,7 +165,7 @@ def sanitize_child_toothpaste_recommendations(result: dict[str, Any], analysis_i
         r"wangi",
         r"bau buah",
     ]
-    fields = ("title", "suggestion", "creator_script", "creator_script_zh", "aigc_prompt")
+    fields = ("title", "suggestion", "creator_script", "creator_script_zh")
 
     for item in result.get("improvements", []):
         text = "\n".join(str(item.get(field) or "") for field in fields)
@@ -181,7 +181,6 @@ def sanitize_child_toothpaste_recommendations(result: dict[str, Any], analysis_i
                 "开头直接展示按压式牙膏和泵头，用一句简短马来语说明这是儿童刷牙场景的易用产品；不加入年龄、功效或绝对化承诺。",
                 "Ubat gigi pump anak yang senang digunakan, tengok cara pakainya.",
                 "容易使用的儿童按压牙膏，看看怎么用。",
-                "基于达人真实手持牙膏画面，将产品和泵头置于视觉中心，保留家庭实拍质感；留出字幕区域，不新增年龄、功效、认证或绝对化文案。",
             )
         elif "S6" in str(item.get("target_stage") or "") or "cta" in title or "下单" in title or "购物车" in title:
             item["title"] = "补清结尾购物车提示，降低下单流失"
@@ -190,7 +189,6 @@ def sanitize_child_toothpaste_recommendations(result: dict[str, Any], analysis_i
                 "结尾保留产品特写并加入购物车方向提示，引导用户查看商品信息后再选择，不虚构功效或优惠。",
                 "Nak lihat ubat gigi pump ini? Klik troli untuk semak maklumat produk.",
                 "想看看这款按压牙膏？点击购物车查看商品信息。",
-                "基于达人结尾手持产品画面，突出真实牙膏包装并加入购物车方向提示；不新增功效、年龄、认证、价格或优惠文案。",
             )
         else:
             target_stage = str(item.get("target_stage") or "")
@@ -205,7 +203,6 @@ def sanitize_child_toothpaste_recommendations(result: dict[str, Any], analysis_i
                 "放大泵头操作，展示按压和挤出步骤；字幕只描述使用动作，包装信息以实拍可读内容为准。",
                 "Tekan pam sekali dan lihat cara ubat gigi ini digunakan untuk rutin berus gigi anak.",
                 "按压一次，看看这款牙膏如何用于孩子的日常刷牙。",
-                "基于达人真实按压泵头画面，突出按压动作和挤出步骤；字幕仅写操作说明，不新增年龄、功效、认证或比较结论。",
             )
 
 
@@ -257,7 +254,7 @@ def sanitize_health_recommendations(result: dict[str, Any], analysis_input: str)
         r"治疗", r"治愈", r"cure", r"treat",
         r"改善.{0,6}(症状|皮肤|月经)", r"diskon", r"折扣",
     ]
-    fields = ("title", "suggestion", "creator_script", "creator_script_zh", "aigc_prompt")
+    fields = ("title", "suggestion", "creator_script", "creator_script_zh")
 
     for item in result.get("improvements", []):
         text = "\n".join(str(item.get(field) or "") for field in fields)
@@ -272,7 +269,6 @@ def sanitize_health_recommendations(result: dict[str, Any], analysis_input: str)
                 "开头使用可用的产品露出画面，并叠加“Rutin nutrisi harian wanita”文字；若当前素材没有清晰产品画面则补拍；口播只说明女性日常营养补充场景。",
                 "Untuk wanita yang mahu melengkapkan rutin nutrisi harian, produk ini mudah dimasukkan dalam rutin harian anda.",
                 "对于希望完善日常营养补充习惯的女性，这款产品可以轻松加入你的每日习惯。",
-                "基于达人实际可用的产品包装画面，将产品置于画面中心并加清晰文字“Rutin nutrisi harian wanita”；若无清晰包装画面需先补拍，不添加医疗症状或功效承诺。",
             )
         elif "cta" in title or "下单" in title or "购物车" in title:
             replace_health_action(
@@ -280,7 +276,6 @@ def sanitize_health_recommendations(result: dict[str, Any], analysis_input: str)
                 "结尾保留产品特写和购物车指引，只提示用户查看商品详情与当前价格，不虚构优惠或效果理由。",
                 "Klik troli kuning untuk lihat maklumat produk dan harga semasa sebelum membuat pilihan.",
                 "点击黄色购物车，在选择前查看产品信息和当前价格。",
-                "基于达人实际存在的结尾产品画面，保留真实包装，加入黄色购物车方向提示与文字“Semak maklumat produk”；若无产品结尾画面需补拍，不添加优惠或功效承诺。",
             )
         elif "信任" in title or "认证" in title:
             replace_health_action(
@@ -288,7 +283,6 @@ def sanitize_health_recommendations(result: dict[str, Any], analysis_input: str)
                 "信任环节展示包装标签和可读信息，只有画面中明确可见的认证或成分才能写入字幕。",
                 "Semak label dan maklumat pada bungkusan sebelum membuat pilihan anda.",
                 "作出选择前，请查看包装上的标签和产品信息。",
-                "基于达人手持包装的真实画面，放大包装标签区域并保持文字可读；仅突出画面中真实可见的信息，不新增认证或功效文案。",
             )
         elif "使用" in title or "效果" in title or "产品" in title or "引出" in title:
             replace_health_action(
@@ -296,7 +290,6 @@ def sanitize_health_recommendations(result: dict[str, Any], analysis_input: str)
                 "展示包装、开盖和日常携带或服用动作；卖点仅使用包装可见的成分/食用信息，不展示健康结果对比。",
                 "Ini suplemen nutrisi wanita. Lihat label bungkusan untuk maklumat nutrien dan cara pengambilan.",
                 "这是一款女性营养补充品。请查看包装标签了解营养信息和食用方法。",
-                "基于达人真实产品画面，增加开盖与查看标签的动作特写；字幕写“Semak label nutrisi”，不添加症状改善或效果对比。",
             )
         else:
             replace_health_action(
@@ -304,7 +297,6 @@ def sanitize_health_recommendations(result: dict[str, Any], analysis_input: str)
                 "围绕真实包装或日常营养补充场景重拍该段；所有信息以包装可见内容为准，不添加功效、症状或优惠承诺。",
                 "Semak label produk ini dan pilih mengikut keperluan rutin nutrisi harian anda.",
                 "请查看这款产品的标签，并根据你的日常营养补充需求作出选择。",
-                "基于达人实际存在的产品包装画面，强化包装可读性和产品主体；若无清晰素材则补拍，不添加功效或优惠文字。",
             )
 
 
@@ -313,7 +305,6 @@ def replace_health_action(
     suggestion: str,
     local_script: str,
     translated_script: str,
-    image_prompt: str,
 ) -> None:
     item["problem"] = "当前画面对产品使用结果展示不够集中，用户需要更快看清按压、用量和包装信息。"
     item["suggestion"] = suggestion
@@ -323,5 +314,4 @@ def replace_health_action(
     item["base_frame_reason"] = "仅使用达人已有真实画面作为基底；缺少的评价、背书或包装细节需补拍或人工核验。"
     item["creator_script"] = local_script
     item["creator_script_zh"] = translated_script
-    item["aigc_prompt"] = image_prompt
     item["expected_effect"] = "让用户更快看懂产品用法和商品信息，提升继续观看和点击查看的意愿。"

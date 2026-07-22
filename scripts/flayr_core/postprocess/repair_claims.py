@@ -54,15 +54,18 @@ def derive_product_visibility(result: dict[str, Any], analysis: dict[str, Any]) 
     creator = result.get("video_understanding", {}).get("creator", {})
     units = creator.get("evidence_units", []) if isinstance(creator, dict) else []
     raw_duration = analysis.get("videos", {}).get("creator", {}).get("duration_seconds")
-    duration = float(raw_duration) if isinstance(raw_duration, (int, float)) and raw_duration else 0.0
-    if duration <= 0:
+    duration = parse_timestamp_seconds(raw_duration)
+    if duration is None or duration <= 0:
         return
 
     visible_spans: list[tuple[float, float]] = []
     for unit in units if isinstance(units, list) else []:
         if not isinstance(unit, dict) or not unit_product_visible(unit):
             continue
-        start, end = parse_time_range_seconds(unit.get("time_range"), duration)
+        parsed = parse_time_range_seconds(unit.get("time_range"), duration)
+        if parsed is None:
+            continue
+        start, end = parsed
         if end > start:
             visible_spans.append((start, end))
     if not visible_spans:
@@ -150,7 +153,7 @@ def allowed_claim_sources(analysis: dict[str, Any]) -> list[str]:
 
 
 def clamp_result_time_ranges(result: dict[str, Any], analysis: dict[str, Any]) -> None:
-    """把所有 time_range 截到对应视频时长内，防止越界帧选取。"""
+    """Canonicalize valid time ranges; invalid evidence is cleared, never repaired."""
     videos = analysis.get("videos", {})
     benchmark_duration = videos.get("benchmark", {}).get("duration_seconds")
     creator_duration = videos.get("creator", {}).get("duration_seconds")
@@ -171,12 +174,18 @@ def clamp_result_time_ranges(result: dict[str, Any], analysis: dict[str, Any]) -
         item["creator_time_range"] = bounded_time_range(item.get("creator_time_range"), creator_duration)
         item["time_range"] = item["creator_time_range"]
         best_time = parse_timestamp_seconds(item.get("best_base_frame_time"))
-        if best_time is not None and isinstance(creator_duration, (int, float)):
-            item["best_base_frame_time"] = format_seconds(min(max(0.0, best_time), float(creator_duration)))
+        duration_value = parse_timestamp_seconds(creator_duration)
+        if best_time is None or duration_value is None or best_time > duration_value:
+            item["best_base_frame_time"] = ""
+        else:
+            item["best_base_frame_time"] = format_seconds(best_time)
 
 
 def bounded_time_range(value: Any, duration: Any) -> str:
-    start, end = parse_time_range_seconds(value, duration)
+    parsed = parse_time_range_seconds(value, duration)
+    if parsed is None:
+        return ""
+    start, end = parsed
     return f"{format_seconds(start)} - {format_seconds(end)}"
 
 # endregion
