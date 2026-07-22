@@ -159,6 +159,7 @@ def apply_finalized_analysis_result(
     if isinstance(phase_c_review, dict):
         analysis["phase_c_review"] = phase_c_review
     analysis["improvements_status"] = "llm_completed"
+    analysis["analysis_run_state"] = "completed"
     analysis["analysis_source"] = {
         "type": "large_model_json",
         "path": str(result_path),
@@ -1295,6 +1296,7 @@ def _apply_non_comparable_result(
     analysis["stage_analysis"] = []
     analysis["improvements"] = []
     analysis["improvements_status"] = "not_applicable"
+    analysis["analysis_run_state"] = "completed"
     analysis["analysis_source"] = {
         "type": "comparison_contract_gate",
         "merged_at": dt.datetime.now().isoformat(timespec="seconds"),

@@ -76,6 +76,23 @@ def main() -> int:
     elif args.analysis_result_json:
         merge_analysis_result(analysis, args.analysis_result_json, analysis_input_path.read_text(encoding="utf-8"))
     comparison_stopped = analysis.get("analysis_status") in {"not_comparable", "comparison_uncertain"}
+    if args.mode in {"compare", "improve"} and analysis.get("analysis_run_state") == "not_run":
+        if not getattr(args, "allow_degraded", False):
+            write_json(run_dir / "analysis.json", analysis)
+            raise SystemExit(
+                "compare/improve 需要完成的 LLM 分析，但当前 analysis_run_state=not_run。"
+                " 提供 --llm-model 跑分析，或加 --allow-degraded 在无分析时继续（severity 留空）。"
+            )
+        analysis["analysis_run_state"] = "degraded"
+        write_json(
+            run_dir / "degraded_manifest.json",
+            {
+                "analysis_run_state": "degraded",
+                "reason": "LLM 分析未运行或未完成；severity/improvements 为占位，不可作为业务判断。",
+                "stage_analysis": analysis.get("stage_analysis", []),
+                "improvements": analysis.get("improvements", []),
+            },
+        )
     if args.mode in {"compare", "improve"} and not comparison_stopped:
         voice_key = read_llm_api_key(args).strip() if getattr(args, "with_voice_clone", False) else ""
         analysis["proposal_clips"] = generate_proposal_clips(
@@ -216,6 +233,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--llm-dry-run",
         action="store_true",
         help="Write the LLM request payload without calling the API.",
+    )
+    parser.add_argument(
+        "--allow-degraded",
+        action="store_true",
+        help=(
+            "Allow compare/improve to proceed without a completed LLM analysis. "
+            "Without this flag, missing analysis exits non-zero. "
+            "When set, severity stays null and a degraded manifest is written."
+        ),
     )
     parser.add_argument(
         "--llm-include-images",
@@ -793,6 +819,7 @@ def build_analysis(
         "stage_analysis": stage_analysis,
         "improvements": improvements if args.mode in {"compare", "improve"} else [],
         "improvements_status": improvements_status,
+        "analysis_run_state": "not_run",
         "status": {
             "video_rendered": False,
             "reason": "MVP creates an assembly plan first; final improved.mp4 requires timed replacement audio and subtitles.",
@@ -808,7 +835,8 @@ def stage_placeholder(name: str, time_range: str, question: str) -> dict[str, An
         "benchmark_summary": "待基于关键帧和转录补充。",
         "creator_summary": "待基于关键帧和转录补充。",
         "gap": "待人工或模型分析后填写。",
-        "severity": "medium",
+        "severity": None,
+        "placeholder": True,
     }
 
 
