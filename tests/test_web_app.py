@@ -64,7 +64,10 @@ class WebAppHelpersTests(unittest.TestCase):
             (run_dir / "analysis.json").write_text(
                 '{"analysis_run_state":"completed"}', encoding="utf-8"
             )
+            (run_dir / "postprocess_change_log.json").write_text("[]", encoding="utf-8")
             (run_dir / "report.html").write_text("<html></html>", encoding="utf-8")
+            self.assertEqual(progress_for_run(run_dir), (92, "报告生成"))
+            (run_dir / "_SUCCESS.json").write_text("{}", encoding="utf-8")
             self.assertEqual(progress_for_run(run_dir), (100, "报告生成"))
 
     def test_job_store_does_not_expose_internal_paths(self) -> None:
@@ -112,15 +115,23 @@ class WebAppHelpersTests(unittest.TestCase):
             (run_dir / "report.html").write_text("<html></html>", encoding="utf-8")
             public = store.public(job)
             self.assertEqual(public["report_url"], "/api/jobs/job-1/report")
-            self.assertEqual(public["bd_report_url"], "/api/jobs/job-1/report")
+            self.assertEqual(public["bd_report_url"], "")
             self.assertEqual(public["creator_report_url"], "")
+            self.assertEqual(public["report_kind"], "legacy")
 
             (run_dir / "bd_report.html").write_text("<html></html>", encoding="utf-8")
+            public = store.public(job)
+            self.assertEqual(public["report_url"], "/api/jobs/job-1/report")
+            self.assertEqual(public["bd_report_url"], "/api/jobs/job-1/report")
+            self.assertEqual(public["creator_report_url"], "")
+            self.assertEqual(public["report_kind"], "audience")
+
             (run_dir / "creator_report.html").write_text("<html></html>", encoding="utf-8")
             public = store.public(job)
             self.assertEqual(public["report_url"], "/api/jobs/job-1/report")
             self.assertEqual(public["bd_report_url"], "/api/jobs/job-1/report")
             self.assertEqual(public["creator_report_url"], "/api/jobs/job-1/creator-report")
+            self.assertEqual(public["report_kind"], "audience")
             store.shutdown()
 
     def test_failed_job_clears_estimated_time(self) -> None:

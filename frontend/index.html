@@ -239,9 +239,9 @@
     position:absolute;inset:0;width:100%;height:100%;border:0;background:#fff;opacity:0;transform:translateY(4px);
     transition:opacity .18s ease-out,transform .18s ease-out;
   }
-  .report-frame-active{opacity:1;transform:translateY(0);z-index:2;}
-  .report-frame-pending{opacity:0;transform:translateY(4px);z-index:3;}
-  .report-frame-exiting{opacity:0;transform:translateY(-4px);z-index:1;}
+  .report-frame-active{opacity:1;transform:translateY(0);z-index:2;pointer-events:auto;}
+  .report-frame-pending{opacity:0;transform:translateY(4px);z-index:3;pointer-events:none;}
+  .report-frame-exiting{opacity:0;transform:translateY(-4px);z-index:1;pointer-events:none;}
   .report-frame-empty{
     position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;
     color:var(--ink-faint);font-size:13.5px;padding:24px;
@@ -768,7 +768,8 @@
       degraded: rawStatus === 'degraded',
       degradedReason: raw.degraded_reason || '',
       failReason: raw.failure_reason || '',
-      reportUrl: raw.bd_report_url || raw.report_url || '',
+      reportUrl: raw.bd_report_url || '',
+      legacyReportUrl: raw.report_kind === 'legacy' || (!raw.bd_report_url && raw.report_url) ? (raw.report_url || '') : '',
       creatorReportUrl: raw.creator_report_url || ''
     };
   }
@@ -977,19 +978,58 @@
     var loadingNote = shell.querySelector('.report-frame-loading');
     var transitionId = ++reportAudienceState.transitionId;
     reportAudienceState.selectedAudience = audience;
-    storeReportAudience(job.id, audience);
     updateReportAudienceControls(job, audience, true);
     emptyState.hidden = Boolean(previousFrame);
     loadingNote.textContent = previousFrame ? '正在切换报告' : '正在打开报告';
     loadingNote.hidden = false;
     shell.setAttribute('aria-busy', 'true');
 
+    function restorePreviousReport(){
+      loadingNote.hidden = true;
+      shell.setAttribute('aria-busy', 'false');
+      var fallbackAudience = reportAudienceState.activeAudience;
+      var retainedFrame = previousFrame && previousFrame.parentNode ? previousFrame : shell.querySelector('.report-frame-active');
+      if (retainedFrame){
+        retainedFrame.classList.remove('report-frame-exiting');
+        retainedFrame.classList.add('report-frame-active');
+        reportAudienceState.activeFrame = retainedFrame;
+        reportAudienceState.selectedAudience = fallbackAudience;
+        storeReportAudience(job.id, fallbackAudience);
+        updateReportAudienceControls(job, fallbackAudience, false);
+      } else if (fallbackAudience && reportUrlForAudience(job, fallbackAudience)) {
+        reportAudienceState.activeFrame = null;
+        reportAudienceState.activeAudience = null;
+        reportAudienceState.selectedAudience = fallbackAudience;
+        updateReportAudienceControls(job, fallbackAudience, true);
+        loadReportAudience(job, fallbackAudience);
+      } else {
+        reportAudienceState.selectedAudience = null;
+        clearStoredReportAudience(job.id);
+        emptyState.hidden = false;
+        updateReportAudienceControls(job, null, false);
+      }
+      showToast('报告打开失败，请稍后重试');
+    }
+
+    var frameReady = false;
     var frame = document.createElement('iframe');
     frame.className = 'report-frame report-frame-pending';
     frame.title = job.name + ' · ' + reportAudienceLabel(audience) + '报告';
     frame.onload = function(){
+      if (!frameReady) return;
       if (transitionId !== reportAudienceState.transitionId){
         frame.remove();
+        return;
+      }
+      var contentType = '';
+      try {
+        contentType = String(frame.contentDocument && frame.contentDocument.contentType || '').toLowerCase();
+      } catch (error) {
+        contentType = '';
+      }
+      if (contentType && contentType !== 'text/html' && contentType !== 'application/xhtml+xml'){
+        frame.remove();
+        restorePreviousReport();
         return;
       }
       frame.classList.remove('report-frame-pending');
@@ -999,6 +1039,7 @@
       shell.setAttribute('aria-busy', 'false');
       reportAudienceState.activeFrame = frame;
       reportAudienceState.activeAudience = audience;
+      storeReportAudience(job.id, audience);
       updateReportAudienceControls(job, audience, false);
       if (previousFrame){
         previousFrame.classList.add('report-frame-exiting');
@@ -1010,21 +1051,39 @@
     frame.onerror = function(){
       if (transitionId !== reportAudienceState.transitionId) return;
       frame.remove();
-      loadingNote.hidden = true;
-      shell.setAttribute('aria-busy', 'false');
-      if (previousFrame){
-        reportAudienceState.selectedAudience = reportAudienceState.activeAudience;
-        updateReportAudienceControls(job, reportAudienceState.activeAudience, false);
-      } else {
-        reportAudienceState.selectedAudience = null;
-        clearStoredReportAudience(job.id);
-        emptyState.hidden = false;
-        updateReportAudienceControls(job, null, false);
-      }
-      showToast('报告打开失败，请稍后重试');
+      restorePreviousReport();
     };
     shell.appendChild(frame);
-    frame.src = url;
+    fetch(url, {method:'HEAD', credentials:'same-origin', cache:'no-store'}).then(function(response){
+      if (transitionId !== reportAudienceState.transitionId) return;
+      var contentType = String(response.headers.get('content-type') || '').toLowerCase();
+      if (!response.ok || (contentType && contentType.indexOf('text/html') !== 0 && contentType.indexOf('application/xhtml+xml') !== 0)){
+        throw new Error('报告不可用');
+      }
+      frameReady = true;
+      frame.src = url;
+    }).catch(function(){
+      if (transitionId !== reportAudienceState.transitionId) return;
+      frame.remove();
+      restorePreviousReport();
+    });
+  }
+
+  function renderLegacyReport(job){
+    var content = $('report-done-content');
+    resetReportFrameState();
+    $('report-audience').hidden = true;
+    content.setAttribute('data-real-job', job.id);
+    content.innerHTML = '';
+
+    var shell = document.createElement('div');
+    shell.className = 'report-frame-shell';
+    var frame = document.createElement('iframe');
+    frame.className = 'report-frame report-frame-active';
+    frame.title = job.name + ' 提升报告';
+    frame.src = job.legacyReportUrl;
+    shell.appendChild(frame);
+    content.appendChild(shell);
   }
 
   function renderActualReport(job){
@@ -1080,10 +1139,12 @@
       levelBadge.textContent = '视频证据分析';
       levelBadge.className = 'badge badge-level-basic';
     }
-    var hasReport = Boolean(job.reportUrl || job.creatorReportUrl);
+    var hasAudienceReport = Boolean(job.reportUrl || job.creatorReportUrl);
+    var hasLegacyReport = Boolean(job.legacyReportUrl);
+    var hasReport = hasAudienceReport || hasLegacyReport;
     var demoBadge = document.querySelector('.badge-demo');
     demoBadge.style.display = hasReport ? 'none' : 'inline-flex';
-    $('report-audience').hidden = job.status !== 'done' || !hasReport;
+    $('report-audience').hidden = job.status !== 'done' || !hasAudienceReport;
     $('report-degraded-inline').style.display = job.degraded ? 'flex' : 'none';
     if (job.degraded && job.degradedReason){
       $('report-degraded-inline').title = job.degradedReason;
@@ -1103,7 +1164,8 @@
       $('gen-phase-text').textContent = phaseTextFor(pct, job);
     }
     if (job.status === 'done'){
-      if (hasReport) renderActualReport(job);
+      if (hasAudienceReport) renderActualReport(job);
+      else if (hasLegacyReport) renderLegacyReport(job);
       else renderDemoReport();
     }
   }

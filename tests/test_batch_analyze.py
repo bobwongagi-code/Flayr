@@ -198,6 +198,52 @@ class BatchAnalyzeValidationTests(unittest.TestCase):
             status = json.loads((root / "_batch" / "status.json").read_text(encoding="utf-8"))
             self.assertEqual(status["jobs"]["sample"]["state"], "failed")
 
+    def test_improve_success_manifest_requires_both_report_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            creator = root / "creator.mp4"
+            benchmark = root / "benchmark.mp4"
+            creator.write_bytes(b"creator")
+            benchmark.write_bytes(b"benchmark")
+            out = root / "run"
+            out.mkdir()
+            (out / "analysis.json").write_text(
+                '{"analysis_run_state":"completed","mode":"improve"}', encoding="utf-8"
+            )
+            for artifact in (
+                "report.html",
+                "raw_model_response.json",
+                "validated_normalized_result.json",
+                "postprocess_change_log.json",
+            ):
+                (out / artifact).write_text("{}", encoding="utf-8")
+            (out / "final_derived_result.json").write_text(
+                json.dumps(
+                    {
+                        "postprocess_provenance": {
+                            "field_sources": {
+                                "coverage": "complete",
+                                "unresolved_paths": [],
+                                "truncated": False,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            inputs = {"creator_video": creator, "benchmark_video": benchmark}
+            analysis = {"analysis_run_state": "completed", "mode": "improve"}
+            with self.assertRaises(FileNotFoundError):
+                write_success_manifest(out, inputs, analysis)
+
+            (out / "bd_report.html").write_text("{}", encoding="utf-8")
+            (out / "creator_report.html").write_text("{}", encoding="utf-8")
+            write_success_manifest(out, inputs, analysis, {"mode": "improve"})
+            self.assertTrue(validate_success_manifest(out, inputs))
+
+            (out / "creator_report.html").unlink()
+            self.assertFalse(validate_success_manifest(out, inputs))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,8 +16,9 @@ from .utils import write_json
 
 
 SUCCESS_MANIFEST_NAME = "_SUCCESS.json"
-SUCCESS_MANIFEST_SCHEMA_VERSION = 1
-REQUIRED_ARTIFACTS = (
+SUCCESS_MANIFEST_SCHEMA_VERSION = 2
+LEGACY_SUCCESS_MANIFEST_SCHEMA_VERSION = 1
+BASE_REQUIRED_ARTIFACTS = (
     "analysis.json",
     "report.html",
     "raw_model_response.json",
@@ -25,6 +26,15 @@ REQUIRED_ARTIFACTS = (
     "final_derived_result.json",
     "postprocess_change_log.json",
 )
+REPORT_VARIANT_ARTIFACTS = ("bd_report.html", "creator_report.html")
+# Keep the old name available for callers that only need the base artifact set.
+REQUIRED_ARTIFACTS = BASE_REQUIRED_ARTIFACTS
+
+
+def _required_artifacts_for_mode(mode: str) -> tuple[str, ...]:
+    if mode in {"compare", "improve"}:
+        return BASE_REQUIRED_ARTIFACTS + REPORT_VARIANT_ARTIFACTS
+    return BASE_REQUIRED_ARTIFACTS
 
 
 def command_digest(argv: list[str]) -> str:
@@ -86,8 +96,9 @@ def build_success_manifest(
     """Build a manifest only for a fully completed analysis and report."""
     if str(analysis.get("analysis_run_state") or "") != "completed":
         raise ValueError("only analysis_run_state=completed can publish a success manifest")
+    required_artifacts = _required_artifacts_for_mode(str(analysis.get("mode") or ""))
     artifacts: dict[str, dict[str, Any]] = {}
-    for relative in REQUIRED_ARTIFACTS:
+    for relative in required_artifacts:
         candidate = run_dir / relative
         if not candidate.is_file():
             raise FileNotFoundError(candidate)
@@ -98,7 +109,7 @@ def build_success_manifest(
         "schema_version": SUCCESS_MANIFEST_SCHEMA_VERSION,
         "status": "completed",
         "analysis_run_state": "completed",
-        "required_artifacts": list(REQUIRED_ARTIFACTS),
+        "required_artifacts": list(required_artifacts),
         "inputs": {name: _input_metadata(path) for name, path in sorted(inputs.items())},
         "artifacts": artifacts,
         "provenance": dict(provenance or {}),
@@ -157,21 +168,16 @@ def validate_success_manifest(
         return False
     if not isinstance(manifest, dict):
         return False
-    if manifest.get("schema_version") != SUCCESS_MANIFEST_SCHEMA_VERSION:
+    schema_version = manifest.get("schema_version")
+    if schema_version not in {
+        LEGACY_SUCCESS_MANIFEST_SCHEMA_VERSION,
+        SUCCESS_MANIFEST_SCHEMA_VERSION,
+    }:
         return False
     if manifest.get("status") != "completed" or manifest.get("analysis_run_state") != "completed":
         return False
-    required = manifest.get("required_artifacts")
-    if required != list(REQUIRED_ARTIFACTS):
-        return False
-    artifacts = manifest.get("artifacts")
-    if not isinstance(artifacts, dict):
-        return False
-    for relative in REQUIRED_ARTIFACTS:
-        candidate = (root / relative).resolve()
-        if not _path_is_under(candidate, root) or not _valid_file_metadata(candidate, artifacts.get(relative)):
-            return False
-    if not _has_complete_field_sources(root / "final_derived_result.json"):
+    recorded_provenance = manifest.get("provenance")
+    if not isinstance(recorded_provenance, dict):
         return False
     try:
         analysis = json.loads((root / "analysis.json").read_text(encoding="utf-8"))
@@ -179,10 +185,24 @@ def validate_success_manifest(
         return False
     if not isinstance(analysis, dict) or analysis.get("analysis_run_state") != "completed":
         return False
-
-    recorded_provenance = manifest.get("provenance")
-    if not isinstance(recorded_provenance, dict):
+    expected_artifacts = (
+        BASE_REQUIRED_ARTIFACTS
+        if schema_version == LEGACY_SUCCESS_MANIFEST_SCHEMA_VERSION
+        else _required_artifacts_for_mode(str(analysis.get("mode") or ""))
+    )
+    required = manifest.get("required_artifacts")
+    if required != list(expected_artifacts):
         return False
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return False
+    for relative in expected_artifacts:
+        candidate = (root / relative).resolve()
+        if not _path_is_under(candidate, root) or not _valid_file_metadata(candidate, artifacts.get(relative)):
+            return False
+    if not _has_complete_field_sources(root / "final_derived_result.json"):
+        return False
+
     for key, expected in (expected_provenance or {}).items():
         if recorded_provenance.get(key) != expected:
             return False

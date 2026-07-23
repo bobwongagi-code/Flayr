@@ -29,7 +29,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.flayr_core.market import normalize_target_market
-from scripts.flayr_core.run_manifest import validate_success_manifest
+from scripts.flayr_core.run_manifest import SUCCESS_MANIFEST_NAME, validate_success_manifest
 
 
 WEB_ROOT = ROOT / "runs" / "_web"
@@ -96,7 +96,9 @@ def _analysis_state(run_dir: Path) -> str:
 def progress_for_run(run_dir: Path) -> tuple[int, str]:
     """Expose only the three coarse phases promised by the updated design."""
     state = _analysis_state(run_dir)
-    if state in {"completed", "degraded"} and (run_dir / "report.html").is_file():
+    if state == "completed" and (run_dir / SUCCESS_MANIFEST_NAME).is_file():
+        return 100, "报告生成"
+    if state == "degraded" and (run_dir / "degraded_manifest.json").is_file() and report_variants_ready(run_dir):
         return 100, "报告生成"
     if (run_dir / "postprocess_change_log.json").is_file():
         return 92, "报告生成"
@@ -129,6 +131,14 @@ def safe_asset_path(run_dir: Path, relative_path: str) -> Path | None:
     except ValueError:
         return None
     return candidate if candidate.is_file() else None
+
+
+def report_variants_ready(run_dir: Path) -> bool:
+    """Return true only when both audience reports are safely available."""
+    return all(
+        safe_asset_path(run_dir, name) is not None
+        for name in ("bd_report.html", "creator_report.html")
+    )
 
 
 def _content_disposition(value: str) -> tuple[str, str | None]:
@@ -381,11 +391,18 @@ class JobStore:
         run_dir = Path(str(job.get("run_dir") or ""))
         analysis_scope = self._read_analysis_scope(run_dir)
         reports_ready = status in {"completed", "degraded"}
-        has_report = safe_asset_path(run_dir, "bd_report.html") is not None or safe_asset_path(run_dir, "report.html") is not None
+        has_bd_report = safe_asset_path(run_dir, "bd_report.html") is not None
+        has_legacy_report = safe_asset_path(run_dir, "report.html") is not None
         has_creator_report = safe_asset_path(run_dir, "creator_report.html") is not None
+        has_report = has_bd_report or has_legacy_report
         report_url = (
             f"/api/jobs/{job.get('id')}/report"
             if reports_ready and has_report
+            else ""
+        )
+        bd_report_url = (
+            f"/api/jobs/{job.get('id')}/report"
+            if reports_ready and has_bd_report
             else ""
         )
         creator_report_url = (
@@ -407,8 +424,9 @@ class JobStore:
             "degraded_reason": job.get("degraded_reason") or "",
             "failure_reason": job.get("failure_reason") or "",
             "report_url": report_url,
-            "bd_report_url": report_url,
+            "bd_report_url": bd_report_url,
             "creator_report_url": creator_report_url,
+            "report_kind": "audience" if (has_bd_report or has_creator_report) else ("legacy" if has_legacy_report else ""),
         }
 
     @staticmethod
@@ -530,7 +548,7 @@ class JobStore:
                 estimated_remaining_seconds=0,
             )
             return
-        if returncode == 0 and state == "degraded" and (run_dir / "degraded_manifest.json").is_file():
+        if returncode == 0 and state == "degraded" and (run_dir / "degraded_manifest.json").is_file() and report_variants_ready(run_dir):
             reason = "辅助产物已降级，不影响报告结论。"
             try:
                 payload = json.loads((run_dir / "degraded_manifest.json").read_text(encoding="utf-8"))
@@ -610,6 +628,14 @@ class FlayrHandler(BaseHTTPRequestHandler):
             self._serve_file(FRONTEND_INDEX, "text/html; charset=utf-8")
             return
         self._json(404, {"error": "资源不存在"})
+
+    def do_HEAD(self) -> None:
+        path = unquote(urlsplit(self.path).path)
+        match = re.fullmatch(r"/api/jobs/([^/]+)/(report|creator-report)", path)
+        if match:
+            self._serve_job_artifact(match.group(1), match.group(2), head_only=True)
+            return
+        self.send_error(404, "资源不存在")
 
     def do_POST(self) -> None:
         path = unquote(urlsplit(self.path).path)
@@ -692,7 +718,7 @@ class FlayrHandler(BaseHTTPRequestHandler):
             destination.write(chunk)
             remaining -= len(chunk)
 
-    def _serve_job_artifact(self, job_id: str, artifact: str) -> None:
+    def _serve_job_artifact(self, job_id: str, artifact: str, head_only: bool = False) -> None:
         job = self.server.store.get(job_id)
         if not job:
             self._json(404, {"error": "任务不存在"})
@@ -715,7 +741,7 @@ class FlayrHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": "产物不存在"})
             return
         content_type = "text/html; charset=utf-8" if artifact in {"report", "creator-report"} else "application/json; charset=utf-8"
-        self._serve_file(candidate, content_type)
+        self._serve_file(candidate, content_type, head_only=head_only)
 
     def _serve_job_asset(self, job_id: str, relative_path: str) -> None:
         job = self.server.store.get(job_id)
@@ -729,18 +755,20 @@ class FlayrHandler(BaseHTTPRequestHandler):
         content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
         self._serve_file(candidate, content_type)
 
-    def _serve_file(self, path: Path, content_type: str) -> None:
+    def _serve_file(self, path: Path, content_type: str, head_only: bool = False) -> None:
         try:
-            data = path.read_bytes()
+            size = path.stat().st_size
+            data = None if head_only else path.read_bytes()
         except OSError:
             self._json(404, {"error": "资源不存在"})
             return
         self.send_response(200)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Length", str(size if data is None else len(data)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
-        self.wfile.write(data)
+        if data is not None:
+            self.wfile.write(data)
 
     def _json(self, status: int, payload: Any) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
