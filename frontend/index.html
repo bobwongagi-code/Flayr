@@ -212,6 +212,53 @@
   .report-meta{font-size:13px;color:var(--ink-soft);margin-top:6px;}
   .degraded-inline{font-size:12.5px;color:var(--amber-ink);margin-top:8px;display:flex;align-items:center;gap:6px;}
 
+  /* ---------- report: audience choice ---------- */
+  .report-audience{
+    display:flex;align-items:center;justify-content:space-between;gap:16px;
+    margin:0 0 18px;padding:12px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);
+  }
+  .report-audience[hidden]{display:none;}
+  .report-audience-copy{display:flex;align-items:baseline;gap:10px;min-width:0;}
+  .report-audience-label{font-size:12px;font-family:var(--font-mono);color:var(--ink-faint);white-space:nowrap;}
+  .report-audience-note{font-size:13px;color:var(--ink-soft);}
+  .report-audience-tabs{display:flex;gap:4px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:4px;flex-shrink:0;}
+  .report-audience-tabs button{
+    min-height:40px;border:none;background:none;padding:8px 15px;border-radius:9px;font-size:13.5px;color:var(--ink-soft);
+    transition:background .15s ease,color .15s ease,opacity .15s ease;
+  }
+  .report-audience-tabs button.selected{background:var(--ink);color:#fff;}
+  .report-audience-tabs button:disabled{cursor:not-allowed;color:var(--ink-faint);opacity:.65;}
+  .report-audience-tabs button.selected:disabled{background:var(--ink);color:#fff;opacity:.78;}
+  .report-audience-tabs button.is-loading .audience-label::after{content:' · 加载中';font-family:var(--font-body);font-size:12px;}
+
+  .report-frame-shell{
+    position:relative;min-height:1200px;background:var(--surface);border:1px solid var(--line);
+    border-radius:var(--radius-lg);overflow:hidden;
+  }
+  .report-frame{
+    position:absolute;inset:0;width:100%;height:100%;border:0;background:#fff;opacity:0;transform:translateY(4px);
+    transition:opacity .18s ease-out,transform .18s ease-out;
+  }
+  .report-frame-active{opacity:1;transform:translateY(0);z-index:2;}
+  .report-frame-pending{opacity:0;transform:translateY(4px);z-index:3;}
+  .report-frame-exiting{opacity:0;transform:translateY(-4px);z-index:1;}
+  .report-frame-empty{
+    position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;
+    color:var(--ink-faint);font-size:13.5px;padding:24px;
+  }
+  .report-frame-loading{
+    position:absolute;top:14px;right:14px;z-index:4;padding:6px 10px;border-radius:8px;
+    background:rgba(17,21,26,.88);color:#fff;font-size:12px;
+  }
+  .report-frame-loading[hidden],.report-frame-empty[hidden]{display:none;}
+  @media (max-width:560px){
+    .report-audience{display:block;}
+    .report-audience-copy{display:block;}
+    .report-audience-note{display:block;margin-top:3px;}
+    .report-audience-tabs{margin-top:10px;}
+    .report-audience-tabs button{flex:1;}
+  }
+
   /* ---------- report: generating state ---------- */
   .generating-card{padding:44px 30px;text-align:center;}
   .gen-dot-wrap{display:flex;justify-content:center;margin-bottom:20px;}
@@ -519,6 +566,21 @@
       </div>
     </div>
 
+    <div class="report-audience" id="report-audience" hidden>
+      <div class="report-audience-copy">
+        <span class="report-audience-label">报告用途</span>
+        <span class="report-audience-note" id="report-audience-note">请选择要查看的报告</span>
+      </div>
+      <div class="report-audience-tabs" role="group" aria-label="报告用途">
+        <button type="button" data-audience="creator" aria-pressed="false">
+          <span class="audience-label">给达人</span>
+        </button>
+        <button type="button" data-audience="internal" aria-pressed="false">
+          <span class="audience-label">自己用</span>
+        </button>
+      </div>
+    </div>
+
     <!-- generating state -->
     <div class="card generating-card" id="report-generating">
       <div class="gen-dot-wrap"><div class="gen-dot"></div></div>
@@ -647,6 +709,15 @@
   var activeJobId = null;
   var pollTimer = null;
   var demoReportMarkup = null;
+  var reportAudienceState = {
+    jobId: null,
+    selectedAudience: null,
+    activeAudience: null,
+    activeFrame: null,
+    shell: null,
+    transitionId: 0
+  };
+  var REPORT_AUDIENCE_STORAGE_PREFIX = 'flayr:report-audience:';
 
   function $(id){ return document.getElementById(id); }
 
@@ -697,7 +768,8 @@
       degraded: rawStatus === 'degraded',
       degradedReason: raw.degraded_reason || '',
       failReason: raw.failure_reason || '',
-      reportUrl: raw.report_url || ''
+      reportUrl: raw.bd_report_url || raw.report_url || '',
+      creatorReportUrl: raw.creator_report_url || ''
     };
   }
 
@@ -775,6 +847,12 @@
   $('btn-back-to-jobs').addEventListener('click', function(){ goTab('jobs'); });
   $('btn-gen-to-jobs').addEventListener('click', function(){ goTab('jobs'); });
   $('btn-fail-reupload').addEventListener('click', function(){ goTab('upload'); });
+  document.querySelectorAll('#report-audience [data-audience]').forEach(function(button){
+    button.addEventListener('click', function(){
+      var job = findJob(activeJobId);
+      if (job) loadReportAudience(job, button.getAttribute('data-audience'));
+    });
+  });
 
   function updateNavBadge(){
     var n = jobs.filter(function(j){ return j.status === 'generating'; }).length;
@@ -823,23 +901,168 @@
     return phase + suffix;
   }
 
+  function reportAudienceStorageKey(jobId){
+    return REPORT_AUDIENCE_STORAGE_PREFIX + String(jobId);
+  }
+
+  function readStoredReportAudience(jobId){
+    try {
+      var value = localStorage.getItem(reportAudienceStorageKey(jobId));
+      return value === 'creator' || value === 'internal' ? value : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function storeReportAudience(jobId, audience){
+    try { localStorage.setItem(reportAudienceStorageKey(jobId), audience); } catch (error) {}
+  }
+
+  function clearStoredReportAudience(jobId){
+    try { localStorage.removeItem(reportAudienceStorageKey(jobId)); } catch (error) {}
+  }
+
+  function reportUrlForAudience(job, audience){
+    return audience === 'creator' ? job.creatorReportUrl : job.reportUrl;
+  }
+
+  function reportAudienceLabel(audience){
+    return audience === 'creator' ? '给达人' : '自己用';
+  }
+
+  function updateReportAudienceControls(job, audience, loading){
+    var availableCreator = Boolean(job.creatorReportUrl);
+    var availableInternal = Boolean(job.reportUrl);
+    document.querySelectorAll('#report-audience [data-audience]').forEach(function(button){
+      var target = button.getAttribute('data-audience');
+      var available = target === 'creator' ? availableCreator : availableInternal;
+      var label = button.querySelector('.audience-label');
+      label.textContent = reportAudienceLabel(target) + (available ? '' : '（未生成）');
+      button.disabled = !available || Boolean(loading);
+      button.classList.toggle('selected', available && audience === target);
+      button.classList.toggle('is-loading', Boolean(loading) && available && audience === target);
+      button.setAttribute('aria-pressed', String(available && audience === target));
+      button.title = available ? '查看' + reportAudienceLabel(target) + '报告' : '该报告尚未生成';
+    });
+
+    var note = $('report-audience-note');
+    if (loading){
+      note.textContent = '正在打开' + reportAudienceLabel(audience) + '报告';
+    } else if (audience){
+      note.textContent = '当前展示：' + reportAudienceLabel(audience) + '报告';
+    } else if (availableCreator && availableInternal){
+      note.textContent = '请选择要查看的报告';
+    } else {
+      note.textContent = '请选择要查看的报告，未生成的版本不可用';
+    }
+  }
+
+  function resetReportFrameState(){
+    reportAudienceState.transitionId += 1;
+    reportAudienceState.jobId = null;
+    reportAudienceState.selectedAudience = null;
+    reportAudienceState.activeAudience = null;
+    reportAudienceState.activeFrame = null;
+    reportAudienceState.shell = null;
+  }
+
+  function loadReportAudience(job, audience){
+    var url = reportUrlForAudience(job, audience);
+    if (!url || reportAudienceState.jobId !== job.id || !reportAudienceState.shell) return;
+    if (reportAudienceState.activeAudience === audience && reportAudienceState.activeFrame) return;
+
+    var shell = reportAudienceState.shell;
+    var previousFrame = reportAudienceState.activeFrame;
+    var emptyState = shell.querySelector('.report-frame-empty');
+    var loadingNote = shell.querySelector('.report-frame-loading');
+    var transitionId = ++reportAudienceState.transitionId;
+    reportAudienceState.selectedAudience = audience;
+    storeReportAudience(job.id, audience);
+    updateReportAudienceControls(job, audience, true);
+    emptyState.hidden = Boolean(previousFrame);
+    loadingNote.textContent = previousFrame ? '正在切换报告' : '正在打开报告';
+    loadingNote.hidden = false;
+    shell.setAttribute('aria-busy', 'true');
+
+    var frame = document.createElement('iframe');
+    frame.className = 'report-frame report-frame-pending';
+    frame.title = job.name + ' · ' + reportAudienceLabel(audience) + '报告';
+    frame.onload = function(){
+      if (transitionId !== reportAudienceState.transitionId){
+        frame.remove();
+        return;
+      }
+      frame.classList.remove('report-frame-pending');
+      frame.classList.add('report-frame-active');
+      emptyState.hidden = true;
+      loadingNote.hidden = true;
+      shell.setAttribute('aria-busy', 'false');
+      reportAudienceState.activeFrame = frame;
+      reportAudienceState.activeAudience = audience;
+      updateReportAudienceControls(job, audience, false);
+      if (previousFrame){
+        previousFrame.classList.add('report-frame-exiting');
+        window.setTimeout(function(){
+          if (previousFrame.parentNode) previousFrame.remove();
+        }, 220);
+      }
+    };
+    frame.onerror = function(){
+      if (transitionId !== reportAudienceState.transitionId) return;
+      frame.remove();
+      loadingNote.hidden = true;
+      shell.setAttribute('aria-busy', 'false');
+      if (previousFrame){
+        reportAudienceState.selectedAudience = reportAudienceState.activeAudience;
+        updateReportAudienceControls(job, reportAudienceState.activeAudience, false);
+      } else {
+        reportAudienceState.selectedAudience = null;
+        clearStoredReportAudience(job.id);
+        emptyState.hidden = false;
+        updateReportAudienceControls(job, null, false);
+      }
+      showToast('报告打开失败，请稍后重试');
+    };
+    shell.appendChild(frame);
+    frame.src = url;
+  }
+
   function renderActualReport(job){
     var content = $('report-done-content');
-    if (content.getAttribute('data-real-job') === job.id) return;
+    if (content.getAttribute('data-real-job') === job.id && reportAudienceState.jobId === job.id) return;
+    resetReportFrameState();
     content.setAttribute('data-real-job', job.id);
     content.innerHTML = '';
-    var frame = document.createElement('iframe');
-    frame.src = job.reportUrl;
-    frame.title = job.name + ' 提升报告';
-    frame.style.width = '100%';
-    frame.style.minHeight = '1200px';
-    frame.style.border = '0';
-    frame.style.background = '#fff';
-    content.appendChild(frame);
+
+    var shell = document.createElement('div');
+    shell.className = 'report-frame-shell';
+    shell.setAttribute('aria-busy', 'false');
+    var emptyState = document.createElement('div');
+    emptyState.className = 'report-frame-empty';
+    emptyState.textContent = '请选择报告用途';
+    var loadingNote = document.createElement('div');
+    loadingNote.className = 'report-frame-loading';
+    loadingNote.hidden = true;
+    shell.appendChild(emptyState);
+    shell.appendChild(loadingNote);
+    content.appendChild(shell);
+
+    reportAudienceState.jobId = job.id;
+    reportAudienceState.shell = shell;
+    var storedAudience = readStoredReportAudience(job.id);
+    if (storedAudience && reportUrlForAudience(job, storedAudience)){
+      updateReportAudienceControls(job, storedAudience, false);
+      loadReportAudience(job, storedAudience);
+    } else {
+      if (storedAudience) clearStoredReportAudience(job.id);
+      updateReportAudienceControls(job, null, false);
+    }
   }
 
   function renderDemoReport(){
     var content = $('report-done-content');
+    resetReportFrameState();
+    $('report-audience').hidden = true;
     content.removeAttribute('data-real-job');
     content.innerHTML = demoReportMarkup;
     buildStageTabsAndPanels();
@@ -857,8 +1080,10 @@
       levelBadge.textContent = '视频证据分析';
       levelBadge.className = 'badge badge-level-basic';
     }
+    var hasReport = Boolean(job.reportUrl || job.creatorReportUrl);
     var demoBadge = document.querySelector('.badge-demo');
-    demoBadge.style.display = job.reportUrl ? 'none' : 'inline-flex';
+    demoBadge.style.display = hasReport ? 'none' : 'inline-flex';
+    $('report-audience').hidden = job.status !== 'done' || !hasReport;
     $('report-degraded-inline').style.display = job.degraded ? 'flex' : 'none';
     if (job.degraded && job.degradedReason){
       $('report-degraded-inline').title = job.degradedReason;
@@ -878,7 +1103,7 @@
       $('gen-phase-text').textContent = phaseTextFor(pct, job);
     }
     if (job.status === 'done'){
-      if (job.reportUrl) renderActualReport(job);
+      if (hasReport) renderActualReport(job);
       else renderDemoReport();
     }
   }

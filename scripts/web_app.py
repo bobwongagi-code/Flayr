@@ -378,7 +378,21 @@ class JobStore:
 
     def public(self, job: dict[str, Any]) -> dict[str, Any]:
         status = str(job.get("status") or "failed")
-        analysis_scope = self._read_analysis_scope(Path(str(job.get("run_dir") or "")))
+        run_dir = Path(str(job.get("run_dir") or ""))
+        analysis_scope = self._read_analysis_scope(run_dir)
+        reports_ready = status in {"completed", "degraded"}
+        has_report = safe_asset_path(run_dir, "bd_report.html") is not None or safe_asset_path(run_dir, "report.html") is not None
+        has_creator_report = safe_asset_path(run_dir, "creator_report.html") is not None
+        report_url = (
+            f"/api/jobs/{job.get('id')}/report"
+            if reports_ready and has_report
+            else ""
+        )
+        creator_report_url = (
+            f"/api/jobs/{job.get('id')}/creator-report"
+            if reports_ready and has_creator_report
+            else ""
+        )
         return {
             "id": job.get("id"),
             "name": job.get("product_name") or "未命名分析",
@@ -392,8 +406,9 @@ class JobStore:
             "strategy_level": analysis_scope == "strategy",
             "degraded_reason": job.get("degraded_reason") or "",
             "failure_reason": job.get("failure_reason") or "",
-            "report_url": f"/api/jobs/{job.get('id')}/report" if status in {"completed", "degraded"} else "",
-            "creator_report_url": f"/api/jobs/{job.get('id')}/creator-report" if status in {"completed", "degraded"} else "",
+            "report_url": report_url,
+            "bd_report_url": report_url,
+            "creator_report_url": creator_report_url,
         }
 
     @staticmethod
@@ -687,16 +702,13 @@ class FlayrHandler(BaseHTTPRequestHandler):
             return
         run_dir = Path(str(job.get("run_dir") or ""))
         if artifact == "report":
-            if (run_dir / "bd_report.html").is_file():
-                report_name = "bd_report.html"
-            elif (run_dir / "creator_report.html").is_file():
-                report_name = "creator_report.html"
-            else:
-                report_name = "report.html"
-            candidate = safe_asset_path(run_dir, report_name)
+            report_names = ("bd_report.html", "report.html")
+            candidate = next(
+                (safe_asset_path(run_dir, name) for name in report_names if (run_dir / name).is_file()),
+                None,
+            )
         elif artifact == "creator-report":
-            report_name = "creator_report.html" if (run_dir / "creator_report.html").is_file() else "report.html"
-            candidate = safe_asset_path(run_dir, report_name)
+            candidate = safe_asset_path(run_dir, "creator_report.html") if (run_dir / "creator_report.html").is_file() else None
         else:
             candidate = safe_asset_path(run_dir, "analysis.json")
         if not candidate:

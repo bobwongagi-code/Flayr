@@ -90,6 +90,39 @@ class WebAppHelpersTests(unittest.TestCase):
             self.assertNotIn("benchmark_path", public)
             store.shutdown()
 
+    def test_public_report_urls_follow_existing_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            job = {
+                "id": "job-1",
+                "status": "completed",
+                "run_dir": str(run_dir),
+                "product_name": "测试产品",
+                "market": "马来西亚",
+                "created_at": "",
+            }
+
+            public = store.public(job)
+            self.assertEqual(public["report_url"], "")
+            self.assertEqual(public["bd_report_url"], "")
+            self.assertEqual(public["creator_report_url"], "")
+
+            (run_dir / "report.html").write_text("<html></html>", encoding="utf-8")
+            public = store.public(job)
+            self.assertEqual(public["report_url"], "/api/jobs/job-1/report")
+            self.assertEqual(public["bd_report_url"], "/api/jobs/job-1/report")
+            self.assertEqual(public["creator_report_url"], "")
+
+            (run_dir / "bd_report.html").write_text("<html></html>", encoding="utf-8")
+            (run_dir / "creator_report.html").write_text("<html></html>", encoding="utf-8")
+            public = store.public(job)
+            self.assertEqual(public["report_url"], "/api/jobs/job-1/report")
+            self.assertEqual(public["bd_report_url"], "/api/jobs/job-1/report")
+            self.assertEqual(public["creator_report_url"], "/api/jobs/job-1/creator-report")
+            store.shutdown()
+
     def test_failed_job_clears_estimated_time(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = JobStore(Path(tmp))
