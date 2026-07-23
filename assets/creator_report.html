@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>这条视频，我们一起复盘 · Flayr</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#FAFAF8;
+    --card:#FFFFFF;
+    --ink:#211F1B;
+    --ink-soft:#5C5850;
+    --ink-faint:#9B968C;
+    --line:#E8E3D9;
+    --line-strong:#D8D2C4;
+    --spark:#E0982E;
+    --spark-soft:#FBEED9;
+    --spark-ink:#7A4E12;
+    --grow:#4C8E67;
+    --grow-soft:#E4F1E9;
+    --grow-ink:#2C5F41;
+    --muted-ref:#9B9690;
+    --muted-ref-soft:#F1EFEA;
+    --radius:14px;
+    --radius-lg:20px;
+    --font-display:'Fraunces','Noto Serif SC',serif;
+    --font-body:'Inter','PingFang SC','Microsoft YaHei',sans-serif;
+    --font-mono:'IBM Plex Mono','SF Mono',monospace;
+    --shadow-card:0 1px 2px rgba(33,31,27,0.04), 0 10px 28px -16px rgba(33,31,27,0.16);
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--paper);color:var(--ink);font-family:var(--font-body);
+    font-size:16px;line-height:1.65;-webkit-font-smoothing:antialiased;
+  }
+  h1,h2,h3{font-family:var(--font-display);margin:0;color:var(--ink);font-weight:600;}
+  p{margin:0;}
+  button{font-family:var(--font-body);cursor:pointer;}
+  :focus-visible{outline:2px solid var(--spark);outline-offset:2px;}
+
+  .page{max-width:600px;margin:0 auto;padding:28px 20px 90px;}
+
+  .masthead{margin-bottom:22px;}
+  .brand{font-size:12px;color:var(--ink-faint);letter-spacing:.04em;margin-bottom:14px;}
+  .masthead h1{font-size:26px;line-height:1.3;letter-spacing:-0.01em;}
+  .context-line{font-size:13.5px;color:var(--ink-soft);margin-top:10px;}
+
+  .card{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius-lg);
+    box-shadow:var(--shadow-card);
+  }
+
+  /* ---------- previous commitment review ---------- */
+  .prev-card{padding:16px 18px;margin-bottom:22px;}
+  .prev-title{font-size:12px;color:var(--ink-faint);letter-spacing:.03em;margin-bottom:10px;}
+  .prev-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;}
+  .prev-row + .prev-row{border-top:1px solid var(--line);}
+  .prev-text{font-size:13.5px;color:var(--ink);}
+  .adopt-chip{font-size:11.5px;padding:4px 10px;border-radius:999px;flex-shrink:0;white-space:nowrap;}
+  .adopt-chip.done{background:var(--grow-soft);color:var(--grow-ink);}
+  .adopt-chip.partial{background:var(--spark-soft);color:var(--spark-ink);}
+  .adopt-chip.none{background:var(--muted-ref-soft);color:var(--muted-ref);}
+
+  /* ---------- glance (30s) ---------- */
+  .glance{margin-bottom:32px;}
+  .glance-row{margin-bottom:18px;}
+  .glance-label{display:block;font-size:12px;color:var(--ink-faint);letter-spacing:.03em;margin-bottom:6px;}
+  .glance-row p{font-size:15px;color:var(--ink);}
+  .highlight-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;}
+  .highlight-item{
+    display:flex;gap:10px;align-items:flex-start;font-size:14.5px;color:var(--ink);
+    background:var(--grow-soft);border-radius:10px;padding:10px 12px;
+  }
+  .highlight-item .ts{font-family:var(--font-mono);font-size:11.5px;color:var(--grow-ink);flex-shrink:0;padding-top:1px;}
+
+  .glance-top-card{
+    background:var(--ink);color:#fff;border-radius:var(--radius-lg);padding:20px 20px 18px;margin-top:20px;
+  }
+  .glance-top-card .glance-label{color:rgba(255,255,255,0.6);}
+  .glance-top-card .lead{font-family:var(--font-display);font-size:18px;line-height:1.45;margin:4px 0 12px;}
+  .glance-top-card .why{font-size:13.5px;color:rgba(255,255,255,0.78);}
+  .glance-top-card .why b{color:#fff;font-weight:500;}
+
+  /* ---------- section headers ---------- */
+  .section-head{margin:36px 0 6px;}
+  .section-head h2{font-size:19px;}
+  .section-hint{font-size:13px;color:var(--ink-faint);margin-top:5px;margin-bottom:16px;}
+
+  /* ---------- experiment cards ---------- */
+  .exp-card{padding:18px 18px 16px;margin-bottom:14px;}
+  .exp-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;}
+  .exp-head h3{font-size:16px;}
+  .exp-toggle{
+    font-size:12.5px;padding:7px 13px;border-radius:999px;border:1.5px solid var(--line-strong);
+    background:var(--card);color:var(--ink-soft);white-space:nowrap;transition:all .15s ease;
+    display:flex;align-items:center;gap:6px;
+  }
+  .exp-toggle:hover{border-color:var(--spark);}
+  .exp-toggle.selected{background:var(--spark);border-color:var(--spark);color:#fff;}
+  .exp-body{display:flex;flex-direction:column;gap:9px;}
+  .exp-line{font-size:13.5px;color:var(--ink-soft);display:flex;gap:8px;}
+  .exp-line .k{flex-shrink:0;color:var(--ink-faint);min-width:74px;}
+  .exp-line .v{color:var(--ink);}
+  .exp-line.demo .v{font-style:italic;color:var(--ink);}
+
+  /* ---------- evidence map (accordion) ---------- */
+  .stage-acc{border:1px solid var(--line);border-radius:var(--radius);margin-bottom:10px;overflow:hidden;background:var(--card);}
+  .stage-head{
+    display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 16px;cursor:pointer;
+  }
+  .stage-head .left{display:flex;align-items:center;gap:10px;min-width:0;}
+  .stage-code{font-family:var(--font-mono);font-size:12.5px;color:var(--ink-faint);flex-shrink:0;}
+  .stage-name{font-size:14.5px;font-weight:500;flex-shrink:0;}
+  .stage-obs-preview{font-size:12.5px;color:var(--ink-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .status-chip{font-size:11px;padding:3px 9px;border-radius:999px;flex-shrink:0;}
+  .status-chip.keep{background:var(--grow-soft);color:var(--grow-ink);}
+  .status-chip.boost{background:var(--spark-soft);color:var(--spark-ink);}
+  .status-chip.top{background:var(--ink);color:#fff;}
+  .status-chip.low{background:var(--muted-ref-soft);color:var(--muted-ref);}
+  .chev{color:var(--ink-faint);transition:transform .15s ease;flex-shrink:0;}
+  .stage-acc.expanded .chev{transform:rotate(180deg);}
+
+  .stage-detail{display:none;padding:0 16px 18px;}
+  .stage-acc.expanded .stage-detail{display:block;}
+
+  .ev-block{margin-top:6px;}
+  .ev-frame{
+    display:flex;align-items:center;gap:10px;background:var(--spark-soft);border-radius:10px;padding:10px 12px;margin-bottom:8px;
+  }
+  .ev-frame img{width:56px;height:40px;object-fit:cover;border-radius:6px;flex-shrink:0;}
+  .ev-frame .ts-badge{font-family:var(--font-mono);font-size:11.5px;background:var(--ink);color:#fff;padding:2px 8px;border-radius:6px;flex-shrink:0;}
+  .ev-frame .quote{font-size:13px;color:var(--ink);}
+  .ev-note{font-size:12.5px;color:var(--ink-soft);margin-bottom:8px;}
+
+  .ref-block{
+    display:flex;align-items:center;gap:10px;background:var(--muted-ref-soft);border-radius:10px;padding:9px 12px;margin-top:8px;
+  }
+  .ref-block .tag{font-size:11px;color:var(--muted-ref);font-family:var(--font-mono);flex-shrink:0;}
+  .ref-block .txt{font-size:12.5px;color:var(--ink-soft);}
+  .ref-empty{font-size:12.5px;color:var(--ink-faint);margin-top:8px;font-style:italic;}
+
+  .confidence-note{font-size:12px;color:var(--ink-faint);margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);}
+
+  .linked-tag{font-size:12px;color:var(--spark-ink);margin-top:10px;display:flex;align-items:center;gap:6px;}
+
+  /* ---------- commitment ---------- */
+  .commitment{padding:22px 20px;margin-top:36px;}
+  .commitment h2{font-size:19px;margin-bottom:14px;}
+  .commit-empty{font-size:13.5px;color:var(--ink-faint);}
+  .commit-block + .commit-block{margin-top:16px;}
+  .commit-label{font-size:12px;color:var(--ink-faint);letter-spacing:.03em;margin-bottom:8px;}
+  .commit-keep{font-size:13.5px;color:var(--ink-soft);}
+  .commit-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;}
+  .commit-list li{font-size:14px;color:var(--ink);background:var(--paper);border:1px solid var(--line);border-radius:9px;padding:9px 12px;}
+  .checklist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px;}
+  .checklist li{font-size:13.5px;color:var(--ink-soft);display:flex;gap:8px;align-items:flex-start;}
+  .checklist li::before{content:"\25A2";color:var(--ink-faint);flex-shrink:0;}
+  .save-btn{
+    margin-top:18px;width:100%;background:var(--ink);color:#fff;border:none;border-radius:12px;padding:14px;
+    font-size:14.5px;font-weight:500;
+  }
+  .save-btn:hover{background:#000;}
+
+  /* ---------- toast ---------- */
+  .toast{
+    position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(14px);
+    background:var(--ink);color:#fff;padding:12px 20px;border-radius:10px;font-size:13.5px;max-width:88vw;text-align:center;
+    opacity:0;pointer-events:none;transition:opacity .25s ease, transform .25s ease;z-index:50;
+    box-shadow:0 12px 30px -8px rgba(0,0,0,0.35);
+  }
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+
+  @media (prefers-reduced-motion:reduce){
+    .chev, .exp-toggle, .toast{transition:none;}
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="masthead">
+    <div class="brand">Flayr · 心译复盘</div>
+    <h1>这条视频，我们一起复盘</h1>
+    <p class="context-line" id="context-line"></p>
+  </div>
+
+  <div class="card prev-card">
+    <div id="prev-content"></div>
+  </div>
+
+  <div class="glance">
+    <div class="glance-row">
+      <span class="glance-label">这条视频在尝试做什么</span>
+      <p id="intent-text"></p>
+    </div>
+    <div class="glance-row" id="highlight-row">
+      <span class="glance-label">做得有效的地方</span>
+      <ul class="highlight-list" id="highlight-list"></ul>
+    </div>
+    <div class="glance-top-card" id="top-card">
+      <span class="glance-label">本次最值得先试</span>
+      <p class="lead" id="top-lead"></p>
+      <p class="why" id="top-why"></p>
+    </div>
+  </div>
+
+  <div class="section-head" id="experiment-section-head">
+    <h2>下一次可以试试看的方向</h2>
+    <p class="section-hint">最多选 1-2 个先专注尝试，我们会帮你整理成一张拍摄清单。</p>
+  </div>
+
+  <div id="experiment-list"></div>
+
+  <div class="section-head">
+    <h2>完整证据地图</h2>
+    <p class="section-hint">下面是逐段的详细依据，感兴趣可以点开看看，不点开也不影响上面的结论。</p>
+  </div>
+
+  <div id="stage-list"></div>
+
+  <div class="card commitment" id="commitment-card">
+    <h2>本次创作约定</h2>
+    <div id="commit-empty" class="commit-empty">选择上面 1-2 个你想先试的方向，我们会帮你整理成一张可保存的拍摄清单。</div>
+    <div id="commit-filled" style="display:none;">
+      <div class="commit-block" id="commit-keep-block">
+        <div class="commit-label">本次保留</div>
+        <p class="commit-keep" id="commit-keep"></p>
+      </div>
+      <div class="commit-block">
+        <div class="commit-label">本次实验</div>
+        <ul class="commit-list" id="commit-exp-list"></ul>
+      </div>
+      <div class="commit-block">
+        <div class="commit-label">拍摄时检查</div>
+        <ul class="checklist" id="commit-checklist"></ul>
+      </div>
+      <button type="button" class="save-btn" id="btn-save">保存这次的创作约定</button>
+    </div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"><span id="toast-text"></span></div>
+
+<script>
+(function(){
+  var report = {{creator_report_data}};
+  function $(id){ return document.getElementById(id); }
+  function value(v){ return v == null ? '' : String(v); }
+  function setText(id, v){ $(id).textContent = value(v); }
+  function addText(parent, className, text){
+    var node = document.createElement('span');
+    node.className = className;
+    node.textContent = value(text);
+    parent.appendChild(node);
+    return node;
+  }
+  function addLine(parent, label, text, extraClass){
+    if (!value(text).trim()) return;
+    var row = document.createElement('div');
+    row.className = 'exp-line' + (extraClass ? ' ' + extraClass : '');
+    addText(row, 'k', label);
+    addText(row, 'v', text);
+    parent.appendChild(row);
+  }
+
+  var experiments = {};
+  (report.experiments || []).forEach(function(item){ experiments[item.id] = item; });
+  var stages = report.stages || [];
+  var selected = [];
+
+  function renderMasthead(){
+    setText('context-line', report.context || '基于本次上传的视频，我们看了完整版本。');
+    var title = document.querySelector('.masthead h1');
+    if (title && report.title) title.textContent = report.title;
+    var brand = document.querySelector('.brand');
+    if (brand && report.brand) brand.textContent = report.brand;
+    setText('intent-text', report.intent || '目前还无法判断这条视频正在尝试完成什么。');
+  }
+
+  function renderPrevious(){
+    var card = document.querySelector('.prev-card');
+    var data = report.continuity;
+    if (!data){ card.style.display = 'none'; return; }
+    card.style.display = '';
+    var wrap = $('prev-content');
+    wrap.innerHTML = '';
+    addText(wrap, 'prev-title', data.title || '上次约定回顾');
+    if (data.notComparable){
+      var note = document.createElement('div');
+      note.className = 'prev-row';
+      addText(note, 'prev-text', data.note || '本次内容场景不同，暂不验证上次实验');
+      wrap.appendChild(note);
+      return;
+    }
+    (data.items || []).forEach(function(item){
+      var row = document.createElement('div');
+      row.className = 'prev-row';
+      addText(row, 'prev-text', item.text);
+      var chip = document.createElement('span');
+      chip.className = 'adopt-chip ' + (item.statusClass || 'none');
+      chip.textContent = item.statusLabel || '暂未采用';
+      row.appendChild(chip);
+      wrap.appendChild(row);
+    });
+  }
+
+  function renderGlance(){
+    var highlightRow = $('highlight-row');
+    var list = $('highlight-list');
+    list.innerHTML = '';
+    var highlights = report.highlights || [];
+    highlightRow.style.display = highlights.length ? '' : 'none';
+    highlights.forEach(function(item){
+      var li = document.createElement('li');
+      li.className = 'highlight-item';
+      addText(li, 'ts', item.timestamp || '');
+      addText(li, '', item.text);
+      list.appendChild(li);
+    });
+
+    var top = report.topExperiment;
+    var topCard = $('top-card');
+    if (!top){ topCard.style.display = 'none'; return; }
+    topCard.style.display = '';
+    setText('top-lead', top.action || top.title);
+    $('top-why').innerHTML = '';
+    var whyLabel = document.createElement('b');
+    whyLabel.textContent = '为什么：';
+    $('top-why').appendChild(whyLabel);
+    addText($('top-why'), '', top.why || top.observation || '这项尝试有明确的画面或口播依据，下一次可以直接观察它是否出现。');
+  }
+
+  function renderExperiments(){
+    var section = $('experiment-section-head');
+    var wrap = $('experiment-list');
+    wrap.innerHTML = '';
+    if (!report.experiments || !report.experiments.length){
+      section.style.display = 'none';
+      return;
+    }
+    section.style.display = '';
+    report.experiments.forEach(function(e){
+      var card = document.createElement('div');
+      card.className = 'exp-card card';
+      card.setAttribute('data-exp', e.id);
+      var head = document.createElement('div');
+      head.className = 'exp-head';
+      var title = document.createElement('h3');
+      title.textContent = e.title;
+      head.appendChild(title);
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'exp-toggle';
+      button.setAttribute('data-toggle', e.id);
+      button.textContent = '我要试试这个';
+      head.appendChild(button);
+      card.appendChild(head);
+      var body = document.createElement('div');
+      body.className = 'exp-body';
+      addLine(body, '我们看到', e.observation);
+      addLine(body, '这可能会让', e.hypothesis);
+      addLine(body, '下一条可以测试', e.action);
+      addLine(body, '可以具体改成', e.demonstration, 'demo');
+      addLine(body, '下次我们一起看', e.verification);
+      card.appendChild(body);
+      wrap.appendChild(card);
+      button.addEventListener('click', function(){
+        var idx = selected.indexOf(e.id);
+        if (idx > -1){
+          selected.splice(idx, 1);
+        } else {
+          if (selected.length >= 2){
+            showToast('建议先专注 1-2 个方向，下次复盘我们再看新的尝试');
+            return;
+          }
+          selected.push(e.id);
+        }
+        renderCardStates();
+        renderCommitment();
+      });
+    });
+  }
+
+  function renderStages(){
+    var wrap = $('stage-list');
+    wrap.innerHTML = '';
+    stages.forEach(function(s){
+      var acc = document.createElement('div');
+      acc.className = 'stage-acc';
+      acc.id = 'stage-' + s.code;
+      var head = document.createElement('div');
+      head.className = 'stage-head';
+      var left = document.createElement('div');
+      left.className = 'left';
+      addText(left, 'stage-code', s.code);
+      addText(left, 'stage-name', s.name);
+      head.appendChild(left);
+      if (s.status){
+        var chip = document.createElement('span');
+        chip.className = 'status-chip ' + s.status;
+        chip.textContent = s.statusLabel || '';
+        head.appendChild(chip);
+      }
+      head.insertAdjacentHTML('beforeend', '<svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>');
+      head.addEventListener('click', function(){ acc.classList.toggle('expanded'); });
+      acc.appendChild(head);
+
+      var detail = document.createElement('div');
+      detail.className = 'stage-detail';
+      var block = document.createElement('div');
+      block.className = 'ev-block';
+      var frame = document.createElement('div');
+      frame.className = 'ev-frame';
+      if (s.frame && s.frame.src){
+        var image = document.createElement('img');
+        image.src = s.frame.src;
+        image.alt = s.frame.alt || s.name || '证据画面';
+        frame.appendChild(image);
+      }
+      addText(frame, 'ts-badge', s.frameTs || '时间未确认');
+      var quote = s.quote || s.observation || '目前还无法判断，这一段证据不足。';
+      addText(frame, 'quote', quote);
+      if (s.quoteZh && s.quoteZh !== s.quote){
+        addText(frame, 'quote', '（中文：' + s.quoteZh + '）');
+      }
+      block.appendChild(frame);
+      addText(block, 'ev-note', s.observation || '目前还无法判断，这一段证据不足。');
+      if (s.reference){
+        var ref = document.createElement('div');
+        ref.className = 'ref-block';
+        addText(ref, 'tag', '参考 ' + (s.reference.ts || ''));
+        addText(ref, 'txt', s.reference.text);
+        block.appendChild(ref);
+      } else if (s.referenceNote){
+        addText(block, 'ref-empty', s.referenceNote);
+      }
+      if (s.linked && experiments[s.linked]){
+        addText(block, 'linked-tag', '→ 关联实验：' + experiments[s.linked].title);
+      }
+      if (s.confidence){ addText(block, 'confidence-note', s.confidence); }
+      detail.appendChild(block);
+      acc.appendChild(detail);
+      wrap.appendChild(acc);
+    });
+  }
+
+  function renderCardStates(){
+    document.querySelectorAll('.exp-toggle').forEach(function(btn){
+      var id = btn.getAttribute('data-toggle');
+      var isSel = selected.indexOf(id) > -1;
+      btn.classList.toggle('selected', isSel);
+      btn.textContent = isSel ? '已加入 ✓' : '我要试试这个';
+    });
+  }
+
+  function renderCommitment(){
+    if (selected.length === 0){
+      $('commit-empty').style.display = 'block';
+      $('commit-filled').style.display = 'none';
+      return;
+    }
+    $('commit-empty').style.display = 'none';
+    $('commit-filled').style.display = 'block';
+    var keepBlock = $('commit-keep-block');
+    keepBlock.style.display = report.keep ? '' : 'none';
+    setText('commit-keep', report.keep || '');
+    var expList = $('commit-exp-list');
+    var checklist = $('commit-checklist');
+    expList.innerHTML = '';
+    checklist.innerHTML = '';
+    selected.forEach(function(id){
+      var e = experiments[id];
+      var li = document.createElement('li');
+      li.textContent = e.action;
+      expList.appendChild(li);
+      var cli = document.createElement('li');
+      cli.textContent = e.verification;
+      checklist.appendChild(cli);
+    });
+  }
+
+  function showToast(msg){
+    $('toast-text').textContent = msg;
+    $('toast').classList.add('show');
+    setTimeout(function(){ $('toast').classList.remove('show'); }, 3200);
+  }
+
+  $('btn-save').addEventListener('click', function(){
+    var msg = selected.length > 1
+      ? '已保存，下次复盘我们会先回顾这两件事'
+      : '已保存，下次复盘我们会先回顾这件事';
+    showToast(msg);
+  });
+
+  renderMasthead();
+  renderPrevious();
+  renderGlance();
+  renderExperiments();
+  renderStages();
+  renderCommitment();
+})();
+</script>
+</body>
+</html>

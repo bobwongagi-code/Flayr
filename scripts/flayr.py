@@ -16,6 +16,7 @@ from typing import Any
 
 from flayr_core.audio_quality import analyze_audio_quality
 from flayr_core.analysis_model import ANALYSIS_RESULT_CONTRACT, placeholder_stages
+from flayr_core.bd_report import write_bd_report
 from flayr_core.llm.api import can_analyze_native_audio, provider_capabilities, read_llm_api_key
 from flayr_core.llm.pipeline import (
     apply_finalized_analysis_result,
@@ -24,6 +25,7 @@ from flayr_core.llm.pipeline import (
     run_large_model_analysis,
 )
 from flayr_core.prompt import write_analysis_input
+from flayr_core.creator_report import write_creator_report
 from flayr_core.report import write_report
 from flayr_core.resources import ResourceBudget, ResourceBudgetExceeded, finite_nonnegative
 from flayr_core.run_manifest import SUCCESS_MANIFEST_NAME, command_digest, write_success_manifest
@@ -59,6 +61,8 @@ _RUN_OUTPUT_FILES = frozenset(
         "comparison_contract.json",
         "comparison_eligibility.json",
         "comparison_rejection.json",
+        "bd_report.html",
+        "creator_report.html",
         "degraded_manifest.json",
         "final_derived_result.json",
         "postprocess_change_log.json",
@@ -141,6 +145,9 @@ def main() -> int:
 
     analysis["resource_budget"] = budget.snapshot()
     report_path = write_report(run_dir, analysis, budget=budget)
+    if args.mode in {"compare", "improve"}:
+        report_path = write_bd_report(run_dir, analysis, budget=budget)
+        write_creator_report(run_dir, analysis, budget=budget)
     if args.mode in {"compare", "improve"} and analysis.get("analysis_run_state") == "completed":
         write_success_manifest(
             run_dir,
