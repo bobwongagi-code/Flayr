@@ -43,29 +43,53 @@
 `raw_model_response -> validated_normalized_result -> final_derived_result` 生命周期。
 `llm/analysis_contract.py` 只负责边界校验（阶段数量、顺序、改进项范围和标准化结果骨架），不再复制字段清单。
 evidence_unit 含多模态事实字段 +
-结构化标记（`product_visible` / `product_coverage` / `third_party_endorsement`）；标记由模型按定义判，
-代码只做确定性消费（占比累加、归属搬运、severity 一致性），不得用正则重新推断语义。
+结构化标记（`product_visible` / `product_coverage` / `endorsement_verbal` / `endorsement_visual` / `evidence_strength`）；
+标记由模型按定义判，`evidence_strength` 是 floor 门禁的唯一权威强度字段。代码只做确定性消费
+（占比累加、归属搬运、状态一致性），不得用正则重新推断语义。
 
-### 0.4 severity 判定宪法（2026-06-11 修订，4d 架构）
+### 0.4 severity 判定宪法（2026-07-24，floor/ceiling resolver）
 
-> **模型供事实，代码定政策。** 模型逐阶段输出稳定事实：两侧独立执行分
-> （creator/benchmark_execution，0=不执行/0.5=敷衍或无法有效接收/1=合格/2=出色，
-> 先打分再对比）、painpoint_relevance（痛点命中四值枚举）、category_profile（品类画像）；
-> severity 由 `postprocess/derive.py` 确定性推导：E = 标杆执行分 − 达人执行分，
-> S = E × W（品类原型×阶段权重表）× C（痛点命中系数，S6 促单与痛点正交不参与调制），
-> 含 S5 背书门槛 / S4 演示差分 / S1 痛点差分三个事实覆盖与 S1/S6 缺失红线、
-> 极性红线（达人持平或更优 → small），逐阶段写 severity_derivation 算法溯源。
-> 权重表数值随对比数据 + 人工裁决积累，对存量 facts 零 LLM 成本离线重拟合。
+> **模型供初始判断，代码只收窄确定性区间。** `model_severity` 是默认结果；
+> `postprocess/derive.py` 不再用 E/W/C 连续公式、痛点系数或另一套阈值模型给 severity 赋值。
 
-修订背景：原宪法"商业判断归模型（prompt 框架）"经 r1-r2 两轮实测不成立（prompt 调 severity
-不收敛，11/18→9/18 修一伤二）；r4 实弹 15/18 + severe 0 过 T4 预注册线，同批模型直判
-12/18 + severe 2（划算感误归背书、极性 bug 第四轮复发，均被推导层机械纠正）。
+- `resolve_severity` 是唯一的 severity 收口点。所有规则只能提交 `floor` 或 `ceiling`，
+  不能直接写 severity；所有 floor 取 `max(触发的 floor)`，所有 ceiling 取
+  `min(触发的 ceiling)`，因此合并与调用顺序无关。
+- `floor == ceiling` 是合法 clamp；`floor > ceiling` 是约束冲突，保留
+  `model_severity`，标记 `constraint_conflict`，并进入已有的共享 Phase C 候选/预算，不能
+  通过后处理强行覆盖。
+- 缺失、unknown、uncertain、非法状态、证据强度不足和 hard-fact 校验不完整都不触发
+  severity-increasing floor。规则评估必须写入闭集 `reason_code`，并区分缺字段、事实不确定、
+  证据强度不足、约束冲突和模型保留。
+- `evidence_strength` 以 Stage1 `video_understanding.*.evidence_units[]` 为唯一权威来源。
+  任何提高 severity 的 floor 都要求所引用证据的最弱强度为 `direct` 或 `explicit`；
+  `inferred`、`absent`、缺失和非法值都只能保留模型判断。旧产物仍可读取，但没有新字段或
+  新标记时不能触发这些 floor。过渡期内，历史产物大多数会因缺少该 Stage1 字段而不触发
+  floor，这是有意的安全停用，不是 resolver 失效；只有新事实链产出强度后才进入校准。
+- 使用状态与证据强度是两个独立门禁，必须同时满足（状态 predicate AND `direct|explicit`），
+  不能用一个轴替代另一个轴。
+- S1 Hook large floor 还要求 `repair_s1_hook_boundaries` 写入消费 marker；没有 marker
+  的路径不能消费修复前的 Hook 边界字段。S1 landing/命题锚定只提交 medium floor。
+- 主分析、Repair 重跑和 Phase C 都从 `llm/parse.py` 归一后的同一份 S1/S3/S4 flag 读取，
+  并在消费前经过同一条 `repair_s1_hook_boundaries` / hard-fact marker 链；不得在任一路径
+  另行维护 landing、使用完成度或效果完成度判断。
+- S3 使用完成度是四态 `usage_evidence_state`：`none`、`partial`、`complete`、
+  `uncertain`。S3 large floor 只允许在达人 `none`、标杆 `complete`、双方 hard facts
+  校验为 `consistent` 且证据强度满足时提交；`partial` 不能被压成 `none`。
+- S4 效果完成度是四态 `effect_evidence_state`：`none`、`result_only`、`verified`、
+  `uncertain`。`result_only` 不得被当作 `none` 或 `verified`；S4 large floor 当前只记录
+  audit candidate，不启用 severity 改写，直到完成边界校准和全新 blind cohort 门禁。
+- `repair_evidence.py` 只检查状态与硬布尔事实之间的机械矛盾，并把结果写入
+  `_postprocess_state.evidence_hard_fact_checks`；它不能推断、重写或降级 S3/S4 的语义状态。
+  `partial`、`result_only`、`uncertain` 和 hard-fact conflict 均保留模型 severity。
+- 执行分与多模态观察仍可写入 `severity_derivation`，但属于诊断/审计数据，不参与 resolver。
+  `painpoint_relevance` 由商业优先级层消费；severity 与商业优先级保持分离，不能把业务权重
+  偷渡回 derive。
 
-stabilize 残余职责：一致性修复（severity↔task_completion↔gap 文本矛盾收敛）、归属搬运、
-以及执行分缺失时（旧数据/降级路径）的薄兜底。推导失败必须优雅降级保留模型 severity，
-绝不拖垮主流程。S3/S4 牙膏品类正则已按 TODO #1 处置清单删除（门禁过线后执行）。
-推论：`task_completion=partial` 档代码不替模型定级；禁止新增"partial→medium"类映射；
-禁止再用 prompt 判例校准 severity（校准动作 = 调权重表 + 离线重放）。
+derive 的回归必须同时覆盖 resolver 的 max/min 交换律、clamp/conflict 边界、四态及其硬事实
+一致性、Stage1 强度门禁、repair marker 顺序和 S4 audit-only 状态。校准卡片与 fresh blind
+验收集不得混用；真实重复运行稳定性、floor 捕获率和回归数必须单独报告，缺少人工结构性 GT
+时只能标记为不可测，不能把缺失当成通过。
 
 ### 0.5 失败、降级与完成状态
 
@@ -74,9 +98,13 @@ stabilize 残余职责：一致性修复（severity↔task_completion↔gap 文�
 - `compare` / `improve` 没有完成的 LLM 分析时默认失败；只有显式 `--allow-degraded` 才能继续，并保持未知 severity 为空、写入降级清单。
 - 只有子进程成功、最终成功清单和必需产物完整性校验全部通过时，运行状态才是 `completed`。
 
-### 0.6 第三方背书定义（`third_party_endorsement` 的判定规格）
+### 0.6 第三方背书观察（`endorsement_verbal` / `endorsement_visual`）
 
-机构类型 + 关联性门槛**同时成立**才为 true：
+这两个字段只记录观察，不在 Stage1 直接判定背书有效性：
+- `endorsement_verbal`：口播/字幕中出现硬来源词；
+- `endorsement_visual`：画面中清晰出现独立证书、检测报告或机构认证视觉证据。
+
+机构类型 + 关联性门槛**同时成立**才构成有效硬背书，后续 S5 规则再消费这些观察：
 - 机构类型：监管/认证机构（KKM、Halal、SIRIM、TISI…）、行业协会、第三方评测中心/实验室、
   高校与研究机构、三方调研咨询公司、疾病·医院·防治中心。
 - 关联性门槛：该机构的实验/数据/研究**在证明本产品价值**。
@@ -108,6 +136,24 @@ stabilize 残余职责：一致性修复（severity↔task_completion↔gap 文�
   gap 与 6 个 small 对照，S5 至少各 3 个；总准确率不低于 80%、单阶段不低于 70%、两档错误为 0、
   Stage1 决策事件召回和 Stage2 使用率均不低于 90%、Top-N 根因召回不低于 80%、Phase C 不得引入回归。
 - 相同标杆或相同视频内容的多个配对不是独立样本，cohort 冻结会按 SHA-256 拒绝重复。
+
+derive 边界卡片属于 `calibration`，不得直接放入 blind cohort。每张卡片至少记录 S3/S4 双侧
+预期四态、双侧 hard-fact 校验结果和 `expected_floor_outcome`（`trigger_large`、
+`no_trigger_medium_kept`、`uncertain_no_trigger` 或 `audit_only_candidate`）；卡片只定义待验证
+的预期，不替代两名标注者的独立标注，也不替代全新 blind 样本的晋级验收。重复运行稳定性必须
+把缺字段视为不可确认，floor 捕获率只对人工明确标记为结构性缺口的样本计算并给出 Wilson 区间。
+S3 边界卡片必须覆盖 creator 的 `none/partial` 与 benchmark 的 `partial/complete` 两条边界；
+任一边界出现标注分歧都进入 `uncertain`。S4 的 `result_only/verified` 边界也采用同规格的
+双人盲标，不能只为单个回归样本补一个结论；`youkoubo-c1/S4` 必须作为未知背景的普通卡片参与。
+repair 的 hard-fact 检查使用同一批卡片验证机械矛盾，不承担语义标注。报告层展示这些更细状态
+属于后续批次，本次只保证结构化状态与 audit trail 完整。
+
+S4 large floor 的启用不是可手动翻转的布尔开关。只有通过摘要校验的外部 activation manifest，
+经 `postprocess/calibration.py::load_s4_large_floor_activation_evidence` 加载为可信对象，再显式
+传入 severity 收口入口时才可启用；结果文件中的 `derive_activation_evidence` 字段永远不具备激活权限：
+至少 24 张 calibration 边界卡、S3/S4 边界覆盖、双人盲标通过、至少 5 次硬事实重复运行且稳定、
+至少 12 对全新且已冻结的 blind cohort（至少 4 个品类、2 个市场）、floor coverage 已测量且无
+derive/Phase C 回归。缺任一证据都保持 `audit_only`；当前工作树没有这组真实验收证据，因此不启用。
 
 ### 0.9 运行级资源预算
 

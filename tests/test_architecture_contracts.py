@@ -92,6 +92,7 @@ from flayr_core.postprocess.repair import (
     reconcile_unsupported_cta,
     reconcile_s5_trust_sources,
     stabilize_improvement_priorities,
+    validate_s3_s4_hard_fact_consistency,
 )
 from flayr_core.postprocess.repair_stages import infer_s1_boundary_candidate
 from flayr_core.postprocess.health_rewrite import is_child_toothpaste_context
@@ -1878,6 +1879,8 @@ class ArchitectureContractTests(unittest.TestCase):
         stages[2].update(
             {
                 "creator_s3": {
+                    "usage_evidence_state": "complete",
+                    "exists": True,
                     "usage_process_visible": True,
                     "real_usage_met": True,
                     "core_selling_point_visible": True,
@@ -1885,9 +1888,14 @@ class ArchitectureContractTests(unittest.TestCase):
                     "action_target_contact_met": False,
                     "action_application_change_visible": False,
                     "critical_action_continuity_met": False,
+                    "result_only_without_process": False,
+                    "mouth_only_or_static": False,
+                    "fake_or_staged": False,
                     "usage_reason": "空中比划后跳到完成态",
                 },
                 "benchmark_s3": {
+                    "usage_evidence_state": "complete",
+                    "exists": True,
                     "usage_process_visible": True,
                     "real_usage_met": True,
                     "core_selling_point_visible": True,
@@ -1895,6 +1903,9 @@ class ArchitectureContractTests(unittest.TestCase):
                     "action_target_contact_met": True,
                     "action_application_change_visible": True,
                     "critical_action_continuity_met": True,
+                    "result_only_without_process": False,
+                    "mouth_only_or_static": False,
+                    "fake_or_staged": False,
                     "usage_reason": "材料贴到裂缝后立即按压",
                 },
             }
@@ -1902,15 +1913,29 @@ class ArchitectureContractTests(unittest.TestCase):
         stages[3].update(
             {
                 "creator_s4": {
+                    "effect_evidence_state": "result_only",
                     "effect_visible": True,
                     "result_only_without_process": False,
                     "process_linked_effect": True,
+                    "effect_proposition_matched": True,
+                    "visual_difference_observed": True,
+                    "module_constraints_met": True,
+                    "effect_attribution_supported": True,
+                    "requires_close_inspection": False,
+                    "tamper_or_cut_risk": False,
                     "effect_reason": "盆底未漏水",
                 },
                 "benchmark_s4": {
+                    "effect_evidence_state": "verified",
                     "effect_visible": True,
                     "result_only_without_process": False,
                     "process_linked_effect": True,
+                    "effect_proposition_matched": True,
+                    "visual_difference_observed": True,
+                    "module_constraints_met": True,
+                    "effect_attribution_supported": True,
+                    "requires_close_inspection": False,
+                    "tamper_or_cut_risk": False,
                     "effect_reason": "修补后承重",
                 },
             }
@@ -1919,17 +1944,26 @@ class ArchitectureContractTests(unittest.TestCase):
         reconcile_s3_s4_evidence_coherence(result)
         creator_s3 = stages[2]["creator_s3"]
         creator_s4 = stages[3]["creator_s4"]
-        self.assertFalse(creator_s3["usage_process_visible"])
-        self.assertFalse(creator_s3["real_usage_met"])
-        self.assertFalse(creator_s3["action_proof_met"])
-        self.assertFalse(stages[2]["creator_has_usage_demo"])
-        self.assertTrue(stages[2]["benchmark_has_usage_demo"])
-        self.assertTrue(creator_s4["result_only_without_process"])
-        self.assertFalse(creator_s4["process_linked_effect"])
+        self.assertTrue(creator_s3["usage_process_visible"])
+        self.assertTrue(creator_s3["real_usage_met"])
+        self.assertTrue(creator_s3["action_proof_met"])
+        self.assertNotIn("creator_has_usage_demo", stages[2])
+        self.assertNotIn("benchmark_has_usage_demo", stages[2])
+        self.assertFalse(creator_s4["result_only_without_process"])
+        self.assertTrue(creator_s4["process_linked_effect"])
         self.assertTrue(stages[3]["benchmark_s4"]["process_linked_effect"])
+        self.assertEqual(
+            stages[2]["_postprocess_state"]["evidence_hard_fact_checks"]["creator_s3"]["status"],
+            "state_conflict",
+        )
+        self.assertEqual(
+            stages[3]["_postprocess_state"]["evidence_hard_fact_checks"]["creator_s4"]["status"],
+            "state_conflict",
+        )
 
-    def test_s4_strong_benchmark_vs_result_only_creator_is_large(self) -> None:
+    def test_s4_strong_benchmark_vs_result_only_creator_does_not_become_large(self) -> None:
         creator = {
+            "effect_evidence_state": "result_only",
             "effect_visible": True,
             "visual_difference_observed": True,
             "module_constraints_met": True,
@@ -1944,13 +1978,16 @@ class ArchitectureContractTests(unittest.TestCase):
         }
         benchmark = {
             **creator,
+            "effect_evidence_state": "verified",
             "result_only_without_process": False,
             "process_linked_effect": True,
             "evidence_ids": ["B4"],
         }
+        result = {"stage_analysis": [{}, {}, {}, {"creator_s4": creator, "benchmark_s4": benchmark}]}
+        validate_s3_s4_hard_fact_consistency(result)
         trace = _derive_one(
             "S4",
-            {"creator_s4": creator, "benchmark_s4": benchmark},
+            result["stage_analysis"][3],
             {"S4": 1.0},
             [],
             facts={
@@ -1960,8 +1997,8 @@ class ArchitectureContractTests(unittest.TestCase):
                 }
             },
         )
-        self.assertEqual(trace["severity"], "large")
-        self.assertIn("效果证明", trace["reason"])
+        self.assertEqual(trace["severity"], "medium")
+        self.assertNotIn("效果证明", trace["reason"])
 
     def test_structural_scope_s4_visual_review_does_not_require_same_sku_contract(self) -> None:
         result = {
@@ -2015,6 +2052,8 @@ class ArchitectureContractTests(unittest.TestCase):
 
     def test_s3_and_s4_complete_proof_vs_explicit_absence_are_large_gaps(self) -> None:
         complete_s3 = {
+            "usage_evidence_state": "complete",
+            "exists": True,
             "usage_process_visible": True,
             "real_usage_met": True,
             "core_selling_point_visible": True,
@@ -2022,9 +2061,14 @@ class ArchitectureContractTests(unittest.TestCase):
             "action_target_contact_met": True,
             "action_application_change_visible": True,
             "critical_action_continuity_met": True,
+            "result_only_without_process": False,
+            "mouth_only_or_static": False,
+            "fake_or_staged": False,
             "evidence_ids": ["B3"],
         }
-        missing_s3 = {**complete_s3, "usage_process_visible": False, "real_usage_met": False,
+        missing_s3 = {**complete_s3, "exists": False, "usage_process_visible": False, "real_usage_met": False,
+                      "usage_evidence_state": "none", "core_selling_point_visible": False,
+                      "action_proof_met": False,
                       "action_target_contact_met": False, "action_application_change_visible": False,
                       "critical_action_continuity_met": False, "evidence_ids": ["C3"]}
         s3_facts = {
@@ -2033,10 +2077,16 @@ class ArchitectureContractTests(unittest.TestCase):
                 "benchmark": {"evidence_units": [{"id": "B3", "evidence_strength": "direct"}]},
             }
         }
+        s3_result = {"stage_analysis": [{}, {}, {
+            "creator_s3": missing_s3,
+            "benchmark_s3": complete_s3,
+        }, {}]}
+        validate_s3_s4_hard_fact_consistency(s3_result)
         s3_trace = _derive_one(
             "S3",
             {"creator_execution": 0.0, "benchmark_execution": 1.0,
-             "creator_s3": missing_s3, "benchmark_s3": complete_s3},
+             "creator_s3": missing_s3, "benchmark_s3": complete_s3,
+             "_postprocess_state": s3_result["stage_analysis"][2]["_postprocess_state"]},
             {"S3": 1.0},
             [],
             facts=s3_facts,
@@ -2045,35 +2095,50 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertNotIn("E", s3_trace)
         self.assertIn("真实使用", s3_trace["reason"])
         complete_s4 = {
+            "effect_evidence_state": "verified",
             "effect_visible": True,
             "visual_difference_observed": True,
             "module_constraints_met": True,
             "effect_salience": "strong",
             "effect_proposition_matched": True,
             "effect_attribution_supported": True,
+            "process_linked_effect": True,
+            "result_only_without_process": False,
             "requires_close_inspection": False,
             "tamper_or_cut_risk": False,
             "evidence_ids": ["B4"],
         }
         missing_s4 = {**complete_s4, "effect_visible": False, "visual_difference_observed": False,
-                      "effect_salience": "none", "evidence_ids": ["C4"]}
+                      "effect_evidence_state": "none", "effect_salience": "none",
+                      "effect_proposition_matched": False, "module_constraints_met": False,
+                      "effect_attribution_supported": False, "process_linked_effect": False,
+                      "evidence_ids": ["C4"]}
         s4_facts = {
             "video_understanding": {
                 "creator": {"evidence_units": [{"id": "C4", "evidence_strength": "direct"}]},
                 "benchmark": {"evidence_units": [{"id": "B4", "evidence_strength": "direct"}]},
             }
         }
+        s4_result = {"stage_analysis": [{}, {}, {}, {
+            "creator_s4": missing_s4,
+            "benchmark_s4": complete_s4,
+        }]}
+        validate_s3_s4_hard_fact_consistency(s4_result)
         s4_trace = _derive_one(
             "S4",
             {"creator_execution": 0.0, "benchmark_execution": 2.0,
-             "creator_s4": missing_s4, "benchmark_s4": complete_s4},
+             "creator_s4": missing_s4, "benchmark_s4": complete_s4,
+             "_postprocess_state": s4_result["stage_analysis"][3]["_postprocess_state"]},
             {"S4": 1.0},
             [],
             facts=s4_facts,
         )
-        self.assertEqual(s4_trace["severity"], "large")
+        self.assertEqual(s4_trace["severity"], "medium")
         self.assertNotIn("E", s4_trace)
-        self.assertIn("效果证明", s4_trace["reason"])
+        self.assertEqual(
+            next(item for item in s4_trace["constraint_evaluations"] if item["rule"] == "S4_visible_effect_floor")["status"],
+            "audit_only",
+        )
 
     def test_s3_s4_visual_verifier_applies_nested_usage_review_without_breaking_old_s4_fields(self) -> None:
         stages = [{"stage": f"S{index}", "severity": "small"} for index in range(1, 7)]
@@ -2150,9 +2215,9 @@ class ArchitectureContractTests(unittest.TestCase):
             {},
         )
         self.assertTrue(applied)
-        self.assertFalse(stages[2]["creator_s3"]["real_usage_met"])
-        self.assertTrue(stages[3]["creator_s4"]["result_only_without_process"])
-        self.assertFalse(stages[3]["creator_s4"]["process_linked_effect"])
+        self.assertTrue(stages[2]["creator_s3"]["real_usage_met"])
+        self.assertFalse(stages[3]["creator_s4"]["result_only_without_process"])
+        self.assertTrue(stages[3]["creator_s4"]["process_linked_effect"])
         self.assertTrue(stages[2]["benchmark_s3"]["real_usage_met"])
         self.assertTrue(stages[3]["benchmark_s4"]["effect_visible"])
 

@@ -16,6 +16,12 @@ from pathlib import Path
 from typing import Any
 
 from ..artifacts import format_seconds, parse_time_range_seconds
+from ..evidence_states import (
+    EVIDENCE_STATE_STRENGTHS,
+    S3_USAGE_EVIDENCE_STATES,
+    S4_EFFECT_EVIDENCE_STATES,
+    normalize_evidence_state,
+)
 from ..multimodal import (
     MULTIMODAL_CHANNELS,
     MULTIMODAL_DOMINANT_CHANNELS,
@@ -32,7 +38,7 @@ from .product_profile import normalize_category_profile, normalize_product_profi
 
 # 兼容旧 caller 的三元组视图；唯一来源在 stage_catalog.DEFAULT_STAGES。
 STAGES = stage_tuples()
-EVIDENCE_STRENGTHS = ("direct", "explicit", "inferred", "absent")
+EVIDENCE_STRENGTHS = EVIDENCE_STATE_STRENGTHS
 S5_SOURCE_STATUSES = ("missing", "uncertain", "explicit_absent", "explicit_present")
 
 
@@ -63,6 +69,16 @@ def normalize_evidence_strength(value: Any) -> str | None:
     """归一 Stage1 canonical evidence strength；不合法或缺失保持 unknown(None)。"""
     text = str(value or "").strip().lower()
     return text if text in EVIDENCE_STRENGTHS else None
+
+
+def normalize_s3_usage_evidence_state(value: Any) -> str | None:
+    """归一 S3 使用完成度；缺失/非法保持 None，禁止猜成 none。"""
+    return normalize_evidence_state(value, S3_USAGE_EVIDENCE_STATES)
+
+
+def normalize_s4_effect_evidence_state(value: Any) -> str | None:
+    """归一 S4 效果完成度；缺失/非法保持 None，禁止猜成 none。"""
+    return normalize_evidence_state(value, S4_EFFECT_EVIDENCE_STATES)
 
 
 def normalize_proposition_ids(value: Any) -> list[str]:
@@ -426,6 +442,7 @@ def normalize_s3_flags(value: Any) -> dict[str, Any] | None:
     return {
         "exists": normalize_demo_flag(value.get("exists")),
         "module_type": normalize_s3_type(value.get("module_type")),
+        "usage_evidence_state": normalize_s3_usage_evidence_state(value.get("usage_evidence_state")),
         "usage_process_visible": usage_process_visible,
         "result_only_without_process": normalize_demo_flag(value.get("result_only_without_process")),
         "mouth_only_or_static": normalize_demo_flag(value.get("mouth_only_or_static")),
@@ -470,6 +487,7 @@ def normalize_s4_flags(value: Any) -> dict[str, Any] | None:
         return None
     return {
         "effect_type": normalize_s4_effect_type(value.get("effect_type")),
+        "effect_evidence_state": normalize_s4_effect_evidence_state(value.get("effect_evidence_state")),
         "effect_visible": normalize_demo_flag(value.get("effect_visible")),
         "effect_salience": normalize_s4_effect_salience(value.get("effect_salience")),
         "effect_proposition_matched": normalize_demo_flag(value.get("effect_proposition_matched")),
@@ -975,7 +993,7 @@ def normalize_video_understanding(value: Any) -> dict[str, Any]:
                 "evidence_strength": normalize_evidence_strength(unit.get("evidence_strength")),
                 "product_visible": normalize_bool_flag(unit.get("product_visible")),
                 "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
-                # F 项背书劈成两个纯观察信道（替代焊死判断的 third_party_endorsement）：
+                # F 项背书劈成两个纯观察信道，替代旧的单字段硬判定：
                 "endorsement_verbal": normalize_demo_flag(unit.get("endorsement_verbal")),
                 "endorsement_visual": normalize_demo_flag(unit.get("endorsement_visual")),
                 "trust_source_signals": normalize_s5_source_signals(unit.get("trust_source_signals")),
@@ -1542,7 +1560,7 @@ def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dic
                 "evidence_strength": normalize_evidence_strength(unit.get("evidence_strength")),
                 "product_visible": normalize_bool_flag(unit.get("product_visible")),
                 "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
-                # F 项背书劈成两个纯观察信道（替代焊死判断的 third_party_endorsement）：
+                # F 项背书劈成两个纯观察信道，替代旧的单字段硬判定：
                 "endorsement_verbal": normalize_demo_flag(unit.get("endorsement_verbal")),
                 "endorsement_visual": normalize_demo_flag(unit.get("endorsement_visual")),
                 "trust_source_signals": normalize_s5_source_signals(unit.get("trust_source_signals")),

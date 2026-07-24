@@ -22,6 +22,7 @@ RELATIONS = {"creator_better", "matched", "benchmark_better"}
 CONFIDENCE_VALUES = {"low", "medium", "high"}
 STAGES = tuple(f"S{index}" for index in range(1, 7))
 SOURCE_CONTRACT_FILES = (
+    "ARCHITECTURE.md",
     "structure_library_full.md",
     "QA-RULES.md",
     "references/analysis-output-schema.json",
@@ -30,7 +31,13 @@ SOURCE_CONTRACT_FILES = (
     "references/observation-guide.md",
     "scripts/flayr_core/llm/payload.py",
     "scripts/flayr_core/llm/parse.py",
+    "scripts/flayr_core/llm/s4_visual_verifier.py",
+    "scripts/flayr_core/evidence_states.py",
+    "scripts/flayr_core/postprocess/chain.py",
+    "scripts/flayr_core/postprocess/calibration.py",
     "scripts/flayr_core/postprocess/derive.py",
+    "scripts/flayr_core/postprocess/repair_evidence.py",
+    "scripts/flayr_core/postprocess/validate.py",
 )
 
 

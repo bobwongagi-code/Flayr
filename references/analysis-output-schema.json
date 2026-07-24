@@ -142,7 +142,8 @@
           "variant_attribution_confident": "代码计算；明确比较可以 primary 为空但 confident=true。",
           "variant_data_valid": "代码计算：ID、占比键、数值范围、总和和关系模式均一致才为 true。",
           "attention_competitor_ids": [],
-          "third_party_endorsement": "true|false：机构类型（监管认证/行业协会/评测实验室/高校研究/调研咨询/疾病防治中心）+ 其数据或结论在证明本产品价值，同时成立才 true；仅提机构名/赞助 logo/自述功效/用户评论为 false。定义与判例见 ARCHITECTURE.md §0.5。"
+          "endorsement_verbal": "true|false|null：该证据单元口播/字幕是否出现硬来源词；只记录词是否出现，不判断是否构成有效背书。",
+          "endorsement_visual": "true|false|null：该证据单元画面是否清晰出现独立证书、检测报告或机构认证视觉证据；瓶身印刷小标不算。"
         }
       ]
     },
@@ -192,7 +193,8 @@
           "variant_attribution_confident": "代码计算。",
           "variant_data_valid": "代码计算。",
           "attention_competitor_ids": [],
-          "third_party_endorsement": "true|false：机构类型（监管认证/行业协会/评测实验室/高校研究/调研咨询/疾病防治中心）+ 其数据或结论在证明本产品价值，同时成立才 true；仅提机构名/赞助 logo/自述功效/用户评论为 false。定义与判例见 ARCHITECTURE.md §0.5。"
+          "endorsement_verbal": "true|false|null：该证据单元口播/字幕是否出现硬来源词；只记录词是否出现，不判断是否构成有效背书。",
+          "endorsement_visual": "true|false|null：该证据单元画面是否清晰出现独立证书、检测报告或机构认证视觉证据；瓶身印刷小标不算。"
         }
       ]
     }
@@ -332,6 +334,7 @@
       "creator_s3": {
         "exists": "仅 S3 必填：达人侧是否存在使用过程功能；S2/S3 合并也算存在，true|false。",
         "module_type": "仅 S3 必填：S3-A~E 的字母 A-E，或 unknown。",
+        "usage_evidence_state": "仅 S3 必填：none | partial | complete | uncertain。none=没有真实产品操作；partial=有真实操作但未证明核心卖点或关键因果链；complete=核心动作链和卖点证明完整；uncertain=证据冲突或不足。",
         "usage_process_visible": "仅 S3 必填：是否看见产品被实际使用的过程；只给最终结果不算。",
         "result_only_without_process": "仅 S3 必填：只展示使用后的结果/成品/不漏/变干净/变美，但没看到产品如何造成结果。",
         "mouth_only_or_static": "仅 S3 必填：只拿着产品口播/静态展示/字幕讲卖点，没有真实使用动作。",
@@ -376,6 +379,7 @@
       "benchmark_s3": {
         "exists": "仅 S3 必填：标杆侧是否存在使用过程功能；S2/S3 合并也算存在，true|false。",
         "module_type": "仅 S3 必填：S3-A~E 的字母 A-E，或 unknown。",
+        "usage_evidence_state": "仅 S3 必填：none | partial | complete | uncertain。none=没有真实产品操作；partial=有真实操作但未证明核心卖点或关键因果链；complete=核心动作链和卖点证明完整；uncertain=证据冲突或不足。",
         "usage_process_visible": "仅 S3 必填：是否看见产品被实际使用的过程；只给最终结果不算。",
         "result_only_without_process": "仅 S3 必填：只展示使用后的结果/成品/不漏/变干净/变美，但没看到产品如何造成结果。",
         "mouth_only_or_static": "仅 S3 必填：只拿着产品口播/静态展示/字幕讲卖点，没有真实使用动作。",
@@ -416,6 +420,7 @@
       },
       "creator_s4": {
         "effect_type": "仅 S4 必填：before_after | split_screen | person_vs_person | product_vs_alt | quantified_test | process_visualization | aesthetic_display | none。",
+        "effect_evidence_state": "仅 S4 必填：none | result_only | verified | uncertain。none=没有效果证据；result_only=只有结果图/结果叙述没有因果桥；verified=效果可见且归因/过程可信；uncertain=证据冲突或不足。",
         "effect_visible": "仅 S4 必填：达人侧效果/结果是否肉眼可见，true|false。",
         "effect_salience": "仅 S4 必填：none | subtle | clear | strong。subtle=要仔细看才有变化；strong=一眼明显。",
         "effect_proposition_matched": "仅 S4 必填：是否命中 product_profile.visual_proof_points 的 primary 证明点；旧结果无该字段时回退 core_visual_proposition；不得用无关变化或 secondary 证明点替代 primary。",
@@ -439,6 +444,7 @@
       },
       "benchmark_s4": {
         "effect_type": "仅 S4 必填：before_after | split_screen | person_vs_person | product_vs_alt | quantified_test | process_visualization | aesthetic_display | none。",
+        "effect_evidence_state": "仅 S4 必填：none | result_only | verified | uncertain。none=没有效果证据；result_only=只有结果图/结果叙述没有因果桥；verified=效果可见且归因/过程可信；uncertain=证据冲突或不足。",
         "effect_visible": "仅 S4 必填：标杆侧效果/结果是否肉眼可见，true|false。",
         "effect_salience": "仅 S4 必填：none | subtle | clear | strong。subtle=要仔细看才有变化；strong=一眼明显。",
         "effect_proposition_matched": "仅 S4 必填：是否命中 product_profile.visual_proof_points 的 primary 证明点；旧结果无该字段时回退 core_visual_proposition；不得用无关变化或 secondary 证明点替代 primary。",
@@ -548,8 +554,10 @@
       "benchmark_execution": "0 | 0.5 | 1 | 2。标杆侧独立执行分，标尺同上。两个执行分只供诊断与审计观察，不直接决定最终 severity。",
       "painpoint_relevance": "benchmark_only | creator_only | both | none。该阶段双方内容是否命中 category_profile.painpoints 的核心决策因素；按内容功能判断，不要求字面用词一致。只供 commercial_priorities 在同一 severity 层级内排序；缺失或 unknown 不等同于 none，也不参与 severity。",
       "stage_standard_delivery": "benchmark_only | creator_only | both | none。该阶段双方是否有效达到本阶段的『本品到位标准』（按阶段查产品锚点：S1 钩子→hook_proposition、S2 引出→承接钩子的自然引出、S3 使用过程→core_selling_points+usage_context（使用中传卖点）、S4 效果→visual_proof_points.primary（旧结果回退 core_visual_proposition）、S5 信任→trust_multipliers、S6 促单→decision_threshold 匹配的 CTA）。做到/展示到才算，仅口头讲到不算。先作为事实收集，暂不参与推导。",
-      "creator_s3": "仅 S3 需输出。对象字段：exists、module_type(A-E/unknown)、usage_process_visible、result_only_without_process、mouth_only_or_static、real_usage_met、core_selling_point_visible、process_framing_met、action_proof_met、action_target_contact_met、action_application_change_visible、critical_action_continuity_met、demonstrated_selling_points、missing_selling_points、scene_mode、usage_context_fit、continuity_met、richness_met、single_scene_continuity_met、single_scene_variation_met、multi_scene_logic_met、multi_scene_transition_met、multi_scene_role_adaptation_met、role_design_met、role_interaction_met、distinct_personas_met、steps_clear_met、pov_immersive_met、presentation_overlays、fake_or_staged、start_seconds、end_seconds、usage_reason、evidence_ids、proposition_ids。",
+      "creator_s3": "仅 S3 需输出。对象字段：exists、module_type(A-E/unknown)、usage_evidence_state(none/partial/complete/uncertain)、usage_process_visible、result_only_without_process、mouth_only_or_static、real_usage_met、core_selling_point_visible、process_framing_met、action_proof_met、action_target_contact_met、action_application_change_visible、critical_action_continuity_met、demonstrated_selling_points、missing_selling_points、scene_mode、usage_context_fit、continuity_met、richness_met、single_scene_continuity_met、single_scene_variation_met、multi_scene_logic_met、multi_scene_transition_met、multi_scene_role_adaptation_met、role_design_met、role_interaction_met、distinct_personas_met、steps_clear_met、pov_immersive_met、presentation_overlays、fake_or_staged、start_seconds、end_seconds、usage_reason、evidence_ids、proposition_ids。",
       "benchmark_s3": "仅 S3 需输出。字段同 creator_s3。",
+      "creator_s4": "仅 S4 需输出。对象字段包含 effect_evidence_state(none/result_only/verified/uncertain)，并与 effect_visible、effect_attribution_supported、process_linked_effect 保持一致。",
+      "benchmark_s4": "仅 S4 需输出。字段同 creator_s4。",
       "creator_s5": "仅 S5 需输出。对象字段：exists、module_type(A-E/unknown)、trust_evidence_type(hard/soft/mixed/none/unknown)、trust_basis(authority/traceable_data/independent_user/social_consensus/process_transparency/product_claim/offer_or_spec/none/unknown)、trust_source_evidence_ids（仅引用 Stage1 中同类型且有来源说明的证据 ID）、trust_source_visible、trust_source_credible、trust_claim_specific、product_relevance_met、independent_trust_purpose、duplicates_other_stage、voice_only、risky_or_unsupported、start_seconds、end_seconds、trust_reason、evidence_ids、proposition_ids（信任材料支持的产品主张 ID，不是 trust.*）。产品功能/参数为 product_claim，价格/数量/赠品/套装/使用时长为 offer_or_spec，二者不计入 S5。",
       "benchmark_s5": "仅 S5 需输出。字段同 creator_s5。",
       "creator_s6": "仅 S6 需输出。对象字段：exists、module_type(A-E/unknown)、direct_order_met、action_path_clear、soft_purchase_invitation_met、offer_or_incentive_clear、price_anchor_met、urgency_evidence_met、gift_stack_met、guarantee_clear_met、urgency_met、product_value_recalled、module_fit_met、ending_position_met、depends_on_valid_s4、compliance_risk、start_seconds、end_seconds、cta_reason、evidence_ids、proposition_ids（CTA 召回的产品价值 ID）。soft_purchase_invitation_met 仅表示“面向用户邀请 + 明确利益点”的无路径软促单，不等同完整购买路径。A/B/C/E 细分观察先进入 trace/QA；S6-D 的 S4 依赖仍为确定性约束。",

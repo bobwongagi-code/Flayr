@@ -1206,6 +1206,7 @@ def build_llm_comparison_payload(
         "S3 阶段（且仅 S3）每侧【必须】输出 creator_s3 与 benchmark_s3 两个对象，形如：\n"
         '{"exists": bool（该侧是否存在使用过程功能；S2/S3 合并时也算存在）, '
         '"module_type": "A"~"E" 或 "unknown"（按最接近的 structure_library S3 五型描述，D步骤拆解/E沉浸第一视角更多是表现层，不得因此压过场景主轴）, '
+        '"usage_evidence_state": "none|partial|complete|uncertain"（只描述使用证据完成度：none=没有真实产品操作，partial=有真实操作但未证明核心卖点或关键因果链，complete=核心动作链和卖点证明完整，uncertain=证据冲突/不足；不要把 partial 压成 none）, '
         '"usage_process_visible": bool（是否看见产品被实际使用的过程；只给最终结果不算）, '
         '"result_only_without_process": bool（只展示使用后的结果/成品/不漏/变干净/变美，但没看到产品如何造成结果）, '
         '"mouth_only_or_static": bool（只拿着产品口播/静态展示/字幕讲卖点，没有真实使用动作）, '
@@ -1251,7 +1252,7 @@ def build_llm_comparison_payload(
     )
     s3_field_req = (
         "S3 强制：stage_analysis 第 3 项（S3 使用过程）必须再含 creator_s3 与 benchmark_s3 两个对象"
-        "（结构见上方：exists/module_type/usage_process_visible/result_only_without_process/mouth_only_or_static/real_usage_met/"
+        "（结构见上方：exists/module_type/usage_evidence_state/usage_process_visible/result_only_without_process/mouth_only_or_static/real_usage_met/"
         "core_selling_point_visible/process_framing_met/action_proof_met/action_target_contact_met/action_application_change_visible/critical_action_continuity_met/demonstrated_selling_points/missing_selling_points/scene_mode/usage_context_fit/continuity_met/"
         "richness_met/single_scene_continuity_met/single_scene_variation_met/multi_scene_logic_met/multi_scene_transition_met/"
         "multi_scene_role_adaptation_met/role_design_met/role_interaction_met/distinct_personas_met/steps_clear_met/pov_immersive_met/"
@@ -1263,6 +1264,7 @@ def build_llm_comparison_payload(
         "## S4 效果因果 flag（只判效果是否可见，以及是否可信地由产品造成）\n"
         "S4 阶段（且仅 S4）每侧【必须】输出 creator_s4 与 benchmark_s4 两个对象，形如：\n"
         '{"effect_type": "before_after|split_screen|person_vs_person|product_vs_alt|quantified_test|process_visualization|aesthetic_display|none", '
+        '"effect_evidence_state": "none|result_only|verified|uncertain"（none=没有效果证据，result_only=只有结果图/结果叙述没有因果桥，verified=效果可见且归因/过程可信，uncertain=证据冲突或不足；result_only 不得写成 verified）, '
         '"effect_visible": bool（效果/结果是否肉眼可见）, '
         '"effect_salience": "none|subtle|clear|strong"（none=无效果；subtle=要仔细看才有变化；clear=普通用户能看出来；strong=一眼明显、有停留价值）, '
         '"effect_proposition_matched": bool（常规同品对标时是否命中 product_profile.visual_proof_points.primary；同类同任务结构对标时改判是否证明共同用户任务的可见结果。两种范围均不得用 secondary 或无关变化替代）, '
@@ -1295,7 +1297,7 @@ def build_llm_comparison_payload(
     )
     s4_field_req = (
         "S4 强制：stage_analysis 第 4 项（S4 效果呈现）必须再含 creator_s4 与 benchmark_s4 两个对象"
-        "（结构见上方：effect_type/effect_visible/effect_salience/effect_proposition_matched/comparison_control_met/"
+        "（结构见上方：effect_type/effect_evidence_state/effect_visible/effect_salience/effect_proposition_matched/comparison_control_met/"
         "closeup_or_focus_met/visual_difference_observed/module_constraints_met/effect_maximized/requires_close_inspection/effect_attribution_supported/result_only_without_process/"
         "process_linked_effect/tamper_or_cut_risk/effect_reason/evidence_ids/proposition_ids）。"
         "S4 flag 只服务效果因果判断；不要用 S3 的使用过程完整性替代 S4 效果可见性，也不要用单纯结果图替代因果证明。"

@@ -561,15 +561,33 @@ _s1_marker = {
     "benchmark_hook": {"exists": True, "evidence_ids": ["B1"]},
     "severity": "small",
 }
-_s1_result = {"stage_analysis": [_s1_marker]}
+_s1_result = {
+    "stage_analysis": [_s1_marker],
+    "video_understanding": {
+        "creator": {
+            "evidence_units": [
+                {"id": "C1", "evidence_strength": "explicit"},
+            ]
+        },
+        "benchmark": {
+            "evidence_units": [
+                {"id": "B1", "evidence_strength": "direct"},
+            ]
+        },
+    },
+}
 repair_s1_hook_boundaries(_s1_result, {})
 _s1_state = _s1_result["stage_analysis"][0].get(S1_POSTPROCESS_STATE_KEY, {})
 check(
     "S1 repair 写入 canonical 消费 marker",
     _s1_state.get(S1_HOOK_BOUNDARIES_STATE_KEY) == S1_HOOK_BOUNDARIES_REPAIRED,
 )
-_s1_before = _derive_one("S1", {**_s1_marker, S1_POSTPROCESS_STATE_KEY: {}})
-_s1_after = _derive_one("S1", _s1_result["stage_analysis"][0])
+_s1_before = _derive_one(
+    "S1",
+    {**_s1_marker, S1_POSTPROCESS_STATE_KEY: {}},
+    facts=_s1_result,
+)
+_s1_after = _derive_one("S1", _s1_result["stage_analysis"][0], facts=_s1_result)
 check(
     "S1 hook floor 必须依赖 repair marker",
     _s1_before["severity"] == "small"

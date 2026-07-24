@@ -21,6 +21,10 @@ from ..artifacts import (
     parse_time_range_seconds,
     parse_timestamp_seconds,
 )
+from ..evidence_states import (
+    S3_USAGE_EVIDENCE_STATES,
+    S4_EFFECT_EVIDENCE_STATES,
+)
 from ..llm.parse import S5_SOURCE_STATUSES, is_effective_voiceover, normalize_s5_source_status
 from .utils import (
     ensure_evidence_unit,
@@ -179,16 +183,136 @@ def prune_multimodal_evidence_to_stage(result: dict[str, Any]) -> None:
                     ]
 
 
-def reconcile_s3_s4_evidence_coherence(result: dict[str, Any]) -> None:
-    """收紧 S3 真实使用与 S4 因果桥的跨阶段一致性。
+def _check_evidence_state_consistency(
+    flag: Any,
+    *,
+    state_key: str,
+    allowed_states: tuple[str, ...],
+    state_complete: str,
+    state_none: str,
+    required_fields: tuple[str, ...],
+    positive_fields: tuple[str, ...],
+    must_be_true_fields: tuple[str, ...] = (),
+    state_must_be_true: dict[str, tuple[str, ...]] | None = None,
+    state_must_be_false: dict[str, tuple[str, ...]] | None = None,
+    result_only: str | None = None,
+) -> dict[str, Any]:
+    """Check only impossible state/boolean combinations.
 
-    该规则不从文字猜动作，只消费模型已明确给出的三个可复核观察：
-    - action_target_contact_met：产品/材料是否真实作用于目标对象；
-    - action_application_change_visible：动作是否新施加/位移/激活材料，或直接改变目标状态；
-    - critical_action_continuity_met：关键作用动作和目标状态变化是否可追踪。
+    This function deliberately does not decide whether a video is ``partial``
+    or ``none``. That semantic state is an upstream fact. Missing or unstable
+    inputs become ``incomplete`` and are refused by derive.
+    """
+    if not isinstance(flag, dict):
+        return {
+            "status": "incomplete",
+            "reason_code": "missing_field",
+            "checked_fields": [],
+        }
+    state = flag.get(state_key)
+    if state not in allowed_states:
+        return {
+            "status": "incomplete",
+            "reason_code": "evidence_state_missing",
+            "state": state,
+            "checked_fields": [],
+        }
+    missing = [key for key in required_fields if flag.get(key) is not True and flag.get(key) is not False]
+    if missing:
+        return {
+            "status": "incomplete",
+            "reason_code": "hard_fact_missing",
+            "state": state,
+            "missing_fields": missing,
+            "checked_fields": list(required_fields),
+        }
+    positive = [key for key in positive_fields if flag.get(key) is True]
+    impossible: list[str] = []
+    for key in (state_must_be_true or {}).get(state, ()):
+        if flag.get(key) is not True:
+            impossible.append(key)
+    for key in (state_must_be_false or {}).get(state, ()):
+        if flag.get(key) is not False:
+            impossible.append(key)
+    if state == state_complete:
+        impossible.extend(key for key in must_be_true_fields if flag.get(key) is False)
+        if flag.get("fake_or_staged") is True:
+            impossible.append("fake_or_staged")
+    if state == state_none:
+        impossible.extend(positive)
+    if result_only is not None:
+        if state == result_only:
+            if flag.get("process_linked_effect") is True:
+                impossible.append("process_linked_effect")
+            if flag.get("result_only_without_process") is False:
+                impossible.append("result_only_without_process")
+        elif state == state_complete and flag.get("result_only_without_process") is True:
+            impossible.append("result_only_without_process")
+    if impossible:
+        return {
+            "status": "state_conflict",
+            "reason_code": "state_hard_fact_conflict",
+            "state": state,
+            "conflicting_fields": sorted(set(impossible)),
+            "checked_fields": list(required_fields),
+        }
+    return {
+        "status": "consistent",
+        "reason_code": "predicate_not_met",
+        "state": state,
+        "checked_fields": list(required_fields),
+    }
 
-    任一明确为 false 时，不能再同时把 S3 记为真实使用；若 S4 有结果，结果仍可存在，
-    但必须标记为“只有结果、未见过程”，不得借 S3 建立因果桥。None 保持旧结果兼容。
+
+def validate_s2_hard_fact_consistency(result: dict[str, Any]) -> None:
+    """Record the read-only S2 contract marker consumed by its floor rule.
+
+    S2 has no semantic state enum, so the marker only proves that every
+    boolean used by ``S2_contract_floor`` was explicitly produced. It never
+    changes a flag or assigns severity.
+    """
+    stages = result.get("stage_analysis")
+    if not isinstance(stages, list) or len(stages) < 2 or not isinstance(stages[1], dict):
+        return
+    s2 = stages[1]
+    required_fields = (
+        "exists",
+        "merged_with_s3",
+        "handoff_met",
+        "product_identity_clear",
+        "product_role_clear",
+    )
+    checks: dict[str, dict[str, Any]] = {}
+    for role in ("creator", "benchmark"):
+        flag = s2.get(f"{role}_s2")
+        if not isinstance(flag, dict):
+            checks[f"{role}_s2"] = {
+                "status": "incomplete",
+                "reason_code": "missing_field",
+                "checked_fields": list(required_fields),
+            }
+            continue
+        missing = [
+            key
+            for key in required_fields
+            if flag.get(key) is not True and flag.get(key) is not False
+        ]
+        checks[f"{role}_s2"] = {
+            "status": "incomplete" if missing else "consistent",
+            "reason_code": "hard_fact_missing" if missing else "predicate_not_met",
+            "missing_fields": missing,
+            "checked_fields": list(required_fields),
+        }
+    postprocess_state = s2.setdefault("_postprocess_state", {})
+    if isinstance(postprocess_state, dict):
+        postprocess_state["s2_hard_fact_checks"] = checks
+
+
+def validate_s3_s4_hard_fact_consistency(result: dict[str, Any]) -> None:
+    """Record mechanical S3/S4 state checks without rewriting semantic facts.
+
+    The marker is stored under ``_postprocess_state`` so it cannot be mistaken
+    for an LLM fact. derive reads this marker as a precondition for a floor.
     """
     stages = result.get("stage_analysis")
     if not isinstance(stages, list) or len(stages) < 4:
@@ -197,61 +321,103 @@ def reconcile_s3_s4_evidence_coherence(result: dict[str, Any]) -> None:
     if not isinstance(s3, dict) or not isinstance(s4, dict):
         return
 
+    s3_fields = (
+        "exists",
+        "usage_process_visible",
+        "real_usage_met",
+        "core_selling_point_visible",
+        "action_proof_met",
+        "action_target_contact_met",
+        "action_application_change_visible",
+        "critical_action_continuity_met",
+        "result_only_without_process",
+        "mouth_only_or_static",
+        "fake_or_staged",
+    )
+    s4_fields = (
+        "effect_visible",
+        "effect_proposition_matched",
+        "visual_difference_observed",
+        "module_constraints_met",
+        "effect_attribution_supported",
+        "process_linked_effect",
+        "result_only_without_process",
+        "requires_close_inspection",
+        "tamper_or_cut_risk",
+    )
+    s3_positive_fields = tuple(
+        field
+        for field in s3_fields
+        if field not in {"result_only_without_process", "mouth_only_or_static", "fake_or_staged"}
+    )
+    s3_must_be_true_fields = tuple(field for field in s3_positive_fields)
+    s4_positive_fields = (
+        "effect_visible",
+        "effect_proposition_matched",
+        "visual_difference_observed",
+        "module_constraints_met",
+        "effect_attribution_supported",
+        "process_linked_effect",
+        "result_only_without_process",
+    )
+    state_checks: dict[str, dict[str, Any]] = {}
     for role in ("creator", "benchmark"):
-        usage = s3.get(f"{role}_s3")
-        effect = s4.get(f"{role}_s4")
-        if not isinstance(usage, dict):
-            continue
-        missing_contact = usage.get("action_target_contact_met") is False
-        missing_application_change = usage.get("action_application_change_visible") is False
-        broken_continuity = usage.get("critical_action_continuity_met") is False
-        if missing_contact or missing_application_change or broken_continuity:
-            # 真实使用不能由空中比划、已有材料上的触碰、准备镜头或跳到完成态来补足。
-            usage["usage_process_visible"] = False
-            usage["real_usage_met"] = False
-            usage["core_selling_point_visible"] = False
-            usage["action_proof_met"] = False
-            reasons: list[str] = []
-            if missing_contact:
-                reasons.append("未见产品或材料实际作用于目标对象")
-            if missing_application_change:
-                reasons.append("未见动作新施加/位移/激活材料或改变目标状态")
-            if broken_continuity:
-                reasons.append("关键动作与目标状态变化之间存在跳剪")
-            reason = "；".join(reasons)
-            current_usage_reason = str(usage.get("usage_reason") or "").strip()
-            if reason and reason not in current_usage_reason:
-                usage["usage_reason"] = f"{current_usage_reason}；{reason}".strip("；")
+        state_checks[f"{role}_s3"] = _check_evidence_state_consistency(
+            s3.get(f"{role}_s3"),
+            state_key="usage_evidence_state",
+            allowed_states=S3_USAGE_EVIDENCE_STATES,
+            state_complete="complete",
+            state_none="none",
+            required_fields=s3_fields,
+            positive_fields=s3_positive_fields,
+            must_be_true_fields=s3_must_be_true_fields,
+            state_must_be_true={
+                "partial": ("exists", "real_usage_met"),
+            },
+            state_must_be_false={
+                "partial": ("result_only_without_process", "fake_or_staged"),
+                "complete": (
+                    "result_only_without_process",
+                    "mouth_only_or_static",
+                    "fake_or_staged",
+                ),
+            },
+        )
+        state_checks[f"{role}_s4"] = _check_evidence_state_consistency(
+            s4.get(f"{role}_s4"),
+            state_key="effect_evidence_state",
+            allowed_states=S4_EFFECT_EVIDENCE_STATES,
+            state_complete="verified",
+            state_none="none",
+            required_fields=s4_fields,
+            positive_fields=s4_positive_fields,
+            must_be_true_fields=(
+                "effect_visible",
+                "effect_proposition_matched",
+                "visual_difference_observed",
+                "module_constraints_met",
+                "effect_attribution_supported",
+                "process_linked_effect",
+            ),
+            state_must_be_true={
+                "result_only": ("effect_visible", "result_only_without_process"),
+            },
+            state_must_be_false={
+                "result_only": ("process_linked_effect",),
+            },
+            result_only="result_only",
+        )
+    for stage in (s3, s4):
+        postprocess_state = stage.setdefault("_postprocess_state", {})
+        if isinstance(postprocess_state, dict):
+            postprocess_state["evidence_hard_fact_checks"] = {
+                key: value for key, value in state_checks.items() if key.endswith("_s3") or key.endswith("_s4")
+            }
 
-            if isinstance(effect, dict) and effect.get("effect_visible") is True:
-                effect["result_only_without_process"] = True
-                effect["process_linked_effect"] = False
-                current_effect_reason = str(effect.get("effect_reason") or "").strip()
-                bridge_reason = f"S3 未形成可复核过程，效果不能作为过程因果闭环：{reason}"
-                if bridge_reason not in current_effect_reason:
-                    effect["effect_reason"] = f"{current_effect_reason}；{bridge_reason}".strip("；")
 
-        # 主分析的摘要布尔也必须跟随复核后的 flags；否则旧的 has_* 会在 derive 中覆盖新事实。
-        if any(
-            key in usage
-            for key in (
-                "action_target_contact_met",
-                "action_application_change_visible",
-                "critical_action_continuity_met",
-            )
-        ):
-            s3[f"{role}_has_usage_demo"] = (
-                usage.get("usage_process_visible") is True
-                and usage.get("real_usage_met") is True
-                and usage.get("action_proof_met") is not False
-                and usage.get("action_target_contact_met") is not False
-                and usage.get("action_application_change_visible") is not False
-                and usage.get("critical_action_continuity_met") is not False
-            )
-        if isinstance(effect, dict) and any(
-            key in effect for key in ("visual_difference_observed", "module_constraints_met")
-        ):
-            s4[f"{role}_has_effect_demo"] = effect.get("effect_visible") is True
+def reconcile_s3_s4_evidence_coherence(result: dict[str, Any]) -> None:
+    """Backward-compatible name for the read-only hard-fact validator."""
+    validate_s3_s4_hard_fact_consistency(result)
 
 
 def bind_improvement_benchmark_reference(item: dict[str, Any], stage: dict[str, Any]) -> None:

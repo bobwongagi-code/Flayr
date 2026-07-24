@@ -683,6 +683,10 @@ def run_large_model_analysis(
         analysis["s2_flags_required"] = True
         analysis["s3_flags_required"] = True
         analysis["s4_flags_required"] = True
+        # New structured state fields are required for severity-elevating floors.
+        # Legacy artifacts without this marker remain readable but cannot trigger
+        # the new floor rules.
+        analysis["evidence_state_required"] = True
         analysis["s5_flags_required"] = True
         analysis["s5_source_signals_required"] = True
         analysis["s6_flags_required"] = True

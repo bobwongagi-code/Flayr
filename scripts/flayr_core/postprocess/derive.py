@@ -17,13 +17,20 @@ from __future__ import annotations
 import re
 from typing import Any, NamedTuple
 
+from ..evidence_states import (
+    EVIDENCE_STATE_STRENGTHS,
+    S3_USAGE_EVIDENCE_STATES,
+    S4_EFFECT_EVIDENCE_STATES,
+    normalize_reason_code,
+)
 from ..multimodal import channel_requirement_for, has_multimodal_assessment, multimodal_execution
+from .calibration import TrustedS4ActivationEvidence, validate_s4_large_floor_activation_evidence
 
 _STAGE_RE = re.compile(r"(S[1-6])")
 
 SEVERITIES = ("small", "medium", "large")
 SEVERITY_RANK = {value: index for index, value in enumerate(SEVERITIES)}
-EVIDENCE_STRENGTHS = ("direct", "explicit", "inferred", "absent")
+EVIDENCE_STRENGTHS = EVIDENCE_STATE_STRENGTHS
 _EXPLICIT_STRENGTHS = {"direct", "explicit"}
 _S1_REPAIR_STATE_KEY = "s1_hook_boundaries"
 _S1_REPAIR_STATE_VALUE = "repaired"
@@ -196,54 +203,6 @@ def _s3_usage_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
         return 2.0 if _s3_strong_scene(flag) else 1.0
 
     return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
-
-
-def _s3_complete_real_usage(flag: dict[str, Any]) -> bool:
-    """S3-A~E 共同底线：真实作用、关键动作闭环、核心卖点在动作中可见。"""
-    return (
-        (flag.get("usage_process_visible") is True or flag.get("real_usage_met") is True)
-        and flag.get("core_selling_point_visible") is True
-        and flag.get("action_proof_met") is True
-        and flag.get("action_target_contact_met") is True
-        and flag.get("action_application_change_visible") is True
-        and flag.get("critical_action_continuity_met") is True
-    )
-
-
-def _s3_explicitly_missing_real_usage(flag: dict[str, Any]) -> bool:
-    """只在事实明确否定使用过程时触发，未知字段不冒充缺失。"""
-    return (
-        flag.get("exists") is False
-        or flag.get("mouth_only_or_static") is True
-        or flag.get("result_only_without_process") is True
-        or flag.get("usage_process_visible") is False
-        or flag.get("real_usage_met") is False
-        or flag.get("action_target_contact_met") is False
-        or flag.get("action_application_change_visible") is False
-        or flag.get("critical_action_continuity_met") is False
-    )
-
-
-def _s4_strong_visible_effect(flag: dict[str, Any]) -> bool:
-    """S4-A~F 的共同底线：用户无需脑补即可看到并理解效果。"""
-    return (
-        flag.get("effect_visible") is True
-        and flag.get("visual_difference_observed") is True
-        and flag.get("module_constraints_met") is True
-        and str(flag.get("effect_salience") or "") in {"clear", "strong"}
-        and flag.get("effect_attribution_supported") is True
-        and flag.get("requires_close_inspection") is not True
-        and flag.get("tamper_or_cut_risk") is not True
-    )
-
-
-def _s4_explicitly_missing_visible_effect(flag: dict[str, Any]) -> bool:
-    """效果不存在或视觉验证明确失败；不把未知结果当成缺失。"""
-    return (
-        flag.get("effect_visible") is False
-        or flag.get("visual_difference_observed") is False
-        or str(flag.get("effect_salience") or "") == "none"
-    )
 
 
 def _attach_pending_flag_trace(stage_id: str, stage: dict[str, Any], trace: dict[str, Any]) -> dict[str, Any]:
@@ -658,7 +617,58 @@ def _stage_strength_gate(
 
 
 def _constraint_evaluation(rule: str, status: str, reason: str, **extra: Any) -> dict[str, Any]:
-    return {"rule": rule, "status": status, "reason": reason, **extra}
+    supplied_reason_code = extra.pop("reason_code", None)
+    default_reason_codes = {
+        "triggered": "constraint_applied",
+        "conflict": "constraint_conflict",
+        "predicate_not_met": "predicate_not_met",
+        "missing_field": "missing_field",
+        "missing_evidence_strength": "evidence_strength_missing",
+        "uncertain_evidence_strength": "insufficient_strength",
+        "insufficient_strength": "insufficient_strength",
+        "uncertain_fact": "uncertain_fact",
+        "precondition_missing": "precondition_missing",
+        "audit_only": "activation_gate_closed",
+        "model_preserved": "model_preserved",
+    }
+    reason_code = normalize_reason_code(supplied_reason_code or default_reason_codes.get(status))
+    return {"rule": rule, "status": status, "reason": reason, "reason_code": reason_code, **extra}
+
+
+def _hard_fact_check(stage: dict[str, Any], flag_key: str) -> dict[str, Any] | None:
+    postprocess_state = stage.get("_postprocess_state")
+    if not isinstance(postprocess_state, dict):
+        return None
+    check_group = "s2_hard_fact_checks" if flag_key.endswith("_s2") else "evidence_hard_fact_checks"
+    checks = postprocess_state.get(check_group)
+    check = checks.get(flag_key) if isinstance(checks, dict) else None
+    return check if isinstance(check, dict) else None
+
+
+def _hard_fact_gate_failure(
+    stage: dict[str, Any],
+    creator_key: str,
+    benchmark_key: str,
+) -> dict[str, Any] | None:
+    """Return a structured failure unless both read-only checks are consistent."""
+    creator_check = _hard_fact_check(stage, creator_key)
+    benchmark_check = _hard_fact_check(stage, benchmark_key)
+    if not isinstance(creator_check, dict) or not isinstance(benchmark_check, dict):
+        return {
+            "status": "precondition_missing",
+            "reason_code": "repair_incomplete",
+            "reason": "severity-increasing floor 缺少只读 hard-fact 校验标记。",
+            "evidence": {"creator": creator_check, "benchmark": benchmark_check},
+        }
+    statuses = {creator_check.get("status"), benchmark_check.get("status")}
+    if statuses != {"consistent"}:
+        return {
+            "status": "uncertain_fact",
+            "reason_code": "state_hard_fact_conflict" if "state_conflict" in statuses else "repair_incomplete",
+            "reason": "severity-increasing floor 的 hard-fact 校验不一致或不完整。",
+            "evidence": {"creator": creator_check, "benchmark": benchmark_check},
+        }
+    return None
 
 
 def _s3_basic_process(flag: dict[str, Any]) -> bool:
@@ -719,6 +729,7 @@ def _derive_one(
     endorsement: dict[str, _Endorsement] | None = None,
     allow_legacy_text_fallback: bool = False,
     facts: dict[str, Any] | None = None,
+    activation_evidence: TrustedS4ActivationEvidence | None = None,
 ) -> dict[str, Any]:
     """根据离散事实收集约束，再交给 resolver；旧参数仅保留调用兼容性。"""
     del weights, painpoints, shake, allow_legacy_text_fallback
@@ -751,7 +762,11 @@ def _derive_one(
         elif not _has_required_evidence(creator, benchmark):
             skip(rule, "missing_field", "S1 Hook 缺少双方 evidence_ids。")
         elif benchmark.get("exists") is True and creator.get("exists") is False:
-            add("floor", "large", rule, "标杆有 Hook、达人明确没有 Hook。", (*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)))
+            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark)
+            if status == "eligible":
+                add("floor", "large", rule, "标杆有 Hook、达人明确没有 Hook。", ids)
+            else:
+                skip(rule, status, "S1 Hook 大下限需要 direct/explicit evidence_strength。", evidence=detail)
         else:
             skip(rule, "predicate_not_met", "双方 Hook 存在性未形成结构性缺口。")
 
@@ -799,6 +814,14 @@ def _derive_one(
             skip(rule, "uncertain_fact", "S2 契约字段未全部明确。")
         elif not _has_required_evidence(creator, benchmark):
             skip(rule, "missing_field", "S2 契约缺少双方 evidence_ids。")
+        elif (hard_fact_failure := _hard_fact_gate_failure(stage, "creator_s2", "benchmark_s2")) is not None:
+            skip(
+                rule,
+                hard_fact_failure["status"],
+                hard_fact_failure["reason"],
+                reason_code=hard_fact_failure["reason_code"],
+                evidence=hard_fact_failure["evidence"],
+            )
         elif all(benchmark.get(key) is True for key in keys) and any(creator.get(key) is False for key in keys):
             status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark)
             if status == "eligible":
@@ -811,22 +834,81 @@ def _derive_one(
     if stage_id == "S3":
         creator, benchmark = _pair_flags(stage, "s3")
         rule = "S3_real_usage_floor"
+        creator_state = creator.get("usage_evidence_state") if isinstance(creator, dict) else None
+        benchmark_state = benchmark.get("usage_evidence_state") if isinstance(benchmark, dict) else None
         if creator is None or benchmark is None:
             skip(rule, "missing_field", "S3 usage flag 缺失。")
-        elif _s3_basic_process_state(benchmark) != "explicit" or _s3_basic_process_state(creator) != "explicit":
-            skip(rule, "uncertain_fact", "S3 核心使用事实不完整。")
+        elif creator_state not in S3_USAGE_EVIDENCE_STATES or benchmark_state not in S3_USAGE_EVIDENCE_STATES:
+            skip(rule, "uncertain_fact", "S3 usage_evidence_state 缺失或非法。", reason_code="evidence_state_missing")
         elif not _has_required_evidence(creator, benchmark):
             skip(rule, "missing_field", "S3 核心使用断层缺少双方 evidence_ids。")
-        elif _s3_complete_real_usage(benchmark) and _s3_explicitly_missing_real_usage(creator):
-            add("floor", "large", rule, "标杆完成可复核真实使用、达人明确缺少真实使用。", (*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)))
         else:
-            skip(rule, "predicate_not_met", "S3 未形成完整使用过程断层。")
+            creator_check = _hard_fact_check(stage, "creator_s3")
+            benchmark_check = _hard_fact_check(stage, "benchmark_s3")
+            if not isinstance(creator_check, dict) or not isinstance(benchmark_check, dict):
+                skip(rule, "precondition_missing", "S3 使用事实尚未经过只读 hard-fact 校验。", reason_code="repair_incomplete")
+            elif creator_check.get("status") != "consistent" or benchmark_check.get("status") != "consistent":
+                skip(
+                    rule,
+                    "uncertain_fact",
+                    "S3 使用状态存在硬事实冲突或校验不完整，保留模型 severity。",
+                    reason_code="state_hard_fact_conflict" if "state_conflict" in {
+                        creator_check.get("status"), benchmark_check.get("status")
+                    } else "repair_incomplete",
+                    evidence={"creator": creator_check, "benchmark": benchmark_check},
+                )
+            elif "uncertain" in {creator_state, benchmark_state}:
+                uncertain_role = "creator" if creator_state == "uncertain" else "benchmark"
+                skip(
+                    rule,
+                    "uncertain_fact",
+                    "S3 使用完成度存在 uncertain，不能把它解释为明确缺失或明确完成。",
+                    reason_code=f"{uncertain_role}_usage_uncertain",
+                )
+            elif creator_state == "partial" or benchmark_state == "partial":
+                partial_role = "creator" if creator_state == "partial" else "benchmark"
+                skip(
+                    rule,
+                    "predicate_not_met",
+                    "S3 存在 partial 使用过程，不能把 partial 压成 none 触发大下限。",
+                    reason_code=f"{partial_role}_usage_partial",
+                )
+            elif creator_state == "none" and benchmark_state == "complete":
+                status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark)
+                if status == "eligible":
+                    add("floor", "large", rule, "标杆完成可复核真实使用、达人明确没有真实使用过程。", ids)
+                else:
+                    skip(rule, status, "S3 结构性大下限需要双方 direct/explicit evidence_strength。", evidence=detail)
+            else:
+                skip(rule, "predicate_not_met", "S3 未形成 none 对 complete 的明确使用过程断层。")
 
         rule = "S3_thin_presentation_floor"
         if creator is None or benchmark is None:
             skip(rule, "missing_field", "S3 usage flag 缺失。")
+        elif creator_state not in S3_USAGE_EVIDENCE_STATES or benchmark_state not in S3_USAGE_EVIDENCE_STATES:
+            skip(rule, "uncertain_fact", "S3 薄呈现规则的使用状态缺失或非法。", reason_code="evidence_state_missing")
+        elif "uncertain" in {creator_state, benchmark_state}:
+            uncertain_role = "creator" if creator_state == "uncertain" else "benchmark"
+            skip(
+                rule,
+                "uncertain_fact",
+                "S3 薄呈现规则遇到 uncertain 使用状态，不能继续比较。",
+                reason_code=f"{uncertain_role}_usage_uncertain",
+            )
+        elif creator_state not in {"partial", "complete"} or benchmark_state not in {"partial", "complete"}:
+            skip(rule, "predicate_not_met", "S3 薄呈现规则不适用于 none 使用状态。")
+        elif (hard_fact_failure := _hard_fact_gate_failure(stage, "creator_s3", "benchmark_s3")) is not None:
+            skip(
+                rule,
+                hard_fact_failure["status"],
+                hard_fact_failure["reason"],
+                reason_code=hard_fact_failure["reason_code"],
+                evidence=hard_fact_failure["evidence"],
+            )
         elif _s3_basic_process_state(creator) != "explicit" or _s3_basic_process_state(benchmark) != "explicit":
-            skip(rule, "uncertain_fact", "S3 薄呈现规则的核心事实不完整。")
+            skip(rule, "uncertain_fact", "S3 薄呈现规则的核心事实不完整。", reason_code="hard_fact_missing")
+        elif creator.get("process_framing_met") not in {True, False} or benchmark.get("process_framing_met") not in {True, False}:
+            skip(rule, "uncertain_fact", "S3 薄呈现规则的 process_framing_met 不明确。", reason_code="hard_fact_missing")
         elif benchmark.get("process_framing_met") is not True or creator.get("process_framing_met") is not False:
             skip(rule, "predicate_not_met", "S3 未形成标杆做厚、达人单薄的明确差异。")
         else:
@@ -839,25 +921,87 @@ def _derive_one(
     if stage_id == "S4":
         creator, benchmark = _pair_flags(stage, "s4")
         rule = "S4_visible_effect_floor"
+        creator_state = creator.get("effect_evidence_state") if isinstance(creator, dict) else None
+        benchmark_state = benchmark.get("effect_evidence_state") if isinstance(benchmark, dict) else None
         if creator is None or benchmark is None:
             skip(rule, "missing_field", "S4 effect flag 缺失。")
-        elif _s4_credible_effect_state(benchmark) != "explicit" or _s4_credible_effect_state(creator) != "explicit":
-            skip(rule, "uncertain_fact", "S4 可见效果事实不完整。")
+        elif creator_state not in S4_EFFECT_EVIDENCE_STATES or benchmark_state not in S4_EFFECT_EVIDENCE_STATES:
+            skip(rule, "uncertain_fact", "S4 effect_evidence_state 缺失或非法。", reason_code="evidence_state_missing")
         elif not _has_required_evidence(creator, benchmark):
             skip(rule, "missing_field", "S4 效果断层缺少双方 evidence_ids。")
-        elif _s4_strong_visible_effect(benchmark) and (
-            _s4_explicitly_missing_visible_effect(creator)
-            or (creator.get("result_only_without_process") is True and creator.get("process_linked_effect") is False)
-        ):
-            add("floor", "large", rule, "标杆完成强而可见的效果证明、达人明确缺少可复核效果。", (*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)))
         else:
-            skip(rule, "predicate_not_met", "S4 未形成明确效果证明断层。")
+            creator_check = _hard_fact_check(stage, "creator_s4")
+            benchmark_check = _hard_fact_check(stage, "benchmark_s4")
+            if not isinstance(creator_check, dict) or not isinstance(benchmark_check, dict):
+                skip(rule, "precondition_missing", "S4 效果事实尚未经过只读 hard-fact 校验。", reason_code="repair_incomplete")
+            elif creator_check.get("status") != "consistent" or benchmark_check.get("status") != "consistent":
+                skip(
+                    rule,
+                    "uncertain_fact",
+                    "S4 效果状态存在硬事实冲突或校验不完整，保留模型 severity。",
+                    reason_code="state_hard_fact_conflict" if "state_conflict" in {
+                        creator_check.get("status"), benchmark_check.get("status")
+                    } else "repair_incomplete",
+                    evidence={"creator": creator_check, "benchmark": benchmark_check},
+                )
+            elif "uncertain" in {creator_state, benchmark_state}:
+                uncertain_role = "creator" if creator_state == "uncertain" else "benchmark"
+                skip(
+                    rule,
+                    "uncertain_fact",
+                    "S4 效果完成度存在 uncertain，不能把它解释为明确缺失或明确验证。",
+                    reason_code=f"{uncertain_role}_effect_uncertain",
+                )
+            elif creator_state == "result_only" or benchmark_state == "result_only":
+                result_only_role = "creator" if creator_state == "result_only" else "benchmark"
+                skip(
+                    rule,
+                    "predicate_not_met",
+                    "S4 存在 result_only 效果证据，不能把结果图当作 verified。",
+                    reason_code=f"{result_only_role}_effect_result_only",
+                )
+            elif creator_state == "none" and benchmark_state == "verified":
+                status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark)
+                if status != "eligible":
+                    skip(rule, status, "S4 结构性大下限需要双方 direct/explicit evidence_strength。", evidence=detail)
+                elif not validate_s4_large_floor_activation_evidence(activation_evidence):
+                    add("floor", "large", rule, "标杆完成可验证效果、达人明确没有效果证据。", ids)
+                else:
+                    skip(
+                        rule,
+                        "audit_only",
+                        "S4 大下限候选已满足事实条件，但仍等待 S4 边界校准与新鲜盲测门禁。",
+                        reason_code="activation_gate_closed",
+                        candidate={"kind": "floor", "level": "large", "evidence_ids": ids},
+                    )
+            else:
+                skip(rule, "predicate_not_met", "S4 未形成 none 对 verified 的明确效果证明断层。")
 
         rule = "S4_thin_effect_floor"
         if creator is None or benchmark is None:
             skip(rule, "missing_field", "S4 effect flag 缺失。")
+        elif creator_state not in S4_EFFECT_EVIDENCE_STATES or benchmark_state not in S4_EFFECT_EVIDENCE_STATES:
+            skip(rule, "uncertain_fact", "S4 薄效果规则的效果状态缺失或非法。", reason_code="evidence_state_missing")
+        elif "uncertain" in {creator_state, benchmark_state}:
+            uncertain_role = "creator" if creator_state == "uncertain" else "benchmark"
+            skip(
+                rule,
+                "uncertain_fact",
+                "S4 薄效果规则遇到 uncertain 效果状态，不能继续比较。",
+                reason_code=f"{uncertain_role}_effect_uncertain",
+            )
+        elif creator_state not in {"result_only", "verified"} or benchmark_state != "verified":
+            skip(rule, "predicate_not_met", "S4 薄效果规则不适用于 none 效果状态。")
+        elif (hard_fact_failure := _hard_fact_gate_failure(stage, "creator_s4", "benchmark_s4")) is not None:
+            skip(
+                rule,
+                hard_fact_failure["status"],
+                hard_fact_failure["reason"],
+                reason_code=hard_fact_failure["reason_code"],
+                evidence=hard_fact_failure["evidence"],
+            )
         elif _s4_credible_effect_state(benchmark) != "explicit" or _s4_credible_effect_state(creator) != "explicit":
-            skip(rule, "uncertain_fact", "S4 薄效果规则的事实不完整。")
+            skip(rule, "uncertain_fact", "S4 薄效果规则的事实不完整。", reason_code="hard_fact_missing")
         elif not _s4_credible_effect(creator) or not _s4_credible_effect(benchmark):
             skip(rule, "predicate_not_met", "双方没有同时形成可信效果，薄效果规则不触发。")
         elif not (str(benchmark.get("effect_salience") or "") == "strong" and benchmark.get("effect_maximized") is True):
@@ -989,9 +1133,13 @@ def critical_severity_stages(result: dict[str, Any]) -> list[str]:
     return out
 
 
-def derive_severity_from_facts(result: dict[str, Any], analysis: dict[str, Any] | None = None) -> None:
+def derive_severity_from_facts(
+    result: dict[str, Any],
+    analysis: dict[str, Any] | None = None,
+    *,
+    activation_evidence: TrustedS4ActivationEvidence | None = None,
+) -> None:
     """为每个阶段收集确定性约束并通过唯一 resolver 写入最终 severity。"""
-    del analysis
     stages = result.get("stage_analysis")
     if not isinstance(stages, list):
         return
@@ -1010,6 +1158,7 @@ def derive_severity_from_facts(result: dict[str, Any], analysis: dict[str, Any] 
                 stage,
                 endorsement=endorsement,
                 facts=result,
+                activation_evidence=activation_evidence,
             )
         except Exception as exc:
             trace = {

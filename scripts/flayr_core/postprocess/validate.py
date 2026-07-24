@@ -17,6 +17,7 @@ import re
 from typing import Any
 
 from ..artifacts import parse_time_range_seconds
+from ..evidence_states import S3_USAGE_EVIDENCE_STATES, S4_EFFECT_EVIDENCE_STATES
 from ..llm.parse import (
     hook_reason_window_leaks,
     is_effective_voiceover,
@@ -469,12 +470,15 @@ def validate_s3_usage_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
         return
 
     errors: list[str] = []
+    evidence_state_required = analysis.get("evidence_state_required") is True
     for role in ("creator", "benchmark"):
         key = f"{role}_s3"
         flag = s3.get(key)
         if not isinstance(flag, dict):
             errors.append(f"S3 缺少 {key}")
             continue
+        if evidence_state_required and flag.get("usage_evidence_state") not in S3_USAGE_EVIDENCE_STATES:
+            errors.append(f"S3 {key}.usage_evidence_state 必须是 none/partial/complete/uncertain")
         for bool_key in (
             "exists",
             "usage_process_visible",
@@ -546,12 +550,15 @@ def validate_s4_effect_flags(result: dict[str, Any], analysis: dict[str, Any]) -
         return
 
     errors: list[str] = []
+    evidence_state_required = analysis.get("evidence_state_required") is True
     for role in ("creator", "benchmark"):
         key = f"{role}_s4"
         flag = s4.get(key)
         if not isinstance(flag, dict):
             errors.append(f"S4 缺少 {key}")
             continue
+        if evidence_state_required and flag.get("effect_evidence_state") not in S4_EFFECT_EVIDENCE_STATES:
+            errors.append(f"S4 {key}.effect_evidence_state 必须是 none/result_only/verified/uncertain")
         for bool_key in (
             "effect_visible",
             "effect_proposition_matched",

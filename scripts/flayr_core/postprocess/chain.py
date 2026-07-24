@@ -42,7 +42,8 @@ from .repair import (
     ground_stage_visual_evidence,
     materialize_spoken_stage_evidence,
     prune_multimodal_evidence_to_stage,
-    reconcile_s3_s4_evidence_coherence,
+    validate_s2_hard_fact_consistency,
+    validate_s3_s4_hard_fact_consistency,
     reconcile_s5_trust_sources,
     reconcile_unsupported_cta,
     repair_s1_hook_boundaries,
@@ -58,6 +59,7 @@ from .claims_my import (
 
 # severity resolver：模型默认值 + 只收窄区间的确定性 floor/ceiling 约束。
 from .derive import derive_severity_from_facts
+from .calibration import TrustedS4ActivationEvidence
 from .proposition import materialize_cross_stage_inputs, materialize_quality_audits
 
 
@@ -104,23 +106,37 @@ def finalize_severity_after_repairs(
     normalized: dict[str, Any],
     analysis: dict[str, Any],
     audit: PostprocessAudit | None = None,
+    activation_evidence: TrustedS4ActivationEvidence | None = None,
 ) -> None:
     """所有 severity 重算入口都先完成 S1 repair，再调用唯一 resolver。"""
     steps = (
         ("postprocess.repair_s1_hook_boundaries", repair_s1_hook_boundaries, (normalized, analysis)),
-        ("postprocess.derive_severity_from_facts", derive_severity_from_facts, (normalized, analysis)),
+        ("postprocess.validate_s2_hard_fact_consistency", validate_s2_hard_fact_consistency, (normalized,)),
+        ("postprocess.validate_s3_s4_hard_fact_consistency", validate_s3_s4_hard_fact_consistency, (normalized,)),
+        (
+            "postprocess.derive_severity_from_facts",
+            derive_severity_from_facts,
+            (normalized, analysis),
+        ),
     )
     for rule, function, args in steps:
         if audit is None:
-            function(*args)
+            if function is derive_severity_from_facts:
+                function(*args, activation_evidence=activation_evidence)
+            else:
+                function(*args)
         else:
-            audit.run(normalized, rule, function, *args)
+            if function is derive_severity_from_facts:
+                audit.run(normalized, rule, function, *args, activation_evidence=activation_evidence)
+            else:
+                audit.run(normalized, rule, function, *args)
 
 
 def apply_postprocess_chain(
     normalized: dict[str, Any],
     analysis: dict[str, Any],
     audit: PostprocessAudit | None = None,
+    activation_evidence: TrustedS4ActivationEvidence | None = None,
 ) -> None:
     """两个 caller 共享的中段流水线，并可记录每个规则的字段变更。"""
 
@@ -146,7 +162,6 @@ def apply_postprocess_chain(
     step("postprocess.materialize_spoken_stage_evidence", materialize_spoken_stage_evidence, normalized)
     step("postprocess.align_stage_flag_evidence", align_stage_flag_evidence, normalized)
     step("postprocess.fill_missing_evidence_references", fill_missing_evidence_references, normalized)
-    step("postprocess.reconcile_s3_s4_evidence_coherence", reconcile_s3_s4_evidence_coherence, normalized)
     step("postprocess.derive_product_visibility", derive_product_visibility, normalized, analysis)
     step(
         "postprocess.reconcile_s5_trust_sources",
@@ -157,7 +172,12 @@ def apply_postprocess_chain(
     step("postprocess.prune_multimodal_evidence_to_stage", prune_multimodal_evidence_to_stage, normalized)
     step("postprocess.materialize_cross_stage_inputs", materialize_cross_stage_inputs, normalized, analysis)
     step("postprocess.stabilize_stage_severity", stabilize_stage_severity, normalized)
-    finalize_severity_after_repairs(normalized, analysis, audit=audit)
+    finalize_severity_after_repairs(
+        normalized,
+        analysis,
+        audit=audit,
+        activation_evidence=activation_evidence,
+    )
     step("postprocess.apply_comparison_eligibility", apply_comparison_eligibility, normalized)
     step("postprocess.materialize_quality_audits", materialize_quality_audits, normalized, analysis)
     step("postprocess.stabilize_improvement_priorities", stabilize_improvement_priorities, normalized)

@@ -13,7 +13,7 @@ from typing import Any
 
 from ..artifacts import format_seconds, parse_time_range_seconds, parse_timestamp_seconds, select_frames_for_time_range
 from ..postprocess.chain import finalize_severity_after_repairs
-from ..postprocess.repair import reconcile_s3_s4_evidence_coherence, stabilize_improvement_priorities
+from ..postprocess.repair import validate_s3_s4_hard_fact_consistency, stabilize_improvement_priorities
 from ..utils import write_json, write_text
 from .api import call_llm_api, extract_chat_completion_text, image_to_data_url, video_to_data_url
 from .parse import normalize_demo_flag, normalize_s4_effect_salience, normalize_s4_effect_type, parse_json_text
@@ -280,7 +280,7 @@ def apply_s4_visual_verifier_result(
             s4_flag["effect_proposition_matched"] = False
             applied = True
     if applied:
-        reconcile_s3_s4_evidence_coherence(result)
+        validate_s3_s4_hard_fact_consistency(result)
         finalize_severity_after_repairs(result, analysis)
         stabilize_improvement_priorities(result)
     return applied

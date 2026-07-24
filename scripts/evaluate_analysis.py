@@ -70,12 +70,12 @@ FLAG_FIELD_OWNERSHIP: dict[str, dict[str, set[str]]] = {
         "qa_report": {"start_seconds", "end_seconds", "handoff_reason", "evidence_ids"},
     },
     "S3": {
-        "derive": {"exists", "usage_process_visible", "result_only_without_process", "mouth_only_or_static", "real_usage_met", "core_selling_point_visible", "action_proof_met", "action_target_contact_met", "action_application_change_visible", "critical_action_continuity_met", "missing_selling_points", "scene_mode", "usage_context_fit", "continuity_met", "richness_met", "single_scene_continuity_met", "single_scene_variation_met", "multi_scene_logic_met", "multi_scene_transition_met", "multi_scene_role_adaptation_met", "role_design_met", "role_interaction_met", "fake_or_staged"},
+        "derive": {"exists", "usage_evidence_state", "usage_process_visible", "result_only_without_process", "mouth_only_or_static", "real_usage_met", "core_selling_point_visible", "action_proof_met", "action_target_contact_met", "action_application_change_visible", "critical_action_continuity_met", "missing_selling_points", "scene_mode", "usage_context_fit", "continuity_met", "richness_met", "single_scene_continuity_met", "single_scene_variation_met", "multi_scene_logic_met", "multi_scene_transition_met", "multi_scene_role_adaptation_met", "role_design_met", "role_interaction_met", "fake_or_staged"},
         "cross_stage": {"demonstrated_selling_points", "proposition_ids"},
         "qa_report": {"module_type", "process_framing_met", "distinct_personas_met", "steps_clear_met", "pov_immersive_met", "presentation_overlays", "start_seconds", "end_seconds", "usage_reason", "evidence_ids"},
     },
     "S4": {
-        "derive": {"effect_type", "effect_visible", "effect_salience", "effect_proposition_matched", "comparison_control_met", "closeup_or_focus_met", "visual_difference_observed", "module_constraints_met", "effect_maximized", "requires_close_inspection", "effect_attribution_supported", "result_only_without_process", "process_linked_effect", "tamper_or_cut_risk"},
+        "derive": {"effect_type", "effect_evidence_state", "effect_visible", "effect_salience", "effect_proposition_matched", "comparison_control_met", "closeup_or_focus_met", "visual_difference_observed", "module_constraints_met", "effect_maximized", "requires_close_inspection", "effect_attribution_supported", "result_only_without_process", "process_linked_effect", "tamper_or_cut_risk"},
         "cross_stage": {"effect_visible", "effect_proposition_matched", "process_linked_effect", "proposition_ids"},
         "qa_report": {"start_seconds", "end_seconds", "effect_reason", "evidence_ids", "visual_verifier_reason"},
     },
@@ -609,8 +609,9 @@ def _stage_oracle_audit(labels: dict[str, Any], run_paths: dict[str, Path]) -> d
             replay_status = "execution_only"
             if isinstance(candidate_stage, dict):
                 replay_status = _prepare_oracle_replay_stage(candidate_stage, current_stage, oracle)
-                candidate["structured_relevance_required"] = True
-                finalize_severity_after_repairs(candidate, candidate)
+                # Evaluation replays the result artifact, but must never treat
+                # fields inside that artifact as trusted activation metadata.
+                finalize_severity_after_repairs(candidate, {})
             replay_stage = _result_stage_map(candidate).get(current_stage) or {}
             expected_severity = normalize_ground_truth(expected_stages.get(current_stage))
             replay_severity = normalize_severity(replay_stage.get("severity"))

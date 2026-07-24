@@ -76,7 +76,10 @@ LLM raw JSON
 
 ### 2.5.4 当前 S3 evidence-reception 规则状态
 
-`process_framing_met` 不是“画面必须拍全”的打分规则，而是 S3 使用过程证据是否可接收的候选观察字段。它当前只作为 trace/审计字段，不直接影响 S3 severity。
+`process_framing_met` 不是“画面必须拍全”的打分规则，而是 S3 使用过程证据是否可接收的结构化观察字段。
+它不单独决定 severity；只有在 S3 `usage_evidence_state` 已明确为 `partial|complete`、核心动作事实
+完整、双方证据强度为 `direct|explicit`，且标杆为 true、达人为 false 时，才可作为已登记的
+`S3_thin_presentation_floor` medium 约束。缺字段、unknown、uncertain 或未经过证据强度门禁时仍只记录审计，不触发。
 
 设计边界：
 
@@ -539,6 +542,23 @@ PY
 - 缺少足够 oracle 时必须写 `unresolved`，不得根据最终结果编造根因。
 
 Phase C 现在保存 `before_stage_analysis` / `after_stage_analysis` 快照，仅用于离线净收益评估，不改变主分析。
+
+### Q24 derive 约束与校准门禁
+
+- `model_severity` 是默认值；derive 只能提交 floor/ceiling，floor 取 max、ceiling 取 min，冲突保留模型并复用共享 Phase C 预算。
+- `usage_evidence_state` / `effect_evidence_state` 是 Stage1/Stage2 的结构化事实。`partial`、`result_only`、`uncertain`、缺字段、非法值或证据强度不是 `direct|explicit` 时，不得触发提高 severity 的 floor。
+- `repair_evidence.py` 只检查状态与核心布尔事实之间的机械矛盾；不得把 `partial` 改成 `none`，不得把 `result_only` 改成 `verified`，也不得重写模型 severity。
+- 每个 severity-increasing floor 必须有 repair/hard-fact marker；缺 marker 只能写 audit，不得由直接调用 derive 的路径绕过。
+- S4 large floor 没有手动开关，也不能从 `analysis.json` 读取激活字段。只有通过 `postprocess/calibration.py::load_s4_large_floor_activation_evidence` 的摘要校验、至少 24 张 calibration 边界卡、双人边界复核、至少 5 次稳定重复运行、至少 12 对全新 frozen blind、4 个品类、2 个市场、已测 floor coverage 且无 derive/Phase C 回归后，才允许把可信 manifest 显式传入收口入口触发；否则必须保持 `audit_only`。
+- calibration 卡只用于边界校准，不能混入 blind cohort；重复运行、floor 捕获率和回归数缺少人工结构性 GT 时必须报告为不可测，不得把缺失当作通过。
+
+实现位置：
+
+- `scripts/flayr_core/postprocess/derive.py`
+- `scripts/flayr_core/postprocess/repair_evidence.py`
+- `scripts/flayr_core/postprocess/calibration.py`
+- `scripts/flayr_core/postprocess/chain.py`
+- `scripts/flayr_core/evidence_states.py`
 
 ---
 
