@@ -12,6 +12,7 @@ from scripts.flayr_core.run_state import (
     PROCESSING,
     REPORT_GENERATING,
     RunStateError,
+    begin_report_generation,
     initialize_run_state,
     read_run_state,
     recover_run_state,
@@ -46,6 +47,18 @@ class RunStateTests(unittest.TestCase):
             initialize_run_state(run_dir)
             with self.assertRaises(RunStateError):
                 transition_run_state(run_dir, COMPLETED)
+
+    def test_report_generation_state_is_written_before_report_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            initialize_run_state(run_dir, job_id="job-3")
+            transition_run_state(run_dir, PROCESSING)
+            transition_run_state(run_dir, ANALYSIS_COMPLETED, artifacts=("analysis.json",))
+
+            state = begin_report_generation(run_dir, job_id="job-3", artifacts=("analysis.json",))
+
+            self.assertEqual(state["state"], REPORT_GENERATING)
+            self.assertFalse((run_dir / "bd_report.html").exists())
 
     def test_restart_recovery_records_terminal_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

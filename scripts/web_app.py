@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import hmac
 import json
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -62,6 +65,9 @@ DEFAULT_WORKSPACE_ID = "local"
 DEFAULT_OWNER_ID = "local"
 CLIENT_COOKIE_NAME = "flayr_client_id"
 CLIENT_COOKIE_MAX_AGE = 365 * 24 * 60 * 60
+CLIENT_COOKIE_SECRET_FILE = ".client_cookie_secret"
+CLIENT_COOKIE_SECRET_ENV = "FLAYR_COOKIE_SECRET"
+CLIENT_COOKIE_SECRET_BYTES = 32
 IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 MARKET_CODES = {
@@ -111,6 +117,54 @@ def _identity_value(value: Any, label: str, default: str) -> str:
     return candidate
 
 
+def _load_client_cookie_secret(root: Path) -> bytes:
+    """Load a stable signing key without exposing it through the web root."""
+    configured = os.environ.get(CLIENT_COOKIE_SECRET_ENV, "").strip()
+    if configured:
+        if len(configured) < CLIENT_COOKIE_SECRET_BYTES:
+            raise RuntimeError(f"{CLIENT_COOKIE_SECRET_ENV} 至少需要 {CLIENT_COOKIE_SECRET_BYTES} 个字符")
+        return configured.encode("utf-8")
+
+    secret_path = root / CLIENT_COOKIE_SECRET_FILE
+    secret_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        secret = secret_path.read_bytes()
+    except FileNotFoundError:
+        secret = secrets.token_bytes(CLIENT_COOKIE_SECRET_BYTES)
+        try:
+            fd = os.open(secret_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            secret = secret_path.read_bytes()
+        else:
+            with os.fdopen(fd, "wb") as sink:
+                sink.write(secret)
+    except OSError as exc:
+        raise RuntimeError(f"无法读取浏览器身份签名密钥：{secret_path}") from exc
+    if len(secret) < CLIENT_COOKIE_SECRET_BYTES:
+        raise RuntimeError(f"浏览器身份签名密钥无效：{secret_path}")
+    try:
+        secret_path.chmod(0o600)
+    except OSError:
+        pass
+    return secret
+
+
+def _signed_client_cookie(client_id: str, secret: bytes) -> str:
+    signature = hmac.new(secret, client_id.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{client_id}.{signature}"
+
+
+def _verified_client_cookie(value: str, secret: bytes) -> str | None:
+    try:
+        client_id, signature = value.rsplit(".", 1)
+    except ValueError:
+        return None
+    if not IDENTITY_PATTERN.fullmatch(client_id) or not re.fullmatch(r"[0-9a-f]{64}", signature):
+        return None
+    expected = _signed_client_cookie(client_id, secret).rsplit(".", 1)[1]
+    return client_id if hmac.compare_digest(signature, expected) else None
+
+
 def _run_state(run_dir: Path) -> str:
     payload = read_run_state(run_dir)
     return str(payload.get("state") or "") if payload else ""
@@ -129,7 +183,9 @@ def _analysis_state(run_dir: Path) -> str:
 def progress_for_run(run_dir: Path) -> tuple[int, str]:
     """Expose only the three coarse phases promised by the updated design."""
     lifecycle_state = _run_state(run_dir)
-    if lifecycle_state in {COMPLETED, DEGRADED}:
+    if lifecycle_state == DEGRADED:
+        return 100, "报告生成（部分分析能力降级）"
+    if lifecycle_state == COMPLETED:
         return 100, "报告生成"
     if lifecycle_state in {ANALYSIS_COMPLETED, REPORT_GENERATING}:
         return 92, "报告生成"
@@ -137,7 +193,7 @@ def progress_for_run(run_dir: Path) -> tuple[int, str]:
     if state == "completed" and (run_dir / SUCCESS_MANIFEST_NAME).is_file():
         return 100, "报告生成"
     if state == "degraded" and (run_dir / "degraded_manifest.json").is_file() and report_variants_ready(run_dir):
-        return 100, "报告生成"
+        return 100, "报告生成（部分分析能力降级）"
     if (run_dir / "postprocess_change_log.json").is_file():
         return 92, "报告生成"
     if (run_dir / "final_derived_result.json").is_file() or (run_dir / "validated_normalized_result.json").is_file():
@@ -214,10 +270,15 @@ def _servable_asset(path: Path) -> bool:
     return _asset_magic_matches(path)
 
 
+def _safe_servable_asset(run_dir: Path, relative_path: str) -> Path | None:
+    candidate = safe_asset_path(run_dir, relative_path)
+    return candidate if candidate is not None and _servable_asset(candidate) else None
+
+
 def report_variants_ready(run_dir: Path) -> bool:
     """Return true only when both audience reports are safely available."""
     return all(
-        safe_asset_path(run_dir, name) is not None
+        _safe_servable_asset(run_dir, name) is not None
         for name in ("bd_report.html", "creator_report.html")
     )
 
@@ -416,7 +477,7 @@ class JobStore:
                     job.update({
                         "status": "degraded",
                         "progress": 100,
-                        "phase": "报告生成",
+                        "phase": "报告生成（部分分析能力降级）",
                         "estimated_remaining_seconds": 0,
                     })
                 else:
@@ -526,9 +587,9 @@ class JobStore:
         if owner_id is None:
             return True
         stored_owner = str(job.get("owner_id") or "")
-        # Jobs created before ownership metadata was introduced can be claimed
-        # by the first authenticated local browser that opens them.
-        return not stored_owner or stored_owner == owner_id
+        # Missing ownership metadata is not public.  Treating it as claimable
+        # would let any browser that knows a legacy job id take it over.
+        return bool(stored_owner) and stored_owner == owner_id
 
     def get(
         self,
@@ -546,9 +607,6 @@ class JobStore:
                 workspace = _identity_value(workspace_id, "workspace_id", self.workspace_id)
                 if not self._matches_scope(job, owner, workspace):
                     return None
-                if owner is not None and not job.get("owner_id"):
-                    job["owner_id"] = owner
-                    self._persist_locked()
             self._refresh_progress_locked(job)
             return dict(job)
 
@@ -575,9 +633,9 @@ class JobStore:
         run_dir = Path(str(job.get("run_dir") or ""))
         analysis_scope = self._read_analysis_scope(run_dir)
         reports_ready = status in {"completed", "degraded"}
-        has_bd_report = safe_asset_path(run_dir, "bd_report.html") is not None
-        has_legacy_report = safe_asset_path(run_dir, "report.html") is not None
-        has_creator_report = safe_asset_path(run_dir, "creator_report.html") is not None
+        has_bd_report = _safe_servable_asset(run_dir, "bd_report.html") is not None
+        has_legacy_report = _safe_servable_asset(run_dir, "report.html") is not None
+        has_creator_report = _safe_servable_asset(run_dir, "creator_report.html") is not None
         has_report = has_bd_report or has_legacy_report
         workspace_id = str(job.get("workspace_id") or DEFAULT_WORKSPACE_ID)
         scoped_job_url = f"/api/workspaces/{workspace_id}/jobs/{job.get('id')}"
@@ -667,14 +725,6 @@ class JobStore:
                     artifacts=artifacts,
                 )
                 state = ANALYSIS_COMPLETED
-            if state == ANALYSIS_COMPLETED and any(
-                name in artifacts for name in ("bd_report.html", "creator_report.html", "report.html")
-            ):
-                transition_run_state(
-                    run_dir,
-                    REPORT_GENERATING,
-                    artifacts=artifacts,
-                )
         except RunStateError:
             # The terminal result path performs an explicit consistency check;
             # a transient or corrupt state must not make polling crash.
@@ -840,7 +890,7 @@ class JobStore:
                     job_id,
                     status="degraded",
                     progress=100,
-                    phase="报告生成",
+                    phase="报告生成（部分分析能力降级）",
                     estimated_remaining_seconds=0,
                     degraded_reason=reason[:500],
                 )
@@ -879,6 +929,7 @@ class FlayrServer(ThreadingHTTPServer):
 
     def __init__(self, address: tuple[str, int], store: JobStore) -> None:
         self.store = store
+        self.client_cookie_secret = _load_client_cookie_secret(store.root)
         super().__init__(address, FlayrHandler)
 
 
@@ -896,7 +947,8 @@ class FlayrHandler(BaseHTTPRequestHandler):
         cookie = SimpleCookie()
         try:
             cookie.load(self.headers.get("Cookie", ""))
-            value = cookie.get(CLIENT_COOKIE_NAME).value if cookie.get(CLIENT_COOKIE_NAME) else ""
+            raw_value = cookie.get(CLIENT_COOKIE_NAME).value if cookie.get(CLIENT_COOKIE_NAME) else ""
+            value = _verified_client_cookie(raw_value, self.server.client_cookie_secret) or ""
         except (CookieError, KeyError, ValueError):
             value = ""
         if not IDENTITY_PATTERN.fullmatch(value):
@@ -1094,11 +1146,11 @@ class FlayrHandler(BaseHTTPRequestHandler):
         if artifact == "report":
             report_names = ("bd_report.html", "report.html")
             candidate = next(
-                (safe_asset_path(run_dir, name) for name in report_names if (run_dir / name).is_file()),
+                (_safe_servable_asset(run_dir, name) for name in report_names),
                 None,
             )
         elif artifact == "creator-report":
-            candidate = safe_asset_path(run_dir, "creator_report.html") if (run_dir / "creator_report.html").is_file() else None
+            candidate = _safe_servable_asset(run_dir, "creator_report.html")
         else:
             candidate = safe_asset_path(run_dir, "analysis.json")
         if not candidate:
@@ -1157,7 +1209,8 @@ class FlayrHandler(BaseHTTPRequestHandler):
         if getattr(self, "_flayr_set_cookie", False):
             self.send_header(
                 "Set-Cookie",
-                f"{CLIENT_COOKIE_NAME}={self._client_id()}; Path=/; Max-Age={CLIENT_COOKIE_MAX_AGE}; HttpOnly; SameSite=Lax",
+                f"{CLIENT_COOKIE_NAME}={_signed_client_cookie(self._client_id(), self.server.client_cookie_secret)}; "
+                f"Path=/; Max-Age={CLIENT_COOKIE_MAX_AGE}; HttpOnly; SameSite=Lax",
             )
 
 

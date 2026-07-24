@@ -78,6 +78,7 @@ class CreatorReportTests(unittest.TestCase):
         self.assertIn("--paper:#FAFAF8", template)
         self.assertIn("这条视频，我们一起复盘", template)
         self.assertIn("完整证据地图", template)
+        self.assertIn("部分分析能力降级", template)
         self.assertIn("{{creator_report_data}}", template)
         self.assertNotIn("孩子不肯刷牙？", template)
 

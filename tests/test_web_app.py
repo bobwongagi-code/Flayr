@@ -8,8 +8,23 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from unittest import mock
 
-from scripts.web_app import FlayrServer, JobStore, parse_multipart, progress_for_run, safe_asset_path
-from scripts.flayr_core.run_state import PROCESSING, read_run_state, transition_run_state
+from scripts.web_app import (
+    FlayrServer,
+    JobStore,
+    _signed_client_cookie,
+    parse_multipart,
+    progress_for_run,
+    safe_asset_path,
+)
+from scripts.flayr_core.run_state import (
+    ANALYSIS_COMPLETED,
+    DEGRADED,
+    PROCESSING,
+    REPORT_GENERATING,
+    initialize_run_state,
+    read_run_state,
+    transition_run_state,
+)
 
 
 class WebAppHelpersTests(unittest.TestCase):
@@ -74,6 +89,16 @@ class WebAppHelpersTests(unittest.TestCase):
             (run_dir / "_SUCCESS.json").write_text("{}", encoding="utf-8")
             self.assertEqual(progress_for_run(run_dir), (100, "报告生成"))
 
+    def test_degraded_progress_is_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            initialize_run_state(run_dir)
+            transition_run_state(run_dir, PROCESSING)
+            transition_run_state(run_dir, ANALYSIS_COMPLETED)
+            transition_run_state(run_dir, REPORT_GENERATING)
+            transition_run_state(run_dir, DEGRADED)
+            self.assertEqual(progress_for_run(run_dir), (100, "报告生成（部分分析能力降级）"))
+
     def test_job_store_does_not_expose_internal_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = JobStore(Path(tmp))
@@ -130,6 +155,13 @@ class WebAppHelpersTests(unittest.TestCase):
             self.assertEqual(public["creator_report_url"], "")
             self.assertEqual(public["report_kind"], "audience")
 
+            (run_dir / "bd_report.html").write_text("not html", encoding="utf-8")
+            public = store.public(job)
+            self.assertEqual(public["report_url"], "/api/workspaces/local/jobs/job-1/report")
+            self.assertEqual(public["bd_report_url"], "")
+            self.assertEqual(public["report_kind"], "legacy")
+
+            (run_dir / "bd_report.html").write_text("<html></html>", encoding="utf-8")
             (run_dir / "creator_report.html").write_text("<html></html>", encoding="utf-8")
             public = store.public(job)
             self.assertEqual(public["report_url"], "/api/workspaces/local/jobs/job-1/report")
@@ -165,6 +197,12 @@ class WebAppHelpersTests(unittest.TestCase):
             self.assertIsNone(store.get(job_id, owner_id="owner-b", workspace_id="workspace-a"))
             self.assertIsNone(store.get(job_id, owner_id="owner-a", workspace_id="workspace-b"))
             self.assertEqual(store.all(owner_id="owner-b", workspace_id="workspace-a"), [])
+            store.jobs["legacy-job"] = {
+                "id": "legacy-job",
+                "workspace_id": "workspace-a",
+                "run_dir": str(Path(tmp) / "legacy-run"),
+            }
+            self.assertIsNone(store.get("legacy-job", owner_id="owner-a", workspace_id="workspace-a"))
             store.shutdown()
 
     def test_http_report_requires_matching_browser_owner(self) -> None:
@@ -192,17 +230,46 @@ class WebAppHelpersTests(unittest.TestCase):
             thread.start()
             url = f"http://127.0.0.1:{server.server_address[1]}/api/workspaces/local/jobs/job-1/report"
             try:
-                response = urlopen(Request(url, headers={"Cookie": "flayr_client_id=owner-a"}))
+                signed_owner_a = _signed_client_cookie("owner-a", server.client_cookie_secret)
+                signed_owner_b = _signed_client_cookie("owner-b", server.client_cookie_secret)
+                response = urlopen(Request(url, headers={"Cookie": f"flayr_client_id={signed_owner_a}"}))
                 self.assertEqual(response.status, 200)
                 self.assertEqual(response.read().decode("utf-8"), "<html>private report</html>")
                 with self.assertRaises(HTTPError) as error:
-                    urlopen(Request(url, headers={"Cookie": "flayr_client_id=owner-b"}))
+                    urlopen(Request(url, headers={"Cookie": f"flayr_client_id={signed_owner_b}"}))
+                self.assertEqual(error.exception.code, 404)
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(Request(url, headers={"Cookie": "flayr_client_id=owner-a"}))
+                self.assertEqual(error.exception.code, 404)
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(Request(url, headers={"Cookie": f"flayr_client_id={signed_owner_a[:-1]}0"}))
                 self.assertEqual(error.exception.code, 404)
             finally:
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=2)
                 store.shutdown()
+
+    def test_browser_identity_secret_survives_server_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_store = JobStore(root)
+            first_server = FlayrServer(("127.0.0.1", 0), first_store)
+            first_secret = first_server.client_cookie_secret
+            first_server.server_close()
+            first_store.shutdown()
+
+            second_store = JobStore(root)
+            second_server = FlayrServer(("127.0.0.1", 0), second_store)
+            try:
+                self.assertEqual(second_server.client_cookie_secret, first_secret)
+                self.assertEqual(
+                    _signed_client_cookie("owner-a", second_server.client_cookie_secret),
+                    _signed_client_cookie("owner-a", first_secret),
+                )
+            finally:
+                second_server.server_close()
+                second_store.shutdown()
 
     def test_http_asset_rejects_extension_content_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -229,8 +296,9 @@ class WebAppHelpersTests(unittest.TestCase):
             thread.start()
             url = f"http://127.0.0.1:{server.server_address[1]}/api/workspaces/local/jobs/job-1/assets/frame.png"
             try:
+                signed_owner_a = _signed_client_cookie("owner-a", server.client_cookie_secret)
                 with self.assertRaises(HTTPError) as error:
-                    urlopen(Request(url, headers={"Cookie": "flayr_client_id=owner-a"}))
+                    urlopen(Request(url, headers={"Cookie": f"flayr_client_id={signed_owner_a}"}))
                 self.assertEqual(error.exception.code, 415)
             finally:
                 server.shutdown()

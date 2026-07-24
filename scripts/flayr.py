@@ -29,7 +29,19 @@ from flayr_core.creator_report import write_creator_report
 from flayr_core.report import write_report
 from flayr_core.resources import ResourceBudget, ResourceBudgetExceeded, finite_nonnegative
 from flayr_core.run_manifest import SUCCESS_MANIFEST_NAME, command_digest, write_success_manifest
-from flayr_core.run_state import RUN_STATE_FILE
+from flayr_core.run_state import (
+    COMPLETED,
+    DEGRADED,
+    PROCESSING,
+    RUN_STATE_FILE,
+    RunStateError,
+    begin_report_generation,
+    initialize_run_state,
+    read_run_state,
+    recover_run_state,
+    reset_run_state,
+    transition_run_state,
+)
 from flayr_core.motion import compute_shake_metric
 from flayr_core.market import normalize_target_market
 from flayr_core.shot_track import build_shot_track
@@ -81,6 +93,15 @@ _RUN_OUTPUT_PREFIXES = (
 )
 
 
+def _record_run_failure(run_dir: Path, reason: str) -> None:
+    try:
+        recover_run_state(run_dir, "FAILED", reason=reason[:500])
+    except RunStateError:
+        # The web worker performs the same recovery check after a child exits.
+        # A CLI failure must never hide its original exception behind cleanup.
+        pass
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -98,15 +119,27 @@ def main() -> int:
         source_durations[role] = budget.register_source(path, duration)
     deps["source_durations"] = source_durations
     run_dir = create_run_dir(args)
+    initialize_run_state(run_dir)
+    lifecycle = read_run_state(run_dir)
+    if lifecycle and lifecycle.get("state") == "CREATED":
+        transition_run_state(run_dir, PROCESSING)
     # A direct rerun must invalidate an old completion marker before any new
     # artifact is written. The batch runner also removes invalid markers.
     (run_dir / SUCCESS_MANIFEST_NAME).unlink(missing_ok=True)
 
     videos: dict[str, dict[str, Any]] = {}
-    for role, path in inputs.items():
-        videos[role] = process_video(role, path, run_dir, deps, args, budget=budget)
+    try:
+        for role, path in inputs.items():
+            videos[role] = process_video(role, path, run_dir, deps, args, budget=budget)
+    except Exception as exc:
+        _record_run_failure(run_dir, f"素材处理失败：{exc}")
+        raise
 
-    analysis = build_analysis(args, run_dir, deps, videos, budget=budget)
+    try:
+        analysis = build_analysis(args, run_dir, deps, videos, budget=budget)
+    except Exception as exc:
+        _record_run_failure(run_dir, f"分析初始化失败：{exc}")
+        raise
     analysis_input_path = write_analysis_input(run_dir, analysis)
     if args.mode == "scope":
         eligibility = run_comparison_scope_preflight(args, analysis, run_dir)
@@ -126,6 +159,7 @@ def main() -> int:
     if args.mode in {"compare", "improve"} and analysis.get("analysis_run_state") == "not_run":
         if not getattr(args, "allow_degraded", False):
             write_json(run_dir / "analysis.json", analysis)
+            _record_run_failure(run_dir, "compare/improve 未运行完成的 LLM 分析。")
             raise SystemExit(
                 "compare/improve 需要完成的 LLM 分析，但当前 analysis_run_state=not_run。"
                 " 提供 --llm-model 跑分析，或加 --allow-degraded 在无分析时继续（severity 留空）。"
@@ -144,30 +178,78 @@ def main() -> int:
     write_json(run_dir / "analysis.json", analysis)
     write_analysis_input(run_dir, analysis)
 
-    analysis["resource_budget"] = budget.snapshot()
-    report_path = write_report(run_dir, analysis, budget=budget)
-    if args.mode in {"compare", "improve"}:
-        report_path = write_bd_report(run_dir, analysis, budget=budget)
-        write_creator_report(run_dir, analysis, budget=budget)
-    if args.mode in {"compare", "improve"} and analysis.get("analysis_run_state") == "completed":
-        write_success_manifest(
-            run_dir,
-            {
-                "benchmark_video": inputs["benchmark"],
-                **({"creator_video": inputs["creator"]} if "creator" in inputs else {}),
-                **({"analysis_result_json": args.analysis_result_json} if args.analysis_result_json else {}),
-            },
-            analysis,
-            {
-                "mode": args.mode,
-                "code_commit": _git_commit_sha(),
-                "argv_sha256": command_digest(sys.argv[1:]),
-                "llm_model": str(args.llm_model or ""),
-                "llm_api_url": str(args.llm_api_url or ""),
-            },
-        )
+    report_path = _generate_reports_and_publish(
+        run_dir,
+        args,
+        inputs,
+        analysis,
+        budget,
+    )
     print_summary(run_dir, report_path, deps, videos)
     return 0
+
+
+def _generate_reports_and_publish(
+    run_dir: Path,
+    args: argparse.Namespace,
+    inputs: dict[str, Path],
+    analysis: dict[str, Any],
+    budget: ResourceBudget,
+) -> Path:
+    try:
+        begin_report_generation(
+            run_dir,
+            artifacts=("analysis.json", "analysis_input.md"),
+        )
+    except RunStateError as exc:
+        _record_run_failure(run_dir, f"无法进入报告生成状态：{exc}")
+        raise SystemExit(f"无法进入报告生成状态：{exc}") from exc
+
+    try:
+        analysis["resource_budget"] = budget.snapshot()
+        report_path = write_report(run_dir, analysis, budget=budget)
+        if args.mode in {"compare", "improve"}:
+            report_path = write_bd_report(run_dir, analysis, budget=budget)
+            write_creator_report(run_dir, analysis, budget=budget)
+        if args.mode in {"compare", "improve"} and analysis.get("analysis_run_state") == "completed":
+            write_success_manifest(
+                run_dir,
+                {
+                    "benchmark_video": inputs["benchmark"],
+                    **({"creator_video": inputs["creator"]} if "creator" in inputs else {}),
+                    **({"analysis_result_json": args.analysis_result_json} if args.analysis_result_json else {}),
+                },
+                analysis,
+                {
+                    "mode": args.mode,
+                    "code_commit": _git_commit_sha(),
+                    "argv_sha256": command_digest(sys.argv[1:]),
+                    "llm_model": str(args.llm_model or ""),
+                    "llm_api_url": str(args.llm_api_url or ""),
+                },
+            )
+            transition_run_state(
+                run_dir,
+                COMPLETED,
+                artifacts=(
+                    SUCCESS_MANIFEST_NAME,
+                    "analysis.json",
+                    "report.html",
+                    "bd_report.html",
+                    "creator_report.html",
+                ),
+            )
+        elif args.mode in {"compare", "improve"} and analysis.get("analysis_run_state") == "degraded":
+            transition_run_state(
+                run_dir,
+                DEGRADED,
+                reason="辅助产物已降级，不影响报告结论。",
+                artifacts=("degraded_manifest.json", "analysis.json", "bd_report.html", "creator_report.html"),
+            )
+        return report_path
+    except Exception as exc:
+        _record_run_failure(run_dir, f"报告生成失败：{exc}")
+        raise
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -374,6 +456,8 @@ def _prepare_explicit_run_dir(run_dir: Path, *, reuse: bool) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     entries = [entry for entry in run_dir.iterdir() if entry.name != RUN_STATE_FILE]
     if not entries:
+        if reuse:
+            reset_run_state(run_dir)
         return
     if not reuse:
         raise SystemExit(
@@ -393,6 +477,7 @@ def _prepare_explicit_run_dir(run_dir: Path, *, reuse: bool) -> None:
             f"--output-dir 含有未识别的旧内容：{entry}。请使用新的运行目录，"
             "不要把非 Flayr 产物与预处理缓存混用。"
         )
+    reset_run_state(run_dir)
 
 
 def check_dependencies(args: argparse.Namespace) -> dict[str, Any]:

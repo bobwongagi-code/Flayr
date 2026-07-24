@@ -12,12 +12,15 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from .report_metadata import extract_variant_report_metadata
+from .run_state import COMPLETED, read_run_state
 from .utils import write_json
 
 
 SUCCESS_MANIFEST_NAME = "_SUCCESS.json"
-SUCCESS_MANIFEST_SCHEMA_VERSION = 2
+SUCCESS_MANIFEST_SCHEMA_VERSION = 3
 LEGACY_SUCCESS_MANIFEST_SCHEMA_VERSION = 1
+PREVIOUS_SUCCESS_MANIFEST_SCHEMA_VERSION = 2
 BASE_REQUIRED_ARTIFACTS = (
     "analysis.json",
     "report.html",
@@ -105,6 +108,7 @@ def build_success_manifest(
         artifacts[relative] = _artifact_metadata(candidate)
     if not _has_complete_field_sources(run_dir / "final_derived_result.json"):
         raise ValueError("final_derived_result.json must contain complete field source coverage")
+    report_metadata = extract_variant_report_metadata(run_dir, required_artifacts)
     return {
         "schema_version": SUCCESS_MANIFEST_SCHEMA_VERSION,
         "status": "completed",
@@ -112,6 +116,7 @@ def build_success_manifest(
         "required_artifacts": list(required_artifacts),
         "inputs": {name: _input_metadata(path) for name, path in sorted(inputs.items())},
         "artifacts": artifacts,
+        "report_metadata": report_metadata,
         "provenance": dict(provenance or {}),
     }
 
@@ -171,11 +176,16 @@ def validate_success_manifest(
     schema_version = manifest.get("schema_version")
     if schema_version not in {
         LEGACY_SUCCESS_MANIFEST_SCHEMA_VERSION,
+        PREVIOUS_SUCCESS_MANIFEST_SCHEMA_VERSION,
         SUCCESS_MANIFEST_SCHEMA_VERSION,
     }:
         return False
     if manifest.get("status") != "completed" or manifest.get("analysis_run_state") != "completed":
         return False
+    if schema_version == SUCCESS_MANIFEST_SCHEMA_VERSION:
+        lifecycle = read_run_state(root)
+        if not lifecycle or lifecycle.get("state") != COMPLETED:
+            return False
     recorded_provenance = manifest.get("provenance")
     if not isinstance(recorded_provenance, dict):
         return False
@@ -190,9 +200,23 @@ def validate_success_manifest(
         if schema_version == LEGACY_SUCCESS_MANIFEST_SCHEMA_VERSION
         else _required_artifacts_for_mode(str(analysis.get("mode") or ""))
     )
+    if (
+        schema_version != SUCCESS_MANIFEST_SCHEMA_VERSION
+        and str(analysis.get("mode") or "") in {"compare", "improve"}
+    ):
+        # Audience reports were added after the legacy manifest formats. Do not
+        # treat an old marker as proof that both current report variants exist.
+        return False
     required = manifest.get("required_artifacts")
     if required != list(expected_artifacts):
         return False
+    if schema_version == SUCCESS_MANIFEST_SCHEMA_VERSION:
+        try:
+            expected_report_metadata = extract_variant_report_metadata(root, tuple(expected_artifacts))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
+        if manifest.get("report_metadata") != expected_report_metadata:
+            return False
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict):
         return False

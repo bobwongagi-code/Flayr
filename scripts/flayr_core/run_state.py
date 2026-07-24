@@ -113,6 +113,16 @@ def initialize_run_state(run_dir: Path, *, job_id: str = "") -> dict[str, Any]:
     return state
 
 
+def reset_run_state(run_dir: Path, *, job_id: str | None = None) -> dict[str, Any]:
+    """Start a fresh lifecycle while retaining the existing job identity."""
+    existing = read_run_state(run_dir)
+    if job_id is None:
+        job_id = str(existing.get("job_id") or "") if existing else ""
+    state = _new_state(job_id)
+    write_json(_state_path(run_dir), state)
+    return state
+
+
 def _apply_state(
     current: dict[str, Any],
     target: str,
@@ -165,6 +175,35 @@ def transition_run_state(
     next_state = _apply_state(current, target, reason=reason, artifacts=artifacts)
     write_json(_state_path(run_dir), next_state)
     return next_state
+
+
+def begin_report_generation(
+    run_dir: Path,
+    *,
+    job_id: str = "",
+    artifacts: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """Move a run into ``REPORT_GENERATING`` before report files are written."""
+    current = read_run_state(run_dir)
+    if current is None:
+        current = initialize_run_state(run_dir, job_id=job_id)
+    elif job_id and current.get("job_id") not in {"", job_id}:
+        raise RunStateError("run_state job_id 与当前任务不一致")
+    if current["state"] in TERMINAL_RUN_STATES:
+        raise RunStateError(f"终态任务不能开始报告生成：{current['state']}")
+    artifact_names = _clean_artifacts(artifacts)
+    state = current["state"]
+    if state == CREATED:
+        current = transition_run_state(run_dir, PROCESSING, artifacts=artifact_names)
+        state = current["state"]
+    if state == PROCESSING:
+        current = transition_run_state(run_dir, ANALYSIS_COMPLETED, artifacts=artifact_names)
+        state = current["state"]
+    if state == ANALYSIS_COMPLETED:
+        current = transition_run_state(run_dir, REPORT_GENERATING, artifacts=artifact_names)
+    elif state != REPORT_GENERATING:
+        raise RunStateError(f"无法开始报告生成：当前状态为 {state}")
+    return current
 
 
 def recover_run_state(

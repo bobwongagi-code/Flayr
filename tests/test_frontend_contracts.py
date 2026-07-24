@@ -28,6 +28,17 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("report-degraded-detail", app)
         self.assertIn("method:'HEAD'", app)
         self.assertIn("transitionId", app)
+        creator_report = (ROOT / "assets" / "creator_report.html").read_text(encoding="utf-8")
+        self.assertIn("degraded-note", creator_report)
+        self.assertIn("report.analysisState === 'degraded'", creator_report)
+
+    def test_report_switching_retains_previous_frame_until_new_frame_is_ready(self) -> None:
+        app = (ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("var previousFrame = reportAudienceState.activeFrame", app)
+        self.assertIn("frameReady = true", app)
+        self.assertIn("previousFrame.classList.add('report-frame-exiting')", app)
+        self.assertIn("showToast('报告打开失败，请稍后重试')", app)
+        self.assertIn("if (transitionId !== reportAudienceState.transitionId){\n        frame.remove();", app)
 
     def test_report_switching_has_no_default_audience(self) -> None:
         index = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")

@@ -48,6 +48,10 @@
   .brand{font-size:12px;color:var(--ink-faint);letter-spacing:.04em;margin-bottom:14px;}
   .masthead h1{font-size:26px;line-height:1.3;letter-spacing:-0.01em;}
   .context-line{font-size:13.5px;color:var(--ink-soft);margin-top:10px;}
+  .degraded-note{display:flex;align-items:flex-start;gap:8px;margin-top:12px;padding:10px 12px;border:1px solid var(--spark);border-radius:10px;background:var(--spark-soft);color:var(--spark-ink);font-size:12.5px;}
+  .degraded-note strong{font-weight:600;white-space:nowrap;}
+  .degraded-note span{color:var(--ink-soft);}
+  .degraded-note[hidden]{display:none;}
 
   .card{
     background:var(--card);border:1px solid var(--line);border-radius:var(--radius-lg);
@@ -186,6 +190,10 @@
     <div class="brand">Flayr · 心译复盘</div>
     <h1>这条视频，我们一起复盘</h1>
     <p class="context-line" id="context-line"></p>
+    <div class="degraded-note" id="degraded-note" hidden>
+      <strong>部分分析能力降级</strong>
+      <span id="degraded-text"></span>
+    </div>
   </div>
 
   <div class="card prev-card">
@@ -280,6 +288,12 @@
     var brand = document.querySelector('.brand');
     if (brand && report.brand) brand.textContent = report.brand;
     setText('intent-text', report.intent || '目前还无法判断这条视频正在尝试完成什么。');
+    var degraded = report.analysisState === 'degraded' || (report.degradedFlags || []).length > 0;
+    var degradedNote = $('degraded-note');
+    degradedNote.hidden = !degraded;
+    if (degraded) {
+      setText('degraded-text', (report.degradedFlags || []).join('；') || '部分分析能力未完成，报告中的相关判断请结合原始证据复核。');
+    }
   }
 
   function renderPrevious(){

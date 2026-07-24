@@ -321,13 +321,19 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
       }
     };
     frame.onerror = function(){
-      if (transitionId !== reportAudienceState.transitionId) return;
+      if (transitionId !== reportAudienceState.transitionId){
+        frame.remove();
+        return;
+      }
       frame.remove();
       restorePreviousReport();
     };
     shell.appendChild(frame);
     fetch(url, {method:'HEAD', credentials:'same-origin', cache:'no-store'}).then(function(response){
-      if (transitionId !== reportAudienceState.transitionId) return;
+      if (transitionId !== reportAudienceState.transitionId){
+        frame.remove();
+        return;
+      }
       var contentType = String(response.headers.get('content-type') || '').toLowerCase();
       if (!response.ok || (contentType && contentType.indexOf('text/html') !== 0 && contentType.indexOf('application/xhtml+xml') !== 0)){
         throw new Error('报告不可用');
@@ -335,7 +341,10 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
       frameReady = true;
       frame.src = url;
     }).catch(function(){
-      if (transitionId !== reportAudienceState.transitionId) return;
+      if (transitionId !== reportAudienceState.transitionId){
+        frame.remove();
+        return;
+      }
       frame.remove();
       restorePreviousReport();
     });

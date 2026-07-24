@@ -10,11 +10,31 @@ from unittest import mock
 from scripts.batch_analyze import _run_jobs, _success_manifest_valid, acquire_lock, build_command, validate_spec
 from scripts.flayr_core.run_manifest import write_success_manifest, validate_success_manifest
 from scripts.flayr_core.run_manifest import command_digest
+from scripts.flayr_core.run_state import (
+    ANALYSIS_COMPLETED,
+    COMPLETED,
+    PROCESSING,
+    REPORT_GENERATING,
+    initialize_run_state,
+    transition_run_state,
+)
 
 
 class BatchAnalyzeValidationTests(unittest.TestCase):
     def _job(self, name: str = "sample") -> dict[str, object]:
         return {"name": name, "creator": "/tmp/creator.mp4", "benchmark": "/tmp/benchmark.mp4"}
+
+    @staticmethod
+    def _audience_report(template_version: str, report_schema_version: int = 2) -> str:
+        payload = {
+            "metadata": {
+                "report_schema_version": report_schema_version,
+                "template_version": template_version,
+                "generated_by": "test-commit",
+                "generator": "tests",
+            }
+        }
+        return f"<html><script>var report = {json.dumps(payload, separators=(',', ':'))};\n</script></html>"
 
     def test_rejects_duplicate_names_and_output_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -103,6 +123,11 @@ class BatchAnalyzeValidationTests(unittest.TestCase):
             benchmark.write_bytes(b"benchmark")
             out = root / "run"
             out.mkdir()
+            initialize_run_state(out)
+            transition_run_state(out, PROCESSING)
+            transition_run_state(out, ANALYSIS_COMPLETED)
+            transition_run_state(out, REPORT_GENERATING)
+            transition_run_state(out, COMPLETED)
             (out / "analysis.json").write_text(
                 '{"analysis_run_state":"completed"}', encoding="utf-8"
             )
@@ -171,6 +196,12 @@ class BatchAnalyzeValidationTests(unittest.TestCase):
             )
             self.assertTrue(validate_success_manifest(out, {"creator_video": creator, "benchmark_video": benchmark}))
             self.assertTrue(_success_manifest_valid(job, out, []))
+            lifecycle = json.loads((out / "run_state.json").read_text(encoding="utf-8"))
+            lifecycle["state"] = REPORT_GENERATING
+            (out / "run_state.json").write_text(json.dumps(lifecycle), encoding="utf-8")
+            self.assertFalse(validate_success_manifest(out, {"creator_video": creator, "benchmark_video": benchmark}))
+            lifecycle["state"] = COMPLETED
+            (out / "run_state.json").write_text(json.dumps(lifecycle), encoding="utf-8")
             creator.write_bytes(b"changed")
             self.assertFalse(validate_success_manifest(out, {"creator_video": creator, "benchmark_video": benchmark}))
 
@@ -207,6 +238,11 @@ class BatchAnalyzeValidationTests(unittest.TestCase):
             benchmark.write_bytes(b"benchmark")
             out = root / "run"
             out.mkdir()
+            initialize_run_state(out)
+            transition_run_state(out, PROCESSING)
+            transition_run_state(out, ANALYSIS_COMPLETED)
+            transition_run_state(out, REPORT_GENERATING)
+            transition_run_state(out, COMPLETED)
             (out / "analysis.json").write_text(
                 '{"analysis_run_state":"completed","mode":"improve"}', encoding="utf-8"
             )
@@ -236,10 +272,37 @@ class BatchAnalyzeValidationTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 write_success_manifest(out, inputs, analysis)
 
-            (out / "bd_report.html").write_text("{}", encoding="utf-8")
-            (out / "creator_report.html").write_text("{}", encoding="utf-8")
+            (out / "bd_report.html").write_text(self._audience_report("bd-internal-v2"), encoding="utf-8")
+            (out / "creator_report.html").write_text(self._audience_report("creator-v2"), encoding="utf-8")
             write_success_manifest(out, inputs, analysis, {"mode": "improve"})
             self.assertTrue(validate_success_manifest(out, inputs))
+            manifest = json.loads((out / "_SUCCESS.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["schema_version"], 3)
+            self.assertEqual(
+                manifest["report_metadata"]["bd_report.html"]["template_version"],
+                "bd-internal-v2",
+            )
+
+            (out / "bd_report.html").write_text(
+                self._audience_report("bd-internal-v2", report_schema_version=1),
+                encoding="utf-8",
+            )
+            self.assertFalse(validate_success_manifest(out, inputs))
+            (out / "bd_report.html").write_text(
+                self._audience_report("bd-internal-v2"), encoding="utf-8"
+            )
+
+            legacy_manifest = dict(manifest)
+            legacy_manifest["schema_version"] = 2
+            legacy_manifest.pop("report_metadata", None)
+            (out / "_SUCCESS.json").write_text(
+                json.dumps(legacy_manifest), encoding="utf-8"
+            )
+            self.assertFalse(validate_success_manifest(out, inputs))
+
+            write_success_manifest(out, inputs, analysis, {"mode": "improve"})
+            (out / "bd_report.html").write_text(self._audience_report("bd-internal-v3"), encoding="utf-8")
+            self.assertFalse(validate_success_manifest(out, inputs))
 
             (out / "creator_report.html").unlink()
             self.assertFalse(validate_success_manifest(out, inputs))
