@@ -1062,7 +1062,7 @@ def maybe_refine_low_confidence_stages(
     """
     if not locked_video_understanding:
         return result
-    # 候选 = 模型自报 ∪ 素材不足确定性检测 ∪ 推导临界分值（S 压阈值线邻域，4d 后可行）。
+    # 候选 = 模型自报 ∪ 素材不足确定性检测 ∪ resolver 冲突阶段。
     # 按优先级取 2：P1 链路致命节点 S1/S6（判错代价最高）→ P2 高杠杆验证节点 S4 → P3 其他。
     candidates: list[str] = []
     for code in [
@@ -1176,7 +1176,7 @@ def detect_low_confidence_stages(result: dict[str, Any]) -> list[str]:
     判据（针对达人侧——分析主体）：
     - 引用的是占位 evidence_unit（_NO_*），或 support_status=visual_only 且无有效口播/带待复核提示；
     - 且 severity ∈ {large, medium}：只有"薄证据上的高后果判断"才值得花一次回看。
-    large 优先，最多 2 个，与现有 Phase C 约束一致。
+    large 优先，最多 2 个；resolver 冲突与其他候选共享同一视频级预算。
     """
     creator_units = {
         str(unit.get("id")): unit
@@ -1263,6 +1263,8 @@ def apply_stage_review_updates(
             if code == "S1":
                 base_stage.pop("creator_hook", None)
                 base_stage.pop("benchmark_hook", None)
+                # S1 hook flags must be repaired again after Phase C replaces them.
+                base_stage.pop("_postprocess_state", None)
             if code == "S2":
                 base_stage.pop("creator_s2", None)
                 base_stage.pop("benchmark_s2", None)

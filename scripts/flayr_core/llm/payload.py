@@ -529,6 +529,7 @@ def build_video_fact_payload(
                             "visual_fact": "该时刻画面中实际可见的事实：主体、动作、表情变化、字幕叠字、特效。",
                             "subtitle_fact": "可读字幕；没有则留空。",
                             "audio_fact": "该时刻的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。",
+                            "evidence_strength": "direct|explicit|inferred|absent；只描述该证据单元自身的事实强度，不确定或缺失留空。",
                             "product_visible": True,
                             "product_coverage": "该时段产品在画面里的视觉占比：none｜low｜medium｜high。看不到产品写 none。",
                             "endorsement_verbal": False,
@@ -625,6 +626,7 @@ def build_video_fact_payload(
         "每条还要标 product_visible（该时段画面里能否看到产品本体，true/false）与 product_coverage"
         "（产品视觉占比 none｜low｜medium｜high，看不到写 none）：这两项用于确定性统计产品出镜，"
         "据画面如实标，产品被手遮住或只露局部按真实可见程度给 low；"
+        "再标 evidence_strength（direct|explicit|inferred|absent）：direct=本证据单元直接看见/听见的事实，explicit=本证据单元明确支持的事实，inferred=需要跨证据或解释才能得到，absent=本证据单元明确没有该事实；无法确定或缺失留空，绝不把 unknown 当 absent。"
         "再标 endorsement_verbal 与 endorsement_visual（各 true/false，纯观察、不判断算不算有效背书——有效性归后续打分）："
         "endorsement_verbal＝该时段口播/字幕里有没有【出现】halal/KKM/认证/证书/检测/临床/医生/皮肤科/专家/机构/FDA/GMP/SIRIM/BPOM/GMP/certified 等硬来源词（只看词出没出现，不判断是否构成援引背书）；"
         "endorsement_visual＝该时段画面里有没有【出现】独立的硬背书视觉证据（证书/检测报告文件/机构认证标识被画面清晰呈现）——产品瓶身上的印刷小标不算，口播说了但画面没出现也不算（口播归 endorsement_verbal，别把听到的脑补成画面）；"
@@ -1164,12 +1166,13 @@ def build_llm_comparison_payload(
         '如 0-4.5s 近脸/指脸/拿产品但未建立使用前后强对比", '
         '"landing_window_leak": bool（landing_reason 或 landing_met 是否借用了 hook_boundary_seconds 之后的 S2/S3 材料。若引用边界后的产品名/卖点/认证/解决方案补足三件套，必须 true 且 landing_met=false）, '
         '"anchors_proposition": bool（该侧钩子内容是否触及上面任一 proposition、painpoint，或 product_profile.hook_proposition/category_profile.painpoints 概念）, '
+        '"evidence_ids": ["C1"]（该侧 S1 flag 直接依据的 Stage1 evidence unit ID；无明确依据填空数组）, '
         '"proposition_ids": ["hook.1"]（该侧 S1 实际锚定的合同命题 ID；未锚定填空数组）}。'
     )
     # 强制字段要求（放在末尾"输出要求"区，模型严格跟这块走；前面的尺子块只给结构定义）
     hook_field_req = (
         "S1 强制：stage_analysis 第 1 项（S1 Hook）必须再含 creator_hook 与 benchmark_hook 两个对象"
-        "（结构见上方：exists/type/dims{camera,copy,sound,rhythm}/hook_boundary_seconds/hook_boundary_reason/s2_start_signal/landing_met/landing_reason/window_evidence/landing_window_leak/anchors_proposition/proposition_ids）。"
+        "（结构见上方：exists/type/dims{camera,copy,sound,rhythm}/hook_boundary_seconds/hook_boundary_reason/s2_start_signal/landing_met/landing_reason/window_evidence/landing_window_leak/anchors_proposition/evidence_ids/proposition_ids）。"
         "type 为描述字段（按最早窗口主导机制判、不进 severity）；landing_met 是 type 无关的三件套二元判（进 severity）；"
         "exists 只判是否做了留人尝试，不得把“弱 Hook、未打穿”误写成无 Hook；具体用户问题/收益/结果承诺即使与产品介绍同句出现，仍可 exists=true、landing_met=false。"
         "hook_boundary_seconds 必须按 structure_library 的 S1 留人机制→S2 产品引出/解决方案承接功能切换来判，不得写死固定秒数；"
@@ -1420,7 +1423,7 @@ def build_llm_comparison_payload(
             "只输出严格 JSON，不要 Markdown。字段必须使用 references/analysis-output-schema.json 的字段名。",
             "顶层 comparison_contract 必须原样回填已锁定合同；comparison_eligibility 可省略，由代码派生兼容视图。",
             "必须输出：one_line_verdict, one_line_summary, executive_summary, holistic_assessment（每维独立）, key_conclusions（1-5 条消费者视角）, comparison_contract, product_visibility, category_profile, product_profile, loop_closure, s3_s4_relationship, promise_chain, video_understanding, stage_analysis[6], improvements（1-5 条，按 GMV 杠杆排序）。",
-            "stage_analysis 每项必须含：stage, time_range, benchmark_time_range, creator_time_range, core_question, creator_module_id, benchmark_module_id, module_fit, module_fit_reason, task_completion, gap_type, gap_summary, voice_performance, benchmark_summary, benchmark_key_message, benchmark_evidence_ids, benchmark_visual_evidence, benchmark_support_status, benchmark_has_effect_demo, benchmark_has_usage_demo, benchmark_quote, benchmark_quote_zh, creator_summary, creator_key_message, creator_evidence_ids, creator_visual_evidence, creator_support_status, creator_has_effect_demo, creator_has_usage_demo, creator_quote, creator_quote_zh, creator_multimodal, benchmark_multimodal, gap, evidence, severity, creator_execution, benchmark_execution, painpoint_relevance, stage_standard_delivery。",
+            "stage_analysis 每项必须含：stage, time_range, benchmark_time_range, creator_time_range, core_question, creator_module_id, benchmark_module_id, module_fit, module_fit_reason, task_completion, gap_type, gap_summary, voice_performance, benchmark_summary, benchmark_key_message, benchmark_evidence_ids, benchmark_visual_evidence, benchmark_support_status, benchmark_has_effect_demo, benchmark_has_usage_demo, benchmark_quote, benchmark_quote_zh, creator_summary, creator_key_message, creator_evidence_ids, creator_visual_evidence, creator_support_status, creator_has_effect_demo, creator_has_usage_demo, creator_quote, creator_quote_zh, creator_multimodal, benchmark_multimodal, gap, evidence, severity, creator_execution, benchmark_execution, painpoint_relevance, stage_standard_delivery。severity 只作模型参考，最终等级由代码 resolver 按确定性 floor/ceiling 约束收口。",
             "creator_multimodal 与 benchmark_multimodal 必须按上方跨模态合同输出；integrated_effect 是各渠道组合后的净效果，不是最弱渠道结果，也不是四维等权计数。",
             hook_field_req,
             s2_field_req,
@@ -1447,7 +1450,7 @@ def build_llm_comparison_payload(
             "注意：这是『有没有演示使用过程』的存在性判断，不评教学清晰度、不评场景丰富度（那些进执行分）。看见真实使用演示=true，只看见口播/静态=false。",
             "S3 执行分 2 不是『有真实使用』，而是『核心卖点在动作里清楚可见 + 证据可接收 + 过程被做厚』；单场景连续但单薄通常最高 1。",
             "0.5 档同样适用于'内容存在但消费者无法有效接收'：看不清（虚焦/过曝/遮挡/一闪而过/画面晃动到观众抓不住重点）、听不清（吞字/被 BGM 压制）、读不完（字幕停留过短）——物理存在不等于有效传递，晃动按观众可看性判而非镜头美学。S5 背书孤证规则：仅口播提及背书而画面无任何佐证、或背书标志一闪而过无法辨认，执行分最高 0.5（高决策门槛品类口头孤证视为无效背书）。",
-            "painpoint_relevance 只能取 benchmark_only、creator_only、both、none 四选一：该阶段双方内容是否命中 category_profile.painpoints 中的核心决策因素——只有标杆命中/只有达人命中/双方都命中/双方都未命中。按内容功能判断（讲没讲到、演没演到核心痛点），不要求字面用词一致。",
+            "painpoint_relevance 只能取 benchmark_only、creator_only、both、none 四选一：该阶段双方内容是否命中 category_profile.painpoints 中的核心决策因素——只有标杆命中/只有达人命中/双方都命中/双方都未命中。按内容功能判断（讲没讲到、演没演到核心痛点），不要求字面用词一致。它只供 commercial_priorities 做同一 severity tier 内的商业相关性排序；缺失或未知不等同于 none，也不参与 severity。",
             "category_profile 必须含：category_name（品类名）, price_tier（low|mid|high 客单价档）, decision_threshold（impulse|considered）, drive_type（emotional|functional|mixed）, painpoints（该品类目标消费者最在意的决策因素关键词，每个痛点同时给中文和本地语两种表述放进同一数组，共 6-16 个词条）。只报品类事实与世界知识，不做权重判断。",
             "打分前必须先输出 product_profile 产品商业 DNA（这是 S1-S6 打分的尺子，先立尺再量）：visualizable、physical_task、hook_proposition、core_selling_points、usage_context、short_video_proof_plan（先列全部候选卖点，再按可视展示空间→功能中心性→理解成本选出一个 S4 anchor，并把其他卖点分流到 S2/S3/S5；不是给产品删卖点）、proof_contract（只引用该 anchor）、core_visual_proposition（旧兼容字段）、visual_proof_points（S4 多视觉证明点；primary 是选中 anchor 的单一可测信号，secondary 是同一 S4 anchor 的补充画面，不能替代 primary）、proof_mode、effect_requires_process、visual_diff_dimensions、trust_multipliers、shooting_requirement、confidence。只报产品事实与品类世界知识。visualizable=no 时 S4 不强求视觉命题，把判断重心放到 S5 信任放大与达人可信度。",
             "每阶段输出 stage_standard_delivery（benchmark_only|creator_only|both|none）：该阶段双方是否有效达到本阶段的『本品到位标准』（见下条对照表锚点）。做到/展示到才算，仅口头讲到不算。先作为事实输出，暂不参与推导。",
@@ -1812,7 +1815,7 @@ def build_stage_review_payload(
                     "若切片内证据不足、画面过稀或关键动作跨出窗口，必须在 review_notes 写明 sparse_window，而不是用主分析旧结论或邻近阶段补证。",
                     "只重判 target_stages 中列出的阶段；不要改写 video_understanding，不要新增 evidence_unit。",
                     "必须先在 gap 字段写清判断依据（达人做了什么→标杆做了什么→对购买意愿影响），再给 severity。",
-                    "回看后必须按主分析同一标尺重打 creator_execution 与 benchmark_execution（0=未执行；0.5=做了但基本无效/敷衍/无法有效接收；1=合格有效；2=出色。两侧独立打分，先打分再对比）和 painpoint_relevance——系统将据这些事实重推导差距等级；severity 仍需填写但仅作参考。",
+                    "回看后必须按主分析同一标尺重打 creator_execution 与 benchmark_execution（0=未执行；0.5=做了但基本无效/敷衍/无法有效接收；1=合格有效；2=出色。两侧独立打分，先打分再对比）和 painpoint_relevance——执行分只供诊断和审计，最终 severity 仍由同一 resolver 依据显式 floor/ceiling 约束收口；severity 仍需填写但仅作参考。",
                     "每个重判的结构化 stage flag 必须保留 proposition_ids，并只引用下方合同中该阶段 allowed_ids；没有实际命中则填空数组。",
                     s1_contract,
                     s2_contract,
@@ -2096,7 +2099,7 @@ def build_llm_repair_payload(
                     "你是 Flayr JSON 修复器。只输出严格 JSON，不要 Markdown，不要解释。"
                     "必须符合 references/analysis-output-schema.json：保留 one_line_verdict、holistic_assessment（每维独立评估）、key_conclusions（1-5 条消费者视角）、product_visibility、loop_closure、s3_s4_relationship、promise_chain，6 个 stage_analysis，1-5 个 improvements（按 GMV 杠杆排序）。"
                     "如果原始输出缺少 improvements（如 JSON 被截断），必须基于 stage_analysis 的差距分析补充 1-5 条。"
-                    "severity 必须差异化：功能没完成=large，有短板=medium，做到位或持平=small。"
+                    "severity 是本轮模型参考判断，不要为了凑分布强行改写；只有显式、可追溯事实才能触发 resolver 的 floor/ceiling 约束，缺失、unknown 或 uncertain 不触发。"
                     "必须保留 video_understanding 证据事实清单。stage_analysis 必须严格按 S1、S2、S3、S4、S5、S6 顺序输出六项；阶段必须保留 benchmark_time_range、creator_time_range、证据引用、核心信息、画面证据和 support_status；达人话术必须保留本地语言和中文翻译。"
                     "每个阶段引用的事实单元时间必须与阶段时间相交；缺少独立内容的阶段也要提供该时段的无对应内容事实单元。"
                     "提供了 transcript.srt 时，以其时间戳重新校对口播对应阶段；"
@@ -2104,7 +2107,7 @@ def build_llm_repair_payload(
                     + "一条事实只归属一个主要阶段；口播提及但画面不可见时标记 voice_only。"
                     + render_multimodal_prompt_contract(native_audio)
                     + "每个阶段必须补齐 creator_multimodal 与 benchmark_multimodal；只能引用该侧该阶段已有 evidence_ids，不得为补多模态字段新增事实。"
-                    "S1 Hook 必须补齐 creator_hook 与 benchmark_hook 两个对象，字段为 exists(bool)、type(A-G 或 unknown)、dims{camera,copy,sound,rhythm}(bool)、hook_boundary_seconds(number)、hook_boundary_reason(非空)、s2_start_signal(非空)、landing_met(bool)、landing_reason(非空)、window_evidence(非空)、landing_window_leak(bool)、anchors_proposition(bool)、proposition_ids(数组)。exists 只判是否有具体面向用户的留人尝试；弱 Hook 可以 exists=true、landing_met=false，不能与完全无 Hook 混淆。"
+                    "S1 Hook 必须补齐 creator_hook 与 benchmark_hook 两个对象，字段为 exists(bool)、type(A-G 或 unknown)、dims{camera,copy,sound,rhythm}(bool)、hook_boundary_seconds(number)、hook_boundary_reason(非空)、s2_start_signal(非空)、landing_met(bool)、landing_reason(非空)、window_evidence(非空)、landing_window_leak(bool)、anchors_proposition(bool)、evidence_ids(数组)、proposition_ids(数组)。exists 只判是否有具体面向用户的留人尝试；弱 Hook 可以 exists=true、landing_met=false，不能与完全无 Hook 混淆。"
                     "hook_boundary_seconds 按 structure_library_full.md 的 S1 留人机制→S2 产品引出/解决方案承接功能切换判断，不得写死固定秒数；S2-A 承接式引出可早于产品实物或产品名出现，不能等产品画面才切 S2。"
                     "landing_met 按 type 无关三件套判断：0 到 hook_boundary_seconds 内对象明确、张力明确、可感知承诺/证据或具体未解问题，缺一即 false；痛点提问的答案可以在 S2 承接，不要求 S1 先说出产品；不得用后续 S2/S3 产品介绍补足 S1 landing。若引用边界后材料，landing_window_leak=true 且 landing_met=false。"
                     + "S2 产品引出必须补齐 creator_s2 与 benchmark_s2 两个对象，字段为 exists(bool)、merged_with_s3(bool)、module_type(A-D或unknown)、handoff_met(bool)、s1_s2_compatible(bool)、product_identity_clear(bool)、product_role_clear(bool)、excluded_or_risky_module(bool)、start_seconds(number)、end_seconds(number)、handoff_reason(非空)、evidence_ids(非空数组)、proposition_ids(数组)。"

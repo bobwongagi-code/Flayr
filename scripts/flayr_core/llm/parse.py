@@ -32,6 +32,8 @@ from .product_profile import normalize_category_profile, normalize_product_profi
 
 # 兼容旧 caller 的三元组视图；唯一来源在 stage_catalog.DEFAULT_STAGES。
 STAGES = stage_tuples()
+EVIDENCE_STRENGTHS = ("direct", "explicit", "inferred", "absent")
+S5_SOURCE_STATUSES = ("missing", "uncertain", "explicit_absent", "explicit_present")
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +59,12 @@ def normalize_evidence(value: Any) -> list[str]:
     return []
 
 
+def normalize_evidence_strength(value: Any) -> str | None:
+    """归一 Stage1 canonical evidence strength；不合法或缺失保持 unknown(None)。"""
+    text = str(value or "").strip().lower()
+    return text if text in EVIDENCE_STRENGTHS else None
+
+
 def normalize_proposition_ids(value: Any) -> list[str]:
     """归一命题引用并去重；不在解析层判断 ID 是否属于某阶段。"""
     return list(dict.fromkeys(normalize_evidence(value)))
@@ -71,7 +79,7 @@ def normalize_support_status(value: Any, quote: Any) -> str:
 
 def normalize_demo_flag(value: Any) -> bool | None:
     """演示布尔通用归一（S4 has_effect_demo / S3 has_usage_demo）。返回 True/False；
-    非该阶段/null/缺失/无法解析→None（derive 见 None：S4 回退 _DEMO_RE 兜底，S3 不放大）。
+    非该阶段/null/缺失/无法解析→None；None 不触发确定性 severity 约束。
     容忍模型吐 bool 或 true/false/yes/no/1/0 字符串。"""
     if isinstance(value, bool):  # 必须先于 int 判（Python 中 bool 是 int 子类）
         return value
@@ -277,6 +285,28 @@ def normalize_s5_source_signals(value: Any) -> list[str]:
     ))
 
 
+def normalize_s5_source_status(unit: dict[str, Any]) -> str:
+    """保留 S5 来源事实的三态边界，避免把缺失字段压成明确不存在。
+
+    空数组且没有出处是模型明确声明“没有来源”；字段缺失、形状非法、来源类型
+    与出处不完整则不能当作 absence。该状态由解析层从原始字段存在性计算，供
+    postprocess 的 S5 门禁使用。
+    """
+    if "trust_source_signals" not in unit:
+        return "uncertain" if str(unit.get("trust_source_reference") or "").strip() else "missing"
+    raw_signals = unit.get("trust_source_signals")
+    reference = str(unit.get("trust_source_reference") or "").strip()
+    if not isinstance(raw_signals, list):
+        return "uncertain"
+    has_raw_signal = any(str(item or "").strip() for item in raw_signals)
+    signals = normalize_s5_source_signals(raw_signals)
+    if not has_raw_signal and not reference:
+        return "explicit_absent"
+    if signals and reference:
+        return "explicit_present"
+    return "uncertain"
+
+
 def normalize_s3_s4_relationship_type(value: Any) -> str:
     rel = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     return rel if rel in _S3_S4_RELATIONSHIPS else "unknown"
@@ -349,6 +379,7 @@ def normalize_hook_flags(value: Any) -> dict[str, Any] | None:
         "s2_start_signal": str(value.get("s2_start_signal") or "").strip(),
         "landing_window_leak": landing_window_leak,
         "anchors_proposition": normalize_demo_flag(value.get("anchors_proposition")),
+        "evidence_ids": normalize_evidence(value.get("evidence_ids")),
         "proposition_ids": normalize_proposition_ids(value.get("proposition_ids")),
     }
     return normalized
@@ -382,9 +413,8 @@ def normalize_s3_flags(value: Any) -> dict[str, Any] | None:
     usage_process_visible = normalize_demo_flag(value.get("usage_process_visible"))
     if usage_process_visible is None:
         usage_process_visible = normalize_demo_flag(value.get("real_usage_met"))
+    # 缺失不是“过程完整”。保留 None，让 derive 将其视为未知而不触发规则。
     process_framing_met = normalize_demo_flag(value.get("process_framing_met"))
-    if process_framing_met is None:
-        process_framing_met = True
     scene_mode = normalize_s3_scene_mode(value.get("scene_mode"))
     overlays = normalize_presentation_overlays(value.get("presentation_overlays"))
 
@@ -460,7 +490,7 @@ def normalize_s4_flags(value: Any) -> dict[str, Any] | None:
 
 
 def normalize_s5_flags(value: Any) -> dict[str, Any] | None:
-    """归一 S5 信任放大 flag。缺失返回 None，derive 回退旧执行分。"""
+    """归一 S5 信任放大 flag。缺失返回 None，derive 保守保留模型判断。"""
     if not isinstance(value, dict):
         return None
     return {
@@ -658,7 +688,7 @@ def normalize_execution_score(value: Any) -> float | None:
 
 
 def normalize_painpoint_relevance(value: Any) -> str | None:
-    """痛点命中归一（4d）：四值枚举；缺失/不合法返回 None → derive 退回词法匹配兜底。"""
+    """痛点相关性归一；缺失保持 unknown，不在 severity 层转成 false。"""
     text = str(value or "").strip().lower()
     return text if text in {"benchmark_only", "creator_only", "both", "none"} else None
 
@@ -942,13 +972,15 @@ def normalize_video_understanding(value: Any) -> dict[str, Any]:
                 "visual_fact": str(unit.get("visual_fact") or "").strip(),
                 "subtitle_fact": str(unit.get("subtitle_fact") or "").strip(),
                 "audio_fact": str(unit.get("audio_fact") or "").strip(),
+                "evidence_strength": normalize_evidence_strength(unit.get("evidence_strength")),
                 "product_visible": normalize_bool_flag(unit.get("product_visible")),
                 "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
                 # F 项背书劈成两个纯观察信道（替代焊死判断的 third_party_endorsement）：
-                "endorsement_verbal": normalize_bool_flag(unit.get("endorsement_verbal")),
-                "endorsement_visual": normalize_bool_flag(unit.get("endorsement_visual")),
+                "endorsement_verbal": normalize_demo_flag(unit.get("endorsement_verbal")),
+                "endorsement_visual": normalize_demo_flag(unit.get("endorsement_visual")),
                 "trust_source_signals": normalize_s5_source_signals(unit.get("trust_source_signals")),
                 "trust_source_reference": str(unit.get("trust_source_reference") or "").strip(),
+                "trust_source_status": normalize_s5_source_status(unit),
                 "functions": normalize_functions(unit.get("functions")),
             }
             normalized_unit.update(normalize_variant_unit_fields(unit))
@@ -1110,7 +1142,7 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 "benchmark_evidence_ids": normalize_evidence(item.get("benchmark_evidence_ids")),
                 "benchmark_visual_evidence": normalize_evidence(item.get("benchmark_visual_evidence")),
                 "benchmark_support_status": normalize_support_status(item.get("benchmark_support_status"), item.get("benchmark_quote")),
-                # S4 效果呈现布尔（结构库 S4-A~F 判定）：缺失为 None → derive 回退 _DEMO_RE 词法兜底
+                # S4 效果呈现布尔（结构库 S4-A~F 判定）：缺失为 None，不触发确定性约束。
                 "benchmark_has_effect_demo": normalize_demo_flag(item.get("benchmark_has_effect_demo")),
                 # S3 使用过程布尔（结构库 S3-A~E 判定）：缺失为 None → derive S3 放大器不触发（保留旧空白行为）
                 "benchmark_has_usage_demo": normalize_demo_flag(item.get("benchmark_has_usage_demo")),
@@ -1134,7 +1166,7 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 # 4d：两侧独立执行分（0/0.5/1/2），缺失为 None → derive 优雅跳过
                 "creator_execution": normalize_execution_score(item.get("creator_execution")),
                 "benchmark_execution": normalize_execution_score(item.get("benchmark_execution")),
-                # 4d：痛点命中事实（替代词法匹配定 C 系数），缺失为 None → derive 词法兜底
+                # 痛点相关性是商业优先级事实，缺失为 None，不进入 severity resolver。
                 "painpoint_relevance": normalize_painpoint_relevance(item.get("painpoint_relevance")),
                 # 到位标准达成事实（全阶段统一，见 prompt 对照表；先收集，暂不卡分）
                 "stage_standard_delivery": normalize_stage_standard_delivery(item.get("stage_standard_delivery")),
@@ -1507,13 +1539,15 @@ def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dic
                 "visual_fact": str(unit.get("visual_fact") or "").strip(),
                 "subtitle_fact": str(unit.get("subtitle_fact") or "").strip(),
                 "audio_fact": str(unit.get("audio_fact") or "").strip(),
+                "evidence_strength": normalize_evidence_strength(unit.get("evidence_strength")),
                 "product_visible": normalize_bool_flag(unit.get("product_visible")),
                 "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
                 # F 项背书劈成两个纯观察信道（替代焊死判断的 third_party_endorsement）：
-                "endorsement_verbal": normalize_bool_flag(unit.get("endorsement_verbal")),
-                "endorsement_visual": normalize_bool_flag(unit.get("endorsement_visual")),
+                "endorsement_verbal": normalize_demo_flag(unit.get("endorsement_verbal")),
+                "endorsement_visual": normalize_demo_flag(unit.get("endorsement_visual")),
                 "trust_source_signals": normalize_s5_source_signals(unit.get("trust_source_signals")),
                 "trust_source_reference": str(unit.get("trust_source_reference") or "").strip(),
+                "trust_source_status": normalize_s5_source_status(unit),
                 # 这段支撑哪些带货功能（多选，描述性）；nullable，老 facts 缺失为 None
                 "functions": normalize_functions(unit.get("functions")),
             }

@@ -21,7 +21,7 @@ from ..artifacts import (
     parse_time_range_seconds,
     parse_timestamp_seconds,
 )
-from ..llm.parse import is_effective_voiceover
+from ..llm.parse import is_effective_voiceover, normalize_s5_source_status
 from .utils import (
     ensure_evidence_unit,
     evidence_mentions_product,
@@ -426,30 +426,6 @@ _S5_VALID_BASES = {
 }
 
 
-def _s5_absent_flag(reason: str) -> dict[str, Any]:
-    """把无法由锁定事实证明的 S5 统一收敛为“未涉及”。"""
-    return {
-        "exists": False,
-        "module_type": "unknown",
-        "trust_evidence_type": "none",
-        "trust_basis": "none",
-        "trust_source_evidence_ids": [],
-        "trust_source_visible": False,
-        "trust_source_credible": False,
-        "trust_claim_specific": False,
-        "product_relevance_met": False,
-        "independent_trust_purpose": False,
-        "duplicates_other_stage": False,
-        "voice_only": False,
-        "risky_or_unsupported": False,
-        "start_seconds": 0.0,
-        "end_seconds": 0.0,
-        "trust_reason": reason,
-        "evidence_ids": [],
-        "proposition_ids": [],
-    }
-
-
 def _valid_s5_source_ids(flag: dict[str, Any], units: list[Any]) -> list[str]:
     """只接受当前 S5 已引用的、带同类型来源信号的事实单元。"""
     basis = str(flag.get("trust_basis") or "")
@@ -473,6 +449,63 @@ def _valid_s5_source_ids(flag: dict[str, Any], units: list[Any]) -> list[str]:
     return valid
 
 
+def _s5_source_status(flag: dict[str, Any], units: list[Any]) -> tuple[str, list[str]]:
+    """返回当前 S5 引用来源的状态，不把缺失或不完整证据改写成 absent。"""
+    candidates = list(dict.fromkeys([
+        *[str(value).strip() for value in flag.get("trust_source_evidence_ids", []) if str(value).strip()],
+        *[str(value).strip() for value in flag.get("evidence_ids", []) if str(value).strip()],
+    ]))
+    if not candidates:
+        return "missing", []
+    unit_map = {
+        str(unit.get("id") or "").strip(): unit
+        for unit in units
+        if isinstance(unit, dict) and str(unit.get("id") or "").strip()
+    }
+    if any(candidate not in unit_map for candidate in candidates):
+        return "missing", []
+    statuses = [
+        str(unit_map[candidate].get("trust_source_status") or normalize_s5_source_status(unit_map[candidate]))
+        for candidate in candidates
+    ]
+    if any(status == "uncertain" for status in statuses):
+        return "uncertain", []
+    if any(status == "missing" for status in statuses):
+        return "missing", []
+    valid_ids = _valid_s5_source_ids(flag, units)
+    if valid_ids:
+        return "explicit_present", valid_ids
+    # Stage1 明确看到了来源，但它与当前 S5 basis 无法对齐时是冲突/不确定，
+    # 不能降格成 explicit_absent，否则会错误触发 S5 ceiling。
+    if any(status == "explicit_present" for status in statuses):
+        return "uncertain", []
+    return "explicit_absent", []
+
+
+def _s5_flag_explicit_absence(flag: dict[str, Any], source_status: str) -> bool:
+    """只有 Stage2 明确声明无独立信任材料时，才允许 S5 ceiling 消费 absence。"""
+    candidates = [
+        str(value).strip()
+        for value in [
+            *(flag.get("trust_source_evidence_ids") or []),
+            *(flag.get("evidence_ids") or []),
+        ]
+        if str(value).strip()
+    ]
+    return (
+        (
+            source_status == "explicit_absent"
+            or (source_status == "missing" and not candidates)
+        )
+        and
+        flag.get("exists") is False
+        and flag.get("independent_trust_purpose") is False
+        and flag.get("duplicates_other_stage") is False
+        and str(flag.get("trust_basis") or "") in {"none", "product_claim", "offer_or_spec"}
+        and str(flag.get("trust_evidence_type") or "") in {"none", "unknown"}
+    )
+
+
 def _set_s5_absent_stage_side(stage: dict[str, Any], role: str) -> None:
     label = "标杆" if role == "benchmark" else "达人"
     stage[f"{role}_summary"] = f"{label}未提供可核验的独立信任材料。"
@@ -491,7 +524,7 @@ def _s5_improvement_targets_benchmark(item: dict[str, Any]) -> bool:
 
 
 def reconcile_s5_trust_sources(result: dict[str, Any], source_signals_required: bool) -> None:
-    """以 Stage1 锁定来源为准收敛 S5，避免规格、促销或无来源说法触发 LLM repair。"""
+    """以 Stage1 锁定来源校验 S5，但保留 missing/uncertain，不伪造明确 absence。"""
     if not source_signals_required:
         return
     stages = result.get("stage_analysis", [])
@@ -499,7 +532,7 @@ def reconcile_s5_trust_sources(result: dict[str, Any], source_signals_required: 
         return
     stage = stages[4]
     understanding = result.get("video_understanding", {})
-    valid_roles: dict[str, bool] = {}
+    valid_roles: dict[str, bool | None] = {}
     reconciled: list[dict[str, str]] = []
     for role in ("creator", "benchmark"):
         key = f"{role}_s5"
@@ -507,7 +540,8 @@ def reconcile_s5_trust_sources(result: dict[str, Any], source_signals_required: 
         if not isinstance(flag, dict):
             continue
         units = understanding.get(role, {}).get("evidence_units", [])
-        source_ids = _valid_s5_source_ids(flag, units if isinstance(units, list) else [])
+        units = units if isinstance(units, list) else []
+        source_status, source_ids = _s5_source_status(flag, units)
         basis = str(flag.get("trust_basis") or "unknown")
         has_valid_source = (
             flag.get("exists") is True
@@ -516,33 +550,39 @@ def reconcile_s5_trust_sources(result: dict[str, Any], source_signals_required: 
             and flag.get("trust_claim_specific") is True
             and flag.get("product_relevance_met") is True
             and basis in _S5_VALID_BASES
+            and source_status == "explicit_present"
             and bool(source_ids)
         )
         if has_valid_source:
             flag["trust_source_evidence_ids"] = source_ids
+            flag["_s5_source_status"] = "explicit_present"
             valid_roles[role] = True
             continue
-        reason = "未找到与 S5 结论同类型、可核验的 Stage1 信任来源，按未涉及处理。"
-        stage[key] = _s5_absent_flag(reason)
-        valid_roles[role] = False
-        _set_s5_absent_stage_side(stage, role)
-        reconciled.append({"role": role, "basis": basis, "reason": reason})
+        if _s5_flag_explicit_absence(flag, source_status):
+            flag["_s5_source_status"] = "explicit_absent"
+            valid_roles[role] = False
+            continue
+        # 来源缺失、不完整或与 flag 声明不一致时保留原 flag，让后续质量门禁触发
+        # repair；不能把“无法证明存在”降格成“明确不存在”并触发 ceiling。
+        flag["_s5_source_status"] = "unknown"
+        valid_roles[role] = None
+        reason = "S5 来源事实缺失或不完整，保留 unknown，不能按未涉及处理。"
+        reconciled.append({"role": role, "basis": basis, "status": source_status, "reason": reason})
 
     benchmark_valid = valid_roles.get("benchmark") is True
     creator_valid = valid_roles.get("creator") is True
-    if not benchmark_valid and not creator_valid:
+    roles_known = valid_roles.get("benchmark") is not None and valid_roles.get("creator") is not None
+    if roles_known and not benchmark_valid and not creator_valid:
         stage["gap"] = "双方均未提供可核验的独立信任材料，S5 不构成独立差距。"
         stage["gap_summary"] = [stage["gap"]]
-        stage["severity"] = "small"
-    elif benchmark_valid and not creator_valid:
+    elif roles_known and benchmark_valid and not creator_valid:
         stage["gap"] = "标杆提供了可核验的独立信任材料，达人未提供对应来源。"
         stage["gap_summary"] = [stage["gap"]]
-    elif creator_valid and not benchmark_valid:
+    elif roles_known and creator_valid and not benchmark_valid:
         stage["gap"] = "达人提供了可核验的独立信任材料，标杆未提供；S5 不构成达人差距。"
         stage["gap_summary"] = [stage["gap"]]
-        stage["severity"] = "small"
 
-    if not benchmark_valid:
+    if roles_known and not benchmark_valid:
         result["improvements"] = [
             item
             for item in result.get("improvements", [])
@@ -551,7 +591,7 @@ def reconcile_s5_trust_sources(result: dict[str, Any], source_signals_required: 
     if reconciled:
         warnings = result.get("qa_warnings") if isinstance(result.get("qa_warnings"), list) else []
         warnings.extend(
-            f"S5 来源校验：{item['role']}侧 {item['basis']} 未被锁定事实来源支持，已归一为未涉及。"
+            f"S5 来源校验：{item['role']}侧 {item['basis']} 状态为 {item['status']}，保留 unknown，等待 repair。"
             for item in reconciled
         )
         result["qa_warnings"] = warnings

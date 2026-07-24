@@ -205,7 +205,7 @@ def _improvement_payload(item: dict[str, Any], rank: int, benchmark_understandin
         "priorityClass": priority_class,
         "impactDirection": impact_direction,
         "confidence": _confidence_label(item.get("confidence")),
-        "evidenceStrength": _evidence_strength(item, units),
+        "evidenceStrength": _report_evidence_label(item, units),
         "gapType": gap_type,
         "planA": action or "暂无明确拍摄或执行方案。",
         "planB": plan_b,
@@ -249,7 +249,7 @@ def _gate_payload(semantic: SemanticAnalysis) -> list[dict[str, str]]:
                 "priorityLabel": priority_label,
                 "priorityClass": priority_class,
                 "confidence": _confidence_label(item.get("confidence")),
-                "evidenceStrength": _evidence_strength(item),
+                "evidenceStrength": _report_evidence_label(item),
                 "text": f"{title}：{summary}" if summary else title,
             }
         )
@@ -339,7 +339,8 @@ def _confidence_label(value: Any) -> str:
     return "待确认"
 
 
-def _evidence_strength(item: dict[str, Any], units: list[dict[str, Any]] | None = None) -> str:
+def _report_evidence_label(item: dict[str, Any], units: list[dict[str, Any]] | None = None) -> str:
+    """报告展示标签；不等同于 Stage1 canonical evidence_strength。"""
     references = units or []
     has_evidence = bool(
         references

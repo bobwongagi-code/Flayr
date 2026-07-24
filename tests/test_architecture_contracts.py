@@ -345,7 +345,8 @@ class ArchitectureContractTests(unittest.TestCase):
         trace = _derive_one("S1", stage, {"S1": 1.0}, [])
         self.assertEqual(trace["derived_creator_execution"], 2.0)
         self.assertEqual(trace["derived_benchmark_execution"], 2.0)
-        self.assertEqual(trace["severity"], "small")
+        self.assertEqual(trace["status"], "model_preserved")
+        self.assertEqual(trace["severity"], "medium")
 
     def test_multimodal_s1_is_not_reinflated_by_legacy_anchor_gap(self) -> None:
         stage = {
@@ -361,7 +362,8 @@ class ArchitectureContractTests(unittest.TestCase):
         trace = _derive_one("S1", stage, {"S1": 1.5}, [], allow_legacy_text_fallback=False)
         self.assertEqual(trace["derived_creator_execution"], 1.0)
         self.assertEqual(trace["derived_benchmark_execution"], 2.0)
-        self.assertEqual(trace["E"], 1.0)
+        self.assertNotIn("E", trace)
+        self.assertEqual(trace["status"], "model_preserved")
         self.assertEqual(trace["severity"], "medium")
 
     def test_multimodal_gate_rejects_strong_effect_with_strong_conflict(self) -> None:
@@ -1932,26 +1934,34 @@ class ArchitectureContractTests(unittest.TestCase):
             "visual_difference_observed": True,
             "module_constraints_met": True,
             "effect_salience": "strong",
+            "effect_proposition_matched": True,
             "effect_attribution_supported": True,
             "requires_close_inspection": False,
             "tamper_or_cut_risk": False,
             "result_only_without_process": True,
             "process_linked_effect": False,
-            "effect_proposition_matched": True,
+            "evidence_ids": ["C4"],
         }
         benchmark = {
             **creator,
             "result_only_without_process": False,
             "process_linked_effect": True,
+            "evidence_ids": ["B4"],
         }
         trace = _derive_one(
             "S4",
             {"creator_s4": creator, "benchmark_s4": benchmark},
             {"S4": 1.0},
             [],
+            facts={
+                "video_understanding": {
+                    "creator": {"evidence_units": [{"id": "C4", "evidence_strength": "direct"}]},
+                    "benchmark": {"evidence_units": [{"id": "B4", "evidence_strength": "direct"}]},
+                }
+            },
         )
         self.assertEqual(trace["severity"], "large")
-        self.assertIn("效果归因断层", trace["reason"])
+        self.assertIn("效果证明", trace["reason"])
 
     def test_structural_scope_s4_visual_review_does_not_require_same_sku_contract(self) -> None:
         result = {
@@ -2012,41 +2022,58 @@ class ArchitectureContractTests(unittest.TestCase):
             "action_target_contact_met": True,
             "action_application_change_visible": True,
             "critical_action_continuity_met": True,
+            "evidence_ids": ["B3"],
         }
         missing_s3 = {**complete_s3, "usage_process_visible": False, "real_usage_met": False,
                       "action_target_contact_met": False, "action_application_change_visible": False,
-                      "critical_action_continuity_met": False}
+                      "critical_action_continuity_met": False, "evidence_ids": ["C3"]}
+        s3_facts = {
+            "video_understanding": {
+                "creator": {"evidence_units": [{"id": "C3", "evidence_strength": "direct"}]},
+                "benchmark": {"evidence_units": [{"id": "B3", "evidence_strength": "direct"}]},
+            }
+        }
         s3_trace = _derive_one(
             "S3",
             {"creator_execution": 0.0, "benchmark_execution": 1.0,
              "creator_s3": missing_s3, "benchmark_s3": complete_s3},
             {"S3": 1.0},
             [],
+            facts=s3_facts,
         )
         self.assertEqual(s3_trace["severity"], "large")
-        self.assertEqual(s3_trace["E"], 2)
-        self.assertIn("使用过程完整性断层", s3_trace["reason"])
+        self.assertNotIn("E", s3_trace)
+        self.assertIn("真实使用", s3_trace["reason"])
         complete_s4 = {
             "effect_visible": True,
             "visual_difference_observed": True,
             "module_constraints_met": True,
             "effect_salience": "strong",
+            "effect_proposition_matched": True,
             "effect_attribution_supported": True,
             "requires_close_inspection": False,
             "tamper_or_cut_risk": False,
+            "evidence_ids": ["B4"],
         }
         missing_s4 = {**complete_s4, "effect_visible": False, "visual_difference_observed": False,
-                      "effect_salience": "none"}
+                      "effect_salience": "none", "evidence_ids": ["C4"]}
+        s4_facts = {
+            "video_understanding": {
+                "creator": {"evidence_units": [{"id": "C4", "evidence_strength": "direct"}]},
+                "benchmark": {"evidence_units": [{"id": "B4", "evidence_strength": "direct"}]},
+            }
+        }
         s4_trace = _derive_one(
             "S4",
             {"creator_execution": 0.0, "benchmark_execution": 2.0,
              "creator_s4": missing_s4, "benchmark_s4": complete_s4},
             {"S4": 1.0},
             [],
+            facts=s4_facts,
         )
         self.assertEqual(s4_trace["severity"], "large")
-        self.assertEqual(s4_trace["E"], 2)
-        self.assertIn("效果说服力断层", s4_trace["reason"])
+        self.assertNotIn("E", s4_trace)
+        self.assertIn("效果证明", s4_trace["reason"])
 
     def test_s3_s4_visual_verifier_applies_nested_usage_review_without_breaking_old_s4_fields(self) -> None:
         stages = [{"stage": f"S{index}", "severity": "small"} for index in range(1, 7)]
@@ -2276,18 +2303,20 @@ class ArchitectureContractTests(unittest.TestCase):
             },
         }
         reconcile_s5_trust_sources(result, True)
-        self.assertFalse(stages[4]["creator_s5"]["exists"])
+        self.assertTrue(stages[4]["creator_s5"]["exists"])
+        self.assertEqual(stages[4]["creator_s5"]["_s5_source_status"], "unknown")
         self.assertTrue(stages[4]["benchmark_s5"]["exists"])
         self.assertEqual(stages[4]["benchmark_s5"]["trust_source_evidence_ids"], ["B5"])
-        self.assertIn("标杆提供了可核验", stages[4]["gap"])
+        self.assertEqual(stages[4]["gap"], "标杆背书更强。")
         self.assertEqual([item["target_stage"] for item in result["improvements"]], ["S5 信任放大", "S1 Hook"])
 
         stages[4]["benchmark_s5"]["trust_source_evidence_ids"] = []
         result["video_understanding"]["benchmark"]["evidence_units"][0]["trust_source_signals"] = []
         reconcile_s5_trust_sources(result, True)
-        self.assertFalse(stages[4]["benchmark_s5"]["exists"])
-        self.assertEqual([item["target_stage"] for item in result["improvements"]], ["S1 Hook"])
-        self.assertEqual(stages[4]["severity"], "small")
+        self.assertTrue(stages[4]["benchmark_s5"]["exists"])
+        self.assertEqual(stages[4]["benchmark_s5"]["_s5_source_status"], "unknown")
+        self.assertEqual([item["target_stage"] for item in result["improvements"]], ["S5 信任放大", "S1 Hook"])
+        self.assertEqual(stages[4]["gap"], "标杆背书更强。")
 
     def test_s5_source_reconciliation_rejects_vague_or_irrelevant_testimonial(self) -> None:
         stages = [{"stage": f"S{index}"} for index in range(1, 7)]
@@ -2296,6 +2325,9 @@ class ArchitectureContractTests(unittest.TestCase):
             "creator_s5": {
                 "exists": False,
                 "trust_basis": "none",
+                "trust_evidence_type": "none",
+                "independent_trust_purpose": False,
+                "duplicates_other_stage": False,
             },
             "benchmark_s5": {
                 "exists": True,
@@ -2328,9 +2360,9 @@ class ArchitectureContractTests(unittest.TestCase):
 
         reconcile_s5_trust_sources(result, True)
 
-        self.assertFalse(stages[4]["benchmark_s5"]["exists"])
-        self.assertEqual(stages[4]["severity"], "small")
-        self.assertIn("双方均未提供", stages[4]["gap"])
+        self.assertTrue(stages[4]["benchmark_s5"]["exists"])
+        self.assertEqual(stages[4]["benchmark_s5"]["_s5_source_status"], "unknown")
+        self.assertEqual(stages[4]["gap"], "标杆有评论背书。")
 
     def test_subtitle_driven_cta_is_not_overwritten_by_no_cta_placeholder(self) -> None:
         stages = [{"stage": f"S{index}"} for index in range(1, 7)]

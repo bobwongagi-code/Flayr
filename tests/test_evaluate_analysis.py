@@ -13,7 +13,6 @@ from scripts.evaluate_analysis import (
     _phase_c_audit,
     _stage_oracle_audit,
     severity_diagnostics,
-    severity_from_score,
 )
 
 
@@ -23,96 +22,59 @@ class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
         self.assertIsNone(_event_time_bounds([3.0, 1.0]))
         self.assertIsNone(_event_time_bounds([float("nan"), 3.0]))
 
-    def test_score_bucket_uses_derive_boundaries(self) -> None:
-        self.assertEqual(severity_from_score(1.2), "small")
-        self.assertEqual(severity_from_score(1.21), "medium")
-        self.assertEqual(severity_from_score(2.5), "medium")
-        self.assertEqual(severity_from_score(2.51), "large")
-
-    def test_near_threshold_mismatch_is_diagnostic_only(self) -> None:
+    def test_model_preserved_has_no_score_or_threshold_path(self) -> None:
         diagnostics = severity_diagnostics(
             "medium",
-            "small",
-            {
-                "severity_derivation": {
-                    "status": "derived",
-                    "severity": "small",
-                    "S": 1.15,
-                    "reason": "E = 标杆执行分 1.0 - 达人执行分 0.5",
-                }
-            },
-        )
-        self.assertEqual(diagnostics["ordinal_distance"], 1)
-        self.assertEqual(diagnostics["derivation_path"], "threshold")
-        self.assertTrue(diagnostics["near_threshold"])
-
-    def test_floor_override_is_not_explained_as_boundary_noise(self) -> None:
-        diagnostics = severity_diagnostics(
-            "small",
             "medium",
             {
                 "severity_derivation": {
-                    "status": "derived",
+                    "status": "model_preserved",
                     "severity": "medium",
-                    "S": 0.9,
-                    "reason": "landing 下限：标杆钩子立住、达人未立住",
+                    "constraints": [],
                 }
             },
         )
-        self.assertEqual(diagnostics["ordinal_distance"], 1)
-        self.assertEqual(diagnostics["derivation_path"], "override_or_floor")
+        self.assertEqual(diagnostics["score"], None)
+        self.assertEqual(diagnostics["score_bucket"], None)
+        self.assertEqual(diagnostics["derivation_path"], "model_preserved")
+        self.assertEqual(diagnostics["decision_mechanism"], "model_default")
         self.assertIsNone(diagnostics["near_threshold"])
 
-    def test_two_band_error_is_preserved(self) -> None:
-        diagnostics = severity_diagnostics("large", "small", {})
-        self.assertEqual(diagnostics["ordinal_distance"], 2)
-        self.assertEqual(diagnostics["derivation_path"], "non_score_path")
-        self.assertEqual(diagnostics["decision_mechanism"], "other_non_score_path")
-
-    def test_non_positive_gap_is_not_classified_as_missing_evidence(self) -> None:
+    def test_constraint_path_reports_clamp_without_score(self) -> None:
         diagnostics = severity_diagnostics(
-            "medium",
             "small",
-            {
-                "severity_derivation": {
-                    "status": "derived",
-                    "severity": "small",
-                    "E": 0,
-                    "reason": "E = 标杆执行分 2.0 - 达人执行分 2.0；达人持平或更优（亮点，零差距红线）",
-                }
-            },
-        )
-        self.assertEqual(diagnostics["decision_mechanism"], "non_positive_execution_gap")
-
-    def test_both_absent_has_its_own_mechanism(self) -> None:
-        diagnostics = severity_diagnostics(
-            "large",
-            "small",
-            {
-                "severity_derivation": {
-                    "status": "derived",
-                    "severity": "small",
-                    "E": 0,
-                    "reason": "双方均未涉及（执行分均为 0），不进公式",
-                }
-            },
-        )
-        self.assertEqual(diagnostics["decision_mechanism"], "both_absent")
-
-    def test_non_score_floor_is_classified_as_structural_override(self) -> None:
-        diagnostics = severity_diagnostics(
-            "medium",
             "medium",
             {
                 "severity_derivation": {
-                    "status": "derived",
+                    "status": "constrained",
                     "severity": "medium",
-                    "E": 0,
-                    "reason": "E = 标杆执行分 2.0 - 达人执行分 2.0；命题锚下限：标杆锚定核心命题",
+                    "constraints": [{"kind": "floor", "level": "medium", "rule": "S1_landing_floor"}],
                 }
             },
         )
-        self.assertEqual(diagnostics["decision_mechanism"], "structural_override")
+        self.assertEqual(diagnostics["ordinal_distance"], 1)
+        self.assertEqual(diagnostics["derivation_path"], "constraint")
+        self.assertEqual(diagnostics["decision_mechanism"], "floor_ceiling_clamp")
+        self.assertIsNone(diagnostics["near_threshold"])
+
+    def test_constraint_conflict_is_explicit(self) -> None:
+        diagnostics = severity_diagnostics(
+            "small",
+            "small",
+            {
+                "severity_derivation": {
+                    "status": "conflict",
+                    "severity": "small",
+                    "constraints": [
+                        {"kind": "floor", "level": "large", "rule": "S1_hook_exists_floor"},
+                        {"kind": "ceiling", "level": "medium", "rule": "S5_no_trust_ceiling"},
+                    ],
+                }
+            },
+        )
+        self.assertEqual(diagnostics["derivation_path"], "constraint_conflict")
+        self.assertEqual(diagnostics["decision_mechanism"], "floor_ceiling_conflict")
+        self.assertTrue(diagnostics["constraint_conflict"])
 
 
 class LayeredEvaluationTest(unittest.TestCase):
@@ -125,7 +87,7 @@ class LayeredEvaluationTest(unittest.TestCase):
         labels = {
             "samples": {
                 "sample": {
-                    "stages": {"S6": "large"},
+                    "stages": {"S6": "small"},
                     "stage_oracles": {
                         "S6": {
                             "creator_execution": 0.0,
@@ -161,7 +123,7 @@ class LayeredEvaluationTest(unittest.TestCase):
         self.assertFalse(record["execution_match"])
         self.assertEqual(record["actual_creator_execution"], 0.5)
         self.assertEqual(record["derive_replay_status"], "complete_oracle_patch")
-        self.assertEqual(record["derive_replay_severity"], "large")
+        self.assertEqual(record["derive_replay_severity"], "small")
         self.assertTrue(record["derive_replay_match"])
 
     def test_human_key_event_audit_separates_present_and_absent_evidence(self) -> None:

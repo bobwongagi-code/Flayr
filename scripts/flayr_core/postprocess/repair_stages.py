@@ -1,8 +1,8 @@
-"""flayr_core.postprocess.repair_stages：阶段归属与差距等级的确定性校准。
+"""flayr_core.postprocess.repair_stages：阶段归属与证据边界的确定性校准。
 
 从 repair.py 按 region 簇拆出（2026-06-15，零跨模块依赖）：
   - align_*       按关键词/时间戳把 evidence 归到正确阶段
-  - stabilize_*   对 LLM 容易漂移的阶段差距等级做兜底校准
+  - stabilize_*   保留旧调用入口；severity 已由 derive resolver 统一收口
 另含这两簇共享的小工具（stage_code/stage_text/has_real_endorsement 等）。
 所有函数都是"修改 result data 后正常返回"，不抛 SystemExit。
 """
@@ -17,6 +17,10 @@ from ..artifacts import format_seconds, parse_time_range_seconds, parse_timestam
 from ..stage_catalog import stage_tuples
 
 STAGES = stage_tuples()
+
+S1_POSTPROCESS_STATE_KEY = "_postprocess_state"
+S1_HOOK_BOUNDARIES_STATE_KEY = "s1_hook_boundaries"
+S1_HOOK_BOUNDARIES_REPAIRED = "repaired"
 from .utils import (
     adjacent_review_range,
     assign_benchmark_unit,
@@ -130,6 +134,11 @@ def repair_s1_hook_boundaries(result: dict[str, Any], analysis: dict[str, Any]) 
     s1 = next((stage for stage in result.get("stage_analysis", []) if str(stage.get("stage", "")).startswith("S1")), None)
     if not isinstance(s1, dict):
         return
+    # derive 只消费经过这一轮 repair 的 canonical S1 facts。即使本轮没有
+    # 可应用候选也要写入，表示前置检查已完成，而不是表示一定发生了改写。
+    postprocess_state = s1.setdefault(S1_POSTPROCESS_STATE_KEY, {})
+    if isinstance(postprocess_state, dict):
+        postprocess_state[S1_HOOK_BOUNDARIES_STATE_KEY] = S1_HOOK_BOUNDARIES_REPAIRED
     for role, side in (("creator", "creator"), ("benchmark", "benchmark")):
         hook = s1.get(f"{side}_hook")
         if not isinstance(hook, dict):
@@ -459,42 +468,12 @@ def align_timed_cta_from_transcript(result: dict[str, Any], analysis: dict[str, 
 # region stabilize -----------------------------------------------------------
 
 def stabilize_stage_severity(result: dict[str, Any]) -> None:
-    """校准容易跨阶段漂移的 severity（4d 后为兜底层）。
+    """兼容性占位钩子；最终 severity 只能由 derive resolver 写入。
 
-    2026-06-11 按 TODO #1 处置清单执行去过拟合：S3/S4 牙膏三件套（按压/闻香/功能效果正则）
-    已删——kakwan S3 误触发实锤 + round4 验证 derive 用执行分正确处理同品类（tasha S4 large 3/5）。
-    保留的规则只在 derive 跳过时（执行分缺失的旧数据/降级路径）作为最终值生效：
-    - 达人持平或优于标杆时，severity 不应超过 small（极性兜底，文本正则版）；
-    - S5 双方均无真背书 → 均未涉及（与 derive S5 门槛同源）；
-    - 标杆没有 CTA 而达人有购买指令时，S6 不应被"不够强促销"惩罚。
+    过去这里的文本兜底会先写 severity，再由 derive 覆盖，造成规则顺序和
+    gap 文本不同步。保留调用点但不再修改任何 severity 或阶段业务字段。
     """
-    creator_global_has_cta = role_has_positive_cta(result, "creator")
-    benchmark_global_has_cta = role_has_positive_cta(result, "benchmark")
-
-    for stage in result.get("stage_analysis", []):
-        stage_id = stage_code(stage)
-        text = stage_text(stage)
-
-        if creator_not_worse(text):
-            set_stage_small(stage)
-
-        # S3/S4 牙膏三件套已删（2026-06-11，TODO #1 处置清单）：按压/闻香/功能效果正则
-        # 是对单一牙膏样本长出的过拟合，kakwan"按压按钮"误触发实锤；该判断现由
-        # derive.py 的执行分 + S4 演示差分承担（round4 tasha S4 实证）。
-        # S2 不再无条件兜底 small：双方都完成产品引出不代表卖点质量相当，
-        # 需由 LLM 按品类消费者决策优先级判断卖点选择是否偏离。
-
-        # S5「双方均无背书 → small」闸已移交 derive（2026-06-23）：derive 用结构化 flag
-        # （endorsement_verbal/visual，缺失退 has_real_endorsement 正则兜底）做唯一判定。
-        # 此处旧正则闸删除——它在 derive 之前跑、设 small + gap_summary，derive 后跑覆盖 severity
-        # 却不改 gap_summary，两者一旦不一致（正则 vs flag）会产出「severity≠解释」的自相矛盾。
-
-        if stage_id == "S6" and creator_global_has_cta and not benchmark_global_has_cta:
-            set_stage_small(
-                stage,
-                "达人有明确购买指令，标杆未设计独立 CTA；不因缺少限时/限量话术判为中大差距。",
-                "达人 CTA 不弱于标杆，差距等级按 small 处理。",
-            )
+    del result
 
 
 def apply_comparison_eligibility(result: dict[str, Any]) -> None:
@@ -758,12 +737,5 @@ def has_hard_endorsement(text: str) -> bool:
 def creator_has_cta(text: str) -> bool:
     return bool(re.search(r"买|购买|下单|小黄车|黄色|购物车|beg|kuning|grab|beli|direct|link|cart", text, flags=re.IGNORECASE))
 
-
-def set_stage_small(stage: dict[str, Any], gap: str | None = None, summary: str | None = None) -> None:
-    stage["severity"] = "small"
-    if gap:
-        stage["gap"] = gap
-    if summary:
-        stage["gap_summary"] = [summary]
 
 # endregion

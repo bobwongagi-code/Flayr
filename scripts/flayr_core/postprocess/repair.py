@@ -3,7 +3,7 @@
 本模块所有函数都是"修改 result data 后正常返回"，不抛 SystemExit，不触发流程终止。
 2026-06-15 按职责拆成三个子模块（零跨模块依赖），本文件保留为统一 re-export 入口，
 既给现有 `from .repair import X` 调用方零改动，又给后续维护一个一目了然的目录：
-  - repair_stages   align_* / stabilize_*（阶段归属与差距等级校准，含背书识别）
+  - repair_stages   align_* / stabilize_*（阶段归属与证据边界校准，含背书识别）
   - repair_evidence bind_* / reconcile_* / ground_* / fill_* / materialize_* / deduplicate_*
   - repair_claims   downgrade_* / 产品出镜累加 / 品牌清洗 / 时间归一
 """
@@ -50,7 +50,6 @@ from .repair_stages import (
     role_has_positive_cta,
     role_stage_text,
     repair_s1_hook_boundaries,
-    set_stage_small,
     stabilize_improvement_priorities,
     stabilize_stage_severity,
     stage_code,
@@ -74,7 +73,6 @@ __all__ = [
     "has_real_endorsement",
     "has_hard_endorsement",
     "creator_has_cta",
-    "set_stage_small",
     # repair_evidence
     "bind_timed_transcript_quotes",
     "align_stage_flag_evidence",

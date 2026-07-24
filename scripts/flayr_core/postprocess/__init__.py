@@ -8,10 +8,10 @@
   - health_rewrite    健康品类合规重写专项（含 2 个会抛 SystemExit 的 validate_*）
   - chain             共享流水线 apply_postprocess_chain
 
-包级 re-export 仅暴露 apply_postprocess_chain。其他函数请显式 import 子模块路径，
+包级 re-export 暴露主链和 severity 收口入口。其他函数请显式 import 子模块路径，
 让调用方一眼看出函数来自哪个职责层。
 """
 
-from .chain import apply_postprocess_chain
+from .chain import apply_postprocess_chain, finalize_severity_after_repairs
 
-__all__ = ["apply_postprocess_chain"]
+__all__ = ["apply_postprocess_chain", "finalize_severity_after_repairs"]

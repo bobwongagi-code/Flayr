@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..artifacts import format_seconds, parse_time_range_seconds, parse_timestamp_seconds, select_frames_for_time_range
-from ..postprocess.derive import derive_severity_from_facts
+from ..postprocess.chain import finalize_severity_after_repairs
 from ..postprocess.repair import reconcile_s3_s4_evidence_coherence, stabilize_improvement_priorities
 from ..utils import write_json, write_text
 from .api import call_llm_api, extract_chat_completion_text, image_to_data_url, video_to_data_url
@@ -281,7 +281,7 @@ def apply_s4_visual_verifier_result(
             applied = True
     if applied:
         reconcile_s3_s4_evidence_coherence(result)
-        derive_severity_from_facts(result, analysis)
+        finalize_severity_after_repairs(result, analysis)
         stabilize_improvement_priorities(result)
     return applied
 

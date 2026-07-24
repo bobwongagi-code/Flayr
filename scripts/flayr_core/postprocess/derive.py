@@ -1,22 +1,15 @@
-"""flayr_core.postprocess.derive：severity 确定性推导（4d 架构落地）。
+"""flayr_core.postprocess.derive：severity 约束解析器。
 
-设计依据（2026-06-11，两轮门禁 + 历史离线校验 r1 14/18 / r2 16/18）：
-模型直出 severity 不收敛（prompt 两轮校准 11/18→9/18），但事实层稳定。
-分工改为：模型供事实（两侧独立执行分 + 品类画像 + 证据文本），代码定政策（权重表 + 推导）。
+derive 是模型 severity 的安全网，不是第二个评分模型。它只允许把确定性事实
+转换为 floor/ceiling 约束，再由一个 resolver 统一收口：
 
-三条定稿原则（用户裁决）：
-  ① E 由代码从稳定事实推导，模型不直出对比性差距分。
-     单侧执行分标尺：0=不执行，0.5=敷衍，1=合格，2=好；E = 标杆执行分 − 达人执行分。
-  ③ 品类痛点清单是数据（category_profile.painpoints 由模型按世界知识输出，命中由代码查表），
-     权重政策（W 表）在代码。
-  ④ 事实不支撑则不判断：双方执行分均为 0、或 S5 双方均无真背书 → "均未涉及"，不进公式。
+* 没有确定性约束时保留 model_severity；
+* 多条 floor 取 max，多条 ceiling 取 min；
+* floor == ceiling 是合法 clamp，floor > ceiling 是冲突，冲突时保留模型并交给 Phase C；
+* 缺失、unknown、uncertain 和不足以证明的事实绝不触发规则；
+* E/W/C 连续公式不再参与 severity，painpoint_relevance 由商业优先级层单独消费。
 
-架构不变量：推导失败（字段缺失/不合法/任何异常）必须优雅降级--保留模型 severity 和
-既有 stabilize 护栏结果，把原因写进 severity_derivation.status，绝不抛错拖垮主分析流程。
-每阶段附 severity_derivation 算法溯源（E/W/C/S/依据），满足可解释证据链要求。
-
-权重初值来自离线校验（同批 18 标签拟合，属可行性初值非定稿）；
-后续随对比数据 + 人工裁决积累，对存量 facts 零 LLM 成本离线重拟合。
+所有异常都必须优雅降级，写入 severity_derivation，不得拖垮主分析流程。
 """
 
 from __future__ import annotations
@@ -25,77 +18,22 @@ import re
 from typing import Any, NamedTuple
 
 from ..multimodal import channel_requirement_for, has_multimodal_assessment, multimodal_execution
-from .repair import has_hard_endorsement
 
-# ── 品类原型 → 阶段权重表 W（政策数据，待数据积累渐进拟合）──────────────────────
-ARCHETYPE_W: dict[str, dict[str, float]] = {
-    # 高决策门槛 + 功能理性（口服保健品/护肤等）：信任背书与效果验证是说服核心
-    # 2026-06-12 任务5 首次重拟合（60 标签，S1 锁框架红线不进搜索）：
-    # 理性 S3 1.0→1.2、感官 S2/S3 1.0→1.6--中段呈现权重整体上调，36/60→40/60 severe 7→5
-    # 2026-06-12 晃动信号上线后二次拟合：理性 S2/S3 1.2→1.4（45/60 severe 2）
-    # 2026-06-13 repeat5 稳定口径三次拟合：理性 S3 1.4→1.6（众数语料 43→44/60 severe 2）
-    "high_decision_rational": {"S1": 1.5, "S2": 1.4, "S3": 1.6, "S4": 1.4, "S5": 1.6, "S6": 1.2},
-    # 低客单价冲动品（日用快消）：CTA 是转化口（客单越低 CTA 权重越高），背书必要性低
-    "impulse_low_price": {"S1": 1.5, "S2": 1.2, "S3": 1.2, "S4": 1.0, "S5": 0.6, "S6": 1.8},
-    # 高决策门槛 + 情绪/感官驱动（儿童用品等决策人分离品类）：感官效果可视化权重最高
-    "high_decision_sensory": {"S1": 1.5, "S2": 1.6, "S3": 1.6, "S4": 1.5, "S5": 1.4, "S6": 1.2},
-}
-# severity 映射阈值：S≤1.2 → small；S≤2.5 → medium；S>2.5 → large
-TH_SMALL, TH_MEDIUM = 1.2, 2.5
 _STAGE_RE = re.compile(r"(S[1-6])")
-# S4 动作演示词：效果验证的功能定义是"让用户看到并信服"，标杆动作演示 vs 达人口头宣称 = 验证功能未达成
-_DEMO_RE = re.compile(r"闻|嗅|按压|挤出|涂抹|擦拭|冲水|冲洗|冲净|脱落|掉入|掉进|排空|实测|对比|试用|测试|前后")
 
-
-def _reconcile_operator_tier(profile: dict[str, Any] | None, analysis: dict[str, Any] | None) -> None:
-    """运营档位优先（降级链）：运营给的 price_tier 覆盖模型世界知识判断。
-
-    price_tier 需要的是"该品牌型号的实际市场价位"--视频通常不报价、模型对本地品牌
-    价位无谱，运营（领域专家）最可靠。降级链：运营档位 > 模型判断（model_fallback）。
-    触发器（2026-06-13）：impulse+high 时 impulse_low_price 原型（背书权重 0.6）可能不适用，
-    告警人工复议--这是 price_tier 在当前架构唯一的非冗余价值点。
-    """
-    if not isinstance(profile, dict):
-        return
-    op = (analysis or {}).get("product") or {} if isinstance(analysis, dict) else {}
-    op_tier = str(op.get("tier") or "").strip().lower()
-    if op_tier in {"low", "mid", "high"}:
-        profile["price_tier"] = op_tier
-        profile["price_tier_source"] = "operator"
-        price = op.get("price")
-        if price and str(price) != "未填写":
-            profile["price"] = str(price)
-    if profile.get("decision_threshold") == "impulse" and profile.get("price_tier") == "high":
-        profile["archetype_warning"] = (
-            "impulse+high：impulse_low_price 原型(背书权重 0.6)可能不适用，建议人工复议"
-        )
-
-
-def _select_archetype(profile: dict[str, Any] | None) -> str | None:
-    if not isinstance(profile, dict):
-        return None
-    if profile.get("decision_threshold") == "impulse":
-        return "impulse_low_price"
-    # 框架"客单越低 CTA 权重越高"：低客单+功能性日用品按冲动品原型处理--
-    # round3 实测模型对马桶刷的 decision_threshold 在 considered/impulse 间摆（4:1），
-    # 而 price_tier=low 稳定，政策锚定在稳的事实上。
-    if profile.get("price_tier") == "low" and profile.get("drive_type") == "functional":
-        return "impulse_low_price"
-    if profile.get("drive_type") in {"emotional", "mixed"}:
-        return "high_decision_sensory"
-    return "high_decision_rational"
-
-
-def _side_text(stage: dict[str, Any], side: str) -> str:
-    keys = [f"{side}_summary", f"{side}_key_message", f"{side}_quote_zh", f"{side}_quote"]
-    return " ".join(str(stage.get(k) or "") for k in keys)
+SEVERITIES = ("small", "medium", "large")
+SEVERITY_RANK = {value: index for index, value in enumerate(SEVERITIES)}
+EVIDENCE_STRENGTHS = ("direct", "explicit", "inferred", "absent")
+_EXPLICIT_STRENGTHS = {"direct", "explicit"}
+_S1_REPAIR_STATE_KEY = "s1_hook_boundaries"
+_S1_REPAIR_STATE_VALUE = "repaired"
 
 
 class _Endorsement(NamedTuple):
     """该侧硬背书聚合结果。具名避免 (verbal, visual, available) 位置元组解包错位。"""
     verbal: bool      # 口播/字幕出现硬背书来源词
     visual: bool      # 画面出现独立硬背书视觉证据
-    available: bool   # 该侧 unit 有无结构化 endorsement 字段（无→derive 退回硬背书正则兜底）
+    available: bool   # 该侧 unit 是否有结构化 endorsement 字段
 
 
 _NO_ENDORSEMENT = _Endorsement(False, False, False)
@@ -113,32 +51,13 @@ def _side_endorsement(result: dict[str, Any], side: str) -> _Endorsement:
     units = [u for u in units if isinstance(u, dict)]
     verbal = any(u.get("endorsement_verbal") is True for u in units)
     visual = any(u.get("endorsement_visual") is True for u in units)
-    available = any(("endorsement_verbal" in u or "endorsement_visual" in u) for u in units)
+    # normalize 层会保留缺失字段为 None；只有明确出现 true/false 才算该观察
+    # 信道可用，不能因为字段被补成 None 就把 unknown 当作 false。
+    available = any(
+        u.get("endorsement_verbal") is not None or u.get("endorsement_visual") is not None
+        for u in units
+    )
     return _Endorsement(verbal, visual, available)
-
-
-def _painpoint_tokens(painpoints: list[str]) -> list[str]:
-    """痛点词条分词：模型常输出 'kebersihan (卫生)' 复合串，整串匹配永不命中。
-
-    按括号/分隔符拆成独立 token（马来语短语 + 中文词各自成条），过滤过短噪声。
-    """
-    tokens: list[str] = []
-    for entry in painpoints:
-        for part in re.split(r"[()（）/、,，;；|]", str(entry)):
-            part = part.strip()
-            # 拉丁词须 ≥2 字符防噪声；单个汉字是合法痛点词（脏/痛/香），不过滤（code review #6）
-            if len(part) >= 2 or (len(part) == 1 and "一" <= part <= "鿿"):
-                tokens.append(part)
-    return tokens
-
-
-def _hits(text: str, words: list[str]) -> bool:
-    lowered = text.lower()
-    return any(w.lower() in lowered for w in words if w)
-
-
-# 晃动封顶作用域：视觉依赖阶段（S5 背书看视觉但有自己的门槛；S6 促单主要靠口播指令）
-_SHAKE_CAPPED_STAGES = {"S1", "S2", "S3", "S4"}
 
 
 def _s1_hook_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
@@ -160,37 +79,6 @@ def _s1_hook_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
     if b.get("landing_met") is False:
         b_exec = min(b_exec, 1.0)
     return {"redline": False, "creator_exec": c_exec, "bench_exec": b_exec}
-
-
-def _s1_landing_floor(stage: dict[str, Any]) -> bool:
-    """landing 下限：标杆钩子立住、达人没立住 → S1 至少 medium（结构件齐全但钩子没打穿的 case）。
-    双方都没立住则不触发（同样没打穿，差距小）。"""
-    c = stage.get("creator_hook")
-    b = stage.get("benchmark_hook")
-    if not isinstance(c, dict) or not isinstance(b, dict):
-        return False
-    return c.get("landing_met") is False and b.get("landing_met") is True
-
-
-def _s1_bench_anchors_only(stage: dict[str, Any], relevance: str | None) -> bool:
-    """S1 命题锚放大判据：标杆钩子锚定品命题、达人未锚定。
-    flag 在 → 读 hook_anchors_proposition（命题不止痛点）；flag 缺 → 回退旧痛点 relevance 口径。"""
-    b = stage.get("benchmark_hook")
-    c = stage.get("creator_hook")
-    if isinstance(b, dict) and isinstance(c, dict):
-        return b.get("anchors_proposition") is True and c.get("anchors_proposition") is not True
-    return relevance == "benchmark_only"
-
-
-def _s1_bench_highlight(stage: dict[str, Any]) -> bool:
-    """残差亮点门：标杆四维全 met 且 hook_type≠unknown 才开（防模型每次硬写亮点）。
-    只决定'是否允许亮点描述'，进 trace 不进 severity。"""
-    b = stage.get("benchmark_hook")
-    if not isinstance(b, dict):
-        return False
-    dims = b.get("dims") or {}
-    return (b.get("type") not in (None, "", "unknown")
-            and len(dims) == 4 and all(v is True for v in dims.values()))
 
 
 def _s2_contract_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
@@ -231,47 +119,6 @@ def _s2_contract_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
         return 0.0
 
     return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
-
-
-def _s2_contract_floor(stage: dict[str, Any]) -> tuple[bool, str]:
-    """S2 下限：标杆完成承接/身份/角色，达人没完成关键契约 → 至少 medium。"""
-    c = stage.get("creator_s2")
-    b = stage.get("benchmark_s2")
-    if not isinstance(c, dict) or not isinstance(b, dict):
-        return False, ""
-    if c.get("merged_with_s3") is True:
-        return False, ""
-    benchmark_complete = (
-        b.get("handoff_met") is True
-        and b.get("product_identity_clear") is True
-        and b.get("product_role_clear") is True
-    )
-    if not benchmark_complete:
-        return False, ""
-    missing = []
-    if c.get("handoff_met") is False:
-        missing.append("未自然承接 S1")
-    if c.get("product_identity_clear") is False:
-        missing.append("产品身份不清")
-    if c.get("product_role_clear") is False:
-        missing.append("产品未成为解决方案/答案")
-    creator_compatible = c.get("computed_s1_s2_compatible")
-    if creator_compatible not in {True, False}:
-        creator_compatible = c.get("s1_s2_compatible")
-    if creator_compatible is False:
-        missing.append("S1→S2 模块不兼容")
-    if not missing:
-        return False, ""
-    return True, "；S2 契约下限：" + "、".join(missing)
-
-
-def _s2_risky_module(stage: dict[str, Any]) -> bool:
-    """S2 风险模块：达人使用结构库排除/高风险引出方式而标杆没有，需放大到 medium 起。"""
-    c = stage.get("creator_s2")
-    b = stage.get("benchmark_s2")
-    if not isinstance(c, dict) or not isinstance(b, dict):
-        return False
-    return c.get("excluded_or_risky_module") is True and b.get("excluded_or_risky_module") is not True
 
 
 def _s3_strong_scene(flag: dict[str, Any]) -> bool:
@@ -470,131 +317,6 @@ def _attach_pending_flag_trace(stage_id: str, stage: dict[str, Any], trace: dict
     return trace
 
 
-def _s3_core_floor(stage: dict[str, Any]) -> tuple[bool, str]:
-    """S3 下限：标杆把核心卖点演出来而达人没演出来时，不应因小分差落成 small。"""
-    c = stage.get("creator_s3")
-    b = stage.get("benchmark_s3")
-    if not isinstance(c, dict) or not isinstance(b, dict):
-        return False, ""
-    benchmark_core = (
-        (b.get("usage_process_visible") is True or b.get("real_usage_met") is True)
-        and b.get("core_selling_point_visible") is True
-        and b.get("action_proof_met") is not False
-        and b.get("action_target_contact_met") is not False
-        and b.get("action_application_change_visible") is not False
-        and b.get("critical_action_continuity_met") is not False
-    )
-    if not benchmark_core:
-        return False, ""
-    missing = []
-    if c.get("mouth_only_or_static") is True:
-        missing.append("只口播/静态展示")
-    if c.get("result_only_without_process") is True:
-        missing.append("只有结果没有使用过程")
-    if c.get("usage_process_visible") is False or c.get("real_usage_met") is False or c.get("fake_or_staged") is True:
-        missing.append("缺少真实使用过程")
-    if c.get("core_selling_point_visible") is not True:
-        missing.append("核心卖点未在动作里可见")
-    if c.get("action_proof_met") is False:
-        missing.append("动作未形成可复核卖点证明")
-    if c.get("action_target_contact_met") is False:
-        missing.append("产品未实际作用于目标对象")
-    if c.get("action_application_change_visible") is False:
-        missing.append("未见动作使产品/材料发生可复核变化")
-    if c.get("critical_action_continuity_met") is False:
-        missing.append("关键动作被跳剪，无法确认状态变化")
-    if not missing:
-        return False, ""
-    return True, "；S3 核心演示下限：" + "、".join(missing)
-
-
-def _s3_thin_demo_floor(stage: dict[str, Any]) -> tuple[bool, str]:
-    """S3 薄演示下限：达人有基础过程，但标杆把过程做厚，不能轻易落 small。"""
-    c = stage.get("creator_s3")
-    b = stage.get("benchmark_s3")
-    if not isinstance(c, dict) or not isinstance(b, dict):
-        return False, ""
-
-    def has_basic_process(flag: dict[str, Any]) -> bool:
-        return (
-            flag.get("exists") is not False
-            and flag.get("mouth_only_or_static") is not True
-            and flag.get("result_only_without_process") is not True
-            and (flag.get("usage_process_visible") is True or flag.get("real_usage_met") is True)
-            and flag.get("fake_or_staged") is not True
-            and flag.get("core_selling_point_visible") is True
-            and flag.get("action_proof_met") is not False
-            and flag.get("action_target_contact_met") is not False
-            and flag.get("action_application_change_visible") is not False
-            and flag.get("critical_action_continuity_met") is not False
-        )
-
-    if not has_basic_process(c) or not has_basic_process(b):
-        return False, ""
-    benchmark_strong = (
-        b.get("process_framing_met") is True
-        and b.get("action_proof_met") is not False
-        and _s3_strong_scene(b)
-    )
-    creator_thin_reasons = []
-    if c.get("process_framing_met") is False:
-        creator_thin_reasons.append("使用过程未拍全/未对准")
-    if c.get("action_proof_met") is False:
-        creator_thin_reasons.append("动作未形成可复核卖点证明")
-    if c.get("action_target_contact_met") is False:
-        creator_thin_reasons.append("产品未实际作用于目标对象")
-    if c.get("action_application_change_visible") is False:
-        creator_thin_reasons.append("未见动作使产品/材料发生可复核变化")
-    if c.get("critical_action_continuity_met") is False:
-        creator_thin_reasons.append("关键动作被跳剪，无法确认状态变化")
-    if c.get("usage_context_fit") is False:
-        creator_thin_reasons.append("使用场景未给卖点舞台")
-    if not _s3_strong_scene(c):
-        creator_thin_reasons.append("过程呈现单薄")
-    if benchmark_strong and creator_thin_reasons:
-        return True, "；S3 薄演示下限：" + "、".join(dict.fromkeys(creator_thin_reasons))
-    return False, ""
-
-
-def _s4_thin_effect_floor(stage: dict[str, Any]) -> tuple[bool, str]:
-    """S4 薄效果下限：达人拍到了效果，但标杆把效果更显著、更聚焦地放大。"""
-    c = stage.get("creator_s4")
-    b = stage.get("benchmark_s4")
-    if not isinstance(c, dict) or not isinstance(b, dict):
-        return False, ""
-
-    def has_credible_effect(flag: dict[str, Any]) -> bool:
-        salience = str(flag.get("effect_salience") or "none")
-        return (
-            flag.get("effect_visible") is True
-            and salience in {"clear", "strong"}
-            and flag.get("effect_proposition_matched") is True
-            and flag.get("effect_attribution_supported") is True
-            and flag.get("requires_close_inspection") is not True
-            and flag.get("tamper_or_cut_risk") is not True
-        )
-
-    if not has_credible_effect(c) or not has_credible_effect(b):
-        return False, ""
-
-    benchmark_stronger = (
-        str(b.get("effect_salience") or "") == "strong"
-        and b.get("effect_maximized") is True
-    )
-    comparison_required = str(c.get("effect_type") or "") not in {
-        "process_visualization", "quantified_test", "aesthetic_display"
-    }
-    creator_thinner = (
-        str(c.get("effect_salience") or "") != "strong"
-        or c.get("effect_maximized") is not True
-        or (comparison_required and c.get("comparison_control_met") is not True)
-        or c.get("closeup_or_focus_met") is not True
-    )
-    if benchmark_stronger and creator_thinner:
-        return True, "；S4 薄效果下限：达人拍到效果，但标杆把效果做得更显著、更聚焦"
-    return False, ""
-
-
 def _s4_effect_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
     """S4 效果因果 flag：效果要可见，也要可信地由产品造成；只有结果没过程不能直接高分。"""
     c = stage.get("creator_s4")
@@ -687,29 +409,6 @@ def _s5_trust_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
     return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
 
 
-def _s5_hard_visual_gap(stage: dict[str, Any], endorsement: dict[str, _Endorsement] | None,
-                        weight: float) -> bool:
-    """高决策品中，硬背书可见性断层是独立于一般执行差的信任红线。"""
-    if weight < 1.4:
-        return False
-    creator = stage.get("creator_s5")
-    benchmark = stage.get("benchmark_s5")
-    if not isinstance(creator, dict) or not isinstance(benchmark, dict):
-        return False
-    benchmark_endorsement = (endorsement or {}).get("benchmark") or _NO_ENDORSEMENT
-    creator_endorsement = (endorsement or {}).get("creator") or _NO_ENDORSEMENT
-    return (
-        benchmark_endorsement.visual
-        and not creator_endorsement.visual
-        and str(benchmark.get("trust_evidence_type") or "") in {"hard", "mixed"}
-        and str(benchmark.get("trust_basis") or "") in {"authority", "traceable_data"}
-        and benchmark.get("trust_source_visible") is True
-        and benchmark.get("trust_source_credible") is True
-        and benchmark.get("trust_claim_specific") is True
-        and creator.get("voice_only") is True
-    )
-
-
 def _s5_has_any_trust(stage: dict[str, Any]) -> bool:
     """S5 flag 已输出时，软信任也算设计了信任环节，避免硬背书闸误杀。"""
     for key in ("creator_s5", "benchmark_s5"):
@@ -727,6 +426,24 @@ def _s5_has_any_trust(stage: dict[str, Any]) -> bool:
         ):
             return True
     return False
+
+
+def _s5_absence_is_explicit(flag: dict[str, Any]) -> bool:
+    """只允许 repair 已确认的 absence 触发 S5 ceiling。
+
+    直接调用 derive 的旧结果没有私有状态时，仍兼容明确的 ``trust_basis=none``
+    旗标；经过新 repair 的 unknown 状态则优先于这个兼容回退，绝不触发 ceiling。
+    """
+    status = flag.get("_s5_source_status")
+    if status is not None:
+        return status == "explicit_absent"
+    return (
+        flag.get("exists") is False
+        and flag.get("independent_trust_purpose") is False
+        and flag.get("duplicates_other_stage") is False
+        and str(flag.get("trust_basis") or "") in {"none", "product_claim", "offer_or_spec"}
+        and str(flag.get("trust_evidence_type") or "") in {"none", "unknown"}
+    )
 
 
 def _s6_cta_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
@@ -774,291 +491,498 @@ def _s6_cta_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
     return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
 
 
-def _derive_one(stage_id: str, stage: dict[str, Any], weights: dict[str, float] | None,
-                painpoints: list[str], shake: dict[str, bool] | None = None,
-                endorsement: dict[str, tuple[bool, bool, bool]] | None = None,
-                allow_legacy_text_fallback: bool = True) -> dict[str, Any]:
-    """推导单阶段 severity。返回 severity_derivation 溯源 dict（status=derived 时含新 severity）。"""
-    creator_exec = stage.get("creator_execution")
-    bench_exec = stage.get("benchmark_execution")
+class SeverityConstraint(NamedTuple):
+    """一个只允许收窄 severity 区间的确定性约束。"""
 
-    def finish(trace: dict[str, Any]) -> dict[str, Any]:
-        """保留参与公式的最终执行分，避免报告字段与 severity 推导口径脱节。"""
-        trace.setdefault("derived_creator_execution", creator_exec)
-        trace.setdefault("derived_benchmark_execution", bench_exec)
-        if has_multimodal_assessment(stage):
-            trace.setdefault(
-                "multimodal_integration",
-                {
-                    "channel_requirement": channel_requirement_for(stage_id),
-                    "sides": {
-                        role: {
-                            "dominant_channel": (stage.get(f"{role}_multimodal") or {}).get("dominant_channel"),
-                            "cross_channel_relation": (stage.get(f"{role}_multimodal") or {}).get("cross_channel_relation"),
-                            "integrated_effect": (stage.get(f"{role}_multimodal") or {}).get("integrated_effect"),
-                            "compensation_applied": (stage.get(f"{role}_multimodal") or {}).get("compensation_applied"),
-                        }
-                        for role in ("creator", "benchmark")
-                        if isinstance(stage.get(f"{role}_multimodal"), dict)
-                    },
-                },
-            )
-        return _attach_pending_flag_trace(stage_id, stage, trace)
+    kind: str
+    level: str
+    rule: str
+    reason: str
+    evidence_ids: tuple[str, ...] = ()
 
-    # S1 Hook flag 化：四维 bool 在时由 flag 推执行分，替代模型 0-2 主观分；flag 缺则回退模型分（优雅降级）。
-    # severity 仍走下方 e 差值/阈值/放大器/红线，不把 S1 变成孤立打分系统。
-    multimodal_active = has_multimodal_assessment(stage)
-    if stage_id == "S1" and not multimodal_active:
-        s1 = _s1_hook_exec(stage)
-        if s1 is not None:
-            if s1.get("redline"):
-                creator_exec, bench_exec = 0.0, 2.0
-                return finish({"status": "derived", "severity": "large", "E": 2,
-                               "reason": "S1 达人无 Hook、标杆有 Hook（hook_exists 红线）"})
-            creator_exec, bench_exec = s1["creator_exec"], s1["bench_exec"]
-    elif stage_id == "S2":
-        s2 = _s2_contract_exec(stage)
-        if s2 is not None:
-            creator_exec, bench_exec = s2["creator_exec"], s2["bench_exec"]
-    elif stage_id == "S3":
-        s3 = _s3_usage_exec(stage)
-        if s3 is not None:
-            creator_exec, bench_exec = s3["creator_exec"], s3["bench_exec"]
-    elif stage_id == "S4":
-        s4 = _s4_effect_exec(stage)
-        if s4 is not None:
-            creator_exec, bench_exec = s4["creator_exec"], s4["bench_exec"]
-    elif stage_id == "S5":
-        s5 = _s5_trust_exec(stage)
-        if s5 is not None:
-            creator_exec, bench_exec = s5["creator_exec"], s5["bench_exec"]
-    elif stage_id == "S6":
-        s6 = _s6_cta_exec(stage)
-        if s6 is not None:
-            creator_exec, bench_exec = s6["creator_exec"], s6["bench_exec"]
 
-    if multimodal_active:
-        creator_exec = multimodal_execution(stage_id, stage, "creator", creator_exec)
-        bench_exec = multimodal_execution(stage_id, stage, "benchmark", bench_exec)
-    if creator_exec is None or bench_exec is None:
-        return finish({"status": "skipped", "reason": "执行分缺失，保留模型 severity"})
+def _normalize_model_severity(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in SEVERITY_RANK else "medium"
 
-    # 晃动确定性封顶（2026-06-12 用户判例：晃动=无法有效接收）：severe 侧在视觉依赖阶段
-    # 执行分封顶 0.5，只降不升、双侧对称。指标由 flayr_core.motion 在预处理算出（零 LLM）。
-    shake_notes = []
-    if shake and stage_id in _SHAKE_CAPPED_STAGES:
-        if shake.get("creator") and float(creator_exec) > 0.5:
-            creator_exec = 0.5
-            shake_notes.append("达人侧晃动实测 severe→执行分封顶 0.5")
-        if shake.get("benchmark") and float(bench_exec) > 0.5:
-            bench_exec = 0.5
-            shake_notes.append("标杆侧晃动实测 severe→执行分封顶 0.5")
 
-    bench_text = _side_text(stage, "benchmark")
-    creator_text = _side_text(stage, "creator")
+def _flag_evidence_ids(flag: Any) -> tuple[str, ...]:
+    if not isinstance(flag, dict):
+        return ()
+    return tuple(sorted({str(value).strip() for value in flag.get("evidence_ids") or [] if str(value).strip()}))
 
-    # S3/S4 都是结构库中不可跳过的核心证明槽位。一侧已把过程/效果做成可复核闭环，
-    # 另一侧被事实明确判为缺失时，不能只按普通 0-2 分差稀释为 medium。
-    if stage_id == "S3":
-        creator_s3 = stage.get("creator_s3")
-        benchmark_s3 = stage.get("benchmark_s3")
-        if (
-            isinstance(creator_s3, dict)
-            and isinstance(benchmark_s3, dict)
-            and _s3_complete_real_usage(benchmark_s3)
-            and _s3_explicitly_missing_real_usage(creator_s3)
-        ):
-            return finish({
-                "status": "derived",
-                "severity": "large",
-                "E": 2,
-                "reason": "S3 标杆完成可复核真实使用、达人明确缺少真实使用（使用过程完整性断层）",
-            })
-    if stage_id == "S4":
-        creator_s4 = stage.get("creator_s4")
-        benchmark_s4 = stage.get("benchmark_s4")
-        if (
-            isinstance(creator_s4, dict)
-            and isinstance(benchmark_s4, dict)
-            and _s4_strong_visible_effect(benchmark_s4)
-            and (
-                _s4_explicitly_missing_visible_effect(creator_s4)
-                or (
-                    creator_s4.get("result_only_without_process") is True
-                    and creator_s4.get("process_linked_effect") is False
-                )
-            )
-        ):
-            reason = (
-                "S4 标杆完成强而可见的效果证明、达人只有结果态且缺少可复核过程因果桥（效果归因断层）"
-                if creator_s4.get("result_only_without_process") is True
-                else "S4 标杆完成强而可见的效果证明、达人明确未呈现可见效果（效果说服力断层）"
-            )
-            return finish({
-                "status": "derived",
-                "severity": "large",
-                "E": 2,
-                "reason": reason,
-            })
 
-    # 原则④：事实不支撑则不判断
-    if creator_exec == 0 and bench_exec == 0:
-        return finish({"status": "derived", "severity": "small", "E": 0,
-                       "reason": "双方均未涉及（执行分均为 0），不进公式"})
-    if stage_id == "S5":
-        b = (endorsement or {}).get("benchmark") or _NO_ENDORSEMENT
-        c = (endorsement or {}).get("creator") or _NO_ENDORSEMENT
-        if b.available or c.available:  # 有结构化 flag → 读 flag（绕过 Stage2 判断 + 脆弱正则）
-            b_has, c_has = (b.verbal or b.visual), (c.verbal or c.visual)
-            src = "结构化 flag"
-        else:  # 老 facts 无 flag → 硬背书正则兜底（软背书不算，与 flag 口径一致：双方均无硬背书→small）
-            b_has, c_has = has_hard_endorsement(bench_text), has_hard_endorsement(creator_text)
-            src = "硬背书正则兜底"
-        if not b_has and not c_has and not _s5_has_any_trust(stage):
-            return finish({"status": "derived", "severity": "small", "E": 0,
-                           "reason": f"S5 双方均无硬背书 → 均未涉及（{src}）"})
+def _role_evidence_units(result: dict[str, Any] | None, role: str) -> dict[str, dict[str, Any]]:
+    understanding = result.get("video_understanding") if isinstance(result, dict) else None
+    side = understanding.get(role) if isinstance(understanding, dict) else None
+    units = side.get("evidence_units") if isinstance(side, dict) else None
+    return {
+        str(unit.get("id")): unit
+        for unit in units or []
+        if isinstance(unit, dict) and str(unit.get("id") or "").strip()
+    }
 
-    e = max(0.0, float(bench_exec) - float(creator_exec))
-    reason = f"E = 标杆执行分 {bench_exec} − 达人执行分 {creator_exec}"
-    if multimodal_active:
-        reason += "；执行分已按阶段硬条件融合画面、口播、字幕、声音节奏的综合净效果"
-    if shake_notes:
-        reason += "；" + "；".join(shake_notes)
 
-    # 痛点命中：优先用模型事实枚举（round3 实证词法匹配跨语言/跨粒度不可靠），缺失退回词法兜底
-    relevance = stage.get("painpoint_relevance")
-    if relevance is None and painpoints and allow_legacy_text_fallback:
-        lever_text = f"{stage.get('gap_summary') or ''} {stage.get('gap') or ''} {bench_text}"
-        if _hits(lever_text, painpoints):
-            relevance = "both" if _hits(creator_text, painpoints) else "benchmark_only"
+def _flag_strength(result: dict[str, Any] | None, role: str, flag: Any) -> dict[str, Any]:
+    """从 Stage1 evidence_units 汇总 flag 的最弱证据强度。
 
-    # 事实覆盖层（取 E 下限）：观察事实 > 打分漂移
-    b_vis = " ".join(str(v) for v in stage.get("benchmark_visual_evidence") or [])
-    c_vis = " ".join(str(v) for v in stage.get("creator_visual_evidence") or [])
-    # S4 效果呈现放大：优先读模型基于结构库 S4-A~F 判出的结构化布尔（稳，不随措辞抖）；
-    # 布尔缺失（存量结果无此字段）才回退扫 _DEMO_RE 关键词（脆，仅兜底，见 TODO §ROOT/§0）
-    b_demo = stage.get("benchmark_has_effect_demo")
-    c_demo = stage.get("creator_has_effect_demo")
-    if b_demo is None and c_demo is None:
-        b_demo, c_demo = bool(_DEMO_RE.search(b_vis)), bool(_DEMO_RE.search(c_vis))
-    # S3 使用过程放大：模型基于结构库 S3-A~E 判出的布尔。无正则兜底--布尔缺失（存量结果）
-    # 则不触发，保留 S3 旧空白行为（derive.py 此前无任何 S3 专属逻辑）。用严格 is True/is False，
-    # 仅在明确"标杆演示了使用、达人没演"时放大，不确定（None）不触发，保守。
-    b_usage = stage.get("benchmark_has_usage_demo")
-    c_usage = stage.get("creator_has_usage_demo")
-    if stage_id == "S4" and e > 0 and b_demo is True and c_demo is False:
-        e, reason = max(e, 2.0), reason + "；S4 标杆呈现了效果(S4-A~F)、达人未呈现（验证=让用户看到）"
-    elif stage_id == "S3" and e > 0 and b_usage is True and c_usage is False:
-        e, reason = max(e, 2.0), reason + "；S3 标杆把卖点演示出来(S3-A~E)、达人只口播未演示（演示即证据）"
-    elif stage_id == "S1" and not multimodal_active and e > 0 and _s1_bench_anchors_only(stage, relevance):
-        e, reason = max(e, 2.0), reason + "；S1 标杆钩子锚定品命题、达人未锚定（命题不止痛点）"
-    elif stage_id == "S2" and e > 0 and _s2_risky_module(stage):
-        e, reason = max(e, 1.0), reason + "；S2 达人使用结构库排除/高风险引出方式"
+    不在这里猜测缺失字段。没有引用、引用不存在或 unit 没有 canonical
+    evidence_strength 都会被明确记录，不能被当作 absent/false。
+    """
+    ids = _flag_evidence_ids(flag)
+    if not ids:
+        return {
+            "status": "missing_field",
+            "strength": None,
+            "evidence_ids": [],
+        }
 
-    # 极性红线：达人持平或更优 → small（达人优势记亮点，绝不是差距）
-    if e <= 0:
-        if stage_id == "S1" and not multimodal_active and _s1_bench_anchors_only(stage, relevance):
-            return finish({"status": "derived", "severity": "medium", "E": 0,
-                           "reason": reason + "；命题锚下限：标杆钩子锚定本品核心命题、达人只做泛留人"})
-        # S4 的基础执行分是离散档，可能把"双方都有可信效果"都压成 1.0；若既有
-        # 结构化观察已明确标杆强且最大化、达人仅清楚但单薄，应在持平红线前保留
-        # medium 差距。双方效果仍须满足可信门槛，不能由口播或氛围替代视觉证据。
-        if stage_id == "S4":
-            thin_floor, thin_reason = _s4_thin_effect_floor(stage)
-            if thin_floor:
-                return finish({"status": "derived", "severity": "medium", "E": 0,
-                               "reason": reason + thin_reason})
-        # 极性红线软化（2026-07）：
-        # E≤0 不总是意味着"没差距"--执行分为离散档，可能把真差距的 creator/bench 压在同档。
-        # 在 E≤0 且 model 已出更可靠判断时，保留模型原判，避免把模型正确的 medium/large 压成 small。
-        model = stage.get("model_severity") or stage.get("severity")
-        if isinstance(model, str) and model.strip() in {"medium", "large"}:
-            return finish({"status": "derived", "severity": model, "E": 0,
-                           "reason": reason + "；执行分持平但模型判定存在差距，保留模型原判"})
-        return finish({"status": "derived", "severity": "small", "E": 0,
-                       "reason": reason + "；达人持平或更优（亮点，零差距红线）"})
+    units = _role_evidence_units(result, role)
+    missing_ids = [evidence_id for evidence_id in ids if evidence_id not in units]
+    if missing_ids:
+        return {
+            "status": "missing_field",
+            "strength": None,
+            "evidence_ids": list(ids),
+            "missing_evidence_ids": missing_ids,
+        }
 
-    w = (weights or {}).get(stage_id, 1.0)
-    # 痛点命中系数：差距落在核心决策因素上 → 放大；与痛点无关 → 衰减；事实完全缺失 → 中性。
-    # 只作用于卖点链相关阶段（S1 钩子选题 + S2-S5）：S6 促单功能与产品痛点正交
-    # （CTA 差距永远不会"命中痛点"，按 0.8 惩罚是范畴错误--round4 kakwan S6 实证），
-    # 促单的消费者侧权重已由客单价编入 W（冲动品 1.8）。
-    if stage_id == "S6":
-        c_factor = 1.0
-    elif relevance in {"benchmark_only", "both"}:
-        c_factor = 1.2
-    elif relevance in {"creator_only", "none"}:
-        c_factor = 0.8
-    else:
-        c_factor = 1.0
-    score = round(e * w * c_factor, 2)
+    strengths: list[str] = []
+    for evidence_id in ids:
+        raw_strength = units[evidence_id].get("evidence_strength")
+        strength = str(raw_strength or "").strip().lower()
+        if not strength:
+            return {
+                "status": "missing_evidence_strength",
+                "strength": None,
+                "evidence_ids": list(ids),
+            }
+        if strength not in EVIDENCE_STRENGTHS:
+            return {
+                "status": "uncertain_evidence_strength",
+                "strength": None,
+                "evidence_ids": list(ids),
+                "invalid_evidence_strength": strength,
+            }
+        strengths.append(strength)
+    weakest = max(strengths, key=lambda value: EVIDENCE_STRENGTHS.index(value))
+    if weakest not in _EXPLICIT_STRENGTHS:
+        return {
+            "status": "uncertain_evidence_strength",
+            "strength": weakest,
+            "evidence_ids": list(ids),
+        }
+    return {"status": "eligible", "strength": weakest, "evidence_ids": list(ids)}
 
-    if e >= 2 and stage_id in {"S1", "S6"}:
-        severity = "large"
-        reason += "；S1/S6 核心功能缺失红线"
-    elif stage_id == "S5" and _s5_hard_visual_gap(stage, endorsement, w):
-        severity = "large"
-        reason += "；高决策品硬背书可见性断层（标杆可核验、达人仅口播）"
-    elif score > TH_MEDIUM:
-        severity = "large"
-    elif score > TH_SMALL:
-        severity = "medium"
-    else:
-        severity = "small"
-    # landing 下限：标杆钩子立住、达人未立住 → 至少 medium（件齐但钩子没打穿，不该判 small）
-    if stage_id == "S1" and not multimodal_active and severity == "small" and _s1_landing_floor(stage):
-        severity = "medium"
-        reason += "；landing 下限：标杆钩子立住、达人未立住（结构件齐全但钩子没打穿）"
-    if stage_id == "S1" and not multimodal_active and severity == "small" and _s1_bench_anchors_only(stage, relevance):
-        severity = "medium"
-        reason += "；命题锚下限：标杆钩子锚定本品核心命题、达人只做泛留人"
-    if stage_id == "S2" and severity == "small":
-        floor, floor_reason = _s2_contract_floor(stage)
-        if floor:
-            severity = "medium"
-            reason += floor_reason
-    if stage_id == "S3" and severity == "small":
-        floor, floor_reason = _s3_core_floor(stage)
-        if floor:
-            severity = "medium"
-            reason += floor_reason
+
+def _pair_flags(stage: dict[str, Any], suffix: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    creator = stage.get(f"creator_{suffix}")
+    benchmark = stage.get(f"benchmark_{suffix}")
+    return (
+        creator if isinstance(creator, dict) else None,
+        benchmark if isinstance(benchmark, dict) else None,
+    )
+
+
+def _required_bool_state(flag: dict[str, Any], keys: tuple[str, ...]) -> str:
+    values = [flag.get(key) for key in keys]
+    if all(value is True or value is False for value in values):
+        return "explicit"
+    return "uncertain_fact"
+
+
+def _has_required_evidence(creator: dict[str, Any], benchmark: dict[str, Any]) -> bool:
+    return bool(_flag_evidence_ids(creator) and _flag_evidence_ids(benchmark))
+
+
+def resolve_severity(
+    model_severity: str,
+    floors: tuple[SeverityConstraint, ...] = (),
+    ceilings: tuple[SeverityConstraint, ...] = (),
+) -> dict[str, Any]:
+    """唯一 severity resolver；聚合规则是 max(floor) / min(ceiling)。"""
+    model = _normalize_model_severity(model_severity)
+    ordered_floors = tuple(sorted(floors, key=lambda item: (item.level, item.rule, item.reason)))
+    ordered_ceilings = tuple(sorted(ceilings, key=lambda item: (item.level, item.rule, item.reason)))
+    floor_rank = max((SEVERITY_RANK[item.level] for item in ordered_floors), default=0)
+    ceiling_rank = min((SEVERITY_RANK[item.level] for item in ordered_ceilings), default=len(SEVERITIES) - 1)
+    constraints = tuple(sorted((*ordered_floors, *ordered_ceilings), key=lambda item: (item.kind, item.level, item.rule, item.reason)))
+    if floor_rank > ceiling_rank:
+        return {
+            "severity": model,
+            "status": "conflict",
+            "model_severity": model,
+            "floor": SEVERITIES[floor_rank],
+            "ceiling": SEVERITIES[ceiling_rank],
+            "constraints": constraints,
+            "phase_c_candidate": True,
+        }
+    resolved_rank = max(floor_rank, min(SEVERITY_RANK[model], ceiling_rank))
+    return {
+        "severity": SEVERITIES[resolved_rank],
+        "status": "constrained" if constraints else "model_preserved",
+        "model_severity": model,
+        "floor": SEVERITIES[floor_rank] if ordered_floors else None,
+        "ceiling": SEVERITIES[ceiling_rank] if ordered_ceilings else None,
+        "constraints": constraints,
+        "phase_c_candidate": False,
+    }
+
+
+def _constraint_dict(item: SeverityConstraint) -> dict[str, Any]:
+    return {
+        "kind": item.kind,
+        "level": item.level,
+        "rule": item.rule,
+        "reason": item.reason,
+        "evidence_ids": list(item.evidence_ids),
+    }
+
+
+def _stage_strength_gate(
+    result: dict[str, Any] | None,
+    creator_role: str,
+    creator: dict[str, Any],
+    benchmark_role: str,
+    benchmark: dict[str, Any],
+) -> tuple[str, list[str], dict[str, Any]]:
+    creator_state = _flag_strength(result, creator_role, creator)
+    benchmark_state = _flag_strength(result, benchmark_role, benchmark)
+    evidence_ids = sorted(set(creator_state.get("evidence_ids", [])) | set(benchmark_state.get("evidence_ids", [])))
+    if creator_state.get("status") != "eligible" or benchmark_state.get("status") != "eligible":
+        status = creator_state.get("status") if creator_state.get("status") != "eligible" else benchmark_state.get("status")
+        return str(status), evidence_ids, {"creator": creator_state, "benchmark": benchmark_state}
+    if creator_state.get("strength") not in _EXPLICIT_STRENGTHS or benchmark_state.get("strength") not in _EXPLICIT_STRENGTHS:
+        return "insufficient_strength", evidence_ids, {"creator": creator_state, "benchmark": benchmark_state}
+    return "eligible", evidence_ids, {"creator": creator_state, "benchmark": benchmark_state}
+
+
+def _constraint_evaluation(rule: str, status: str, reason: str, **extra: Any) -> dict[str, Any]:
+    return {"rule": rule, "status": status, "reason": reason, **extra}
+
+
+def _s3_basic_process(flag: dict[str, Any]) -> bool:
+    return all(
+        flag.get(key) is True
+        for key in (
+            "usage_process_visible",
+            "core_selling_point_visible",
+            "action_proof_met",
+            "action_target_contact_met",
+            "action_application_change_visible",
+            "critical_action_continuity_met",
+        )
+    )
+
+
+def _s3_basic_process_state(flag: dict[str, Any]) -> str:
+    keys = (
+        "usage_process_visible",
+        "core_selling_point_visible",
+        "action_proof_met",
+        "action_target_contact_met",
+        "action_application_change_visible",
+        "critical_action_continuity_met",
+    )
+    return _required_bool_state(flag, keys)
+
+
+def _s4_credible_effect(flag: dict[str, Any]) -> bool:
+    salience = str(flag.get("effect_salience") or "")
+    return (
+        flag.get("effect_visible") is True
+        and salience in {"clear", "strong"}
+        and flag.get("effect_proposition_matched") is True
+        and flag.get("effect_attribution_supported") is True
+        and flag.get("requires_close_inspection") is False
+        and flag.get("tamper_or_cut_risk") is False
+    )
+
+
+def _s4_credible_effect_state(flag: dict[str, Any]) -> str:
+    keys = (
+        "effect_visible",
+        "effect_proposition_matched",
+        "effect_attribution_supported",
+        "requires_close_inspection",
+        "tamper_or_cut_risk",
+    )
+    return _required_bool_state(flag, keys)
+
+
+def _derive_one(
+    stage_id: str,
+    stage: dict[str, Any],
+    weights: dict[str, float] | None = None,
+    painpoints: list[str] | None = None,
+    shake: dict[str, bool] | None = None,
+    endorsement: dict[str, _Endorsement] | None = None,
+    allow_legacy_text_fallback: bool = False,
+    facts: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """根据离散事实收集约束，再交给 resolver；旧参数仅保留调用兼容性。"""
+    del weights, painpoints, shake, allow_legacy_text_fallback
+    model = _normalize_model_severity(stage.get("model_severity") or stage.get("severity"))
+    facts = facts if isinstance(facts, dict) else {}
+    floors: list[SeverityConstraint] = []
+    ceilings: list[SeverityConstraint] = []
+    evaluations: list[dict[str, Any]] = []
+
+    def skip(rule: str, status: str, reason: str, **extra: Any) -> None:
+        evaluations.append(_constraint_evaluation(rule, status, reason, **extra))
+
+    def add(kind: str, level: str, rule: str, reason: str, evidence_ids: tuple[str, ...] | list[str] = ()) -> None:
+        constraint = SeverityConstraint(kind, level, rule, reason, tuple(sorted(set(evidence_ids))))
+        (floors if kind == "floor" else ceilings).append(constraint)
+        evaluations.append(_constraint_evaluation(rule, "triggered", reason, kind=kind, level=level, evidence_ids=list(constraint.evidence_ids)))
+
+    s1_state = (stage.get("_postprocess_state") or {}).get(_S1_REPAIR_STATE_KEY)
+    s1_ready = s1_state == _S1_REPAIR_STATE_VALUE
+
+    if stage_id == "S1":
+        rule = "S1_hook_exists_floor"
+        creator, benchmark = _pair_flags(stage, "hook")
+        if not s1_ready:
+            skip(rule, "precondition_missing", "S1 hook facts 未经过 repair_s1_hook_boundaries。")
+        elif creator is None or benchmark is None:
+            skip(rule, "missing_field", "S1 hook flag 缺失。")
+        elif _required_bool_state(creator, ("exists",)) != "explicit" or _required_bool_state(benchmark, ("exists",)) != "explicit":
+            skip(rule, "uncertain_fact", "S1 Hook exists 不是明确 true/false。")
+        elif not _has_required_evidence(creator, benchmark):
+            skip(rule, "missing_field", "S1 Hook 缺少双方 evidence_ids。")
+        elif benchmark.get("exists") is True and creator.get("exists") is False:
+            add("floor", "large", rule, "标杆有 Hook、达人明确没有 Hook。", (*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)))
         else:
-            thin_floor, thin_reason = _s3_thin_demo_floor(stage)
-            if thin_floor:
-                severity = "medium"
-                reason += thin_reason
-    if stage_id == "S4" and severity == "small":
-        thin_floor, thin_reason = _s4_thin_effect_floor(stage)
-        if thin_floor:
-            severity = "medium"
-            reason += thin_reason
-    trace = {"status": "derived", "severity": severity, "E": e, "W": w, "C": c_factor,
-             "painpoint_relevance": relevance, "S": score, "reason": reason}
-    # 残差亮点门（只进 trace 不进 severity）：标杆四维全 met 且类型明确才允许亮点描述，否则跳过
-    if stage_id == "S1" and _s1_bench_highlight(stage):
-        trace["hook_highlight_allowed"] = True
-    return finish(trace)
+            skip(rule, "predicate_not_met", "双方 Hook 存在性未形成结构性缺口。")
 
+        for rule, predicate, reason in (
+            (
+                "S1_landing_floor",
+                lambda c, b: c.get("landing_met") is False and b.get("landing_met") is True,
+                "标杆 landing 成立、达人 landing 明确不成立。",
+            ),
+            (
+                "S1_proposition_anchor_floor",
+                lambda c, b: c.get("anchors_proposition") is False and b.get("anchors_proposition") is True,
+                "标杆 Hook 锚定本品命题、达人明确未锚定。",
+            ),
+        ):
+            creator, benchmark = _pair_flags(stage, "hook")
+            if not s1_ready:
+                skip(rule, "precondition_missing", "S1 hook facts 未经过 repair_s1_hook_boundaries。")
+                continue
+            if creator is None or benchmark is None:
+                skip(rule, "missing_field", "S1 hook flag 缺失。")
+                continue
+            key = "landing_met" if rule == "S1_landing_floor" else "anchors_proposition"
+            if _required_bool_state(creator, (key,)) != "explicit" or _required_bool_state(benchmark, (key,)) != "explicit":
+                skip(rule, "uncertain_fact", f"S1 {key} 不是明确事实。")
+                continue
+            if not predicate(creator, benchmark):
+                skip(rule, "predicate_not_met", "S1 比较型下限条件未满足。")
+                continue
+            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark)
+            if status != "eligible":
+                skip(rule, status, "S1 比较型下限需要 direct/explicit evidence_strength。", evidence=detail)
+                continue
+            add("floor", "medium", rule, reason, ids)
 
-CRITICAL_BAND = 0.2
+    if stage_id == "S2":
+        rule = "S2_contract_floor"
+        creator, benchmark = _pair_flags(stage, "s2")
+        keys = ("handoff_met", "product_identity_clear", "product_role_clear")
+        if creator is None or benchmark is None:
+            skip(rule, "missing_field", "S2 contract flag 缺失。")
+        elif creator.get("merged_with_s3") is True:
+            skip(rule, "predicate_not_met", "S2 已与 S3 合并，不重复处罚独立 S2。")
+        elif _required_bool_state(creator, (*keys, "merged_with_s3")) != "explicit" or _required_bool_state(benchmark, (*keys,)) != "explicit":
+            skip(rule, "uncertain_fact", "S2 契约字段未全部明确。")
+        elif not _has_required_evidence(creator, benchmark):
+            skip(rule, "missing_field", "S2 契约缺少双方 evidence_ids。")
+        elif all(benchmark.get(key) is True for key in keys) and any(creator.get(key) is False for key in keys):
+            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark)
+            if status == "eligible":
+                add("floor", "medium", rule, "标杆完成 S2 承接契约、达人明确缺少关键契约。", ids)
+            else:
+                skip(rule, status, "S2 比较型下限需要 direct/explicit evidence_strength。", evidence=detail)
+        else:
+            skip(rule, "predicate_not_met", "S2 未形成标杆完整、达人缺失的契约断层。")
+
+    if stage_id == "S3":
+        creator, benchmark = _pair_flags(stage, "s3")
+        rule = "S3_real_usage_floor"
+        if creator is None or benchmark is None:
+            skip(rule, "missing_field", "S3 usage flag 缺失。")
+        elif _s3_basic_process_state(benchmark) != "explicit" or _s3_basic_process_state(creator) != "explicit":
+            skip(rule, "uncertain_fact", "S3 核心使用事实不完整。")
+        elif not _has_required_evidence(creator, benchmark):
+            skip(rule, "missing_field", "S3 核心使用断层缺少双方 evidence_ids。")
+        elif _s3_complete_real_usage(benchmark) and _s3_explicitly_missing_real_usage(creator):
+            add("floor", "large", rule, "标杆完成可复核真实使用、达人明确缺少真实使用。", (*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)))
+        else:
+            skip(rule, "predicate_not_met", "S3 未形成完整使用过程断层。")
+
+        rule = "S3_thin_presentation_floor"
+        if creator is None or benchmark is None:
+            skip(rule, "missing_field", "S3 usage flag 缺失。")
+        elif _s3_basic_process_state(creator) != "explicit" or _s3_basic_process_state(benchmark) != "explicit":
+            skip(rule, "uncertain_fact", "S3 薄呈现规则的核心事实不完整。")
+        elif benchmark.get("process_framing_met") is not True or creator.get("process_framing_met") is not False:
+            skip(rule, "predicate_not_met", "S3 未形成标杆做厚、达人单薄的明确差异。")
+        else:
+            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark)
+            if status == "eligible":
+                add("floor", "medium", rule, "双方都有基础使用过程，但标杆明确做厚、达人呈现单薄。", ids)
+            else:
+                skip(rule, status, "S3 薄呈现下限需要 direct/explicit evidence_strength。", evidence=detail)
+
+    if stage_id == "S4":
+        creator, benchmark = _pair_flags(stage, "s4")
+        rule = "S4_visible_effect_floor"
+        if creator is None or benchmark is None:
+            skip(rule, "missing_field", "S4 effect flag 缺失。")
+        elif _s4_credible_effect_state(benchmark) != "explicit" or _s4_credible_effect_state(creator) != "explicit":
+            skip(rule, "uncertain_fact", "S4 可见效果事实不完整。")
+        elif not _has_required_evidence(creator, benchmark):
+            skip(rule, "missing_field", "S4 效果断层缺少双方 evidence_ids。")
+        elif _s4_strong_visible_effect(benchmark) and (
+            _s4_explicitly_missing_visible_effect(creator)
+            or (creator.get("result_only_without_process") is True and creator.get("process_linked_effect") is False)
+        ):
+            add("floor", "large", rule, "标杆完成强而可见的效果证明、达人明确缺少可复核效果。", (*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)))
+        else:
+            skip(rule, "predicate_not_met", "S4 未形成明确效果证明断层。")
+
+        rule = "S4_thin_effect_floor"
+        if creator is None or benchmark is None:
+            skip(rule, "missing_field", "S4 effect flag 缺失。")
+        elif _s4_credible_effect_state(benchmark) != "explicit" or _s4_credible_effect_state(creator) != "explicit":
+            skip(rule, "uncertain_fact", "S4 薄效果规则的事实不完整。")
+        elif not _s4_credible_effect(creator) or not _s4_credible_effect(benchmark):
+            skip(rule, "predicate_not_met", "双方没有同时形成可信效果，薄效果规则不触发。")
+        elif not (str(benchmark.get("effect_salience") or "") == "strong" and benchmark.get("effect_maximized") is True):
+            skip(rule, "predicate_not_met", "标杆没有明确做强和最大化效果。")
+        elif str(creator.get("effect_salience") or "") == "strong" and creator.get("effect_maximized") is True:
+            skip(rule, "predicate_not_met", "达人效果同样做强，不构成薄效果差距。")
+        else:
+            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark)
+            if status == "eligible":
+                add("floor", "medium", rule, "双方都有可信效果，但标杆效果更显著、更聚焦。", ids)
+            else:
+                skip(rule, status, "S4 薄效果下限需要 direct/explicit evidence_strength。", evidence=detail)
+
+    if stage_id == "S5":
+        rule = "S5_no_trust_ceiling"
+        creator, benchmark = _pair_flags(stage, "s5")
+        b_endorsement = (endorsement or {}).get("benchmark") or _NO_ENDORSEMENT
+        c_endorsement = (endorsement or {}).get("creator") or _NO_ENDORSEMENT
+        if creator is None or benchmark is None:
+            skip(rule, "missing_field", "S5 trust flag 缺失。")
+        elif not b_endorsement.available or not c_endorsement.available:
+            skip(rule, "missing_field", "S5 Stage1 背书观察字段缺失。")
+        elif _required_bool_state(creator, ("exists", "independent_trust_purpose", "duplicates_other_stage")) != "explicit" or _required_bool_state(benchmark, ("exists", "independent_trust_purpose", "duplicates_other_stage")) != "explicit":
+            skip(rule, "uncertain_fact", "S5 信任事实不完整，不能把 unknown 当作无背书。")
+        elif b_endorsement.verbal or b_endorsement.visual or c_endorsement.verbal or c_endorsement.visual:
+            skip(rule, "predicate_not_met", "至少一侧存在明确硬背书观察。")
+        elif not _s5_absence_is_explicit(creator) or not _s5_absence_is_explicit(benchmark):
+            skip(rule, "uncertain_fact", "S5 来源 absence 未被明确确认，不能把 unknown 当作无背书。")
+        elif _s5_has_any_trust(stage):
+            skip(rule, "predicate_not_met", "至少一侧存在明确软/结构化信任材料。")
+        elif creator.get("exists") is False and benchmark.get("exists") is False:
+            add("ceiling", "medium", rule, "双方明确没有信任放大材料，模型不能把该阶段判为 large。", (*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)))
+        else:
+            skip(rule, "predicate_not_met", "双方没有同时明确声明 S5 不存在。")
+
+    if stage_id == "S6":
+        rule = "S6_creator_cta_ceiling"
+        creator, benchmark = _pair_flags(stage, "s6")
+        if creator is None or benchmark is None:
+            skip(rule, "missing_field", "S6 CTA flag 缺失。")
+        elif _required_bool_state(creator, ("direct_order_met", "action_path_clear")) != "explicit" or _required_bool_state(benchmark, ("exists",)) != "explicit":
+            skip(rule, "uncertain_fact", "S6 CTA 事实不完整。")
+        elif not _has_required_evidence(creator, benchmark):
+            skip(rule, "missing_field", "S6 CTA 安全封顶缺少双方 evidence_ids。")
+        elif benchmark.get("exists") is False and (creator.get("direct_order_met") is True or creator.get("action_path_clear") is True):
+            add("ceiling", "small", rule, "达人有明确购买路径、标杆没有独立 CTA，不因缺少促销放大话术制造差距。", (*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)))
+        else:
+            skip(rule, "predicate_not_met", "S6 未形成达人明确优于标杆 CTA 的安全封顶条件。")
+
+    resolved = resolve_severity(model, tuple(floors), tuple(ceilings))
+    constraint_reason = "；".join(item.reason for item in resolved["constraints"]) if resolved["constraints"] else "无确定性约束，保留模型 severity。"
+    trace: dict[str, Any] = {
+        "status": resolved["status"],
+        "severity": resolved["severity"],
+        "model_severity": model,
+        "resolver": "floor_ceiling_v1",
+        "floor": resolved.get("floor"),
+        "ceiling": resolved.get("ceiling"),
+        "constraints": [_constraint_dict(item) for item in resolved["constraints"]],
+        "constraint_evaluations": evaluations,
+        "phase_c_candidate": resolved["phase_c_candidate"],
+        "reason": constraint_reason,
+    }
+    if resolved["status"] == "conflict":
+        trace["reason"] = "floor 与 ceiling 冲突，保留模型 severity，交 Phase C 复核。"
+        trace["conflict"] = {"floor": resolved["floor"], "ceiling": resolved["ceiling"]}
+
+    # 执行分仍可作为离线审计信息，但明确不再进入 severity resolver。
+    observed = None
+    helper = {
+        "S1": _s1_hook_exec,
+        "S2": _s2_contract_exec,
+        "S3": _s3_usage_exec,
+        "S4": _s4_effect_exec,
+        "S5": _s5_trust_exec,
+        "S6": _s6_cta_exec,
+    }.get(stage_id)
+    if helper is not None:
+        try:
+            observed = helper(stage)
+        except Exception:
+            observed = None
+    if not isinstance(observed, dict):
+        creator_exec = stage.get("creator_execution")
+        benchmark_exec = stage.get("benchmark_execution")
+        if isinstance(creator_exec, (int, float)) and not isinstance(creator_exec, bool) and isinstance(benchmark_exec, (int, float)) and not isinstance(benchmark_exec, bool):
+            observed = {"creator_exec": float(creator_exec), "bench_exec": float(benchmark_exec)}
+    if isinstance(observed, dict):
+        creator_observed = observed.get("creator_exec")
+        benchmark_observed = observed.get("bench_exec")
+        if has_multimodal_assessment(stage):
+            creator_observed = multimodal_execution(stage_id, stage, "creator", creator_observed)
+            benchmark_observed = multimodal_execution(stage_id, stage, "benchmark", benchmark_observed)
+        trace["execution_observation"] = {
+            "creator": creator_observed,
+            "benchmark": benchmark_observed,
+            "source": "diagnostic_only",
+        }
+        trace["derived_creator_execution"] = creator_observed
+        trace["derived_benchmark_execution"] = benchmark_observed
+    if has_multimodal_assessment(stage):
+        trace["multimodal_integration"] = {
+            "channel_requirement": channel_requirement_for(stage_id),
+            "sides": {
+                role: {
+                    "dominant_channel": (stage.get(f"{role}_multimodal") or {}).get("dominant_channel"),
+                    "cross_channel_relation": (stage.get(f"{role}_multimodal") or {}).get("cross_channel_relation"),
+                    "integrated_effect": (stage.get(f"{role}_multimodal") or {}).get("integrated_effect"),
+                    "compensation_applied": (stage.get(f"{role}_multimodal") or {}).get("compensation_applied"),
+                }
+                for role in ("creator", "benchmark")
+                if isinstance(stage.get(f"{role}_multimodal"), dict)
+            },
+        }
+    return _attach_pending_flag_trace(stage_id, stage, trace)
 
 
 def critical_severity_stages(result: dict[str, Any]) -> list[str]:
-    """临界分值触发（Phase C P3）：推导分 S 落在 small/medium 或 medium/large 阈值邻域的阶段。
-
-    S 确定性化后才可行（4d 红利）：边界 case 不靠拟合阈值解决，靠回看原生素材
-    复核事实再重推导（实证：tasha S1 连续两轮 S=1.2 恰好压线）。
-    须在 derive_severity_from_facts 之后调用（依赖 severity_derivation 溯源）。
-    """
+    """返回 resolver 检出的 floor/ceiling 冲突阶段，供现有 Phase C 预算复用。"""
     out: list[str] = []
     for stage in result.get("stage_analysis", []):
         if not isinstance(stage, dict):
             continue
         trace = stage.get("severity_derivation") or {}
-        score = trace.get("S")
-        if trace.get("status") != "derived" or not isinstance(score, (int, float)):
-            continue
-        if abs(score - TH_SMALL) <= CRITICAL_BAND or abs(score - TH_MEDIUM) <= CRITICAL_BAND:
+        if trace.get("phase_c_candidate") is True:
             match = _STAGE_RE.match(str(stage.get("stage") or ""))
             if match:
                 out.append(match.group(1))
@@ -1066,54 +990,35 @@ def critical_severity_stages(result: dict[str, Any]) -> list[str]:
 
 
 def derive_severity_from_facts(result: dict[str, Any], analysis: dict[str, Any] | None = None) -> None:
-    """4d 主入口：用执行分 + 品类权重表确定性推导各阶段 severity，覆盖模型直出值。
-
-    每阶段把算法溯源写入 stage["severity_derivation"]（含被覆盖前的 model_severity）。
-    analysis 可选：提供时读取预处理的晃动信号（videos[role].shake）做执行分封顶。
-    任何异常优雅降级：跳过该阶段并记录原因，绝不中断主流程。
-    """
+    """为每个阶段收集确定性约束并通过唯一 resolver 写入最终 severity。"""
+    del analysis
     stages = result.get("stage_analysis")
     if not isinstance(stages, list):
         return
-    shake = None
-    if isinstance(analysis, dict):
-        levels = {
-            side: (((analysis.get("videos") or {}).get(side) or {}).get("shake") or {}).get("level")
-            for side in ("creator", "benchmark")
-        }
-        if any(v == "severe" for v in levels.values()):
-            shake = {side: levels[side] == "severe" for side in levels}
-    profile = result.get("category_profile") if isinstance(result.get("category_profile"), dict) else None
-    _reconcile_operator_tier(profile, analysis)
-    archetype = _select_archetype(profile)
-    weights = ARCHETYPE_W.get(archetype) if archetype else None
-    painpoints = _painpoint_tokens([str(p) for p in (profile or {}).get("painpoints") or [] if str(p).strip()])
-    # S5 硬背书：从 Stage1 facts 代码聚合每侧 ①②，绕过 Stage2 判断。仅 S5 闸消费--无 S5 阶段则不算
     endorsement = ({side: _side_endorsement(result, side) for side in ("creator", "benchmark")}
                    if any("S5" in str(s.get("stage") or "") for s in stages if isinstance(s, dict)) else {})
-
     for stage in stages:
         if not isinstance(stage, dict):
             continue
         match = _STAGE_RE.match(str(stage.get("stage") or ""))
         if not match:
             continue
+        model = _normalize_model_severity(stage.get("model_severity") or stage.get("severity"))
         try:
             trace = _derive_one(
                 match.group(1),
                 stage,
-                weights,
-                painpoints,
-                shake,
-                endorsement,
-                allow_legacy_text_fallback=not bool((analysis or {}).get("structured_relevance_required")),
+                endorsement=endorsement,
+                facts=result,
             )
-        except Exception as exc:  # 架构不变量：推导绝不拖垮主流程
-            trace = {"status": "error", "reason": f"推导异常已降级：{exc}"}
-        if archetype:
-            trace.setdefault("archetype", archetype)
-        if trace.get("status") == "derived":
-            # 优先用归一时定格的模型直判快照；stage["severity"] 此刻已被 stabilize 改写过
-            trace["model_severity"] = stage.get("model_severity") or stage.get("severity")
-            stage["severity"] = trace["severity"]
+        except Exception as exc:
+            trace = {
+                "status": "error",
+                "severity": model,
+                "model_severity": model,
+                "resolver": "floor_ceiling_v1",
+                "phase_c_candidate": False,
+                "reason": f"约束解析异常已降级，保留模型 severity：{exc}",
+            }
+        stage["severity"] = _normalize_model_severity(trace.get("severity") or model)
         stage["severity_derivation"] = trace

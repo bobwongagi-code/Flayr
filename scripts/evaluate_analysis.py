@@ -24,12 +24,7 @@ if str(ROOT / "scripts") not in sys.path:
 
 from flayr_core.structure_modules import stage1_event_catalog
 from flayr_core.artifacts import parse_time_range_seconds
-from flayr_core.postprocess.derive import (
-    CRITICAL_BAND,
-    TH_MEDIUM,
-    TH_SMALL,
-    derive_severity_from_facts,
-)
+from flayr_core.postprocess.chain import finalize_severity_after_repairs
 from flayr_core.validation_cohort import verify_cohort_lock, validate_blind_sample_contract
 
 
@@ -128,61 +123,39 @@ def normalize_ground_truth(value: Any) -> str | None:
     return normalized if normalized in {*SEVERITIES, NOT_APPLICABLE} else None
 
 
-def severity_from_score(score: float) -> str:
-    """严格复用 derive 的连续分分桶边界，不把覆盖规则混进来。"""
-    if score > TH_MEDIUM:
-        return "large"
-    if score > TH_SMALL:
-        return "medium"
-    return "small"
-
-
 def severity_diagnostics(expected: str, final: str, stage: dict[str, Any]) -> dict[str, Any]:
-    """给标签偏差增加序数距离与连续分诊断，不改变 matched 判定。
-
-    landing 下限、命题锚、红线和过程/效果断层都可能覆盖普通分桶。此时即使
-    trace 中保留了 S，也不能把差一档解释为阈值附近的离散化噪声。
-    """
+    """给标签偏差标出 resolver 路径；不再用连续分或阈值解释 severity。"""
     distance = abs(SEVERITY_RANK[final] - SEVERITY_RANK[expected])
     trace = stage.get("severity_derivation")
     if not isinstance(trace, dict):
         trace = {}
-    score = trace.get("S")
-    reason = str(trace.get("reason") or "")
-    if not isinstance(score, (int, float)):
-        if "执行分缺失" in reason:
-            mechanism = "missing_execution"
-        elif "双方均未涉及" in reason:
-            mechanism = "both_absent"
-        elif "达人持平或更优" in reason:
-            mechanism = "non_positive_execution_gap"
-        elif "红线" in reason or "下限" in reason or "断层" in reason:
-            mechanism = "structural_override"
-        else:
-            mechanism = "other_non_score_path"
-        return {
-            "ordinal_distance": distance,
-            "score": None,
-            "score_bucket": None,
-            "distance_to_nearest_threshold": None,
-            "near_threshold": None,
-            "derivation_path": "non_score_path",
-            "decision_mechanism": mechanism,
-        }
-
-    numeric_score = float(score)
-    score_bucket = severity_from_score(numeric_score)
-    threshold_distance = min(abs(numeric_score - TH_SMALL), abs(numeric_score - TH_MEDIUM))
-    override_markers = ("红线", "下限", "断层", "持平或更优", "均未涉及", "不进公式")
-    threshold_only = final == score_bucket and not any(marker in reason for marker in override_markers)
+    status = str(trace.get("status") or "missing_trace")
+    constraints = trace.get("constraints") if isinstance(trace.get("constraints"), list) else []
+    if status == "conflict":
+        path = "constraint_conflict"
+        mechanism = "floor_ceiling_conflict"
+    elif constraints:
+        path = "constraint"
+        mechanism = "floor_ceiling_clamp"
+    elif status == "model_preserved":
+        path = "model_preserved"
+        mechanism = "model_default"
+    elif status == "error":
+        path = "error_fallback"
+        mechanism = "resolver_error_fallback"
+    else:
+        path = "unknown_decision_path"
+        mechanism = "unknown_decision_path"
     return {
         "ordinal_distance": distance,
-        "score": numeric_score,
-        "score_bucket": score_bucket,
-        "distance_to_nearest_threshold": round(threshold_distance, 4),
-        "near_threshold": threshold_distance <= CRITICAL_BAND if threshold_only else None,
-        "derivation_path": "threshold" if threshold_only else "override_or_floor",
-        "decision_mechanism": "threshold_bucket" if threshold_only else "score_with_override_or_floor",
+        "score": None,
+        "score_bucket": None,
+        "distance_to_nearest_threshold": None,
+        "near_threshold": None,
+        "derivation_path": path,
+        "decision_mechanism": mechanism,
+        "constraint_count": len(constraints),
+        "constraint_conflict": status == "conflict",
     }
 
 
@@ -259,7 +232,7 @@ def diagnosis(expected: str, final: str, stage: dict[str, Any]) -> str:
     """定位偏差发生在哪一层，不把模型错误伪装成事实错误。"""
     model = normalize_severity(stage.get("model_severity"))
     derivation = stage.get("severity_derivation")
-    derived = isinstance(derivation, dict) and derivation.get("status") == "derived"
+    derived = isinstance(derivation, dict) and derivation.get("status") in {"constrained", "conflict"}
     if final == expected:
         return "matched"
     if model == expected and final != expected:
@@ -637,7 +610,7 @@ def _stage_oracle_audit(labels: dict[str, Any], run_paths: dict[str, Path]) -> d
             if isinstance(candidate_stage, dict):
                 replay_status = _prepare_oracle_replay_stage(candidate_stage, current_stage, oracle)
                 candidate["structured_relevance_required"] = True
-                derive_severity_from_facts(candidate, candidate)
+                finalize_severity_after_repairs(candidate, candidate)
             replay_stage = _result_stage_map(candidate).get(current_stage) or {}
             expected_severity = normalize_ground_truth(expected_stages.get(current_stage))
             replay_severity = normalize_severity(replay_stage.get("severity"))
@@ -1310,11 +1283,17 @@ def evaluate(
         if len(values) > 1
     ]
     mismatches = [row for row in rows if not row["matched"]]
-    threshold_mismatches = [row for row in mismatches if row["derivation_path"] == "threshold"]
+    threshold_mismatches: list[dict[str, Any]] = []
     near_threshold_mismatches = [row for row in threshold_mismatches if row["near_threshold"] is True]
     away_from_threshold_mismatches = [row for row in threshold_mismatches if row["near_threshold"] is False]
-    override_mismatches = [row for row in mismatches if row["derivation_path"] == "override_or_floor"]
-    non_score_mismatches = [row for row in mismatches if row["derivation_path"] == "non_score_path"]
+    override_mismatches = [
+        row for row in mismatches
+        if row["derivation_path"] in {"constraint", "constraint_conflict"}
+    ]
+    non_score_mismatches = [
+        row for row in mismatches
+        if row["derivation_path"] in {"model_preserved", "error_fallback", "unknown_decision_path"}
+    ]
     shadow_unstable = [
         {
             "role": role,
@@ -1362,9 +1341,10 @@ def evaluate(
         },
         "boundary_diagnostics": {
             "policy": {
-                "thresholds": {"small_medium": TH_SMALL, "medium_large": TH_MEDIUM},
-                "critical_band": CRITICAL_BAND,
-                "interpretation": "near_threshold 仅标记可能的离散化边界噪声，不把 mismatch 改判为正确。红线、下限和断层覆盖路径不参与该解释。",
+                "resolver": "floor_ceiling_v1",
+                "aggregation": "floor=max(all triggered floors); ceiling=min(all triggered ceilings)",
+                "conflict": "floor>ceiling preserves model severity and enters the shared Phase C budget",
+                "interpretation": "severity 不再由连续分或阈值分桶产生；unknown/missing facts preserve model severity.",
             },
             "mismatches": len(mismatches),
             "threshold_path": len(threshold_mismatches),

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import inspect
+import itertools
 import os
 import py_compile
 import sys
@@ -59,7 +60,11 @@ from flayr_core.postprocess.validate import (  # noqa: E402
     validate_chain_relationships,
     validate_stage_ownership,
 )
-from flayr_core.postprocess.chain import sanitize_promise_chain_scope, stamp_product_foundation  # noqa: E402
+from flayr_core.postprocess.chain import (  # noqa: E402
+    finalize_severity_after_repairs,
+    sanitize_promise_chain_scope,
+    stamp_product_foundation,
+)
 from flayr_core.postprocess.claims_my import reconcile_certification_ownership  # noqa: E402
 
 
@@ -252,338 +257,48 @@ u = normalize_video_understanding(
 check("背书双信道透传 normalize_video_understanding",
       u["creator"]["evidence_units"][0].get("endorsement_verbal") is True
       and u["creator"]["evidence_units"][0].get("endorsement_visual") is False)
-
-# 4b. F项背书接管线：全unit聚合 + hard-only口径 + S5闸（软背书/无硬背书→small）
-from flayr_core.postprocess.derive import _side_endorsement, _derive_one, _Endorsement  # noqa: E402
-from flayr_core.postprocess.proposition import materialize_cross_stage_inputs, materialize_quality_audits  # noqa: E402
-from flayr_core.postprocess.repair_stages import has_hard_endorsement, repair_s1_hook_boundaries  # noqa: E402
-
-# 聚合作用域=全unit：背书落在非S5_trust的unit（如S2_intro）也算，不漏检
-_agg = _side_endorsement(
-    {"video_understanding": {"creator": {"evidence_units": [
-        {"functions": ["S2_intro"], "endorsement_verbal": True, "endorsement_visual": False}]}}}, "creator")
-check("背书聚合：非S5_trust unit 的背书也算（全unit作用域）", _agg.verbal is True and _agg.available is True)
-
-# hard-only：硬来源算、软背书(好评/销量/口碑)不算
-check("has_hard_endorsement 硬来源=True", has_hard_endorsement("画面出现 KKM 认证、医生推荐"))
-check("has_hard_endorsement 软背书=False", not has_hard_endorsement("好评如潮、销量第一、口碑很好、testimoni"))
-
-# S5闸：双方均无硬背书flag → small（用户判例：软背书≤硬背书）
-_s5_none = _derive_one("S5", {"creator_execution": 1.0, "benchmark_execution": 1.0, "creator_summary": "好评", "benchmark_summary": "x"},
-                       {"S5": 1.0}, [], None, {"benchmark": _Endorsement(False, False, True), "creator": _Endorsement(False, False, True)})
-check("S5 双方均无硬背书(flag)→small", _s5_none.get("severity") == "small" and "结构化 flag" in _s5_none.get("reason", ""))
-
-# S5闸：一方有硬背书flag → 不判'均未涉及'，进公式
-_s5_one = _derive_one("S5", {"creator_execution": 1.0, "benchmark_execution": 2.0, "creator_summary": "x", "benchmark_summary": "KKM"},
-                      {"S5": 1.0}, [], None, {"benchmark": _Endorsement(False, True, True), "creator": _Endorsement(False, False, True)})
-check("S5 一方有硬背书→进公式不判均未涉及", "均未涉及" not in _s5_one.get("reason", ""))
-
-
-def _s5_flag(
-    exists=True,
-    module="A",
-    trust_type="hard",
-    trust_basis="authority",
-    visible=True,
-    credible=True,
-    specific=True,
-    relevance=True,
-    independent=True,
-    duplicate=False,
-    voice_only=False,
-    risky=False,
-):
-    return {
-        "exists": exists,
-        "module_type": module,
-        "trust_evidence_type": trust_type,
-        "trust_basis": trust_basis,
-        "trust_source_visible": visible,
-        "trust_source_credible": credible,
-        "trust_claim_specific": specific,
-        "product_relevance_met": relevance,
-        "independent_trust_purpose": independent,
-        "duplicates_other_stage": duplicate,
-        "voice_only": voice_only,
-        "risky_or_unsupported": risky,
-        "start_seconds": 20.0,
-        "end_seconds": 24.0,
-        "trust_reason": "认证/检测材料证明本品可信",
-        "evidence_ids": ["C5"],
+_source_statuses = normalize_video_understanding(
+    {
+        "creator": {
+            "evidence_units": [
+                {"id": "MISSING"},
+                {"id": "ABSENT", "trust_source_signals": [], "trust_source_reference": ""},
+                {"id": "PRESENT", "trust_source_signals": ["authority"], "trust_source_reference": "KKM"},
+                {"id": "UNCERTAIN", "trust_source_signals": ["authority"]},
+            ]
+        }
     }
-
-
-def _s6_flag(
-    exists=True,
-    module="B",
-    direct=True,
-    path=True,
-    soft_invitation=False,
-    offer=True,
-    urgency=True,
-    recall=True,
-    fit=True,
-    ending=True,
-    s4_depends=True,
-    risk=False,
-):
-    return {
-        "exists": exists,
-        "module_type": module,
-        "direct_order_met": direct,
-        "action_path_clear": path,
-        "soft_purchase_invitation_met": soft_invitation,
-        "offer_or_incentive_clear": offer,
-        "price_anchor_met": module == "A" and offer,
-        "urgency_evidence_met": module == "B" and urgency,
-        "gift_stack_met": module == "C" and offer,
-        "guarantee_clear_met": module == "E" and offer,
-        "urgency_met": urgency,
-        "product_value_recalled": recall,
-        "module_fit_met": fit,
-        "ending_position_met": ending,
-        "depends_on_valid_s4": s4_depends,
-        "compliance_risk": risk,
-        "start_seconds": 25.0,
-        "end_seconds": 30.0,
-        "cta_reason": "明确下单路径和限时利益点",
-        "evidence_ids": ["C6"],
-    }
-
-
-_s5_hard_vs_voice = _derive_one(
-    "S5",
-    {
-        "creator_s5": _s5_flag(voice_only=True),
-        "benchmark_s5": _s5_flag(),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S5": 1.6},
-    [],
-    None,
-    {"benchmark": _Endorsement(False, True, True), "creator": _Endorsement(True, False, True)},
-)
-check("S5 高决策品硬信任画面佐证强于口播孤证→large",
-      _s5_hard_vs_voice.get("severity") == "large" and _s5_hard_vs_voice.get("E") == 1.5)
-
-_s5_low_price_hard_vs_voice = _derive_one(
-    "S5",
-    {
-        "creator_s5": _s5_flag(voice_only=True),
-        "benchmark_s5": _s5_flag(),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S5": 0.6},
-    [],
-    None,
-    {"benchmark": _Endorsement(False, True, True), "creator": _Endorsement(True, False, True)},
-)
-check("S5 低客单价硬信任差距不自动拉large",
-      _s5_low_price_hard_vs_voice.get("severity") != "large")
-
-_s5_soft_not_killed = _derive_one(
-    "S5",
-    {
-        "creator_s5": _s5_flag(trust_type="soft", trust_basis="independent_user", visible=True, credible=True, specific=True),
-        "benchmark_s5": _s5_flag(trust_type="soft", trust_basis="independent_user", visible=True, credible=True, specific=True),
-        "creator_summary": "用户好评",
-        "benchmark_summary": "用户好评",
-    },
-    {"S5": 1.0},
-    [],
-    None,
-    {"benchmark": _Endorsement(False, False, True), "creator": _Endorsement(False, False, True)},
-)
-check("S5 软信任 flag 存在→不被双方无硬背书闸误杀",
-      "均无硬背书" not in _s5_soft_not_killed.get("reason", "")
-      and _s5_soft_not_killed.get("severity") == "small")
-
-_s5_opening_comment_not_trust = _derive_one(
-    "S5",
-    {
-        "creator_s5": _s5_flag(trust_type="soft", trust_basis="independent_user", independent=False, duplicate=True),
-        "benchmark_s5": _s5_flag(trust_type="soft", trust_basis="independent_user", independent=True, duplicate=False),
-        "creator_summary": "开头回答粉丝评论作为 Hook",
-        "benchmark_summary": "独立用户证言",
-    },
-    {"S5": 1.0},
-    [],
-    None,
-    {"benchmark": _Endorsement(False, False, True), "creator": _Endorsement(False, False, True)},
-)
-check("S5-C 开头评论/粉丝问答归 S1，不重复算 S5",
-      _s5_opening_comment_not_trust.get("severity") == "small"
-      and _s5_opening_comment_not_trust.get("E") == 1)
-
-_s5_scene_duplicate_not_trust = _derive_one(
-    "S5",
-    {
-        "creator_s5": _s5_flag(module="D", trust_type="soft", independent=False, duplicate=True),
-        "benchmark_s5": _s5_flag(module="D", trust_type="soft", independent=True, duplicate=False),
-        "creator_summary": "S3/S4 的多场景使用被误写为场景广度",
-        "benchmark_summary": "独立适用人群/场景标签建立信任",
-    },
-    {"S5": 1.0},
-    [],
-    None,
-    {"benchmark": _Endorsement(False, False, True), "creator": _Endorsement(False, False, True)},
-)
-check("S5-D 场景广度不得重复 S3/S4 多场景",
-      _s5_scene_duplicate_not_trust.get("severity") == "small"
-      and _s5_scene_duplicate_not_trust.get("E") == 1)
-
-_s5_spec_not_trust = _derive_one(
-    "S5",
-    {
-        "creator_s5": _s5_flag(
-            exists=False, trust_type="none", trust_basis="offer_or_spec", independent=False,
-            visible=True, credible=False, specific=True,
-        ),
-        "benchmark_s5": _s5_flag(
-            exists=False, trust_type="none", trust_basis="offer_or_spec", independent=False,
-            visible=True, credible=False, specific=True,
-        ),
-        "creator_summary": "展示刷头数量和可用时长",
-        "benchmark_summary": "展示套装数量和可用时长",
-    },
-    {"S5": 1.0},
-    [],
-    None,
-    {"benchmark": _Endorsement(False, False, True), "creator": _Endorsement(False, False, True)},
-)
-check("S5 产品数量/时长不是独立信任背书",
-      _s5_spec_not_trust.get("severity") == "small" and "均未涉及" in _s5_spec_not_trust.get("reason", ""))
-
-_s6_missing = _derive_one(
-    "S6",
-    {
-        "creator_s6": _s6_flag(exists=False, direct=False, path=False, offer=False, urgency=False, recall=False, fit=False),
-        "benchmark_s6": _s6_flag(),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S6": 1.8},
-    [],
-)
-check("S6 达人无 CTA 标杆有明确 CTA→large 红线",
-      _s6_missing.get("severity") == "large" and _s6_missing.get("E") == 2)
-
-_s6_opening_price_not_cta = _derive_one(
-    "S6",
-    {
-        "creator_s6": _s6_flag(ending=False),
-        "benchmark_s6": _s6_flag(),
-        "creator_summary": "开头用低价做 Hook",
-        "benchmark_summary": "结尾明确促单",
-    },
-    {"S6": 1.8},
-    [],
-)
-check("S6-A 价格出现在开头归 S1，不算结尾 CTA",
-      _s6_opening_price_not_cta.get("severity") == "large"
-      and _s6_opening_price_not_cta.get("E") == 2)
-
-_s6_invalid_effect_summary = _derive_one(
-    "S6",
-    {
-        "creator_s6": _s6_flag(module="D", s4_depends=False),
-        "benchmark_s6": _s6_flag(module="D", s4_depends=True),
-        "creator_summary": "效果总结但 S4 未成立",
-        "benchmark_summary": "复用有效 S4 效果催单",
-    },
-    {"S6": 1.8},
-    [],
-)
-check("S6-D 缺有效 S4 时不把完整 CTA 错降；依赖仅进审计",
-      _s6_invalid_effect_summary.get("severity") == "small"
-      and _s6_invalid_effect_summary.get("E") == 0
-      and _s6_invalid_effect_summary.get("s6_effect_summary_dependency") == {"creator": False, "benchmark": True})
-
-_s6_creator_better = _derive_one(
-    "S6",
-    {
-        "creator_s6": _s6_flag(),
-        "benchmark_s6": _s6_flag(direct=True, path=True, offer=False, urgency=False, recall=False, fit=True),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S6": 1.8},
-    [],
-)
-check("S6 达人 CTA 更强→零差距红线保持 small",
-      _s6_creator_better.get("severity") == "small" and _s6_creator_better.get("E") == 0)
-
-_s6_soft_invitation = _derive_one(
-    "S6",
-    {
-        "creator_s6": _s6_flag(direct=False, path=False, soft_invitation=True, offer=True, recall=True, fit=True),
-        "benchmark_s6": _s6_flag(),
-        "creator_summary": "结尾面向感兴趣用户提示促销与免邮，但未给购买路径",
-        "benchmark_summary": "结尾给出明确下单路径与优惠",
-    },
-    {"S6": 1.8},
-    [],
-)
-check("S6 软促单（邀请+利益）不与无 CTA 混同",
-      _s6_soft_invitation.get("severity") == "small" and _s6_soft_invitation.get("E") == 0.5)
-
-_matrix_result = {
-    "category_profile": {"decision_threshold": "impulse", "drive_type": "functional", "painpoints": ["油光"]},
-    "product_profile": {
-        "hook_proposition": "油光变哑光",
-        "physical_task": "补妆不花",
-        "core_selling_points": ["强力吸油不拔干"],
-        "usage_context": "出门补妆",
-        "core_visual_proposition": "油光脸变哑光脸",
-        "visual_proof_points": [
-            {
-                "priority": "primary",
-                "proof_target": "油光变哑光",
-                "visual_standard": "强光下反光明显下降",
-                "visual_diff_dimensions": ["亮度反光"],
-                "related_selling_points": ["强力吸油不拔干"],
-            }
-        ],
-        "visual_diff_dimensions": ["亮度反光"],
-        "trust_multipliers": ["真人实测"],
-    },
-    "stage_analysis": [
-        {"stage": "S1 Hook", "creator_hook": {"type": "B", "anchors_proposition": True}, "benchmark_hook": {"type": "A", "anchors_proposition": True}},
-        {"stage": "S2 产品引出", "creator_s2": {"exists": True, "module_type": "A", "s1_s2_compatible": True, "handoff_met": True, "product_identity_clear": True, "product_role_clear": True}, "benchmark_s2": {"exists": True, "module_type": "A", "s1_s2_compatible": True, "handoff_met": True, "product_identity_clear": True, "product_role_clear": True}},
-        {"stage": "S3 使用过程", "creator_s3": {"exists": True, "core_selling_point_visible": True, "demonstrated_selling_points": ["强力吸油不拔干"]}, "benchmark_s3": {"exists": True, "core_selling_point_visible": True, "demonstrated_selling_points": ["强力吸油不拔干"]}},
-        {"stage": "S4 效果呈现", "creator_s4": {"effect_visible": True, "effect_salience": "strong", "effect_proposition_matched": True, "effect_attribution_supported": True}, "benchmark_s4": {"effect_visible": True, "effect_salience": "strong", "effect_proposition_matched": True, "effect_attribution_supported": True}},
-        {"stage": "S5 信任放大", "creator_s5": {"exists": False}, "benchmark_s5": {"exists": False}},
-        {"stage": "S6 CTA", "creator_s6": {"exists": True, "module_type": "D", "depends_on_valid_s4": False}, "benchmark_s6": {"exists": True, "module_type": "D", "depends_on_valid_s4": False}},
-    ],
-}
-materialize_cross_stage_inputs(_matrix_result, {"brand_proposition": {"propositions": ["柔焦隐形毛孔"], "painpoints": ["油光"]}})
-materialize_quality_audits(_matrix_result, {})
-check(
-    "命题矩阵：S1 用冻结命题，S3/S4/S5/S6 用 product_profile",
-    _matrix_result["product_proposition_matrix"]["S1"]["hook_propositions"] == ["柔焦隐形毛孔"]
-    and _matrix_result["product_proposition_matrix"]["S3"]["core_selling_points"] == ["强力吸油不拔干"]
-    and _matrix_result["product_proposition_matrix"]["S4"]["core_visual_proposition"] == "油光脸变哑光脸"
-    and _matrix_result["product_proposition_matrix"]["S4"]["visual_proof_points"][0]["priority"] == "primary"
-    and bool(_matrix_result["product_proposition_matrix"]["S6"]["cta_value_hooks"]),
 )
 check(
-    "S1→S2 兼容矩阵代码化：B→A 覆盖模型 true 为 false",
-    _matrix_result["stage_analysis"][1]["creator_s2"].get("computed_s1_s2_compatible") is False
-    and _matrix_result["stage_analysis"][1].get("creator_absolute_status") == "incompatible",
-)
-check(
-    "S4→S6-D 跨阶段依赖代码化：有效 S4 使 S6-D 可复用",
-    _matrix_result["stage_analysis"][5]["creator_s6"].get("computed_depends_on_valid_s4") is True
-    and _matrix_result["cross_stage_state"]["roles"]["creator"]["s4_output_available"] is True,
-)
-check(
-    "卖点链审计不回填 S2：S2/S3/S4 闭环状态单独暴露",
-    _matrix_result["cross_stage_state"]["roles"]["creator"]["selling_point_chain"]["status"] == "closed",
+    "S5 来源状态区分 missing/uncertain/explicit absence",
+    [
+        unit["trust_source_status"]
+        for unit in _source_statuses["creator"]["evidence_units"]
+    ] == ["missing", "explicit_absent", "explicit_present", "uncertain"],
 )
 
-# 4c. S1 Hook flag 化（切片 A）：四维推执行分 + hook_exists 红线 + 命题锚 + 残差亮点门
+# 4b. severity resolver contract
+#
+# The retired E/W/C scenarios were removed from the release gate; this block
+# covers the current resolver and its evidence boundaries.
+from flayr_core.postprocess.derive import (  # noqa: E402
+    SeverityConstraint,
+    _Endorsement,
+    _derive_one,
+    _side_endorsement,
+    critical_severity_stages,
+    resolve_severity,
+)
+from flayr_core.postprocess.global_diagnosis import (  # noqa: E402
+    _commercial_priorities,
+    _commercial_relevance,
+)
+from flayr_core.postprocess.repair_stages import (  # noqa: E402
+    S1_HOOK_BOUNDARIES_REPAIRED,
+    S1_HOOK_BOUNDARIES_STATE_KEY,
+    S1_POSTPROCESS_STATE_KEY,
+    repair_s1_hook_boundaries,
+)
 from flayr_core.llm.parse import (  # noqa: E402
     normalize_hook_flags,
     normalize_product_profile,
@@ -594,88 +309,11 @@ from flayr_core.llm.parse import (  # noqa: E402
     normalize_s4_flags,
     normalize_s5_flags,
     normalize_s6_flags,
+    normalize_video_understanding,
 )
+import flayr_core.llm.s4_visual_verifier as s4_visual_verifier_module  # noqa: E402
 
 
-def _hook(exists, htype, cam=False, cp=False, snd=False, rhy=False, anchors=None, landing=None):
-    return {"exists": exists, "type": htype,
-            "dims": {"camera": cam, "copy": cp, "sound": snd, "rhythm": rhy},
-            "hook_boundary_seconds": 3.0,
-            "hook_boundary_reason": "3.0s 后开始产品引出",
-            "s2_start_signal": "产品成为解决方案主角",
-            "landing_met": landing,
-            "landing_reason": "0-3s 钩子窗口内对象张力承诺齐全",
-            "window_evidence": "0-3s 钩子窗口",
-            "landing_window_leak": False,
-            "anchors_proposition": anchors}
-
-
-def _s1_stage(creator_hook, benchmark_hook, **extra):
-    st = {"creator_execution": None, "benchmark_execution": None,
-          "creator_summary": "x", "benchmark_summary": "y",
-          "creator_hook": creator_hook, "benchmark_hook": benchmark_hook}
-    st.update(extra)
-    return st
-
-
-# 四维均满 + 双方相等 → e=0 → small（flag 推执行分，绕过模型 0-2）
-_full = _hook(True, "B", True, True, True, True)
-_t = _derive_one("S1", _s1_stage(_full, dict(_full)), None, [])
-check("S1 四维双满→small（flag 推执行分）", _t.get("severity") == "small" and _t.get("E") == 0)
-
-# 达人 0 维 vs 标杆 4 维（双方均有 Hook，不触红线）→ e=2.0 → S1 large 红线
-_c0 = _hook(True, "B", False, False, False, False)
-_t2 = _derive_one("S1", _s1_stage(_c0, dict(_full)), None, [])
-check("S1 达人四维全缺→large（e=2 核心缺失）", _t2.get("severity") == "large" and _t2.get("E") == 2)
-
-# hook_exists 红线：达人无 Hook、标杆有 Hook → large，且独立于四维
-_t3 = _derive_one("S1", _s1_stage(_hook(False, "unknown"), dict(_full)), None, [])
-check("S1 hook_exists 红线（达人无Hook标杆有）→large", _t3.get("severity") == "large" and "红线" in _t3.get("reason", ""))
-
-# 命题锚放大：小差距(e=0.5)下，标杆锚命题、达人没 → 放大到 large；无 anchors 则保持 small
-_c2 = _hook(True, "B", True, True, False, False)            # 2 维 met → exec 1.0
-_b3 = _hook(True, "B", True, True, True, False)             # 3 维 met → exec 1.5，e=0.5
-_t_no = _derive_one("S1", _s1_stage(_c2, _b3), None, [])
-check("S1 小差距无命题锚→small", _t_no.get("severity") == "small")
-_c2a = _hook(True, "B", True, True, False, False, anchors=False)
-_b3a = _hook(True, "B", True, True, True, False, anchors=True)
-_t_an = _derive_one("S1", _s1_stage(_c2a, _b3a), None, [])
-check("S1 命题锚（标杆锚达人没）→放大 large", _t_an.get("severity") == "large" and "锚定品命题" in _t_an.get("reason", ""))
-
-_c_full_no_anchor = _hook(True, "G", True, True, True, True, anchors=False, landing=True)
-_b_full_anchor = _hook(True, "C", True, True, True, True, anchors=True, landing=True)
-_t_anchor_floor = _derive_one("S1", _s1_stage(_c_full_no_anchor, _b_full_anchor), None, [])
-check("S1 命题锚下限：件齐但达人只泛留人→medium",
-      _t_anchor_floor.get("severity") == "medium" and "命题锚下限" in _t_anchor_floor.get("reason", ""))
-
-# 残差亮点门：标杆四维全 met 且 type≠unknown → 开；type=unknown → 不开
-_t_hl = _derive_one("S1", _s1_stage(_c0, dict(_full)), None, [])
-check("S1 亮点门：标杆四维全met+类型明确→开", _t_hl.get("hook_highlight_allowed") is True)
-_unk = _hook(True, "unknown", True, True, True, True)
-_t_unk = _derive_one("S1", _s1_stage(_c0, _unk), None, [])
-check("S1 亮点门：类型 unknown→不开", _t_unk.get("hook_highlight_allowed") is None)
-
-# flag 缺失 → 回退模型执行分（优雅降级，不崩）
-_t_fb = _derive_one("S1", _s1_stage(None, None, creator_execution=1.0, benchmark_execution=2.0), None, [])
-check("S1 flag 缺失→回退模型执行分", _t_fb.get("status") == "derived" and _t_fb.get("E") == 1.0)
-
-# landing 封顶：达人四维 3/4(=1.5) 但钩子没打穿(landing=false) → 执行分封顶 1.0
-_c3_noland = _hook(True, "B", True, True, True, False, landing=False)   # 3 维但 landing=false
-_b4_land = _hook(True, "C", True, True, True, True, landing=True)        # 4 维 landing=true
-_t_cap = _derive_one("S1", _s1_stage(_c3_noland, _b4_land), None, [])
-check("S1 landing 封顶（件齐没打穿→exec≤1.0，e=1.0）", _t_cap.get("E") == 1.0)
-
-# landing 下限（carslan 重演）：标杆立住、达人没立住 → 至少 medium，纠正"件齐误判 small"
-check("S1 landing 下限（标杆立住达人没→medium）",
-      _t_cap.get("severity") == "medium" and "没打穿" in _t_cap.get("reason", ""))
-
-# 双方都没立住 → 不触发下限（同样没打穿，差距小，保持 small）
-_c3_nl = _hook(True, "B", True, True, True, False, landing=False)
-_b3_nl = _hook(True, "C", True, True, True, False, landing=False)
-_t_both = _derive_one("S1", _s1_stage(_c3_nl, _b3_nl), None, [])
-check("S1 双方都没立住→不触发下限（small）", _t_both.get("severity") == "small")
-
-# S2 契约 flag：只判 S1→S2 衔接，不做四维主观分
 def _s2_flag(exists=True, merged=False, module="A", handoff=True, compat=True, identity=True, role=True, risky=False):
     return {
         "exists": exists,
@@ -693,79 +331,13 @@ def _s2_flag(exists=True, merged=False, module="A", handoff=True, compat=True, i
     }
 
 
-_s2_good = _s2_flag()
-_s2_bad = _s2_flag(handoff=False, compat=False, role=False)
-_s2_trace = _derive_one(
-    "S2",
-    {"creator_s2": _s2_bad, "benchmark_s2": _s2_good, "creator_summary": "x", "benchmark_summary": "y"},
-    {"S2": 1.0},
-    [],
-)
-check("S2 契约 flag：标杆接住达人没接住→至少 medium",
-      _s2_trace.get("severity") == "medium")
-
-_s2_merged = _derive_one(
-    "S2",
-    {"creator_s2": _s2_flag(merged=True), "benchmark_s2": _s2_good, "creator_summary": "x", "benchmark_summary": "y"},
-    {"S2": 1.0},
-    [],
-)
-check("S2 merged_with_s3=true 且产品身份/角色清楚→不因缺独立S2扣分",
-      _s2_merged.get("severity") == "small" and _s2_merged.get("E") == 0)
-
-_s2_upstream_missing = _derive_one(
-    "S2",
-    {
-        "creator_s2": _s2_flag(merged=True, handoff=False, compat=False, identity=True, role=True),
-        "benchmark_s2": _s2_good,
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S2": 1.0},
-    [],
-)
-check("S2 上游缺 S1 但产品身份/角色清楚→不重复计罚",
-      _s2_upstream_missing.get("severity") == "small" and _s2_upstream_missing.get("E") == 0)
-
-_s2_risky = _derive_one(
-    "S2",
-    {"creator_s2": _s2_flag(risky=True, handoff=False), "benchmark_s2": _s2_good, "creator_summary": "x", "benchmark_summary": "y"},
-    {"S2": 1.0},
-    [],
-)
-check("S2 风险引出方式→reason 标注风险模块",
-      "高风险引出方式" in _s2_risky.get("reason", ""))
-
-# S3 使用过程 flag：真实使用 + 核心卖点可见是主轴，场景组织/表现层只做加分
 def _s3_flag(
-    exists=True,
-    module="A",
-    usage=True,
-    result_only=False,
-    mouth_static=False,
-    real=True,
-    core=True,
-    framing=True,
-    action_proof=True,
-    target_contact=True,
-    application_change=True,
-    critical_continuity=True,
-    context=True,
-    continuity=True,
-    richness=False,
-    fake=False,
-    scene="single_scene",
-    single_continuity=True,
-    single_variation=False,
-    multi_logic=False,
-    multi_transition=False,
-    multi_role=False,
-    role_design=False,
-    role_interaction=False,
-    distinct_personas=False,
-    steps_clear=False,
-    pov_immersive=False,
-    overlays=None,
+    exists=True, module="A", usage=True, result_only=False, mouth_static=False, real=True,
+    core=True, framing=True, action_proof=True, target_contact=True, application_change=True,
+    critical_continuity=True, context=True, continuity=True, richness=False, fake=False,
+    scene="single_scene", single_continuity=True, single_variation=False, multi_logic=False,
+    multi_transition=False, multi_role=False, role_design=False, role_interaction=False,
+    distinct_personas=False, steps_clear=False, pov_immersive=False, overlays=None,
 ):
     return {
         "exists": exists,
@@ -805,217 +377,10 @@ def _s3_flag(
     }
 
 
-_s3_good = _s3_flag(richness=True, single_variation=True)
-_s3_no_core = _s3_flag(core=False, richness=True)
-_s3_trace = _derive_one(
-    "S3",
-    {"creator_s3": _s3_no_core, "benchmark_s3": _s3_good, "creator_summary": "x", "benchmark_summary": "y"},
-    {"S3": 1.6},
-    [],
-)
-check("S3 核心卖点没在动作里可见→至少 medium",
-      _s3_trace.get("severity") in {"medium", "large"})
-
-_s3_fake = _derive_one(
-    "S3",
-    {"creator_s3": _s3_flag(fake=True), "benchmark_s3": _s3_good, "creator_summary": "x", "benchmark_summary": "y"},
-    {"S3": 1.6},
-    [],
-)
-check("S3 显假摆拍→执行分按 0 处理",
-      _s3_fake.get("severity") == "large" and _s3_fake.get("E") == 2)
-
-_s3_core_incomplete = _derive_one(
-    "S3",
-    {
-        "creator_s3": {**_s3_flag(richness=False), "missing_selling_points": ["核心卖点"]},
-        "benchmark_s3": _s3_good,
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S3": 1.0},
-    [],
-)
-check("S3 核心卖点有缺口→多余表现层不能抵消标杆完整证明",
-      _s3_core_incomplete.get("severity") == "medium"
-      and _s3_core_incomplete.get("E") == 1
-      and "薄演示下限" in _s3_core_incomplete.get("reason", ""))
-
-_s3_context_thin = _derive_one(
-    "S3",
-    {
-        "creator_s3": _s3_flag(richness=False, context=False),
-        "benchmark_s3": _s3_good,
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S3": 1.0},
-    [],
-)
-check("S3 基础演示成立但场景/丰富度弱于标杆→至少 medium",
-      _s3_context_thin.get("severity") == "medium"
-      and _s3_context_thin.get("E") == 1.5)
-
-_s3_bad_framing = _derive_one(
-    "S3",
-    {
-        "creator_s3": _s3_flag(framing=False, richness=True, single_variation=True),
-        "benchmark_s3": _s3_good,
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S3": 1.0},
-    [],
-)
-check("S3 使用过程拍摄对准不足→仅进入 trace，不抢先影响 severity",
-      _s3_bad_framing.get("severity") == "small"
-      and _s3_bad_framing.get("E") == 0
-      and _s3_bad_framing.get("s3_process_framing") == {"creator": False, "benchmark": True})
-
-_s3_action_without_proof = _derive_one(
-    "S3",
-    {
-        "creator_s3": _s3_flag(action_proof=False, richness=True, single_variation=True),
-        "benchmark_s3": _s3_good,
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S3": 1.0},
-    [],
-)
-check("S3 有动作但未形成可复核卖点证明→执行分封顶并触发 medium 下限",
-      _s3_action_without_proof.get("severity") == "medium"
-      and _s3_action_without_proof.get("E") == 1.5
-      and _s3_action_without_proof.get("s3_action_proof") == {"creator": False, "benchmark": True})
-
-_s3_both_thin = _derive_one(
-    "S3",
-    {
-        "creator_s3": _s3_flag(richness=False),
-        "benchmark_s3": _s3_flag(richness=False),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S3": 1.0},
-    [],
-)
-check("S3 双方都只是基础演示→不触发薄演示下限",
-      _s3_both_thin.get("severity") == "small" and _s3_both_thin.get("E") == 0)
-
-_s3_result_only = _derive_one(
-    "S3",
-    {"creator_s3": _s3_flag(usage=False, result_only=True), "benchmark_s3": _s3_good, "creator_summary": "x", "benchmark_summary": "y"},
-    {"S3": 1.6},
-    [],
-)
-check("S3 只有结果没有过程→最高 0.5",
-      _s3_result_only.get("severity") == "large" and _s3_result_only.get("E") == 2)
-
-_s3_static = _derive_one(
-    "S3",
-    {"creator_s3": _s3_flag(usage=False, mouth_static=True), "benchmark_s3": _s3_good, "creator_summary": "x", "benchmark_summary": "y"},
-    {"S3": 1.6},
-    [],
-)
-check("S3 只口播/静态展示→执行分按 0 处理",
-      _s3_static.get("severity") == "large" and _s3_static.get("E") == 2)
-
-_s3_multi_strong = _derive_one(
-    "S3",
-    {
-        "creator_s3": _s3_flag(scene="multi_scene", single_continuity=False, multi_logic=True, multi_transition=True, multi_role=True),
-        "benchmark_s3": _s3_flag(scene="multi_scene", single_continuity=False, multi_logic=True, multi_transition=True, multi_role=True),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S3": 1.6},
-    [],
-)
-check("S3 多场景组织完整→可与标杆持平",
-      _s3_multi_strong.get("severity") == "small" and _s3_multi_strong.get("E") == 0)
-
-_s3_multi_scattered = _derive_one(
-    "S3",
-    {
-        "creator_s3": _s3_flag(scene="multi_scene", single_continuity=False, multi_logic=False, multi_transition=False, multi_role=False, richness=True),
-        "benchmark_s3": _s3_flag(scene="single_scene", single_variation=True, richness=True),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S3": 1.6},
-    [],
-)
-check("S3 多场景散乱→不因场景多自动加分",
-      _s3_multi_scattered.get("severity") in {"medium", "large"} and _s3_multi_scattered.get("E") == 1)
-
-_s3_people = _derive_one(
-    "S3",
-    {
-        "creator_s3": _s3_flag(scene="multi_person", single_continuity=False, role_design=True, role_interaction=True),
-        "benchmark_s3": _s3_flag(scene="multi_person", single_continuity=False, role_design=True, role_interaction=True),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S3": 1.6},
-    [],
-)
-check("S3 多人使用角色清楚且互动服务卖点→可成立",
-      _s3_people.get("severity") == "small" and _s3_people.get("E") == 0)
-
-_s3_single_full = _derive_one(
-    "S3",
-    {
-        "creator_s3": _s3_flag(scene="single_scene", single_continuity=True, richness=False),
-        "benchmark_s3": _s3_flag(scene="single_scene", single_continuity=True, richness=False),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S3": 1.2},
-    [],
-)
-check("S3 单场景完整证明核心卖点→不因缺少多场景/变化被降级",
-      _s3_single_full.get("severity") == "small" and _s3_single_full.get("E") == 0)
-
-_s3_creator_multi_missing = _s3_flag(
-    scene="multi_scene",
-    single_continuity=False,
-    multi_logic=True,
-    multi_transition=True,
-    multi_role=True,
-    richness=True,
-)
-_s3_creator_multi_missing["missing_selling_points"] = ["高载液量"]
-_s3_benchmark_single_complete = _s3_flag(scene="single_scene", single_continuity=True, single_variation=True, richness=True)
-_s3_benchmark_single_complete["missing_selling_points"] = []
-_s3_colorkey_like = _derive_one(
-    "S3",
-    {
-        "creator_s3": _s3_creator_multi_missing,
-        "benchmark_s3": _s3_benchmark_single_complete,
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S3": 1.2},
-    [],
-)
-check("S3 多场景但漏核心卖点→不因丰富度抵消标杆完整证明",
-      _s3_colorkey_like.get("severity") == "medium" and _s3_colorkey_like.get("E") == 1)
-
-
 def _s4_flag(
-    effect=True,
-    attribution=True,
-    result_only=False,
-    linked=True,
-    tamper=False,
-    effect_type="before_after",
-    salience="strong",
-    matched=True,
-    control=True,
-    focus=True,
-    visual_diff=True,
-    module_constraints=True,
-    maximized=True,
+    effect=True, attribution=True, result_only=False, linked=True, tamper=False,
+    effect_type="before_after", salience="strong", matched=True, control=True,
+    focus=True, visual_diff=True, module_constraints=True, maximized=True,
     close_inspection=False,
 ):
     return {
@@ -1038,235 +403,348 @@ def _s4_flag(
     }
 
 
-_s4_result_weak = _derive_one(
-    "S4",
-    {
-        "creator_s4": _s4_flag(attribution=False, result_only=True, linked=False),
-        "benchmark_s4": _s4_flag(),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S4": 1.4},
-    [],
+def _s5_flag(
+    exists=True, module="A", trust_type="hard", trust_basis="authority", visible=True,
+    credible=True, specific=True, relevance=True, independent=True, duplicate=False,
+    voice_only=False, risky=False,
+):
+    return {
+        "exists": exists,
+        "module_type": module,
+        "trust_evidence_type": trust_type,
+        "trust_basis": trust_basis,
+        "trust_source_visible": visible,
+        "trust_source_credible": credible,
+        "trust_claim_specific": specific,
+        "product_relevance_met": relevance,
+        "independent_trust_purpose": independent,
+        "duplicates_other_stage": duplicate,
+        "voice_only": voice_only,
+        "risky_or_unsupported": risky,
+        "start_seconds": 20.0,
+        "end_seconds": 24.0,
+        "trust_reason": "认证/检测材料证明本品可信",
+        "evidence_ids": ["C5"],
+    }
+
+
+def _s6_flag(
+    exists=True, module="B", direct=True, path=True, soft_invitation=False,
+    offer=True, urgency=True, recall=True, fit=True, ending=True, s4_depends=True, risk=False,
+):
+    return {
+        "exists": exists,
+        "module_type": module,
+        "direct_order_met": direct,
+        "action_path_clear": path,
+        "soft_purchase_invitation_met": soft_invitation,
+        "offer_or_incentive_clear": offer,
+        "price_anchor_met": module == "A" and offer,
+        "urgency_evidence_met": module == "B" and urgency,
+        "gift_stack_met": module == "C" and offer,
+        "guarantee_clear_met": module == "E" and offer,
+        "urgency_met": urgency,
+        "product_value_recalled": recall,
+        "module_fit_met": fit,
+        "ending_position_met": ending,
+        "depends_on_valid_s4": s4_depends,
+        "compliance_risk": risk,
+        "start_seconds": 25.0,
+        "end_seconds": 30.0,
+        "cta_reason": "明确下单路径和限时利益点",
+        "evidence_ids": ["C6"],
+    }
+
+_resolver_floors = (
+    SeverityConstraint("floor", "small", "S1_landing_floor", "landing"),
+    SeverityConstraint("floor", "medium", "S2_contract_floor", "contract"),
 )
-check("S4 只有结果且无因果桥、标杆强证明→差距大",
-      _s4_result_weak.get("severity") == "large" and _s4_result_weak.get("E") == 2)
-
-_s4_result_bound = _derive_one(
-    "S4",
-    {
-        "creator_s4": _s4_flag(result_only=True, linked=False),
-        "benchmark_s4": _s4_flag(),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S4": 1.4},
-    [],
+_resolver_ceilings = (
+    SeverityConstraint("ceiling", "large", "S5_no_trust_ceiling", "trust"),
+    SeverityConstraint("ceiling", "medium", "S6_creator_cta_ceiling", "cta"),
 )
-check("S4 产品结果强绑定不能替代使用因果桥",
-      _s4_result_bound.get("severity") == "large" and _s4_result_bound.get("E") == 2)
-
-_s4_strong_same = _derive_one(
-    "S4",
-    {
-        "creator_s4": _s4_flag(),
-        "benchmark_s4": _s4_flag(),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S4": 1.4},
-    [],
+_resolver_expected = resolve_severity("large", _resolver_floors, _resolver_ceilings)
+_order_independent = all(
+    resolve_severity("large", floor_order, ceiling_order) == _resolver_expected
+    for floor_order in itertools.permutations(_resolver_floors)
+    for ceiling_order in itertools.permutations(_resolver_ceilings)
 )
-check("S4 强效果：显著+命题命中+对比控制+聚焦+最大化→满执行",
-      _s4_strong_same.get("severity") == "small" and _s4_strong_same.get("E") == 0)
-
-_s4_process_visual = _derive_one(
-    "S4",
-    {
-        "creator_s4": _s4_flag(effect_type="process_visualization", salience="clear", control=False, maximized=False),
-        "benchmark_s4": _s4_flag(effect_type="process_visualization", salience="strong", control=False, focus=True, maximized=True),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S4": 1.0},
-    [],
+check(
+    "resolver floor=max/ceiling=min 与调用顺序无关",
+    _order_independent
+    and _resolver_expected["floor"] == "medium"
+    and _resolver_expected["ceiling"] == "medium"
+    and _resolver_expected["severity"] == "medium",
 )
-check("S4 过程可视化不要求 comparison_control 才能满执行",
-      _s4_process_visual.get("severity") == "medium"
-      and _s4_process_visual.get("E") == 1)
 
-_s4_subtle = _derive_one(
-    "S4",
-    {
-        "creator_s4": _s4_flag(salience="subtle", close_inspection=True),
-        "benchmark_s4": _s4_flag(),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S4": 1.4},
-    [],
+_equal_clamp = resolve_severity(
+    "small",
+    (SeverityConstraint("floor", "medium", "floor", "floor"),),
+    (SeverityConstraint("ceiling", "medium", "ceiling", "ceiling"),),
 )
-check("S4 变化需要仔细看→封顶弱",
-      _s4_subtle.get("severity") in {"medium", "large"} and _s4_subtle.get("E") == 1.5)
-
-_s4_not_max = _derive_one(
-    "S4",
-    {
-        "creator_s4": _s4_flag(salience="clear", control=False, focus=False, maximized=False),
-        "benchmark_s4": _s4_flag(),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S4": 1.4},
-    [],
+check(
+    "resolver floor==ceiling 是合法 clamp",
+    _equal_clamp["severity"] == "medium"
+    and _equal_clamp["status"] == "constrained"
+    and _equal_clamp["phase_c_candidate"] is False,
 )
-check("S4 结构存在但未最大化→不能拿满分",
-      _s4_not_max.get("severity") in {"small", "medium"} and _s4_not_max.get("E") == 1)
 
-_s4_no_visual_diff = _derive_one(
-    "S4",
-    {
-        "creator_s4": _s4_flag(salience="strong", visual_diff=False, module_constraints=True),
-        "benchmark_s4": _s4_flag(),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S4": 1.4},
-    [],
+_conflict = resolve_severity(
+    "small",
+    (SeverityConstraint("floor", "large", "floor", "floor"),),
+    (SeverityConstraint("ceiling", "medium", "ceiling", "ceiling"),),
 )
-check("S4 看不出指定视觉差异→不能拿满分",
-      _s4_no_visual_diff.get("severity") == "large" and _s4_no_visual_diff.get("E") == 2)
-
-_s4_module_broken = _derive_one(
-    "S4",
-    {
-        "creator_s4": _s4_flag(salience="strong", visual_diff=True, module_constraints=False),
-        "benchmark_s4": _s4_flag(),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S4": 1.4},
-    [],
+check(
+    "resolver floor>ceiling 保留模型并转 Phase C",
+    _conflict["severity"] == "small"
+    and _conflict["status"] == "conflict"
+    and _conflict["phase_c_candidate"] is True,
 )
-check("S4 模块硬约束不成立→不能拿满分",
-      _s4_module_broken.get("severity") in {"small", "medium"} and _s4_module_broken.get("E") == 1)
 
-_s4_thin_effect = _derive_one(
-    "S4",
+_model_only = _derive_one(
+    "S3",
     {
-        "creator_s4": _s4_flag(salience="clear", control=False, focus=False, maximized=False),
-        "benchmark_s4": _s4_flag(salience="strong", control=True, focus=True, maximized=True),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
+        "severity": "large",
+        "creator_execution": 0.0,
+        "benchmark_execution": 2.0,
+        "painpoint_relevance": "benchmark_only",
     },
-    {"S4": 1.0},
-    [],
+    weights={"S3": 99.0},
+    painpoints=["任意痛点"],
+    shake={"creator": True, "benchmark": True},
 )
-check("S4 效果可见但未最大化，标杆更显著→至少 medium",
-      _s4_thin_effect.get("severity") == "medium"
-      and _s4_thin_effect.get("E") == 1
-      and "薄效果下限" in _s4_thin_effect.get("reason", ""))
-
-_s4_aesthetic = _derive_one(
-    "S4",
-    {
-        "creator_s4": _s4_flag(effect_type="aesthetic_display", linked=False, control=False, focus=True, maximized=True),
-        "benchmark_s4": _s4_flag(),
-        "creator_summary": "x",
-        "benchmark_summary": "y",
-    },
-    {"S4": 1.4},
-    [],
+check(
+    "无确定性约束时保留模型 severity，E/W/C 不写入最终 trace",
+    _model_only["severity"] == "large"
+    and _model_only["status"] == "model_preserved"
+    and not any(key in _model_only for key in ("E", "W", "C")),
 )
-check("S4 颜值陈列只算 aesthetic_display，不伪装强效果",
-      _s4_aesthetic.get("severity") in {"small", "medium"} and _s4_aesthetic.get("E") == 1)
 
-from types import SimpleNamespace  # noqa: E402
-import flayr_core.llm.s4_visual_verifier as s4_visual_verifier_module  # noqa: E402
-from flayr_core.llm.s4_visual_verifier import apply_s4_visual_verifier_result, maybe_apply_s4_visual_verifier  # noqa: E402
-
-_s4_verifier_result = {
-    "stage_analysis": [
-        {"stage": "S1 Hook"},
-        {"stage": "S2 产品引出"},
-        {"stage": "S3 使用过程"},
-        {
-            "stage": "S4 效果呈现",
-            "creator_s4": _s4_flag(salience="strong", visual_diff=True, module_constraints=True),
-            "benchmark_s4": _s4_flag(salience="strong", visual_diff=True, module_constraints=True),
-            "creator_summary": "x",
-            "benchmark_summary": "y",
-            "severity": "small",
-        },
-    ],
-    "improvements": [],
-}
-_s4_verifier_applied = apply_s4_visual_verifier_result(
-    _s4_verifier_result,
+_normalized_evidence = normalize_video_understanding(
     {
         "creator": {
-            "evidence_sufficient": True,
-            "visual_difference_observed": False,
-            "module_constraints_met": True,
-            "effect_salience": "subtle",
-            "requires_close_inspection": True,
-            "effect_maximized": False,
-            "reason": "前后变化需要仔细找。",
+            "evidence_units": [
+                {
+                    "id": "C1",
+                    "time_range": "1s - 3s",
+                    "information": "明确证据",
+                    "evidence_strength": "explicit",
+                }
+            ]
         },
-        "benchmark": {
-            "evidence_sufficient": True,
-            "visual_difference_observed": True,
-            "module_constraints_met": True,
-            "effect_salience": "strong",
-            "requires_close_inspection": False,
-            "effect_maximized": True,
-            "reason": "前后差异一眼可见。",
-        },
-    },
-    {},
+        "benchmark": {"evidence_units": []},
+    }
 )
-_s4_verifier_stage = _s4_verifier_result["stage_analysis"][3]
-check("S4 独立视觉复核覆盖字段并重推 severity",
-      _s4_verifier_applied
-      and _s4_verifier_stage["creator_s4"]["effect_visible"] is False
-      and _s4_verifier_stage["creator_s4"]["effect_proposition_matched"] is False
-      and _s4_verifier_stage["creator_s4"]["visual_difference_observed"] is False
-      and _s4_verifier_stage["creator_s4"]["effect_salience"] == "subtle"
-      and _s4_verifier_stage["creator_s4"]["effect_reason"] == "前后变化需要仔细找。"
-      and _s4_verifier_stage["severity"] in {"medium", "large"}
-      and _s4_verifier_stage.get("severity_derivation", {}).get("status") == "derived")
+check(
+    "Stage1 evidence_strength 进入 canonical evidence_units",
+    _normalized_evidence["creator"]["evidence_units"][0]["evidence_strength"] == "explicit",
+)
 
-_orig_build_s4_payload = s4_visual_verifier_module.build_s4_visual_verifier_payload
-_orig_call_s4_api = s4_visual_verifier_module.call_llm_api
-try:
-    s4_visual_verifier_module.build_s4_visual_verifier_payload = lambda *_args, **_kwargs: {"messages": []}
+# 全 unit 聚合仍只读 Stage1 的明确 endorsement 观察，不把缺失当成 false。
+_agg = _side_endorsement(
+    {
+        "video_understanding": {
+            "creator": {
+                "evidence_units": [
+                    {"functions": ["S2_intro"], "endorsement_verbal": True, "endorsement_visual": False}
+                ]
+            }
+        }
+    },
+    "creator",
+)
+check("背书聚合使用全部 Stage1 evidence_units", _agg.verbal and _agg.available)
 
-    def _raise_system_exit(*_args, **_kwargs):
-        raise SystemExit("boom")
+_s1_marker = {
+    "stage": "S1 Hook",
+    "creator_hook": {"exists": False, "evidence_ids": ["C1"]},
+    "benchmark_hook": {"exists": True, "evidence_ids": ["B1"]},
+    "severity": "small",
+}
+_s1_result = {"stage_analysis": [_s1_marker]}
+repair_s1_hook_boundaries(_s1_result, {})
+_s1_state = _s1_result["stage_analysis"][0].get(S1_POSTPROCESS_STATE_KEY, {})
+check(
+    "S1 repair 写入 canonical 消费 marker",
+    _s1_state.get(S1_HOOK_BOUNDARIES_STATE_KEY) == S1_HOOK_BOUNDARIES_REPAIRED,
+)
+_s1_before = _derive_one("S1", {**_s1_marker, S1_POSTPROCESS_STATE_KEY: {}})
+_s1_after = _derive_one("S1", _s1_result["stage_analysis"][0])
+check(
+    "S1 hook floor 必须依赖 repair marker",
+    _s1_before["severity"] == "small"
+    and _s1_after["severity"] == "large"
+    and _s1_after["constraints"][0]["rule"] == "S1_hook_exists_floor",
+)
 
-    s4_visual_verifier_module.call_llm_api = _raise_system_exit
-    _s4_verifier_fail_result = {
-        "product_profile": {"proof_contract_source": "operator"},
+_s1_landing_stage = {
+    S1_POSTPROCESS_STATE_KEY: {S1_HOOK_BOUNDARIES_STATE_KEY: S1_HOOK_BOUNDARIES_REPAIRED},
+    "severity": "small",
+    "creator_hook": {"landing_met": False, "evidence_ids": ["C1"]},
+    "benchmark_hook": {"landing_met": True, "evidence_ids": ["B1"]},
+}
+_s1_missing = _derive_one("S1", _s1_landing_stage, facts={})
+_s1_missing_eval = next(
+    item for item in _s1_missing["constraint_evaluations"] if item["rule"] == "S1_landing_floor"
+)
+_s1_inferred = _derive_one(
+    "S1",
+    _s1_landing_stage,
+    facts={
+        "video_understanding": {
+            "creator": {"evidence_units": [{"id": "C1", "evidence_strength": "inferred"}]},
+            "benchmark": {"evidence_units": [{"id": "B1", "evidence_strength": "direct"}]},
+        }
+    },
+)
+_s1_inferred_eval = next(
+    item for item in _s1_inferred["constraint_evaluations"] if item["rule"] == "S1_landing_floor"
+)
+_s1_explicit = _derive_one(
+    "S1",
+    _s1_landing_stage,
+    facts={
+        "video_understanding": {
+            "creator": {"evidence_units": [{"id": "C1", "evidence_strength": "explicit"}]},
+            "benchmark": {"evidence_units": [{"id": "B1", "evidence_strength": "direct"}]},
+        }
+    },
+)
+check(
+    "规则审计区分 missing 与 uncertain，二者都不触发",
+    _s1_missing["severity"] == "small"
+    and _s1_missing_eval["status"] == "missing_field"
+    and _s1_inferred["severity"] == "small"
+    and _s1_inferred_eval["status"] == "uncertain_evidence_strength",
+)
+check(
+    "S1 比较型 floor 只接受 direct/explicit",
+    _s1_explicit["severity"] == "medium"
+    and _s1_explicit["constraints"][0]["rule"] == "S1_landing_floor",
+)
+
+_s5_none = {
+    "severity": "large",
+    "creator_s5": {
+        "exists": False,
+        "trust_evidence_type": "none",
+        "trust_basis": "none",
+        "independent_trust_purpose": False,
+        "duplicates_other_stage": False,
+        "evidence_ids": ["C5"],
+    },
+    "benchmark_s5": {
+        "exists": False,
+        "trust_evidence_type": "none",
+        "trust_basis": "none",
+        "independent_trust_purpose": False,
+        "duplicates_other_stage": False,
+        "evidence_ids": ["B5"],
+    },
+}
+_s5_ceiling = _derive_one(
+    "S5",
+    _s5_none,
+    endorsement={
+        "creator": _Endorsement(False, False, True),
+        "benchmark": _Endorsement(False, False, True),
+    },
+)
+check(
+    "S5 安全 ceiling 只收窄，不用 legacy 公式赋值",
+    _s5_ceiling["severity"] == "medium"
+    and _s5_ceiling["status"] == "constrained"
+    and _s5_ceiling["constraints"][0]["kind"] == "ceiling"
+)
+_s5_unknown = {
+    "severity": "large",
+    "creator_s5": {
+        "exists": True,
+        "trust_evidence_type": "soft",
+        "trust_basis": "authority",
+        "trust_claim_specific": True,
+        "product_relevance_met": True,
+        "independent_trust_purpose": True,
+        "duplicates_other_stage": False,
+        "_s5_source_status": "unknown",
+    },
+    "benchmark_s5": {
+        "exists": True,
+        "trust_evidence_type": "soft",
+        "trust_basis": "authority",
+        "trust_claim_specific": True,
+        "product_relevance_met": True,
+        "independent_trust_purpose": True,
+        "duplicates_other_stage": False,
+        "_s5_source_status": "unknown",
+    },
+}
+_s5_unknown_trace = _derive_one(
+    "S5",
+    _s5_unknown,
+    endorsement={
+        "creator": _Endorsement(False, False, True),
+        "benchmark": _Endorsement(False, False, True),
+    },
+)
+check(
+    "S5 unknown 不触发 absence ceiling",
+    _s5_unknown_trace["severity"] == "large"
+    and next(item for item in _s5_unknown_trace["constraint_evaluations"] if item["rule"] == "S5_no_trust_ceiling")["status"] == "uncertain_fact",
+)
+
+_s3_missing_framing = normalize_s3_flags({"usage_process_visible": True})
+check(
+    "S3 缺失 process_framing 保持 unknown，不冒充 false",
+    _s3_missing_framing["process_framing_met"] is None,
+)
+
+_unknown_stage = {
+    "stage": "S3 使用过程",
+    "severity": "medium",
+    "creator_absolute_status": "weak",
+    "comparison_status": "comparable",
+}
+_none_stage = {
+    "stage": "S4 效果呈现",
+    "severity": "medium",
+    "creator_absolute_status": "weak",
+    "comparison_status": "comparable",
+    "painpoint_relevance": "none",
+}
+_unknown_relevance = _commercial_relevance(_unknown_stage)
+_none_relevance = _commercial_relevance(_none_stage)
+_commercial_output = _commercial_priorities(
+    {"stage_analysis": [_unknown_stage, _none_stage], "improvements": []},
+    [],
+)
+check(
+    "商业优先级区分 unknown 与 none，unknown 不等价失败",
+    _unknown_relevance["status"] == "unknown"
+    and _none_relevance["status"] == "known"
+    and _unknown_relevance["priority_rank"] is None
+    and _none_relevance["priority_rank"] is not None
+    and {item["id"] for item in _commercial_output} == {"stage:S3", "stage:S4"},
+)
+
+_phase_c_stages = critical_severity_stages(
+    {
         "stage_analysis": [
-            {"stage": "S1 Hook"},
-            {"stage": "S2 产品引出"},
-            {"stage": "S3 使用过程"},
-            {"stage": "S4 效果呈现", "creator_s4": _s4_flag(), "benchmark_s4": _s4_flag()},
+            {"stage": "S1 Hook", "severity_derivation": {"phase_c_candidate": True}},
+            {"stage": "S2 产品引出", "severity_derivation": {"phase_c_candidate": True}},
+            {"stage": "S3 使用过程", "severity_derivation": {"phase_c_candidate": True}},
         ]
     }
-    maybe_apply_s4_visual_verifier(
-        args=SimpleNamespace(llm_dry_run=False, llm_model="x", llm_api_url="http://invalid"),
-        api_key="x",
-        result=_s4_verifier_fail_result,
-        analysis={},
-        run_dir=Path(tempfile.gettempdir()),
-    )
-finally:
-    s4_visual_verifier_module.build_s4_visual_verifier_payload = _orig_build_s4_payload
-    s4_visual_verifier_module.call_llm_api = _orig_call_s4_api
-check("S4 独立视觉复核失败不拖垮主链",
-      _s4_verifier_fail_result.get("s4_visual_verifier", {}).get("applied") is False
-      and "boom" in _s4_verifier_fail_result.get("s4_visual_verifier", {}).get("reason", ""))
+)
+check("resolver 冲突进入现有 Phase C 候选集合", _phase_c_stages == ["S1", "S2", "S3"])
+check(
+    "S4 复核使用统一 severity 收口入口",
+    "finalize_severity_after_repairs" in inspect.getsource(s4_visual_verifier_module)
+    and "derive_severity_from_facts" not in inspect.getsource(s4_visual_verifier_module),
+)
+
+# 4c. 后处理和 Phase C 的共享收口仍由 parse/repair/chain 路径完成；
+# 以下 parse 归一检查继续作为全局 verifier 的一部分.
 
 # parse 归一：容忍 'S1-B：反差' / 'yes' / 1 等写法
 _nh = normalize_hook_flags({"exists": "true", "type": "S1-B：反差震惊型", "dims": {"camera": "yes", "copy": 1}})

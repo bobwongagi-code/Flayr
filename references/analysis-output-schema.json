@@ -129,6 +129,8 @@
           "visual_fact": "画面中实际可见事实，不推断认证、功效或身份。",
           "subtitle_fact": "画面中实际可读字幕；没有则留空。",
           "audio_fact": "该时段的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。",
+          "evidence_strength": "direct | explicit | inferred | absent。只能描述本证据单元自身的事实强度；不确定或缺失留空。",
+          "trust_source_status": "代码计算：missing | uncertain | explicit_absent | explicit_present；不得把 missing/uncertain 当作明确没有。",
           "product_visible": true,
           "product_coverage": "该时段产品在画面中的视觉占比：none｜low｜medium｜high。看不到产品写 none。",
           "variant_ids": [],
@@ -177,6 +179,8 @@
           "visual_fact": "画面中实际可见事实，不推断。",
           "subtitle_fact": "画面中实际可读字幕；没有则留空。",
           "audio_fact": "该时段的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。",
+          "evidence_strength": "direct | explicit | inferred | absent。只能描述本证据单元自身的事实强度；不确定或缺失留空。",
+          "trust_source_status": "代码计算：missing | uncertain | explicit_absent | explicit_present；不得把 missing/uncertain 当作明确没有。",
           "product_visible": true,
           "product_coverage": "该时段产品在画面中的视觉占比：none｜low｜medium｜high。看不到产品写 none。",
           "variant_ids": [],
@@ -225,7 +229,13 @@
       "title": "优先项标题。",
       "summary": "优先项结论。",
       "reference_id": "finding id 或 stage code。",
-      "root_cause_ids": []
+      "root_cause_ids": [],
+      "commercial_relevance": {
+        "status": "known | unknown",
+        "value": "benchmark_only | creator_only | both | none | null。unknown 时为 null。",
+        "priority_rank": "代码计算；unknown 为 null，不参与痛点权重排序，不视为 none。",
+        "source": "stage_analysis.painpoint_relevance"
+      }
     }
   ],
   "commercial_priority_summary": "商业优先级第一项的一句话结论。",
@@ -254,6 +264,7 @@
         "window_evidence": "仅 S1 必填：0 到 hook_boundary_seconds 内实际出现了什么，带时间戳。",
         "landing_window_leak": "仅 S1 必填：landing 判断是否借用了 hook_boundary_seconds 之后的 S2/S3 材料，true|false；若 true，landing_met 应为 false。",
         "anchors_proposition": "仅 S1 必填：是否锚定本品 hook_proposition / painpoints / product_profile/category_profile 概念，true|false。",
+        "evidence_ids": ["该侧 S1 flag 直接依据的 Stage1 evidence unit ID；无明确依据填空数组。"],
         "proposition_ids": [
           "该侧 S1 实际锚定的 product_proposition_contract 命题 ID；未锚定填空数组。"
         ]
@@ -275,6 +286,7 @@
         "window_evidence": "仅 S1 必填：0 到 hook_boundary_seconds 内实际出现了什么，带时间戳。",
         "landing_window_leak": "仅 S1 必填：landing 判断是否借用了 hook_boundary_seconds 之后的 S2/S3 材料，true|false；若 true，landing_met 应为 false。",
         "anchors_proposition": "仅 S1 必填：是否锚定本品 hook_proposition / painpoints / product_profile/category_profile 概念，true|false。",
+        "evidence_ids": ["该侧 S1 flag 直接依据的 Stage1 evidence unit ID；无明确依据填空数组。"],
         "proposition_ids": [
           "该侧 S1 实际锚定的 product_proposition_contract 命题 ID；未锚定填空数组。"
         ]
@@ -533,8 +545,8 @@
       ],
       "severity": "large | medium | small",
       "creator_execution": "0 | 0.5 | 1 | 2。达人侧独立执行分：0=未执行该阶段功能；0.5=做了但对核心功能基本无效（敷衍、平庸无感，或画面晃动/模糊到无法有效接收）；1=合格（功能完成且有效；S2-S4 仅口头/文字、场景单一、缺效果对比的'呈现单薄'封顶 1）；2=出色（S3 要求核心卖点在动作里清楚可见+证据可接收+过程做厚，S4 要求关键效果可视化+效果对比+场景聚焦+模块硬约束成立+视觉差异真被观察到，过长全程记录不加分）。先独立打分再对比，禁止因对比回调。",
-      "benchmark_execution": "0 | 0.5 | 1 | 2。标杆侧独立执行分，标尺同上。两个执行分是系统确定性推导差距等级的事实输入。",
-      "painpoint_relevance": "benchmark_only | creator_only | both | none。该阶段双方内容是否命中 category_profile.painpoints 的核心决策因素；按内容功能判断，不要求字面用词一致。系统据此定痛点命中系数。",
+      "benchmark_execution": "0 | 0.5 | 1 | 2。标杆侧独立执行分，标尺同上。两个执行分只供诊断与审计观察，不直接决定最终 severity。",
+      "painpoint_relevance": "benchmark_only | creator_only | both | none。该阶段双方内容是否命中 category_profile.painpoints 的核心决策因素；按内容功能判断，不要求字面用词一致。只供 commercial_priorities 在同一 severity 层级内排序；缺失或 unknown 不等同于 none，也不参与 severity。",
       "stage_standard_delivery": "benchmark_only | creator_only | both | none。该阶段双方是否有效达到本阶段的『本品到位标准』（按阶段查产品锚点：S1 钩子→hook_proposition、S2 引出→承接钩子的自然引出、S3 使用过程→core_selling_points+usage_context（使用中传卖点）、S4 效果→visual_proof_points.primary（旧结果回退 core_visual_proposition）、S5 信任→trust_multipliers、S6 促单→decision_threshold 匹配的 CTA）。做到/展示到才算，仅口头讲到不算。先作为事实收集，暂不参与推导。",
       "creator_s3": "仅 S3 需输出。对象字段：exists、module_type(A-E/unknown)、usage_process_visible、result_only_without_process、mouth_only_or_static、real_usage_met、core_selling_point_visible、process_framing_met、action_proof_met、action_target_contact_met、action_application_change_visible、critical_action_continuity_met、demonstrated_selling_points、missing_selling_points、scene_mode、usage_context_fit、continuity_met、richness_met、single_scene_continuity_met、single_scene_variation_met、multi_scene_logic_met、multi_scene_transition_met、multi_scene_role_adaptation_met、role_design_met、role_interaction_met、distinct_personas_met、steps_clear_met、pov_immersive_met、presentation_overlays、fake_or_staged、start_seconds、end_seconds、usage_reason、evidence_ids、proposition_ids。",
       "benchmark_s3": "仅 S3 需输出。字段同 creator_s3。",

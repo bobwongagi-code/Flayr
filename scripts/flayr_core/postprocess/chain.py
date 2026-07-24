@@ -1,6 +1,6 @@
 """flayr_core.postprocess.chain：postprocess 流水线编排。
 
-本模块只放 apply_postprocess_chain 一个函数，不写任何业务逻辑。
+本模块只放共享流水线编排函数，不写业务规则。
 每一步通过显式 import 引入，读起来像一份"流水线说明书"——
 每行都能一眼看出调的是哪个模块的哪个函数。
 
@@ -56,7 +56,7 @@ from .claims_my import (
     reconcile_certification_ownership,
 )
 
-# 4d：severity 确定性推导（执行分 + 品类权重表；事实缺失自动跳过，绝不抛错）
+# severity resolver：模型默认值 + 只收窄区间的确定性 floor/ceiling 约束。
 from .derive import derive_severity_from_facts
 from .proposition import materialize_cross_stage_inputs, materialize_quality_audits
 
@@ -100,6 +100,23 @@ def sanitize_promise_chain_scope(normalized: dict[str, Any]) -> None:
     chain["break_reason"] = "前四阶段的承诺、承接、证明与效果已围绕同一产品命题闭环；后续购买引导不属于本字段。"
 
 
+def finalize_severity_after_repairs(
+    normalized: dict[str, Any],
+    analysis: dict[str, Any],
+    audit: PostprocessAudit | None = None,
+) -> None:
+    """所有 severity 重算入口都先完成 S1 repair，再调用唯一 resolver。"""
+    steps = (
+        ("postprocess.repair_s1_hook_boundaries", repair_s1_hook_boundaries, (normalized, analysis)),
+        ("postprocess.derive_severity_from_facts", derive_severity_from_facts, (normalized, analysis)),
+    )
+    for rule, function, args in steps:
+        if audit is None:
+            function(*args)
+        else:
+            audit.run(normalized, rule, function, *args)
+
+
 def apply_postprocess_chain(
     normalized: dict[str, Any],
     analysis: dict[str, Any],
@@ -131,7 +148,6 @@ def apply_postprocess_chain(
     step("postprocess.fill_missing_evidence_references", fill_missing_evidence_references, normalized)
     step("postprocess.reconcile_s3_s4_evidence_coherence", reconcile_s3_s4_evidence_coherence, normalized)
     step("postprocess.derive_product_visibility", derive_product_visibility, normalized, analysis)
-    step("postprocess.repair_s1_hook_boundaries", repair_s1_hook_boundaries, normalized, analysis)
     step(
         "postprocess.reconcile_s5_trust_sources",
         reconcile_s5_trust_sources,
@@ -141,7 +157,7 @@ def apply_postprocess_chain(
     step("postprocess.prune_multimodal_evidence_to_stage", prune_multimodal_evidence_to_stage, normalized)
     step("postprocess.materialize_cross_stage_inputs", materialize_cross_stage_inputs, normalized, analysis)
     step("postprocess.stabilize_stage_severity", stabilize_stage_severity, normalized)
-    step("postprocess.derive_severity_from_facts", derive_severity_from_facts, normalized, analysis)
+    finalize_severity_after_repairs(normalized, analysis, audit=audit)
     step("postprocess.apply_comparison_eligibility", apply_comparison_eligibility, normalized)
     step("postprocess.materialize_quality_audits", materialize_quality_audits, normalized, analysis)
     step("postprocess.stabilize_improvement_priorities", stabilize_improvement_priorities, normalized)
