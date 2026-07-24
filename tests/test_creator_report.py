@@ -93,6 +93,9 @@ class CreatorReportTests(unittest.TestCase):
             self.assertIsNone(data["stages"][0]["reference"])
             self.assertNotIn("gmv_impact", serialized)
             self.assertNotIn('"severity"', serialized)
+            self.assertEqual(data["metadata"]["report_schema_version"], 2)
+            self.assertEqual(data["metadata"]["template_version"], "creator-v2")
+            self.assertTrue(data["metadata"]["generated_by"])
 
             outside = root / "outside.png"
             outside.write_bytes(ONE_PIXEL_PNG)
@@ -113,6 +116,7 @@ class CreatorReportTests(unittest.TestCase):
             self.assertNotIn("{{creator_report_data}}", html)
             self.assertIn('"experiments":[]', html)
             self.assertIn("下一次可以试试看的方向", html)
+            self.assertIn('"report_schema_version":2', html)
 
 
 if __name__ == "__main__":

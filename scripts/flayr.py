@@ -29,6 +29,7 @@ from flayr_core.creator_report import write_creator_report
 from flayr_core.report import write_report
 from flayr_core.resources import ResourceBudget, ResourceBudgetExceeded, finite_nonnegative
 from flayr_core.run_manifest import SUCCESS_MANIFEST_NAME, command_digest, write_success_manifest
+from flayr_core.run_state import RUN_STATE_FILE
 from flayr_core.motion import compute_shake_metric
 from flayr_core.market import normalize_target_market
 from flayr_core.shot_track import build_shot_track
@@ -371,7 +372,7 @@ def _prepare_explicit_run_dir(run_dir: Path, *, reuse: bool) -> None:
     if run_dir.exists() and not run_dir.is_dir():
         raise SystemExit(f"--output-dir 不是目录：{run_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
-    entries = list(run_dir.iterdir())
+    entries = [entry for entry in run_dir.iterdir() if entry.name != RUN_STATE_FILE]
     if not entries:
         return
     if not reuse:

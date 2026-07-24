@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .analysis_model import AnalysisResult
 from .report import (
     evidence_quotes,
     format_generated_at,
@@ -16,6 +15,8 @@ from .report import (
     stage_skipped,
 )
 from .resources import ResourceBudget, ResourceBudgetExceeded, ResourceLimits
+from .report_metadata import build_report_metadata
+from .semantic_model import SemanticAnalysis
 from .utils import write_text
 
 
@@ -49,7 +50,11 @@ _SEVERITY_DOTS = {
     "unknown": "var(--gray-chip)",
 }
 _GAP_TYPES = {"structural": "结构性", "execution": "执行性", "resource": "资源性"}
-_IMPACT_LEVELS = {"blocking": "P0", "major": "P1", "minor": "P2"}
+_PRIORITY_LABELS = {
+    "blocking": ("高优先级", "priority-high"),
+    "major": ("中优先级", "priority-mid"),
+    "minor": ("低优先级", "priority-low"),
+}
 
 
 def write_bd_report(
@@ -80,36 +85,34 @@ def write_bd_report(
 
 
 def build_bd_report_data(analysis: dict[str, Any]) -> dict[str, Any]:
-    """Project the shared analysis into the internal report vocabulary."""
-    result = AnalysisResult.from_mapping(analysis)
-    product = _as_dict(analysis.get("product"))
-    understanding = _as_dict(analysis.get("video_understanding"))
-    creator_understanding = _as_dict(understanding.get("creator"))
-    benchmark_understanding = _as_dict(understanding.get("benchmark"))
-    scope = _as_dict(analysis.get("analysis_scope"))
-    state = _safe_text(analysis.get("analysis_run_state"))
+    """Project semantic analysis into the internal report vocabulary."""
+    semantic = SemanticAnalysis.from_mapping(analysis)
+    product = semantic.product
+    creator_understanding = semantic.side("creator")
+    benchmark_understanding = semantic.side("benchmark")
+    scope = semantic.analysis_scope
+    state = _safe_text(semantic.get("analysis_run_state"))
 
     stages = [
-        _stage_payload(stage, index, creator_understanding, benchmark_understanding, state)
-        for index, stage in enumerate(result.stages(), start=1)
-        if isinstance(stage, dict)
+        _stage_payload(stage.data, index, creator_understanding, benchmark_understanding, state)
+        for index, stage in enumerate(semantic.stages, start=1)
     ]
     improvements = [
         _improvement_payload(item, rank, benchmark_understanding)
-        for rank, item in enumerate(_sorted_improvements(result.improvements())[:3], start=1)
-        if isinstance(item, dict)
+        for rank, item in enumerate(_sorted_improvements([item.data for item in semantic.improvements])[:3], start=1)
     ]
-    summary = _summary_payload(analysis)
+    summary = _summary_payload(semantic)
     return {
         "title": f"{_safe_text(product.get('name')) or '未命名分析'} · 提升报告",
         "product": _safe_text(product.get("name")) or "未填写",
         "market": _MARKET_LABELS.get(_safe_text(product.get("target_market")).lower(), _safe_text(product.get("target_market")) or "未指定市场"),
-        "generatedAt": format_generated_at(analysis.get("generated_at")),
+        "generatedAt": format_generated_at(semantic.get("generated_at")),
+        "metadata": build_report_metadata("bd-internal-v2", "flayr_core.bd_report"),
         "strategyLevel": _safe_text(scope.get("level")) == "strategy",
         "degraded": state == "degraded",
-        "degradedReason": _degraded_reason(analysis),
+        "degradedReason": _degraded_reason(semantic),
         "summary": summary,
-        "gates": _gate_payload(analysis),
+        "gates": _gate_payload(semantic),
         "stages": stages,
         "improvements": improvements,
     }
@@ -169,7 +172,8 @@ def _stage_payload(
 
 
 def _improvement_payload(item: dict[str, Any], rank: int, benchmark_understanding: dict[str, Any]) -> dict[str, Any]:
-    impact = _safe_text(item.get("gmv_impact")) or "待评估"
+    impact_direction = _impact_direction(item.get("gmv_impact"))
+    priority_label, priority_class = _priority_from_improvement(item)
     gap_type = _GAP_TYPES.get(_safe_text(item.get("gap_type")), "待确认")
     action = _first_text(_join_text(item.get("actions")), item.get("suggestion"), item.get("expected_effect"))
     script = _safe_text(item.get("creator_script_zh"))
@@ -197,24 +201,27 @@ def _improvement_payload(item: dict[str, Any], rank: int, benchmark_understandin
     return {
         "rank": rank,
         "title": _safe_text(item.get("title")) or "待确认提升点",
-        "gmvImpact": impact,
-        "gmvClass": _impact_class(impact),
+        "priorityLabel": priority_label,
+        "priorityClass": priority_class,
+        "impactDirection": impact_direction,
+        "confidence": _confidence_label(item.get("confidence")),
+        "evidenceStrength": _evidence_strength(item, units),
         "gapType": gap_type,
         "planA": action or "暂无明确拍摄或执行方案。",
         "planB": plan_b,
     }
 
 
-def _summary_payload(analysis: dict[str, Any]) -> dict[str, str]:
+def _summary_payload(semantic: SemanticAnalysis) -> dict[str, str]:
     verdict = _first_text(
-        analysis.get("one_line_verdict"),
-        analysis.get("commercial_priority_summary"),
-        analysis.get("executive_summary"),
+        semantic.get("one_line_verdict"),
+        semantic.get("commercial_priority_summary"),
+        semantic.get("executive_summary"),
     )
     detail = _first_text(
-        analysis.get("executive_summary"),
-        analysis.get("one_line_summary"),
-        analysis.get("commercial_priority_summary"),
+        semantic.get("executive_summary"),
+        semantic.get("one_line_summary"),
+        semantic.get("commercial_priority_summary"),
     )
     if detail == verdict:
         detail = "请结合下方阶段证据、差距和沟通素材查看。"
@@ -224,17 +231,28 @@ def _summary_payload(analysis: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _gate_payload(analysis: dict[str, Any]) -> list[dict[str, str]]:
-    diagnosis = _as_dict(analysis.get("global_diagnosis"))
+def _gate_payload(semantic: SemanticAnalysis) -> list[dict[str, str]]:
+    diagnosis = _as_dict(semantic.get("global_diagnosis"))
     findings = [item for item in diagnosis.get("findings") or [] if isinstance(item, dict)]
     impact_order = {"blocking": 0, "major": 1, "minor": 2}
     findings.sort(key=lambda item: impact_order.get(_safe_text(item.get("impact")), 9))
     gates = []
     for item in findings[:2]:
-        level = _IMPACT_LEVELS.get(_safe_text(item.get("impact")), "P2")
+        priority_label, priority_class = _PRIORITY_LABELS.get(
+            _safe_text(item.get("impact")),
+            ("待评估", "priority-low"),
+        )
         title = _safe_text(item.get("title")) or _global_finding_title(_safe_text(item.get("id")))
         summary = _safe_text(item.get("summary")) or _safe_text(item.get("downstream_impact"))
-        gates.append({"level": level, "text": f"{title}：{summary}" if summary else title})
+        gates.append(
+            {
+                "priorityLabel": priority_label,
+                "priorityClass": priority_class,
+                "confidence": _confidence_label(item.get("confidence")),
+                "evidenceStrength": _evidence_strength(item),
+                "text": f"{title}：{summary}" if summary else title,
+            }
+        )
     return gates
 
 
@@ -260,8 +278,8 @@ def _side_text(stage: dict[str, Any], role: str, units: list[dict[str, Any]]) ->
     )
 
 
-def _degraded_reason(analysis: dict[str, Any]) -> str:
-    flags = analysis.get("degraded_flags")
+def _degraded_reason(semantic: SemanticAnalysis) -> str:
+    flags = semantic.get("degraded_flags")
     if isinstance(flags, list) and flags:
         return "；".join(_safe_text(item) for item in flags if _safe_text(item))
     return "辅助产物已降级，不影响报告结论。"
@@ -280,12 +298,60 @@ def _priority_key(item: dict[str, Any]) -> tuple[int, str]:
     return priority, _safe_text(item.get("title"))
 
 
-def _impact_class(value: str) -> str:
-    if "高" in value or value.lower() in {"high", "very_high"}:
-        return "gmv-high"
-    if "中" in value or value.lower() == "medium":
-        return "gmv-mid"
-    return ""
+def _impact_direction(value: Any) -> str:
+    text = _safe_text(value).lower()
+    if "高" in text or text in {"high", "very_high"}:
+        return "潜在影响较大"
+    if "中" in text or text in {"medium", "mid"}:
+        return "潜在影响中等"
+    if "低" in text or text in {"low", "small", "minor"}:
+        return "潜在影响较小"
+    return "待评估"
+
+
+def _priority_from_improvement(item: dict[str, Any]) -> tuple[str, str]:
+    try:
+        priority = int(item.get("priority"))
+    except (TypeError, ValueError):
+        priority = 999
+    if priority == 1:
+        return "高优先级", "priority-high"
+    if priority == 2:
+        return "中优先级", "priority-mid"
+    if priority < 999:
+        return "低优先级", "priority-low"
+    impact = _safe_text(item.get("gmv_impact"))
+    if "高" in impact or impact.lower() in {"high", "very_high"}:
+        return "高优先级", "priority-high"
+    if "中" in impact or impact.lower() in {"medium", "mid"}:
+        return "中优先级", "priority-mid"
+    return "待评估", "priority-low"
+
+
+def _confidence_label(value: Any) -> str:
+    text = _safe_text(value).lower()
+    if "高" in text or text in {"high", "strong", "confirmed"}:
+        return "高"
+    if "中" in text or text in {"medium", "mid"}:
+        return "中"
+    if "低" in text or text in {"low", "weak"}:
+        return "低"
+    return "待确认"
+
+
+def _evidence_strength(item: dict[str, Any], units: list[dict[str, Any]] | None = None) -> str:
+    references = units or []
+    has_evidence = bool(
+        references
+        or item.get("evidence")
+        or item.get("benchmark_evidence_ids")
+        or item.get("creator_evidence_ids")
+        or item.get("benchmark_reference")
+    )
+    if not has_evidence:
+        return "待确认"
+    confidence = _confidence_label(item.get("confidence"))
+    return "强" if confidence == "高" else "中"
 
 
 def _global_finding_title(value: str) -> str:

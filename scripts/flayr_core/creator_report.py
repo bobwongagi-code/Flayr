@@ -10,9 +10,8 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
-from .analysis_model import AnalysisResult
 from .artifacts import format_seconds
 from .report import (
     REPORT_MAX_EMBEDDED_BYTES,
@@ -23,6 +22,8 @@ from .report import (
     stage_display_names,
 )
 from .resources import ResourceBudget, ResourceBudgetExceeded, ResourceLimits
+from .report_metadata import build_report_metadata
+from .semantic_model import SemanticAnalysis
 from .utils import write_text
 
 
@@ -81,22 +82,21 @@ def build_creator_report_data(
     analysis: dict[str, Any],
     assets: ReportAssetContext,
 ) -> dict[str, Any]:
-    """Project the shared analysis into the creator report's public vocabulary."""
-    result = AnalysisResult.from_mapping(analysis)
-    product = _as_dict(analysis.get("product"))
-    videos = _as_dict(analysis.get("videos"))
+    """Project semantic analysis into the creator report's public vocabulary."""
+    semantic = SemanticAnalysis.from_mapping(analysis)
+    product = semantic.product
+    videos = semantic.videos
     creator_info = _as_dict(videos.get("creator"))
-    understanding = _as_dict(analysis.get("video_understanding"))
-    creator_understanding = _as_dict(understanding.get("creator"))
+    creator_understanding = semantic.side("creator")
 
-    raw_stages = [stage for stage in result.stages() if isinstance(stage, dict)]
-    low_confidence_codes = _low_confidence_codes(analysis.get("low_confidence_stages"))
+    raw_stages = [stage.data for stage in semantic.stages]
+    low_confidence_codes = _low_confidence_codes(semantic.get("low_confidence_stages"))
     stage_by_code = {
         _stage_code(stage.get("stage"), index): stage
         for index, stage in enumerate(raw_stages, start=1)
     }
     experiments = _build_experiments(
-        analysis,
+        semantic,
         stage_by_code,
         creator_understanding,
     )
@@ -155,39 +155,40 @@ def build_creator_report_data(
             }
         )
 
-    highlights = _build_highlights(analysis)
+    highlights = _build_highlights(semantic.creator_context)
     return {
         "brand": "Flayr · 心译复盘",
+        "metadata": build_report_metadata("creator-v2", "flayr_core.creator_report"),
         "title": "这条视频，我们一起复盘",
         "context": _context_line(product),
         "intent": _first_text(
-            analysis.get("content_intent"),
-            analysis.get("creator_content_intent"),
+            semantic.creator_context.get("content_intent"),
+            semantic.creator_context.get("creator_content_intent"),
             creator_understanding.get("content_intent"),
             creator_understanding.get("content_summary"),
-            analysis.get("one_line_summary"),
-            analysis.get("executive_summary"),
+            semantic.get("one_line_summary"),
+            semantic.get("executive_summary"),
         )
         or "目前还无法判断这条视频正在尝试完成什么。",
         "highlights": highlights,
         "topExperiment": top_experiment,
         "experiments": experiments,
         "stages": stages,
-        "continuity": _build_continuity(analysis.get("continuity_record")),
-        "keep": _build_keep(analysis),
-        "analysisState": _safe_text(analysis.get("analysis_run_state")),
-        "degradedFlags": _as_list(analysis.get("degraded_flags")),
+        "continuity": _build_continuity(semantic.creator_context.get("continuity_record")),
+        "keep": _build_keep(semantic.creator_context),
+        "analysisState": _safe_text(semantic.get("analysis_run_state")),
+        "degradedFlags": _as_list(semantic.get("degraded_flags")),
     }
 
 
 def _build_experiments(
-    analysis: dict[str, Any],
+    semantic: SemanticAnalysis,
     stage_by_code: dict[str, dict[str, Any]],
     creator_understanding: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    raw_candidates = analysis.get("candidate_experiments")
+    raw_candidates = semantic.creator_context.get("candidate_experiments")
     if not isinstance(raw_candidates, list):
-        raw_candidates = analysis.get("improvements")
+        raw_candidates = [item.data for item in semantic.improvements]
     if not isinstance(raw_candidates, list):
         return []
 
@@ -318,10 +319,10 @@ def _build_continuity(value: Any) -> dict[str, Any] | None:
     } if items else None
 
 
-def _build_keep(analysis: dict[str, Any]) -> str:
-    value = analysis.get("retained_points")
+def _build_keep(creator_context: Mapping[str, Any]) -> str:
+    value = creator_context.get("retained_points")
     if value is None:
-        value = analysis.get("creator_retain")
+        value = creator_context.get("creator_retain")
     if isinstance(value, list):
         return "、".join(item for item in (_safe_text(entry) for entry in value) if item)
     return _safe_text(value)

@@ -25,6 +25,14 @@ class OperationsContractTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "已存在且非空"):
                 flayr.create_run_dir(args)
 
+    def test_web_run_state_does_not_block_new_explicit_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "run"
+            output_dir.mkdir()
+            (output_dir / "run_state.json").write_text('{"state":"CREATED"}', encoding="utf-8")
+            args = SimpleNamespace(output_dir=output_dir, reuse_preprocessing=False, mode="improve")
+            self.assertEqual(flayr.create_run_dir(args), output_dir.resolve())
+
     def test_reuse_removes_known_stale_top_level_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp) / "run"

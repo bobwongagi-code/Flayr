@@ -17,6 +17,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from email.message import Message
+from http.cookies import CookieError, SimpleCookie
 from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -30,18 +31,38 @@ if str(ROOT) not in sys.path:
 
 from scripts.flayr_core.market import normalize_target_market
 from scripts.flayr_core.run_manifest import SUCCESS_MANIFEST_NAME, validate_success_manifest
+from scripts.flayr_core.run_state import (
+    ANALYSIS_COMPLETED,
+    COMPLETED,
+    DEGRADED,
+    FAILED,
+    PROCESSING,
+    REPORT_GENERATING,
+    RunStateError,
+    initialize_run_state,
+    read_run_state,
+    recover_run_state,
+    transition_run_state,
+)
 
 
 WEB_ROOT = ROOT / "runs" / "_web"
 JOBS_ROOT = WEB_ROOT / "jobs"
 JOBS_FILE = WEB_ROOT / "jobs.json"
 FRONTEND_INDEX = ROOT / "frontend" / "index.html"
+FRONTEND_ROOT = ROOT / "frontend"
 DEFAULT_PORT = 8787
 MAX_VIDEO_BYTES = 512 * 1024 * 1024
 MAX_FIELD_BYTES = 1024 * 1024
 MAX_REQUEST_BYTES = MAX_VIDEO_BYTES * 2 + 8 * 1024 * 1024
+MAX_SERVED_ASSET_BYTES = MAX_VIDEO_BYTES
 UPLOAD_CHUNK_BYTES = 64 * 1024
 BOUNDARY_BYTES_LIMIT = 200
+DEFAULT_WORKSPACE_ID = "local"
+DEFAULT_OWNER_ID = "local"
+CLIENT_COOKIE_NAME = "flayr_client_id"
+CLIENT_COOKIE_MAX_AGE = 365 * 24 * 60 * 60
+IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 MARKET_CODES = {
     "马来西亚": "my",
@@ -83,6 +104,18 @@ def market_code(value: str) -> str:
     return normalize_target_market(MARKET_CODES.get(raw, raw or "auto"))
 
 
+def _identity_value(value: Any, label: str, default: str) -> str:
+    candidate = str(value or default).strip()
+    if not IDENTITY_PATTERN.fullmatch(candidate):
+        raise RequestError(f"{label} 无效")
+    return candidate
+
+
+def _run_state(run_dir: Path) -> str:
+    payload = read_run_state(run_dir)
+    return str(payload.get("state") or "") if payload else ""
+
+
 def _analysis_state(run_dir: Path) -> str:
     try:
         payload = json.loads((run_dir / "analysis.json").read_text(encoding="utf-8"))
@@ -95,6 +128,11 @@ def _analysis_state(run_dir: Path) -> str:
 
 def progress_for_run(run_dir: Path) -> tuple[int, str]:
     """Expose only the three coarse phases promised by the updated design."""
+    lifecycle_state = _run_state(run_dir)
+    if lifecycle_state in {COMPLETED, DEGRADED}:
+        return 100, "报告生成"
+    if lifecycle_state in {ANALYSIS_COMPLETED, REPORT_GENERATING}:
+        return 92, "报告生成"
     state = _analysis_state(run_dir)
     if state == "completed" and (run_dir / SUCCESS_MANIFEST_NAME).is_file():
         return 100, "报告生成"
@@ -131,6 +169,49 @@ def safe_asset_path(run_dir: Path, relative_path: str) -> Path | None:
     except ValueError:
         return None
     return candidate if candidate.is_file() else None
+
+
+def _asset_magic_matches(path: Path) -> bool:
+    """Reject known media/report extensions whose bytes do not match them."""
+    suffix = path.suffix.lower()
+    if suffix not in {".html", ".htm", ".json", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".m4v", ".webm", ".wav", ".mp3"}:
+        return True
+    try:
+        with path.open("rb") as source:
+            prefix = source.read(64)
+    except OSError:
+        return False
+    if suffix in {".html", ".htm"}:
+        start = prefix.lstrip().lower()
+        return start.startswith((b"<!doctype html", b"<html", b"<head", b"<body"))
+    if suffix == ".json":
+        return prefix.lstrip().startswith((b"{", b"["))
+    if suffix == ".png":
+        return prefix.startswith(b"\x89PNG\r\n\x1a\n")
+    if suffix in {".jpg", ".jpeg"}:
+        return prefix.startswith(b"\xff\xd8\xff")
+    if suffix == ".gif":
+        return prefix.startswith((b"GIF87a", b"GIF89a"))
+    if suffix == ".webp":
+        return len(prefix) >= 12 and prefix[:4] == b"RIFF" and prefix[8:12] == b"WEBP"
+    if suffix in {".mp4", ".m4v"}:
+        return b"ftyp" in prefix[:32]
+    if suffix == ".webm":
+        return prefix.startswith(b"\x1a\x45\xdf\xa3")
+    if suffix == ".wav":
+        return len(prefix) >= 12 and prefix[:4] == b"RIFF" and prefix[8:12] == b"WAVE"
+    if suffix == ".mp3":
+        return prefix.startswith(b"ID3") or (len(prefix) >= 2 and prefix[0] == 0xFF and prefix[1] & 0xE0 == 0xE0)
+    return True
+
+
+def _servable_asset(path: Path) -> bool:
+    try:
+        if path.stat().st_size > MAX_SERVED_ASSET_BYTES:
+            return False
+    except OSError:
+        return False
+    return _asset_magic_matches(path)
 
 
 def report_variants_ready(run_dir: Path) -> bool:
@@ -253,10 +334,11 @@ def parse_multipart(body_path: Path, content_type: str) -> tuple[dict[str, str],
 
 
 class JobStore:
-    def __init__(self, root: Path = WEB_ROOT) -> None:
+    def __init__(self, root: Path = WEB_ROOT, *, workspace_id: str = DEFAULT_WORKSPACE_ID) -> None:
         self.root = root
         self.jobs_root = root / "jobs"
         self.state_path = root / "jobs.json"
+        self.workspace_id = _identity_value(workspace_id, "workspace_id", DEFAULT_WORKSPACE_ID)
         self._lock = threading.RLock()
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="flayr-job")
         self.jobs: dict[str, dict[str, Any]] = {}
@@ -272,6 +354,16 @@ class JobStore:
             payload = {}
         if isinstance(payload, dict):
             self.jobs = {str(key): value for key, value in payload.items() if isinstance(value, dict)}
+        changed = False
+        for job in self.jobs.values():
+            if not job.get("workspace_id"):
+                job["workspace_id"] = self.workspace_id
+                changed = True
+            if not job.get("visibility"):
+                job["visibility"] = "private"
+                changed = True
+        if changed:
+            self._persist_locked()
 
     def _persist_locked(self) -> None:
         temp = self.state_path.with_name(f".{self.state_path.name}.{uuid.uuid4().hex}.tmp")
@@ -289,18 +381,60 @@ class JobStore:
                     "benchmark_video": Path(str(job.get("benchmark_path") or "")),
                     "creator_video": Path(str(job.get("creator_path") or "")),
                 }
-                if run_dir.is_dir() and validate_success_manifest(run_dir, expected):
+                lifecycle = _run_state(run_dir)
+                complete = run_dir.is_dir() and validate_success_manifest(run_dir, expected)
+                degraded = run_dir.is_dir() and (run_dir / "degraded_manifest.json").is_file() and report_variants_ready(run_dir)
+                if lifecycle == COMPLETED:
+                    degraded = False
+                elif lifecycle == DEGRADED:
+                    complete = False
+                elif lifecycle == FAILED:
+                    complete = False
+                    degraded = False
+                if complete:
+                    recover_run_state(
+                        run_dir,
+                        COMPLETED,
+                        job_id=str(job.get("id") or ""),
+                        reason="服务重启后校验成功清单并恢复完成状态。",
+                        artifacts=(SUCCESS_MANIFEST_NAME, "bd_report.html", "creator_report.html"),
+                    )
                     job.update({
                         "status": "completed",
                         "progress": 100,
                         "phase": "报告生成",
                         "estimated_remaining_seconds": 0,
                     })
+                elif degraded:
+                    recover_run_state(
+                        run_dir,
+                        DEGRADED,
+                        job_id=str(job.get("id") or ""),
+                        reason="服务重启后恢复降级报告。",
+                        artifacts=("degraded_manifest.json", "bd_report.html", "creator_report.html"),
+                    )
+                    job.update({
+                        "status": "degraded",
+                        "progress": 100,
+                        "phase": "报告生成",
+                        "estimated_remaining_seconds": 0,
+                    })
                 else:
+                    reason = "服务重新启动时任务尚未完成，请重新上传后重试。"
+                    if run_dir.is_dir():
+                        try:
+                            recover_run_state(
+                                run_dir,
+                                FAILED,
+                                job_id=str(job.get("id") or ""),
+                                reason=reason,
+                            )
+                        except RunStateError:
+                            pass
                     job.update({
                         "status": "failed",
                         "estimated_remaining_seconds": 0,
-                        "failure_reason": "服务重新启动时任务尚未完成，请重新上传后重试。",
+                        "failure_reason": reason,
                     })
                 changed = True
             if changed:
@@ -314,7 +448,14 @@ class JobStore:
             job.update(changes)
             self._persist_locked()
 
-    def create(self, fields: dict[str, str], files: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    def create(
+        self,
+        fields: dict[str, str],
+        files: dict[str, dict[str, Any]],
+        *,
+        owner_id: str = DEFAULT_OWNER_ID,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
         if "benchmark_video" not in files or "creator_video" not in files:
             for item in files.values():
                 Path(str(item.get("path"))).unlink(missing_ok=True)
@@ -325,6 +466,8 @@ class JobStore:
             normalized_market = market_code(market_label)
         except ValueError as exc:
             raise RequestError(str(exc)) from exc
+        owner_id = _identity_value(owner_id, "owner_id", DEFAULT_OWNER_ID)
+        workspace_id = _identity_value(workspace_id, "workspace_id", self.workspace_id)
         job_id = f"job-{uuid.uuid4().hex[:12]}"
         job_root = self.jobs_root / job_id
         input_root = job_root / "inputs"
@@ -344,9 +487,14 @@ class JobStore:
                 Path(str(item.get("path"))).unlink(missing_ok=True)
             shutil.rmtree(job_root, ignore_errors=True)
             raise
+        run_dir.mkdir(parents=True, exist_ok=False)
+        initialize_run_state(run_dir, job_id=job_id)
         now = utc_now()
         job = {
             "id": job_id,
+            "owner_id": owner_id,
+            "workspace_id": workspace_id,
+            "visibility": "private",
             "product_name": product_name,
             "market": market_label,
             "market_code": normalized_market,
@@ -371,19 +519,55 @@ class JobStore:
         self._executor.submit(self._run_job, job_id)
         return self.public(job)
 
-    def get(self, job_id: str) -> dict[str, Any] | None:
+    @staticmethod
+    def _matches_scope(job: dict[str, Any], owner_id: str | None, workspace_id: str | None) -> bool:
+        if workspace_id is not None and str(job.get("workspace_id") or DEFAULT_WORKSPACE_ID) != workspace_id:
+            return False
+        if owner_id is None:
+            return True
+        stored_owner = str(job.get("owner_id") or "")
+        # Jobs created before ownership metadata was introduced can be claimed
+        # by the first authenticated local browser that opens them.
+        return not stored_owner or stored_owner == owner_id
+
+    def get(
+        self,
+        job_id: str,
+        *,
+        owner_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any] | None:
         with self._lock:
             job = self.jobs.get(job_id)
             if not job:
                 return None
+            if owner_id is not None or workspace_id is not None:
+                owner = _identity_value(owner_id, "owner_id", DEFAULT_OWNER_ID) if owner_id is not None else None
+                workspace = _identity_value(workspace_id, "workspace_id", self.workspace_id)
+                if not self._matches_scope(job, owner, workspace):
+                    return None
+                if owner is not None and not job.get("owner_id"):
+                    job["owner_id"] = owner
+                    self._persist_locked()
             self._refresh_progress_locked(job)
             return dict(job)
 
-    def all(self) -> list[dict[str, Any]]:
+    def all(
+        self,
+        *,
+        owner_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         with self._lock:
             for job in self.jobs.values():
                 self._refresh_progress_locked(job)
-            jobs = sorted(self.jobs.values(), key=lambda item: str(item.get("created_at") or ""), reverse=True)
+            owner = _identity_value(owner_id, "owner_id", DEFAULT_OWNER_ID) if owner_id is not None else None
+            workspace = _identity_value(workspace_id, "workspace_id", self.workspace_id) if workspace_id is not None else None
+            jobs = sorted(
+                (job for job in self.jobs.values() if self._matches_scope(job, owner, workspace)),
+                key=lambda item: str(item.get("created_at") or ""),
+                reverse=True,
+            )
             return [dict(job) for job in jobs]
 
     def public(self, job: dict[str, Any]) -> dict[str, Any]:
@@ -395,23 +579,27 @@ class JobStore:
         has_legacy_report = safe_asset_path(run_dir, "report.html") is not None
         has_creator_report = safe_asset_path(run_dir, "creator_report.html") is not None
         has_report = has_bd_report or has_legacy_report
+        workspace_id = str(job.get("workspace_id") or DEFAULT_WORKSPACE_ID)
+        scoped_job_url = f"/api/workspaces/{workspace_id}/jobs/{job.get('id')}"
         report_url = (
-            f"/api/jobs/{job.get('id')}/report"
+            f"{scoped_job_url}/report"
             if reports_ready and has_report
             else ""
         )
         bd_report_url = (
-            f"/api/jobs/{job.get('id')}/report"
+            f"{scoped_job_url}/report"
             if reports_ready and has_bd_report
             else ""
         )
         creator_report_url = (
-            f"/api/jobs/{job.get('id')}/creator-report"
+            f"{scoped_job_url}/creator-report"
             if reports_ready and has_creator_report
             else ""
         )
         return {
             "id": job.get("id"),
+            "workspace_id": workspace_id,
+            "job_url": scoped_job_url,
             "name": job.get("product_name") or "未命名分析",
             "market": job.get("market") or "未指定市场",
             "status": status,
@@ -426,6 +614,7 @@ class JobStore:
             "report_url": report_url,
             "bd_report_url": bd_report_url,
             "creator_report_url": creator_report_url,
+            "run_state": _run_state(run_dir),
             "report_kind": "audience" if (has_bd_report or has_creator_report) else ("legacy" if has_legacy_report else ""),
         }
 
@@ -446,6 +635,76 @@ class JobStore:
         job["phase"] = phase
         job["estimated_remaining_seconds"] = estimated_remaining_seconds(progress)
 
+    @staticmethod
+    def _run_artifacts(run_dir: Path) -> tuple[str, ...]:
+        names = [
+            name
+            for name in (
+                "analysis.json",
+                "validated_normalized_result.json",
+                "final_derived_result.json",
+                "postprocess_change_log.json",
+                "bd_report.html",
+                "creator_report.html",
+                "report.html",
+            )
+            if (run_dir / name).is_file()
+        ]
+        return tuple(names)
+
+    def _advance_run_state(self, run_dir: Path) -> None:
+        """Advance only when the next lifecycle artifact is observable."""
+        state = _run_state(run_dir)
+        artifacts = self._run_artifacts(run_dir)
+        try:
+            if state == PROCESSING and any(
+                name in artifacts
+                for name in ("validated_normalized_result.json", "final_derived_result.json", "postprocess_change_log.json")
+            ):
+                transition_run_state(
+                    run_dir,
+                    ANALYSIS_COMPLETED,
+                    artifacts=artifacts,
+                )
+                state = ANALYSIS_COMPLETED
+            if state == ANALYSIS_COMPLETED and any(
+                name in artifacts for name in ("bd_report.html", "creator_report.html", "report.html")
+            ):
+                transition_run_state(
+                    run_dir,
+                    REPORT_GENERATING,
+                    artifacts=artifacts,
+                )
+        except RunStateError:
+            # The terminal result path performs an explicit consistency check;
+            # a transient or corrupt state must not make polling crash.
+            return
+
+    def _publish_terminal_state(
+        self,
+        run_dir: Path,
+        job_id: str,
+        target: str,
+        *,
+        reason: str = "",
+        artifacts: tuple[str, ...] = (),
+    ) -> bool:
+        current = _run_state(run_dir)
+        if current in {COMPLETED, DEGRADED, FAILED}:
+            return current == target
+        try:
+            # Complete normal transitions that may have happened between two
+            # five-second polling ticks before publishing the terminal state.
+            if current == PROCESSING:
+                transition_run_state(run_dir, ANALYSIS_COMPLETED, artifacts=artifacts)
+                current = ANALYSIS_COMPLETED
+            if current == ANALYSIS_COMPLETED:
+                transition_run_state(run_dir, REPORT_GENERATING, artifacts=artifacts)
+            transition_run_state(run_dir, target, reason=reason, artifacts=artifacts)
+        except RunStateError:
+            return False
+        return True
+
     def _run_job(self, job_id: str) -> None:
         job = self.get(job_id)
         if not job:
@@ -457,6 +716,7 @@ class JobStore:
         command = self._command(job)
         self._update(job_id, status="running", phase="素材处理与转写")
         try:
+            transition_run_state(run_dir, PROCESSING, artifacts=self._run_artifacts(run_dir))
             with log_path.open("ab") as log:
                 log.write(("$ " + " ".join(command) + "\n").encode("utf-8", "replace"))
                 process = subprocess.Popen(
@@ -469,6 +729,7 @@ class JobStore:
                 while process.poll() is None:
                     current = self.get(job_id)
                     if current:
+                        self._advance_run_state(run_dir)
                         progress, phase = progress_for_run(run_dir)
                         self._update(
                             job_id,
@@ -480,10 +741,15 @@ class JobStore:
                 returncode = process.wait()
             self._finish(job_id, returncode)
         except Exception as exc:  # keep worker failures visible in the job list
+            reason = f"任务启动或执行失败：{str(exc)[:240]}"
+            try:
+                recover_run_state(run_dir, FAILED, job_id=job_id, reason=reason)
+            except RunStateError:
+                pass
             self._update(
                 job_id,
                 status="failed",
-                failure_reason=f"任务启动或执行失败：{str(exc)[:240]}",
+                failure_reason=reason,
                 phase="分析失败",
                 estimated_remaining_seconds=0,
             )
@@ -540,14 +806,22 @@ class JobStore:
         }
         state = _analysis_state(run_dir)
         if returncode == 0 and state == "completed" and validate_success_manifest(run_dir, expected):
-            self._update(
+            if not self._publish_terminal_state(
+                run_dir,
                 job_id,
-                status="completed",
-                progress=100,
-                phase="报告生成",
-                estimated_remaining_seconds=0,
-            )
-            return
+                COMPLETED,
+                artifacts=self._run_artifacts(run_dir) + (SUCCESS_MANIFEST_NAME,),
+            ):
+                returncode = 1
+            else:
+                self._update(
+                    job_id,
+                    status="completed",
+                    progress=100,
+                    phase="报告生成",
+                    estimated_remaining_seconds=0,
+                )
+                return
         if returncode == 0 and state == "degraded" and (run_dir / "degraded_manifest.json").is_file() and report_variants_ready(run_dir):
             reason = "辅助产物已降级，不影响报告结论。"
             try:
@@ -555,16 +829,28 @@ class JobStore:
                 reason = str(payload.get("reason") or reason)
             except (OSError, json.JSONDecodeError):
                 pass
-            self._update(
+            if self._publish_terminal_state(
+                run_dir,
                 job_id,
-                status="degraded",
-                progress=100,
-                phase="报告生成",
-                estimated_remaining_seconds=0,
-                degraded_reason=reason[:500],
-            )
-            return
+                DEGRADED,
+                reason=reason[:500],
+                artifacts=self._run_artifacts(run_dir) + ("degraded_manifest.json",),
+            ):
+                self._update(
+                    job_id,
+                    status="degraded",
+                    progress=100,
+                    phase="报告生成",
+                    estimated_remaining_seconds=0,
+                    degraded_reason=reason[:500],
+                )
+                return
+            returncode = 1
         reason = self._log_failure(Path(str(job["log_path"])), returncode)
+        try:
+            recover_run_state(run_dir, FAILED, job_id=job_id, reason=reason[:500])
+        except RunStateError:
+            pass
         self._update(
             job_id,
             status="failed",
@@ -602,15 +888,71 @@ class FlayrHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         sys.stderr.write("[flayr-web] " + (format % args) + "\n")
 
+    def _client_id(self) -> str:
+        cached = getattr(self, "_flayr_client_id", None)
+        if cached:
+            return cached
+        value = ""
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+            value = cookie.get(CLIENT_COOKIE_NAME).value if cookie.get(CLIENT_COOKIE_NAME) else ""
+        except (CookieError, KeyError, ValueError):
+            value = ""
+        if not IDENTITY_PATTERN.fullmatch(value):
+            value = uuid.uuid4().hex
+            self._flayr_set_cookie = True
+        self._flayr_client_id = value
+        return value
+
+    def _workspace_id(self, value: str | None = None) -> str | None:
+        workspace_id = value or self.server.store.workspace_id
+        try:
+            workspace_id = _identity_value(workspace_id, "workspace_id", self.server.store.workspace_id)
+        except RequestError:
+            return None
+        return workspace_id if workspace_id == self.server.store.workspace_id else None
+
+    def _get_job(self, job_id: str, workspace_id: str | None = None) -> dict[str, Any] | None:
+        workspace = self._workspace_id(workspace_id)
+        if workspace is None:
+            return None
+        return self.server.store.get(
+            job_id,
+            owner_id=self._client_id(),
+            workspace_id=workspace,
+        )
+
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
         path = unquote(parsed.path)
+        self._client_id()
         if path == "/api/jobs":
-            self._json(200, {"jobs": [self.server.store.public(job) for job in self.server.store.all()]})
+            jobs = self.server.store.all(
+                owner_id=self._client_id(),
+                workspace_id=self.server.store.workspace_id,
+            )
+            self._json(200, {"jobs": [self.server.store.public(job) for job in jobs]})
+            return
+        match = re.fullmatch(r"/api/workspaces/([^/]+)/jobs/([^/]+)/(analysis|report|creator-report)", path)
+        if match:
+            self._serve_job_artifact(match.group(2), match.group(3), workspace_id=match.group(1))
+            return
+        match = re.fullmatch(r"/api/workspaces/([^/]+)/jobs/([^/]+)/assets/(.+)", path)
+        if match:
+            self._serve_job_asset(match.group(2), match.group(3), workspace_id=match.group(1))
+            return
+        match = re.fullmatch(r"/api/workspaces/([^/]+)/jobs/([^/]+)", path)
+        if match:
+            job = self._get_job(match.group(2), match.group(1))
+            if not job:
+                self._json(404, {"error": "任务不存在"})
+                return
+            self._json(200, self.server.store.public(job))
             return
         match = re.fullmatch(r"/api/jobs/([^/]+)", path)
         if match:
-            job = self.server.store.get(match.group(1))
+            job = self._get_job(match.group(1))
             if not job:
                 self._json(404, {"error": "任务不存在"})
                 return
@@ -627,10 +969,20 @@ class FlayrHandler(BaseHTTPRequestHandler):
         if path in {"/", "/index.html"}:
             self._serve_file(FRONTEND_INDEX, "text/html; charset=utf-8")
             return
+        frontend_asset = safe_asset_path(FRONTEND_ROOT, path.lstrip("/"))
+        if frontend_asset:
+            content_type = mimetypes.guess_type(frontend_asset.name)[0] or "application/octet-stream"
+            self._serve_file(frontend_asset, content_type)
+            return
         self._json(404, {"error": "资源不存在"})
 
     def do_HEAD(self) -> None:
         path = unquote(urlsplit(self.path).path)
+        self._client_id()
+        match = re.fullmatch(r"/api/workspaces/([^/]+)/jobs/([^/]+)/(report|creator-report)", path)
+        if match:
+            self._serve_job_artifact(match.group(2), match.group(3), workspace_id=match.group(1), head_only=True)
+            return
         match = re.fullmatch(r"/api/jobs/([^/]+)/(report|creator-report)", path)
         if match:
             self._serve_job_artifact(match.group(1), match.group(2), head_only=True)
@@ -639,6 +991,7 @@ class FlayrHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = unquote(urlsplit(self.path).path)
+        self._client_id()
         if path != "/api/jobs":
             self._json(404, {"error": "资源不存在"})
             return
@@ -655,7 +1008,12 @@ class FlayrHandler(BaseHTTPRequestHandler):
             with temp:
                 self._read_request_body(temp)
             fields, files = parse_multipart(body_path, content_type)
-            job = self.server.store.create(fields, files)
+            job = self.server.store.create(
+                fields,
+                files,
+                owner_id=self._client_id(),
+                workspace_id=self.server.store.workspace_id,
+            )
             self._json(202, job)
         except RequestError as exc:
             for item in files.values():
@@ -718,8 +1076,14 @@ class FlayrHandler(BaseHTTPRequestHandler):
             destination.write(chunk)
             remaining -= len(chunk)
 
-    def _serve_job_artifact(self, job_id: str, artifact: str, head_only: bool = False) -> None:
-        job = self.server.store.get(job_id)
+    def _serve_job_artifact(
+        self,
+        job_id: str,
+        artifact: str,
+        head_only: bool = False,
+        workspace_id: str | None = None,
+    ) -> None:
+        job = self._get_job(job_id, workspace_id)
         if not job:
             self._json(404, {"error": "任务不存在"})
             return
@@ -743,8 +1107,13 @@ class FlayrHandler(BaseHTTPRequestHandler):
         content_type = "text/html; charset=utf-8" if artifact in {"report", "creator-report"} else "application/json; charset=utf-8"
         self._serve_file(candidate, content_type, head_only=head_only)
 
-    def _serve_job_asset(self, job_id: str, relative_path: str) -> None:
-        job = self.server.store.get(job_id)
+    def _serve_job_asset(
+        self,
+        job_id: str,
+        relative_path: str,
+        workspace_id: str | None = None,
+    ) -> None:
+        job = self._get_job(job_id, workspace_id)
         if not job:
             self._json(404, {"error": "任务不存在"})
             return
@@ -758,6 +1127,9 @@ class FlayrHandler(BaseHTTPRequestHandler):
     def _serve_file(self, path: Path, content_type: str, head_only: bool = False) -> None:
         try:
             size = path.stat().st_size
+            if size > MAX_SERVED_ASSET_BYTES or not _servable_asset(path):
+                self._json(415, {"error": "资源内容类型不匹配"})
+                return
             data = None if head_only else path.read_bytes()
         except OSError:
             self._json(404, {"error": "资源不存在"})
@@ -766,6 +1138,7 @@ class FlayrHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(size if data is None else len(data)))
         self.send_header("X-Content-Type-Options", "nosniff")
+        self._send_identity_cookie()
         self.end_headers()
         if data is not None:
             self.wfile.write(data)
@@ -776,8 +1149,16 @@ class FlayrHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self._send_identity_cookie()
         self.end_headers()
         self.wfile.write(data)
+
+    def _send_identity_cookie(self) -> None:
+        if getattr(self, "_flayr_set_cookie", False):
+            self.send_header(
+                "Set-Cookie",
+                f"{CLIENT_COOKIE_NAME}={self._client_id()}; Path=/; Max-Age={CLIENT_COOKIE_MAX_AGE}; HttpOnly; SameSite=Lax",
+            )
 
 
 def main() -> int:

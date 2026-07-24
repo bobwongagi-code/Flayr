@@ -63,10 +63,13 @@
   .summary-card p{color:var(--ink-soft);font-size:14px;}
   .summary-card .verdict{color:var(--ink);font-size:15px;font-weight:500;margin-bottom:8px;}
   .gate-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;}
-  .gate-chip{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:10px;background:var(--red-soft);font-size:12.5px;color:var(--red-ink);}
-  .gate-chip .p-tag{font-family:var(--font-mono);font-weight:600;background:var(--red);color:#fff;padding:1px 6px;border-radius:5px;font-size:11px;}
-  .gate-chip.p2{background:var(--amber-soft);color:var(--amber-ink);}
-  .gate-chip.p2 .p-tag{background:var(--amber);}
+  .gate-chip{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:10px;background:var(--gray-chip-soft);font-size:12.5px;color:var(--gray-chip-ink);}
+  .gate-chip .priority-tag{font-family:var(--font-mono);font-weight:600;background:var(--gray-chip);color:#fff;padding:1px 6px;border-radius:5px;font-size:11px;white-space:nowrap;}
+  .gate-chip.priority-high{background:var(--red-soft);color:var(--red-ink);}
+  .gate-chip.priority-high .priority-tag{background:var(--red);}
+  .gate-chip.priority-mid{background:var(--amber-soft);color:var(--amber-ink);}
+  .gate-chip.priority-mid .priority-tag{background:var(--amber);}
+  .gate-chip .evidence-tag{font-size:11px;color:inherit;white-space:nowrap;}
   .stage-tabs{display:flex;gap:6px;margin:20px 0 4px;overflow-x:auto;padding-bottom:2px;}
   .stage-tab{font-family:var(--font-mono);font-size:13px;padding:8px 14px;border-radius:9px;border:1px solid var(--line);background:var(--surface);color:var(--ink-soft);white-space:nowrap;flex-shrink:0;}
   .stage-tab .sev-dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:6px;}
@@ -106,8 +109,8 @@
   .rank-badge{width:26px;height:26px;border-radius:50%;background:var(--ink);color:#fff;font-family:var(--font-mono);font-size:13px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
   .tag-row{display:flex;gap:8px;flex-wrap:wrap;}
   .mini-tag{font-size:11.5px;padding:3px 9px;border-radius:999px;background:var(--gray-chip-soft);color:var(--gray-chip-ink);}
-  .mini-tag.gmv-high{background:var(--red-soft);color:var(--red-ink);}
-  .mini-tag.gmv-mid{background:var(--amber-soft);color:var(--amber-ink);}
+  .mini-tag.priority-high{background:var(--red-soft);color:var(--red-ink);}
+  .mini-tag.priority-mid{background:var(--amber-soft);color:var(--amber-ink);}
   .plan-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
   .plan-box{border:1px solid var(--line);border-radius:12px;padding:14px 16px;}
   .plan-box .plan-label{font-size:11.5px;font-family:var(--font-mono);color:var(--ink-faint);margin-bottom:6px;}
@@ -149,7 +152,7 @@
     <div id="stage-panels"></div>
 
     <div class="improve-list">
-      <div class="section-title" style="margin-top:8px;">TOP 3 提升点 · 按 GMV 影响排序</div>
+      <div class="section-title" style="margin-top:8px;">TOP 3 提升点 · 按商业优先级排序</div>
       <div id="improvement-cards"></div>
     </div>
 
@@ -224,8 +227,9 @@
   function renderGates(){
     var gates = $('summary-gates');
     (report.gates || []).forEach(function(gate){
-      var chip = el('div', 'gate-chip' + (gate.level === 'P0' ? '' : ' p2'));
-      append(chip, 'span', 'p-tag', gate.level);
+      var chip = el('div', 'gate-chip ' + (gate.priorityClass || 'priority-low'));
+      append(chip, 'span', 'priority-tag', gate.priorityLabel || '待评估');
+      append(chip, 'span', 'evidence-tag', '证据强度：' + (gate.evidenceStrength || '待确认') + ' · 置信度：' + (gate.confidence || '待确认'));
       chip.appendChild(document.createTextNode(gate.text));
       gates.appendChild(chip);
     });
@@ -239,7 +243,9 @@
       append(left, 'span', 'rank-badge', item.rank);
       append(left, 'span', '', item.title);
       var tags = append(head, 'div', 'tag-row');
-      append(tags, 'span', 'mini-tag ' + (item.gmvClass || ''), 'GMV 影响：' + item.gmvImpact);
+      append(tags, 'span', 'mini-tag ' + (item.priorityClass || ''), '商业优先级：' + (item.priorityLabel || '待评估'));
+      append(tags, 'span', 'mini-tag', '潜在影响：' + (item.impactDirection || '待评估'));
+      append(tags, 'span', 'mini-tag', '证据强度：' + (item.evidenceStrength || '待确认'));
       append(tags, 'span', 'mini-tag', '差距类型：' + item.gapType);
       var planGrid = append(card, 'div', 'plan-grid');
       renderPlan(planGrid, '方案 A · AI 生成图 / 拍摄指令', item.planA);

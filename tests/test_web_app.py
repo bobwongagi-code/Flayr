@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 from unittest import mock
 
-from scripts.web_app import JobStore, parse_multipart, progress_for_run, safe_asset_path
+from scripts.web_app import FlayrServer, JobStore, parse_multipart, progress_for_run, safe_asset_path
+from scripts.flayr_core.run_state import PROCESSING, read_run_state, transition_run_state
 
 
 class WebAppHelpersTests(unittest.TestCase):
@@ -114,25 +118,199 @@ class WebAppHelpersTests(unittest.TestCase):
 
             (run_dir / "report.html").write_text("<html></html>", encoding="utf-8")
             public = store.public(job)
-            self.assertEqual(public["report_url"], "/api/jobs/job-1/report")
+            self.assertEqual(public["report_url"], "/api/workspaces/local/jobs/job-1/report")
             self.assertEqual(public["bd_report_url"], "")
             self.assertEqual(public["creator_report_url"], "")
             self.assertEqual(public["report_kind"], "legacy")
 
             (run_dir / "bd_report.html").write_text("<html></html>", encoding="utf-8")
             public = store.public(job)
-            self.assertEqual(public["report_url"], "/api/jobs/job-1/report")
-            self.assertEqual(public["bd_report_url"], "/api/jobs/job-1/report")
+            self.assertEqual(public["report_url"], "/api/workspaces/local/jobs/job-1/report")
+            self.assertEqual(public["bd_report_url"], "/api/workspaces/local/jobs/job-1/report")
             self.assertEqual(public["creator_report_url"], "")
             self.assertEqual(public["report_kind"], "audience")
 
             (run_dir / "creator_report.html").write_text("<html></html>", encoding="utf-8")
             public = store.public(job)
-            self.assertEqual(public["report_url"], "/api/jobs/job-1/report")
-            self.assertEqual(public["bd_report_url"], "/api/jobs/job-1/report")
-            self.assertEqual(public["creator_report_url"], "/api/jobs/job-1/creator-report")
+            self.assertEqual(public["report_url"], "/api/workspaces/local/jobs/job-1/report")
+            self.assertEqual(public["bd_report_url"], "/api/workspaces/local/jobs/job-1/report")
+            self.assertEqual(public["creator_report_url"], "/api/workspaces/local/jobs/job-1/creator-report")
             self.assertEqual(public["report_kind"], "audience")
             store.shutdown()
+
+    def test_job_store_scopes_jobs_by_owner_and_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp), workspace_id="workspace-a")
+            benchmark = Path(tmp) / "benchmark.mp4"
+            creator = Path(tmp) / "creator.mp4"
+            benchmark.write_bytes(b"benchmark")
+            creator.write_bytes(b"creator")
+            files = {
+                "benchmark_video": {"path": benchmark, "filename": "benchmark.mp4"},
+                "creator_video": {"path": creator, "filename": "creator.mp4"},
+            }
+            with mock.patch.object(store._executor, "submit"):
+                public = store.create(
+                    {"product_name": "测试产品"},
+                    files,
+                    owner_id="owner-a",
+                )
+            job_id = str(public["id"])
+            self.assertEqual(public["workspace_id"], "workspace-a")
+            self.assertEqual(public["job_url"], f"/api/workspaces/workspace-a/jobs/{job_id}")
+            self.assertEqual(
+                store.get(job_id, owner_id="owner-a", workspace_id="workspace-a")["id"],
+                job_id,
+            )
+            self.assertIsNone(store.get(job_id, owner_id="owner-b", workspace_id="workspace-a"))
+            self.assertIsNone(store.get(job_id, owner_id="owner-a", workspace_id="workspace-b"))
+            self.assertEqual(store.all(owner_id="owner-b", workspace_id="workspace-a"), [])
+            store.shutdown()
+
+    def test_http_report_requires_matching_browser_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root)
+            run_dir = root / "job-run"
+            run_dir.mkdir()
+            (run_dir / "bd_report.html").write_text("<html>private report</html>", encoding="utf-8")
+            with store._lock:
+                store.jobs["job-1"] = {
+                    "id": "job-1",
+                    "owner_id": "owner-a",
+                    "workspace_id": "local",
+                    "visibility": "private",
+                    "status": "completed",
+                    "run_dir": str(run_dir),
+                    "product_name": "测试产品",
+                    "market": "马来西亚",
+                    "created_at": "",
+                }
+                store._persist_locked()
+            server = FlayrServer(("127.0.0.1", 0), store)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            url = f"http://127.0.0.1:{server.server_address[1]}/api/workspaces/local/jobs/job-1/report"
+            try:
+                response = urlopen(Request(url, headers={"Cookie": "flayr_client_id=owner-a"}))
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.read().decode("utf-8"), "<html>private report</html>")
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(Request(url, headers={"Cookie": "flayr_client_id=owner-b"}))
+                self.assertEqual(error.exception.code, 404)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                store.shutdown()
+
+    def test_http_asset_rejects_extension_content_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root)
+            run_dir = root / "job-run"
+            run_dir.mkdir()
+            (run_dir / "frame.png").write_bytes(b"not a png")
+            with store._lock:
+                store.jobs["job-1"] = {
+                    "id": "job-1",
+                    "owner_id": "owner-a",
+                    "workspace_id": "local",
+                    "visibility": "private",
+                    "status": "completed",
+                    "run_dir": str(run_dir),
+                    "product_name": "测试产品",
+                    "market": "马来西亚",
+                    "created_at": "",
+                }
+                store._persist_locked()
+            server = FlayrServer(("127.0.0.1", 0), store)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            url = f"http://127.0.0.1:{server.server_address[1]}/api/workspaces/local/jobs/job-1/assets/frame.png"
+            try:
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(Request(url, headers={"Cookie": "flayr_client_id=owner-a"}))
+                self.assertEqual(error.exception.code, 415)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                store.shutdown()
+
+    def test_http_serves_split_frontend_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            server = FlayrServer(("127.0.0.1", 0), store)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                for path, marker in (
+                    ("/styles.css", ".app"),
+                    ("/app.js", "./components/audience-switch.js"),
+                    ("/components/report-view.js", "reportUrlForAudience"),
+                ):
+                    response = urlopen(base + path)
+                    self.assertEqual(response.status, 200)
+                    self.assertIn(marker, response.read().decode("utf-8"))
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                store.shutdown()
+
+    def test_public_projection_handles_one_hundred_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            with store._lock:
+                for index in range(100):
+                    store.jobs[f"job-{index}"] = {
+                        "id": f"job-{index}",
+                        "owner_id": "owner-a",
+                        "workspace_id": "local",
+                        "visibility": "private",
+                        "status": "completed",
+                        "run_dir": str(Path(tmp) / f"run-{index}"),
+                        "product_name": f"产品-{index}",
+                        "market": "马来西亚",
+                        "created_at": "",
+                    }
+                store._persist_locked()
+            public_jobs = store.all(owner_id="owner-a", workspace_id="local")
+            self.assertEqual(len(public_jobs), 100)
+            projections = [store.public(job) for job in public_jobs]
+            self.assertEqual(len(projections), 100)
+            self.assertTrue(all("run_dir" not in item for item in projections))
+            store.shutdown()
+
+    def test_restart_recovery_closes_incomplete_job_with_failed_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root)
+            benchmark = root / "benchmark.mp4"
+            creator = root / "creator.mp4"
+            benchmark.write_bytes(b"benchmark")
+            creator.write_bytes(b"creator")
+            files = {
+                "benchmark_video": {"path": benchmark, "filename": "benchmark.mp4"},
+                "creator_video": {"path": creator, "filename": "creator.mp4"},
+            }
+            with mock.patch.object(store._executor, "submit"):
+                public = store.create({"product_name": "测试"}, files, owner_id="owner-a")
+            job_id = str(public["id"])
+            run_dir = Path(str(store.jobs[job_id]["run_dir"]))
+            transition_run_state(run_dir, PROCESSING)
+            store.jobs[job_id]["status"] = "running"
+            store._persist_locked()
+            store.shutdown()
+
+            recovered_store = JobStore(root)
+            recovered = recovered_store.get(job_id)
+            self.assertEqual(recovered["status"], "failed")
+            self.assertEqual(read_run_state(run_dir)["state"], "FAILED")
+            self.assertIn("服务重新启动", recovered["failure_reason"])
+            recovered_store.shutdown()
 
     def test_failed_job_clears_estimated_time(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

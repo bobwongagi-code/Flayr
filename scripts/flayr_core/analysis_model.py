@@ -3,8 +3,9 @@
 The JSON file under ``references/`` remains the model-facing schema.  This
 module is the application-facing boundary around that schema: it owns the
 stable field groups, the runtime projection into ``analysis`` and the
-artifact lifecycle metadata.  Renderers and pipeline code should not invent
-another list of result fields.
+artifact lifecycle metadata.  Report renderers consume the separate semantic
+model boundary; neither renderers nor pipeline code should invent another list
+of result fields.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ ANALYSIS_SCHEMA_PATH = ROOT / "references" / "analysis-output-schema.json"
 # is independent from the provider/model name and is written to provenance.
 RESULT_CONTRACT_VERSION = 1
 POSTPROCESS_LIFECYCLE_VERSION = 1
+SEMANTIC_MODEL_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -149,6 +151,10 @@ class AnalysisResultContract:
             "version": self.version,
             "schema_path": "references/analysis-output-schema.json",
             "schema_sha256": schema_sha256(),
+            "semantic_model": {
+                "version": SEMANTIC_MODEL_VERSION,
+                "module": "flayr_core.semantic_model",
+            },
             "normalized_required_fields": list(self.normalized_required_fields),
             "projection_fields": list(self.projection_fields),
             "lifecycle": [
