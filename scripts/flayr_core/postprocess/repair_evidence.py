@@ -21,7 +21,7 @@ from ..artifacts import (
     parse_time_range_seconds,
     parse_timestamp_seconds,
 )
-from ..llm.parse import is_effective_voiceover, normalize_s5_source_status
+from ..llm.parse import S5_SOURCE_STATUSES, is_effective_voiceover, normalize_s5_source_status
 from .utils import (
     ensure_evidence_unit,
     evidence_mentions_product,
@@ -464,10 +464,11 @@ def _s5_source_status(flag: dict[str, Any], units: list[Any]) -> tuple[str, list
     }
     if any(candidate not in unit_map for candidate in candidates):
         return "missing", []
-    statuses = [
-        str(unit_map[candidate].get("trust_source_status") or normalize_s5_source_status(unit_map[candidate]))
-        for candidate in candidates
-    ]
+    statuses = []
+    for candidate in candidates:
+        raw_status = unit_map[candidate].get("trust_source_status")
+        status = str(raw_status).strip() if raw_status is not None else normalize_s5_source_status(unit_map[candidate])
+        statuses.append(status if status in S5_SOURCE_STATUSES else "uncertain")
     if any(status == "uncertain" for status in statuses):
         return "uncertain", []
     if any(status == "missing" for status in statuses):

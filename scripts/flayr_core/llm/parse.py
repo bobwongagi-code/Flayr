@@ -286,7 +286,7 @@ def normalize_s5_source_signals(value: Any) -> list[str]:
 
 
 def normalize_s5_source_status(unit: dict[str, Any]) -> str:
-    """保留 S5 来源事实的三态边界，避免把缺失字段压成明确不存在。
+    """保留 S5 来源事实的四态边界，避免把缺失字段压成明确不存在。
 
     空数组且没有出处是模型明确声明“没有来源”；字段缺失、形状非法、来源类型
     与出处不完整则不能当作 absence。该状态由解析层从原始字段存在性计算，供

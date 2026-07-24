@@ -325,6 +325,50 @@ class DeriveResolverTests(unittest.TestCase):
             "uncertain_fact",
         )
 
+    def test_s5_invalid_source_status_is_uncertain_not_absent(self) -> None:
+        stage = {
+            "stage": "S5 信任放大",
+            "severity": "large",
+            "creator_s5": {
+                "exists": False,
+                "trust_evidence_type": "none",
+                "trust_basis": "none",
+                "independent_trust_purpose": False,
+                "duplicates_other_stage": False,
+                "evidence_ids": ["C5"],
+            },
+            "benchmark_s5": {
+                "exists": False,
+                "trust_evidence_type": "none",
+                "trust_basis": "none",
+                "independent_trust_purpose": False,
+                "duplicates_other_stage": False,
+                "evidence_ids": ["B5"],
+            },
+        }
+        result = {
+            "stage_analysis": [{}, {}, {}, {}, stage],
+            "video_understanding": {
+                "creator": {"evidence_units": [{
+                    "id": "C5",
+                    "trust_source_status": "invalid-status",
+                    "endorsement_verbal": False,
+                    "endorsement_visual": False,
+                }]},
+                "benchmark": {"evidence_units": [{
+                    "id": "B5",
+                    "trust_source_status": "invalid-status",
+                    "endorsement_verbal": False,
+                    "endorsement_visual": False,
+                }]},
+            },
+        }
+        reconcile_s5_trust_sources(result, True)
+        finalize_severity_after_repairs(result, {})
+        self.assertEqual(stage["creator_s5"]["_s5_source_status"], "unknown")
+        self.assertEqual(stage["benchmark_s5"]["_s5_source_status"], "unknown")
+        self.assertEqual(stage["severity"], "large")
+
 
 if __name__ == "__main__":
     unittest.main()
