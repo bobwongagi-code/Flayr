@@ -6,6 +6,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import hmac
+import ipaddress
 import json
 import mimetypes
 import os
@@ -18,6 +19,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from email.message import Message
 from http.cookies import CookieError, SimpleCookie
@@ -67,6 +69,13 @@ CLIENT_COOKIE_SECRET_FILE = ".client_cookie_secret"
 CLIENT_COOKIE_SECRET_ENV = "FLAYR_COOKIE_SECRET"
 CLIENT_COOKIE_SECRET_BYTES = 32
 IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+WEB_AUTH_TOKEN_ENV = "FLAYR_WEB_AUTH_TOKEN"
+WEB_ALLOWED_HOSTS_ENV = "FLAYR_WEB_ALLOWED_HOSTS"
+WEB_AUTH_TOKEN_MIN_BYTES = 32
+PUBLIC_SUBMISSIONS_PER_MINUTE = 3
+PUBLIC_MAX_ACTIVE_JOBS = 4
+PUBLIC_MAX_ACTIVE_JOBS_PER_OWNER = 2
+PUBLIC_MAX_DAILY_JOBS_PER_OWNER = 20
 
 MARKET_CODES = {
     "马来西亚": "my",
@@ -79,6 +88,10 @@ MARKET_CODES = {
 
 class RequestError(ValueError):
     """A client-side request error that should be returned as JSON."""
+
+
+class AdmissionError(RequestError):
+    """Raised when public-mode queue or daily capacity is exhausted."""
 
 
 def utc_now() -> str:
@@ -113,6 +126,146 @@ def _identity_value(value: Any, label: str, default: str) -> str:
     if not IDENTITY_PATTERN.fullmatch(candidate):
         raise RequestError(f"{label} 无效")
     return candidate
+
+
+def _is_loopback_host(host: str) -> bool:
+    candidate = str(host or "").strip().strip("[]").lower()
+    if candidate in {"localhost", "ip6-localhost"}:
+        return True
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
+
+
+def _normalize_host(value: str) -> tuple[str, int | None] | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.count(":") > 1 and not raw.startswith("["):
+        raw = f"[{raw}]"
+    try:
+        parsed = urlsplit(f"//{raw}")
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        not hostname
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    return hostname.rstrip(".").lower(), port
+
+
+def _parse_allowed_hosts(raw: str) -> set[tuple[str, int | None]]:
+    hosts: set[tuple[str, int | None]] = set()
+    for value in str(raw or "").split(","):
+        normalized = _normalize_host(value)
+        if normalized:
+            hosts.add(normalized)
+    return hosts
+
+
+def _host_matches(value: str, allowed_hosts: set[tuple[str, int | None]]) -> bool:
+    normalized = _normalize_host(value)
+    if normalized is None:
+        return False
+    hostname, port = normalized
+    return any(
+        allowed_host == hostname and (allowed_port is None or allowed_port == port)
+        for allowed_host, allowed_port in allowed_hosts
+    )
+
+
+def _origin_matches(value: str, allowed_hosts: set[tuple[str, int | None]]) -> bool:
+    raw = str(value or "").strip()
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    return _host_matches(parsed.netloc, allowed_hosts)
+
+
+class SubmissionRateLimiter:
+    """Small in-memory fixed-window limiter for one local server process."""
+
+    def __init__(self, *, max_keys: int = 4096) -> None:
+        self._lock = threading.Lock()
+        self._events: dict[str, deque[float]] = {}
+        self._max_keys = max(1, int(max_keys))
+
+    def admit(self, keys: tuple[str, ...], *, limit: int, window_seconds: float) -> bool:
+        if limit <= 0:
+            return False
+        now = time.monotonic()
+        cutoff = now - max(1.0, float(window_seconds))
+        with self._lock:
+            for key, queue in list(self._events.items()):
+                while queue and queue[0] <= cutoff:
+                    queue.popleft()
+                if not queue:
+                    self._events.pop(key, None)
+            queues: list[deque[float]] = []
+            created_keys: list[str] = []
+            for key in dict.fromkeys(keys):
+                normalized_key = str(key)
+                queue = self._events.get(normalized_key)
+                if queue is None:
+                    if len(self._events) >= self._max_keys:
+                        for created_key in created_keys:
+                            self._events.pop(created_key, None)
+                        return False
+                    queue = deque()
+                    self._events[normalized_key] = queue
+                    created_keys.append(normalized_key)
+                while queue and queue[0] <= cutoff:
+                    queue.popleft()
+                if len(queue) >= limit:
+                    for created_key in created_keys:
+                        self._events.pop(created_key, None)
+                    return False
+                queues.append(queue)
+            for queue in queues:
+                queue.append(now)
+            return True
+
+
+def _is_wildcard_host(host: str) -> bool:
+    return str(host or "").strip().strip("[]").lower() in {"0.0.0.0", "::"}
+
+
+def _resolve_web_security(
+    host: str,
+    unsafe_expose: bool,
+) -> tuple[bool, str, set[tuple[str, int | None]]]:
+    """Resolve bind and operator-auth policy before opening a listening socket."""
+    if not _is_loopback_host(host) and not unsafe_expose:
+        raise ValueError("非回环监听必须显式使用 --unsafe-expose")
+    if not unsafe_expose:
+        return False, "", set()
+
+    token = os.environ.get(WEB_AUTH_TOKEN_ENV, "").strip()
+    if len(token.encode("utf-8")) < WEB_AUTH_TOKEN_MIN_BYTES:
+        raise ValueError(f"{WEB_AUTH_TOKEN_ENV} 至少需要 {WEB_AUTH_TOKEN_MIN_BYTES} 个字节")
+
+    raw_allowed_hosts = os.environ.get(WEB_ALLOWED_HOSTS_ENV, "").strip()
+    allowed_hosts = _parse_allowed_hosts(raw_allowed_hosts)
+    if raw_allowed_hosts and not allowed_hosts:
+        raise ValueError(f"{WEB_ALLOWED_HOSTS_ENV} 没有可用的主机名")
+    if not allowed_hosts and not _is_wildcard_host(host):
+        normalized = _normalize_host(host)
+        if normalized:
+            allowed_hosts.add(normalized)
+    if not allowed_hosts:
+        raise ValueError(f"对外监听必须设置 {WEB_ALLOWED_HOSTS_ENV}")
+    return True, token, allowed_hosts
 
 
 def _load_client_cookie_secret(root: Path) -> bytes:
@@ -402,6 +555,7 @@ class JobStore:
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="flayr-job")
         self._running_processes: dict[str, subprocess.Popen] = {}
         self._shutdown_requested = False
+        self._admission_reservations: dict[tuple[str, str], int] = {}
         self.jobs: dict[str, dict[str, Any]] = {}
         self.root.mkdir(parents=True, exist_ok=True)
         self.jobs_root.mkdir(parents=True, exist_ok=True)
@@ -509,6 +663,53 @@ class JobStore:
             job.update(changes)
             self._persist_locked()
 
+    def _admission_error_locked(self, owner_id: str, workspace_id: str) -> str | None:
+        reservation_total = sum(self._admission_reservations.values())
+        active = [
+            job
+            for job in self.jobs.values()
+            if str(job.get("workspace_id") or self.workspace_id) == workspace_id
+            and job.get("status") in {"queued", "running"}
+        ]
+        if len(active) + reservation_total >= PUBLIC_MAX_ACTIVE_JOBS:
+            return "当前任务队列已满，请稍后重试。"
+        owner_reservations = self._admission_reservations.get((workspace_id, owner_id), 0)
+        owner_active = [job for job in active if str(job.get("owner_id") or "") == owner_id]
+        if len(owner_active) + owner_reservations >= PUBLIC_MAX_ACTIVE_JOBS_PER_OWNER:
+            return "当前浏览器已有任务在处理中，请等待完成后再提交。"
+        today = utc_now()[:10]
+        owner_today = sum(
+            1
+            for job in self.jobs.values()
+            if str(job.get("workspace_id") or self.workspace_id) == workspace_id
+            and str(job.get("owner_id") or "") == owner_id
+            and str(job.get("created_at") or "").startswith(today)
+        )
+        if owner_today + owner_reservations >= PUBLIC_MAX_DAILY_JOBS_PER_OWNER:
+            return "今日任务额度已用完，请明天再试。"
+        return None
+
+    def _reserve_admission(self, owner_id: str, workspace_id: str) -> None:
+        with self._lock:
+            admission_error = self._admission_error_locked(owner_id, workspace_id)
+            if admission_error:
+                raise AdmissionError(admission_error)
+            key = (workspace_id, owner_id)
+            self._admission_reservations[key] = self._admission_reservations.get(key, 0) + 1
+
+    def _release_admission(self, owner_id: str, workspace_id: str) -> None:
+        with self._lock:
+            key = (workspace_id, owner_id)
+            remaining = self._admission_reservations.get(key, 0) - 1
+            if remaining > 0:
+                self._admission_reservations[key] = remaining
+            else:
+                self._admission_reservations.pop(key, None)
+
+    def admission_error(self, *, owner_id: str, workspace_id: str) -> str | None:
+        with self._lock:
+            return self._admission_error_locked(owner_id, workspace_id)
+
     def create(
         self,
         fields: dict[str, str],
@@ -516,6 +717,7 @@ class JobStore:
         *,
         owner_id: str = DEFAULT_OWNER_ID,
         workspace_id: str | None = None,
+        enforce_limits: bool = False,
     ) -> dict[str, Any]:
         if "benchmark_video" not in files or "creator_video" not in files:
             for item in files.values():
@@ -529,55 +731,61 @@ class JobStore:
             raise RequestError(str(exc)) from exc
         owner_id = _identity_value(owner_id, "owner_id", DEFAULT_OWNER_ID)
         workspace_id = _identity_value(workspace_id, "workspace_id", self.workspace_id)
+        if enforce_limits:
+            self._reserve_admission(owner_id, workspace_id)
         job_id = f"job-{uuid.uuid4().hex[:12]}"
         job_root = self.jobs_root / job_id
         input_root = job_root / "inputs"
         run_dir = job_root / "run"
-        input_root.mkdir(parents=True, exist_ok=False)
-        moved: dict[str, Path] = {}
         try:
-            for role in ("benchmark_video", "creator_video"):
-                item = files[role]
-                original = Path(str(item["path"]))
-                filename = Path(str(item.get("filename") or f"{role}.mp4")).name or f"{role}.mp4"
-                destination = input_root / f"{role}-{filename}"
-                shutil.move(str(original), destination)
-                moved[role] = destination
-        except Exception:
-            for item in files.values():
-                Path(str(item.get("path"))).unlink(missing_ok=True)
-            shutil.rmtree(job_root, ignore_errors=True)
-            raise
-        run_dir.mkdir(parents=True, exist_ok=False)
-        now = utc_now()
-        job = {
-            "id": job_id,
-            "owner_id": owner_id,
-            "workspace_id": workspace_id,
-            "visibility": "private",
-            "product_name": product_name,
-            "market": market_label,
-            "market_code": normalized_market,
-            "category": str(fields.get("category") or "").strip()[:200],
-            "price": str(fields.get("price") or "").strip()[:100],
-            "selling_point": str(fields.get("selling_point") or "").strip()[:1000],
-            "status": "queued",
-            "progress": 0,
-            "phase": "素材处理与转写",
-            "estimated_remaining_seconds": 18 * 60,
-            "created_at": now,
-            "failure_reason": "",
-            "degraded_reason": "",
-            "benchmark_path": str(moved["benchmark_video"].resolve()),
-            "creator_path": str(moved["creator_video"].resolve()),
-            "run_dir": str(run_dir.resolve()),
-            "log_path": str((job_root / "worker.log").resolve()),
-        }
-        with self._lock:
-            self.jobs[job_id] = job
-            self._persist_locked()
-        self._executor.submit(self._run_job, job_id)
-        return self.public(job)
+            try:
+                input_root.mkdir(parents=True, exist_ok=False)
+                moved: dict[str, Path] = {}
+                for role in ("benchmark_video", "creator_video"):
+                    item = files[role]
+                    original = Path(str(item["path"]))
+                    filename = Path(str(item.get("filename") or f"{role}.mp4")).name or f"{role}.mp4"
+                    destination = input_root / f"{role}-{filename}"
+                    shutil.move(str(original), destination)
+                    moved[role] = destination
+            except Exception:
+                for item in files.values():
+                    Path(str(item.get("path"))).unlink(missing_ok=True)
+                shutil.rmtree(job_root, ignore_errors=True)
+                raise
+            run_dir.mkdir(parents=True, exist_ok=False)
+            now = utc_now()
+            job = {
+                "id": job_id,
+                "owner_id": owner_id,
+                "workspace_id": workspace_id,
+                "visibility": "private",
+                "product_name": product_name,
+                "market": market_label,
+                "market_code": normalized_market,
+                "category": str(fields.get("category") or "").strip()[:200],
+                "price": str(fields.get("price") or "").strip()[:100],
+                "selling_point": str(fields.get("selling_point") or "").strip()[:1000],
+                "status": "queued",
+                "progress": 0,
+                "phase": "素材处理与转写",
+                "estimated_remaining_seconds": 18 * 60,
+                "created_at": now,
+                "failure_reason": "",
+                "degraded_reason": "",
+                "benchmark_path": str(moved["benchmark_video"].resolve()),
+                "creator_path": str(moved["creator_video"].resolve()),
+                "run_dir": str(run_dir.resolve()),
+                "log_path": str((job_root / "worker.log").resolve()),
+            }
+            with self._lock:
+                self.jobs[job_id] = job
+                self._persist_locked()
+            self._executor.submit(self._run_job, job_id)
+            return self.public(job)
+        finally:
+            if enforce_limits:
+                self._release_admission(owner_id, workspace_id)
 
     @staticmethod
     def _matches_scope(job: dict[str, Any], owner_id: str | None, workspace_id: str | None) -> bool:
@@ -867,8 +1075,25 @@ class JobStore:
 class FlayrServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], store: JobStore) -> None:
+    def __init__(
+        self,
+        address: tuple[str, int],
+        store: JobStore,
+        *,
+        public_mode: bool = False,
+        auth_token: str = "",
+        allowed_hosts: set[tuple[str, int | None]] | None = None,
+    ) -> None:
         self.store = store
+        self.public_mode = bool(public_mode)
+        self.auth_token = auth_token
+        self.allowed_hosts = set(allowed_hosts or ())
+        if self.public_mode:
+            if len(self.auth_token.encode("utf-8")) < WEB_AUTH_TOKEN_MIN_BYTES:
+                raise ValueError(f"{WEB_AUTH_TOKEN_ENV} 至少需要 {WEB_AUTH_TOKEN_MIN_BYTES} 个字节")
+            if not self.allowed_hosts:
+                raise ValueError("对外监听必须设置允许的 Host")
+        self.submission_limiter = SubmissionRateLimiter()
         self.client_cookie_secret = _load_client_cookie_secret(store.root)
         super().__init__(address, FlayrHandler)
 
@@ -878,6 +1103,29 @@ class FlayrHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         sys.stderr.write("[flayr-web] " + (format % args) + "\n")
+
+    def _authorize_request(self, *, state_changing: bool = False) -> bool:
+        if not self.server.public_mode:
+            return True
+        if not _host_matches(self.headers.get("Host", ""), self.server.allowed_hosts):
+            self._json(403, {"error": "Host 不在允许列表"})
+            return False
+        scheme, separator, token = self.headers.get("Authorization", "").partition(" ")
+        if (
+            not separator
+            or scheme.lower() != "bearer"
+            or not hmac.compare_digest(token.strip(), self.server.auth_token)
+        ):
+            self._json(
+                401,
+                {"error": "需要操作者认证"},
+                extra_headers={"WWW-Authenticate": "Bearer"},
+            )
+            return False
+        if state_changing and not _origin_matches(self.headers.get("Origin", ""), self.server.allowed_hosts):
+            self._json(403, {"error": "请求来源不被允许"})
+            return False
+        return True
 
     def _client_id(self) -> str:
         cached = getattr(self, "_flayr_client_id", None)
@@ -916,6 +1164,8 @@ class FlayrHandler(BaseHTTPRequestHandler):
         )
 
     def do_GET(self) -> None:
+        if not self._authorize_request():
+            return
         parsed = urlsplit(self.path)
         path = unquote(parsed.path)
         self._client_id()
@@ -969,6 +1219,8 @@ class FlayrHandler(BaseHTTPRequestHandler):
         self._json(404, {"error": "资源不存在"})
 
     def do_HEAD(self) -> None:
+        if not self._authorize_request():
+            return
         path = unquote(urlsplit(self.path).path)
         self._client_id()
         match = re.fullmatch(r"/api/workspaces/([^/]+)/jobs/([^/]+)/(report|creator-report)", path)
@@ -982,8 +1234,9 @@ class FlayrHandler(BaseHTTPRequestHandler):
         self.send_error(404, "资源不存在")
 
     def do_POST(self) -> None:
+        if not self._authorize_request(state_changing=True):
+            return
         path = unquote(urlsplit(self.path).path)
-        self._client_id()
         if path != "/api/jobs":
             self._json(404, {"error": "资源不存在"})
             return
@@ -991,6 +1244,23 @@ class FlayrHandler(BaseHTTPRequestHandler):
         if not content_type.lower().startswith("multipart/form-data"):
             self._json(415, {"error": "请使用 multipart/form-data 上传视频"})
             return
+        owner_id = self._client_id()
+        if self.server.public_mode:
+            client_ip = str(self.client_address[0])
+            if not self.server.submission_limiter.admit(
+                (f"owner:{owner_id}", f"ip:{client_ip}"),
+                limit=PUBLIC_SUBMISSIONS_PER_MINUTE,
+                window_seconds=60.0,
+            ):
+                self._json(429, {"error": "提交过于频繁，请稍后重试。"}, extra_headers={"Connection": "close"})
+                return
+            admission_error = self.server.store.admission_error(
+                owner_id=owner_id,
+                workspace_id=self.server.store.workspace_id,
+            )
+            if admission_error:
+                self._json(503, {"error": admission_error}, extra_headers={"Connection": "close"})
+                return
         body_path: Path | None = None
         files: dict[str, dict[str, Any]] = {}
         try:
@@ -1003,10 +1273,15 @@ class FlayrHandler(BaseHTTPRequestHandler):
             job = self.server.store.create(
                 fields,
                 files,
-                owner_id=self._client_id(),
+                owner_id=owner_id,
                 workspace_id=self.server.store.workspace_id,
+                enforce_limits=self.server.public_mode,
             )
             self._json(202, job)
+        except AdmissionError as exc:
+            for item in files.values():
+                Path(str(item.get("path"))).unlink(missing_ok=True)
+            self._json(503, {"error": str(exc)})
         except RequestError as exc:
             for item in files.values():
                 Path(str(item.get("path"))).unlink(missing_ok=True)
@@ -1135,12 +1410,20 @@ class FlayrHandler(BaseHTTPRequestHandler):
         if data is not None:
             self.wfile.write(data)
 
-    def _json(self, status: int, payload: Any) -> None:
+    def _json(
+        self,
+        status: int,
+        payload: Any,
+        *,
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self._send_identity_cookie()
         self.end_headers()
         self.wfile.write(data)
@@ -1160,9 +1443,24 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run the local Flayr web application.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=int(os.environ.get("FLAYR_WEB_PORT", DEFAULT_PORT)))
+    parser.add_argument(
+        "--unsafe-expose",
+        action="store_true",
+        help="允许非本机访问；必须同时配置操作者 Bearer token 和允许的 Host。",
+    )
     args = parser.parse_args()
+    try:
+        public_mode, auth_token, allowed_hosts = _resolve_web_security(args.host, args.unsafe_expose)
+    except ValueError as exc:
+        parser.error(str(exc))
     store = JobStore()
-    server = FlayrServer((args.host, args.port), store)
+    server = FlayrServer(
+        (args.host, args.port),
+        store,
+        public_mode=public_mode,
+        auth_token=auth_token,
+        allowed_hosts=allowed_hosts,
+    )
     print(f"Flayr web app: http://{args.host}:{args.port}/", flush=True)
     try:
         server.serve_forever()

@@ -1,20 +1,26 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 from unittest import mock
 
 from scripts.web_app import (
     FlayrServer,
     JobStore,
+    SubmissionRateLimiter,
+    WEB_ALLOWED_HOSTS_ENV,
+    WEB_AUTH_TOKEN_ENV,
+    _resolve_web_security,
     _signed_client_cookie,
     parse_multipart,
     progress_for_run,
     safe_asset_path,
+    utc_now,
 )
 from scripts.flayr_core.run_state import (
     ANALYSIS_COMPLETED,
@@ -28,6 +34,142 @@ from scripts.flayr_core.run_state import (
 
 
 class WebAppHelpersTests(unittest.TestCase):
+    def test_web_security_requires_explicit_public_mode(self) -> None:
+        with self.assertRaises(ValueError):
+            _resolve_web_security("192.168.1.20", False)
+        self.assertEqual(_resolve_web_security("127.0.0.1", False), (False, "", set()))
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                WEB_AUTH_TOKEN_ENV: "t" * 32,
+                WEB_ALLOWED_HOSTS_ENV: "reports.example.test:8443",
+            },
+        ):
+            public_mode, token, allowed_hosts = _resolve_web_security("0.0.0.0", True)
+        self.assertTrue(public_mode)
+        self.assertEqual(token, "t" * 32)
+        self.assertEqual(allowed_hosts, {("reports.example.test", 8443)})
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(WEB_AUTH_TOKEN_ENV, None)
+            os.environ.pop(WEB_ALLOWED_HOSTS_ENV, None)
+            with self.assertRaises(ValueError):
+                _resolve_web_security("0.0.0.0", True)
+
+    def test_public_web_requires_bearer_host_and_origin_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            server = FlayrServer(
+                ("127.0.0.1", 0),
+                store,
+                public_mode=True,
+                auth_token="t" * 32,
+                allowed_hosts={("example.test", None)},
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            url = f"http://127.0.0.1:{server.server_address[1]}/api/jobs"
+            open_direct = build_opener(ProxyHandler({})).open
+            try:
+                with self.assertRaises(HTTPError) as error:
+                    open_direct(Request(url, headers={"Host": "example.test"}))
+                self.assertEqual(error.exception.code, 401)
+
+                with self.assertRaises(HTTPError) as error:
+                    open_direct(
+                        Request(
+                            url,
+                            headers={
+                                "Host": "wrong.example.test",
+                                "Authorization": "Bearer " + "t" * 32,
+                            },
+                        )
+                    )
+                self.assertEqual(error.exception.code, 403)
+
+                response = open_direct(
+                    Request(
+                        url,
+                        headers={
+                            "Host": "example.test",
+                            "Authorization": "Bearer " + "t" * 32,
+                        },
+                    )
+                )
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.read().decode("utf-8"), '{"jobs": []}')
+
+                with self.assertRaises(HTTPError) as error:
+                    open_direct(
+                        Request(
+                            url,
+                            data=b"",
+                            headers={
+                                "Host": "example.test",
+                                "Authorization": "Bearer " + "t" * 32,
+                                "Content-Type": "application/json",
+                            },
+                        )
+                    )
+                self.assertEqual(error.exception.code, 403)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                store.shutdown()
+
+    def test_submission_limiter_applies_to_each_owner_and_ip_key(self) -> None:
+        limiter = SubmissionRateLimiter()
+        keys = ("owner:one", "ip:127.0.0.1")
+        self.assertTrue(limiter.admit(keys, limit=3, window_seconds=60))
+        self.assertTrue(limiter.admit(keys, limit=3, window_seconds=60))
+        self.assertTrue(limiter.admit(keys, limit=3, window_seconds=60))
+        self.assertFalse(limiter.admit(keys, limit=3, window_seconds=60))
+        self.assertTrue(limiter.admit(("owner:two", "ip:127.0.0.2"), limit=3, window_seconds=60))
+
+    def test_public_admission_limits_cover_queue_owner_and_daily_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            today = utc_now()
+            try:
+                with store._lock:
+                    for index in range(4):
+                        store.jobs[f"active-{index}"] = {
+                            "id": f"active-{index}",
+                            "workspace_id": "local",
+                            "owner_id": f"owner-{index}",
+                            "status": "queued",
+                            "created_at": today,
+                        }
+                self.assertIn("队列已满", store.admission_error(owner_id="owner-a", workspace_id="local"))
+
+                with store._lock:
+                    store.jobs.clear()
+                    for index in range(2):
+                        store.jobs[f"owner-active-{index}"] = {
+                            "id": f"owner-active-{index}",
+                            "workspace_id": "local",
+                            "owner_id": "owner-a",
+                            "status": "running",
+                            "created_at": today,
+                        }
+                self.assertIn("已有任务", store.admission_error(owner_id="owner-a", workspace_id="local"))
+
+                with store._lock:
+                    store.jobs.clear()
+                    for index in range(20):
+                        store.jobs[f"daily-{index}"] = {
+                            "id": f"daily-{index}",
+                            "workspace_id": "local",
+                            "owner_id": "owner-a",
+                            "status": "completed",
+                            "created_at": today,
+                        }
+                self.assertIn("今日任务额度", store.admission_error(owner_id="owner-a", workspace_id="local"))
+            finally:
+                store.shutdown()
+
     def test_parse_multipart_keeps_uploads_in_temp_files(self) -> None:
         boundary = b"----FlayrTestBoundary"
         body = (
