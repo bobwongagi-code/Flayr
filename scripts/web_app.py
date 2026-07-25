@@ -60,6 +60,7 @@ MAX_FIELD_BYTES = 1024 * 1024
 MAX_REQUEST_BYTES = MAX_VIDEO_BYTES * 2 + 8 * 1024 * 1024
 MAX_SERVED_ASSET_BYTES = MAX_VIDEO_BYTES
 UPLOAD_CHUNK_BYTES = 64 * 1024
+ASSET_STREAM_CHUNK_BYTES = 64 * 1024
 UPLOAD_STAGING_TTL_SECONDS = 60 * 60
 JOB_RETENTION_SECONDS = 7 * 24 * 60 * 60
 MAX_WEB_STORAGE_BYTES = 20 * 1024 * 1024 * 1024
@@ -1606,23 +1607,42 @@ class FlayrHandler(BaseHTTPRequestHandler):
         self._serve_file(candidate, content_type)
 
     def _serve_file(self, path: Path, content_type: str, head_only: bool = False) -> None:
+        source = None
         try:
             size = path.stat().st_size
             if size > MAX_SERVED_ASSET_BYTES or not _servable_asset(path):
                 self._json(415, {"error": "资源内容类型不匹配"})
                 return
-            data = None if head_only else path.read_bytes()
+            if not head_only:
+                source = path.open("rb")
+                size = os.fstat(source.fileno()).st_size
+                if size > MAX_SERVED_ASSET_BYTES:
+                    source.close()
+                    source = None
+                    self._json(415, {"error": "资源内容类型不匹配"})
+                    return
         except OSError:
+            if source is not None:
+                source.close()
             self._json(404, {"error": "资源不存在"})
             return
         self.send_response(200)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(size if data is None else len(data)))
+        self.send_header("Content-Length", str(size))
         self.send_header("X-Content-Type-Options", "nosniff")
         self._send_identity_cookie()
         self.end_headers()
-        if data is not None:
-            self.wfile.write(data)
+        if source is not None:
+            try:
+                remaining = size
+                while remaining:
+                    chunk = source.read(min(ASSET_STREAM_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+            finally:
+                source.close()
 
     def _json(
         self,

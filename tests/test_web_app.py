@@ -658,6 +658,45 @@ class WebAppHelpersTests(unittest.TestCase):
                 thread.join(timeout=2)
                 store.shutdown()
 
+    def test_http_streams_asset_without_reading_whole_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root)
+            run_dir = root / "job-run"
+            run_dir.mkdir()
+            payload = b"x" * (128 * 1024)
+            (run_dir / "frame.bin").write_bytes(payload)
+            with store._lock:
+                store.jobs["job-1"] = {
+                    "id": "job-1",
+                    "owner_id": "owner-a",
+                    "workspace_id": "local",
+                    "visibility": "private",
+                    "status": "completed",
+                    "run_dir": str(run_dir),
+                    "product_name": "测试产品",
+                    "market": "马来西亚",
+                    "created_at": "",
+                }
+                store._persist_locked()
+            server = FlayrServer(("127.0.0.1", 0), store)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            url = f"http://127.0.0.1:{server.server_address[1]}/api/jobs/job-1/assets/frame.bin"
+            try:
+                signed_owner_a = _signed_client_cookie("owner-a", server.client_cookie_secret)
+                with mock.patch("pathlib.Path.read_bytes", side_effect=AssertionError("asset was read whole")):
+                    response = urlopen(
+                        Request(url, headers={"Cookie": f"flayr_client_id={signed_owner_a}"})
+                    )
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.read(), payload)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                store.shutdown()
+
     def test_http_serves_split_frontend_assets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = JobStore(Path(tmp))
