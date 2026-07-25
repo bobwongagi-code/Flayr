@@ -3090,6 +3090,18 @@ class ArchitectureContractTests(unittest.TestCase):
             args = self._cache_args()
             deps = self._cache_deps()
             fingerprint = flayr.build_preprocess_fingerprint(video, deps, args)
+            self.assertNotIn("path", fingerprint["source_video"])
+            moved_copy = root / "moved-copy.mp4"
+            moved_copy.write_bytes(video.read_bytes())
+            self.assertEqual(
+                fingerprint,
+                flayr.build_preprocess_fingerprint(moved_copy, deps, args),
+            )
+            video.touch()
+            self.assertEqual(
+                fingerprint,
+                flayr.build_preprocess_fingerprint(video, deps, args),
+            )
             (role_dir / "_preprocess.json").write_text(
                 json.dumps(
                     {

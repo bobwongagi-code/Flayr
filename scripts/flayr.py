@@ -61,9 +61,9 @@ from flayr_core.whisper import run_whisper
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNS_DIR = ROOT / "runs"
-PREPROCESS_CACHE_SCHEMA_VERSION = 2
+PREPROCESS_CACHE_SCHEMA_VERSION = 3
 PREPROCESS_PIPELINE_VERSION = "2026-07-18.1"
-PREPROCESS_ARTIFACT_SCHEMA_VERSION = 1
+PREPROCESS_ARTIFACT_SCHEMA_VERSION = 2
 _RUN_ROLE_DIRS = frozenset({"benchmark", "creator"})
 _RUN_OUTPUT_FILES = frozenset(
     {
@@ -587,25 +587,50 @@ def validate_optional_file(path: Path | None, label: str) -> Path | None:
     return resolved
 
 
-def _file_metadata(path: Any, include_sha256: bool = False) -> dict[str, Any] | None:
-    """返回缓存判定所需的文件身份；源视频额外用 SHA-256 防止同路径误复用。"""
+def _file_probe_from_stat(stat: os.stat_result) -> dict[str, int]:
+    return {
+        "size_bytes": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+        "ctime_ns": int(stat.st_ctime_ns),
+        "device": int(stat.st_dev),
+        "inode": int(stat.st_ino),
+    }
+
+
+def _file_metadata(
+    path: Any,
+    include_sha256: bool = False,
+    *,
+    include_path: bool = True,
+    include_mtime: bool = True,
+    cached_probe: dict[str, Any] | None = None,
+    cached_sha256: str = "",
+) -> dict[str, Any] | None:
+    """Return cache identity metadata, optionally reusing a verified fast probe."""
     if not path:
         return None
     candidate = Path(str(path)).expanduser().resolve()
     if not candidate.is_file():
-        return {"path": str(candidate), "missing": True}
+        metadata: dict[str, Any] = {"missing": True}
+        if include_path:
+            metadata["path"] = str(candidate)
+        return metadata
     stat = candidate.stat()
-    metadata: dict[str, Any] = {
-        "path": str(candidate),
-        "size_bytes": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
-    }
+    metadata = {"size_bytes": stat.st_size}
+    if include_path:
+        metadata["path"] = str(candidate)
+    if include_mtime:
+        metadata["mtime_ns"] = stat.st_mtime_ns
     if include_sha256:
-        digest = hashlib.sha256()
-        with candidate.open("rb") as source:
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                digest.update(chunk)
-        metadata["sha256"] = digest.hexdigest()
+        current_probe = _file_probe_from_stat(stat)
+        if cached_probe == current_probe and re.fullmatch(r"[0-9a-f]{64}", str(cached_sha256 or "")):
+            metadata["sha256"] = str(cached_sha256)
+        else:
+            digest = hashlib.sha256()
+            with candidate.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            metadata["sha256"] = digest.hexdigest()
     return metadata
 
 
@@ -637,13 +662,27 @@ def build_preprocess_fingerprint(
     video_path: Path,
     deps: dict[str, Any],
     args: argparse.Namespace,
+    *,
+    cached_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """缓存只在源视频与所有会改变预处理产物的配置完全一致时命中。"""
+    cached_fingerprint = cached_info.get("preprocess_fingerprint") if isinstance(cached_info, dict) else None
+    cached_source = cached_fingerprint.get("source_video") if isinstance(cached_fingerprint, dict) else None
+    cached_probe = cached_info.get("preprocess_source_probe") if isinstance(cached_info, dict) else None
+    cached_sha256 = cached_source.get("sha256") if isinstance(cached_source, dict) else ""
     return {
         "cache_schema_version": PREPROCESS_CACHE_SCHEMA_VERSION,
         "pipeline_version": PREPROCESS_PIPELINE_VERSION,
         "code_commit": _git_commit_sha(),
-        "source_video": _file_metadata(video_path, include_sha256=True),
+        # Content identity is deliberately independent of the input path and mtime.
+        "source_video": _file_metadata(
+            video_path,
+            include_sha256=True,
+            include_path=False,
+            include_mtime=False,
+            cached_probe=cached_probe if isinstance(cached_probe, dict) else None,
+            cached_sha256=str(cached_sha256 or ""),
+        ),
         "media_tools": {
             "ffmpeg": _binary_version(deps, "ffmpeg"),
             "ffprobe": _binary_version(deps, "ffprobe"),
@@ -675,14 +714,19 @@ def build_preprocess_fingerprint(
 def load_existing_video_result(
     role_dir: Path,
     expected_fingerprint: dict[str, Any],
+    cached_info: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """复用上次预处理；缺少、不匹配、未完成的缓存一律重抽。"""
     cache = role_dir / "_preprocess.json"
     if not cache.is_file():
         return None
-    try:
-        info = json.loads(cache.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    info = cached_info
+    if info is None:
+        try:
+            info = json.loads(cache.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+    if not isinstance(info, dict):
         return None
     if info.get("preprocess_fingerprint") != expected_fingerprint:
         return None
@@ -723,15 +767,22 @@ def _current_role_artifact(info: dict[str, Any], key: str, role_dir: Path) -> Pa
     return candidate if candidate.is_file() else None
 
 
-def _preprocess_artifact_metadata(path: Path) -> dict[str, Any]:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return {"size_bytes": path.stat().st_size, "sha256": digest.hexdigest()}
+def _preprocess_artifact_metadata(path: Path, *, include_sha256: bool = True) -> dict[str, Any]:
+    metadata: dict[str, Any] = _file_probe_from_stat(path.stat())
+    if include_sha256:
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        metadata["sha256"] = digest.hexdigest()
+    return metadata
 
 
-def _build_preprocess_artifact_manifest(role_dir: Path) -> dict[str, Any]:
+def _build_preprocess_artifact_manifest(
+    role_dir: Path,
+    *,
+    include_sha256: bool = True,
+) -> dict[str, Any]:
     """Hash every generated role artifact except the manifest that contains it."""
     root = role_dir.expanduser().resolve()
     files: dict[str, dict[str, Any]] = {}
@@ -743,7 +794,7 @@ def _build_preprocess_artifact_manifest(role_dir: Path) -> dict[str, Any]:
             relative = resolved.relative_to(root).as_posix()
         except ValueError:
             continue
-        files[relative] = _preprocess_artifact_metadata(resolved)
+        files[relative] = _preprocess_artifact_metadata(resolved, include_sha256=include_sha256)
     return {"schema_version": PREPROCESS_ARTIFACT_SCHEMA_VERSION, "files": files}
 
 
@@ -754,6 +805,21 @@ def _preprocess_artifacts_match(role_dir: Path, value: Any) -> bool:
     if not isinstance(recorded, dict) or not recorded:
         return False
     root = role_dir.expanduser().resolve()
+    if all(
+        isinstance(metadata, dict)
+        and all(key in metadata for key in ("size_bytes", "mtime_ns", "ctime_ns", "device", "inode"))
+        for metadata in recorded.values()
+    ):
+        current_probe = _build_preprocess_artifact_manifest(root, include_sha256=False).get("files")
+        recorded_probe = {
+            relative: {
+                key: metadata[key]
+                for key in ("size_bytes", "mtime_ns", "ctime_ns", "device", "inode")
+            }
+            for relative, metadata in recorded.items()
+        }
+        if current_probe == recorded_probe:
+            return True
     current = _build_preprocess_artifact_manifest(root).get("files")
     if current != recorded:
         return False
@@ -826,9 +892,20 @@ def process_video(
     role_dir = run_dir / role
     budget = budget or getattr(args, "_resource_budget", None)
     if getattr(args, "reuse_preprocessing", False):
-        fingerprint = build_preprocess_fingerprint(video_path, deps, args)
-        cached = load_existing_video_result(role_dir, fingerprint)
+        cached_info = None
+        cache_path = role_dir / "_preprocess.json"
+        if cache_path.is_file():
+            try:
+                loaded = json.loads(cache_path.read_text(encoding="utf-8"))
+                cached_info = loaded if isinstance(loaded, dict) else None
+            except (OSError, json.JSONDecodeError):
+                cached_info = None
+        fingerprint = build_preprocess_fingerprint(video_path, deps, args, cached_info=cached_info)
+        cached = load_existing_video_result(role_dir, fingerprint, cached_info=cached_info)
         if cached is not None:
+            if cached.get("path") != str(video_path):
+                cached["path"] = str(video_path)
+                write_json(role_dir / "_preprocess.json", cached)
             try:
                 cached_frames = int(
                     finite_nonnegative(cached.get("frame_count") or 0, "cached frame count")
@@ -967,6 +1044,7 @@ def _process_video_generation(
     # 这些 artifact 只用于复核和后续模型证据定位，不直接改变评分。
     result["video_evidence"] = build_video_evidence_artifacts(role_dir, result)
     result["preprocess_fingerprint"] = build_preprocess_fingerprint(video_path, deps, args)
+    result["preprocess_source_probe"] = _file_probe_from_stat(video_path.stat()) if video_path.is_file() else None
 
     # 落盘预处理结果，供 --reuse-preprocessing 下次复用（即使本次 LLM 阶段后续失败也已写）。
     result["preprocess_completed"] = True
