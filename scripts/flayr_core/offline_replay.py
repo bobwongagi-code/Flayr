@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -245,9 +246,49 @@ def _severity_rank(value: Any) -> int:
     return {"small": 0, "medium": 1, "large": 2}.get(str(value or ""), -1)
 
 
+def discover_analysis_inputs(root: Path) -> list[Path]:
+    """Discover saved analysis artifacts at any depth without following directories."""
+    resolved_root = root.expanduser().resolve()
+    if not resolved_root.is_dir():
+        raise NotADirectoryError(resolved_root)
+    return sorted(
+        path
+        for path in resolved_root.rglob("analysis.json")
+        if path.is_file()
+    )
+
+
+def _safe_sample_component(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "")).strip(" .")
+    return normalized or "unnamed"
+
+
+def _sample_id_for_source(source: Path) -> str:
+    """Return a stable, path-safe ID that cannot collide across nested runs."""
+    resolved = source.expanduser().resolve()
+    sample_root: Path | None = None
+    for parent in (resolved.parent, *resolved.parents):
+        if parent.name.startswith("sample-") and len(parent.name) > len("sample-"):
+            sample_root = parent
+            break
+    if sample_root is not None:
+        sample_name = _safe_sample_component(sample_root.name.removeprefix("sample-"))
+        relative_parent = resolved.parent.relative_to(sample_root)
+        suffix = [
+            _safe_sample_component(part)
+            for part in relative_parent.parts
+            if part not in {"", "."}
+        ]
+        return "__".join([sample_name, *suffix])
+
+    path_digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:12]
+    return f"source-{path_digest}"
+
+
 def replay_many(paths: Iterable[Path]) -> dict[str, Any]:
     """Replay multiple saved artifacts and return a report without writing files."""
     records: list[dict[str, Any]] = []
+    seen_sample_ids: dict[str, Path] = {}
     for path in paths:
         source = path.expanduser().resolve()
         value = json.loads(source.read_text(encoding="utf-8"))
@@ -255,8 +296,16 @@ def replay_many(paths: Iterable[Path]) -> dict[str, Any]:
             raise ValueError(f"replay input must be a JSON object: {source}")
         result = replay_derive_result(value, source)
         metadata = result["offline_derive_replay"]
+        sample_id = _sample_id_for_source(source)
+        previous_source = seen_sample_ids.get(sample_id)
+        if previous_source is not None:
+            raise ValueError(
+                f"offline replay sample_id collision: {sample_id!r} maps to both "
+                f"{previous_source} and {source}"
+            )
+        seen_sample_ids[sample_id] = source
         records.append({
-            "sample_id": source.parent.name.removeprefix("sample-"),
+            "sample_id": sample_id,
             "source": metadata["source"],
             "summary": metadata["summary"],
             "evidence_strength": metadata["evidence_strength"],
@@ -310,4 +359,10 @@ def replay_many(paths: Iterable[Path]) -> dict[str, Any]:
     }
 
 
-__all__ = ["OFFLINE_REPLAY_SCHEMA_VERSION", "replay_derive_result", "replay_many", "sha256_file"]
+__all__ = [
+    "OFFLINE_REPLAY_SCHEMA_VERSION",
+    "discover_analysis_inputs",
+    "replay_derive_result",
+    "replay_many",
+    "sha256_file",
+]

@@ -160,6 +160,42 @@ class PhaseCPatchTests(unittest.TestCase):
                 allowed_stage_codes=["S6"],
             )
 
+    def test_rejects_nested_evidence_from_another_stage(self) -> None:
+        facts = {
+            "creator": {
+                "evidence_units": [
+                    {"id": "C1", "time_range": "0.0s - 2.0s"},
+                    {"id": "C6", "time_range": "20.0s - 22.0s"},
+                ]
+            },
+            "benchmark": {
+                "evidence_units": [
+                    {"id": "B1", "time_range": "0.0s - 2.0s"},
+                    {"id": "B6", "time_range": "20.0s - 22.0s"},
+                ]
+            },
+        }
+        current = {
+            "stage_analysis": [{
+                "stage": "S6 CTA",
+                "creator_time_range": "0.0s - 2.0s",
+                "benchmark_time_range": "0.0s - 2.0s",
+            }]
+        }
+        fields = _s6_patch_fields()
+        fields["creator_s6"] = {"exists": True, "evidence_ids": ["C6"]}
+        fields["benchmark_s6"] = {"exists": False, "evidence_ids": ["B6"]}
+
+        with self.assertRaisesRegex(SystemExit, "must be a subset of creator_evidence_ids"):
+            pipeline.apply_stage_review_updates(
+                current,
+                self._review(fields),
+                {},
+                "",
+                facts,
+                allowed_stage_codes=["S6"],
+            )
+
     def test_legal_patch_runs_repair_validation_and_resolver_after_stale_state_is_removed(self) -> None:
         facts = {
             "creator": {"evidence_units": [{"id": "C1", "time_range": "0.0s - 2.0s", "voiceover": "现在下单", "functions": ["S1", "S2", "S3", "S4", "S5", "S6"]}]},

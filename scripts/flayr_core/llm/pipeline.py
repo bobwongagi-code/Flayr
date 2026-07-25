@@ -72,6 +72,7 @@ from ..postprocess import apply_postprocess_chain
 from ..postprocess.audit import MAX_CHANGE_ENTRIES, PostprocessAudit, build_field_sources
 from ..postprocess.derive import critical_severity_stages
 from ..postprocess.global_diagnosis import materialize_global_diagnosis
+from ..postprocess.utils import evidence_overlaps_range
 from ..postprocess.health_rewrite import (
     sanitize_child_toothpaste_recommendations,
     sanitize_health_recommendations,
@@ -1248,6 +1249,7 @@ def apply_stage_review_updates(
         review_result,
         locked_video_understanding,
         allowed_stage_codes,
+        current_result=current_result,
     )
 
     merged = json.loads(json.dumps(current_result, ensure_ascii=False))
@@ -1280,6 +1282,8 @@ def _validate_stage_review_patches(
     review_result: dict[str, Any],
     locked_video_understanding: dict[str, Any],
     allowed_stage_codes: list[str],
+    *,
+    current_result: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Reject Phase C output outside the closed patch contract before merging."""
     if not isinstance(review_result, dict):
@@ -1297,6 +1301,12 @@ def _validate_stage_review_patches(
 
     allowed = {stage_code(code) for code in allowed_stage_codes}
     available_ids = _phase_c_available_evidence_ids(locked_video_understanding)
+    available_units = _phase_c_available_evidence_units(locked_video_understanding)
+    current_stages = {
+        stage_code(stage.get("stage")): stage
+        for stage in (current_result or {}).get("stage_analysis", [])
+        if isinstance(stage, dict) and stage_code(stage.get("stage"))
+    }
     patches_by_code: dict[str, dict[str, Any]] = {}
     for patch in patches:
         if not isinstance(patch, dict):
@@ -1327,7 +1337,13 @@ def _validate_stage_review_patches(
                 + ", ".join(sorted(missing))
                 + "."
             )
-        _validate_phase_c_patch_evidence_ids(code, fields, available_ids)
+        _validate_phase_c_patch_evidence_ids(
+            code,
+            fields,
+            available_ids,
+            available_units,
+            target_stage=current_stages.get(code),
+        )
         patches_by_code[code] = json.loads(json.dumps(fields, ensure_ascii=False))
     missing_requested = allowed - set(patches_by_code)
     if missing_requested:
@@ -1348,10 +1364,26 @@ def _phase_c_available_evidence_ids(facts: dict[str, Any]) -> dict[str, set[str]
     }
 
 
+def _phase_c_available_evidence_units(
+    facts: dict[str, Any],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    return {
+        role: {
+            str(unit.get("id")): unit
+            for unit in ((facts.get(role) or {}).get("evidence_units") or [])
+            if isinstance(unit, dict) and str(unit.get("id") or "").strip()
+        }
+        for role in ("creator", "benchmark")
+    }
+
+
 def _validate_phase_c_patch_evidence_ids(
     code: str,
     fields: dict[str, Any],
     available_ids: dict[str, set[str]],
+    available_units: dict[str, dict[str, dict[str, Any]]],
+    *,
+    target_stage: dict[str, Any] | None = None,
 ) -> None:
     for role in ("creator", "benchmark"):
         evidence_key = f"{role}_evidence_ids"
@@ -1361,6 +1393,8 @@ def _validate_phase_c_patch_evidence_ids(
         normalized_ids = [str(item).strip() for item in evidence_ids]
         if any(not item for item in normalized_ids):
             raise SystemExit(f"Phase C patch for {code} has blank {evidence_key}.")
+        if len(normalized_ids) != len(set(normalized_ids)):
+            raise SystemExit(f"Phase C patch for {code} has duplicate {evidence_key}.")
         missing = sorted(set(normalized_ids) - available_ids[role])
         if missing:
             raise SystemExit(
@@ -1379,6 +1413,8 @@ def _validate_phase_c_patch_evidence_ids(
             normalized_nested = [str(item).strip() for item in nested_ids]
             if any(not item for item in normalized_nested):
                 raise SystemExit(f"Phase C patch for {code} has blank {fact_key}.{nested_key}.")
+            if len(normalized_nested) != len(set(normalized_nested)):
+                raise SystemExit(f"Phase C patch for {code} has duplicate {fact_key}.{nested_key}.")
             nested_missing = sorted(set(normalized_nested) - available_ids[role])
             if nested_missing:
                 raise SystemExit(
@@ -1386,6 +1422,30 @@ def _validate_phase_c_patch_evidence_ids(
                     + ", ".join(nested_missing)
                     + "."
                 )
+            outside_stage = sorted(set(normalized_nested) - set(normalized_ids))
+            if outside_stage:
+                raise SystemExit(
+                    f"Phase C patch for {code} {fact_key}.{nested_key} must be a subset of "
+                    f"{evidence_key}: "
+                    + ", ".join(outside_stage)
+                    + "."
+                )
+            stage_range = (target_stage or {}).get(f"{role}_time_range")
+            if stage_range is not None:
+                outside_time = [
+                    evidence_id
+                    for evidence_id in normalized_nested
+                    if not evidence_overlaps_range(
+                        available_units[role][evidence_id],
+                        stage_range,
+                    )
+                ]
+                if outside_time:
+                    raise SystemExit(
+                        f"Phase C patch for {code} {fact_key}.{nested_key} must overlap the target stage time range: "
+                        + ", ".join(outside_time)
+                        + "."
+                    )
 
 
 def _phase_c_patch_snapshots(

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from scripts.flayr_core.evidence_states import evidence_strength_gate_report
-from scripts.flayr_core.offline_replay import replay_derive_result, replay_many
+from scripts.flayr_core.offline_replay import discover_analysis_inputs, replay_derive_result, replay_many
 
 
 class OfflineReplayTests(unittest.TestCase):
@@ -98,6 +98,26 @@ class OfflineReplayTests(unittest.TestCase):
             self.assertEqual(report["summary"]["inputs"], 2)
             self.assertEqual([item["sample_id"] for item in report["records"]], ["a", "b"])
             self.assertIn("result", report["records"][0])
+
+    def test_nested_discovery_keeps_multiple_runs_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "history"
+            for relative in (
+                "sample-a/run_01/analysis.json",
+                "sample-a/run_02/analysis.json",
+                "sample-b/run_01/analysis.json",
+            ):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(self._result()), encoding="utf-8")
+
+            paths = discover_analysis_inputs(root)
+            report = replay_many(paths)
+
+            self.assertEqual(
+                [item["sample_id"] for item in report["records"]],
+                ["a__run_01", "a__run_02", "b__run_01"],
+            )
 
     def test_evidence_strength_missing_is_a_closed_gate_not_absent(self) -> None:
         report = evidence_strength_gate_report(self._result())

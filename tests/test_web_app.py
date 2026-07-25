@@ -241,8 +241,11 @@ class WebAppHelpersTests(unittest.TestCase):
                 with self.assertRaises(HTTPError) as error:
                     urlopen(Request(url, headers={"Cookie": "flayr_client_id=owner-a"}))
                 self.assertEqual(error.exception.code, 404)
+                tampered_signature = signed_owner_a[:-1] + (
+                    "0" if signed_owner_a[-1] != "0" else "1"
+                )
                 with self.assertRaises(HTTPError) as error:
-                    urlopen(Request(url, headers={"Cookie": f"flayr_client_id={signed_owner_a[:-1]}0"}))
+                    urlopen(Request(url, headers={"Cookie": f"flayr_client_id={tampered_signature}"}))
                 self.assertEqual(error.exception.code, 404)
             finally:
                 server.shutdown()

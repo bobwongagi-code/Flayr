@@ -87,6 +87,8 @@ def _validate_structured_flag_evidence_ids(
     role: str,
     flag_name: str,
     flag: dict[str, Any],
+    *,
+    stage: dict[str, Any] | None = None,
 ) -> list[str]:
     """Ensure structured S3/S4 facts reference the locked Stage1 units.
 
@@ -112,6 +114,39 @@ def _validate_structured_flag_evidence_ids(
     missing = [value for value in normalized if value not in available]
     if missing:
         errors.append(f"{key}.evidence_ids 引用了不存在的 Stage1 证据：{', '.join(missing)}")
+    if stage is not None:
+        stage_references = stage.get(f"{role}_evidence_ids")
+        if isinstance(stage_references, list):
+            normalized_stage_references = {
+                str(value).strip()
+                for value in stage_references
+                if str(value).strip()
+            }
+            outside_stage = sorted(set(normalized) - normalized_stage_references)
+            if outside_stage:
+                errors.append(
+                    f"{key}.evidence_ids 必须属于该阶段的 {role}_evidence_ids："
+                    + ", ".join(outside_stage)
+                )
+        stage_range = stage.get(f"{role}_time_range")
+        if stage_range is not None:
+            units = result.get("video_understanding", {}).get(role, {}).get("evidence_units", [])
+            units_by_id = {
+                str(unit.get("id")): unit
+                for unit in units
+                if isinstance(unit, dict) and str(unit.get("id") or "").strip()
+            }
+            outside_time = [
+                evidence_id
+                for evidence_id in normalized
+                if evidence_id in units_by_id
+                and not evidence_overlaps_range(units_by_id[evidence_id], stage_range)
+            ]
+            if outside_time:
+                errors.append(
+                    f"{key}.evidence_ids 必须落在该阶段时间范围内："
+                    + ", ".join(outside_time)
+                )
     return errors
 
 
@@ -554,7 +589,7 @@ def validate_s3_usage_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
         if evidence_state_required and flag.get("usage_evidence_state") not in S3_USAGE_EVIDENCE_STATES:
             errors.append(f"S3 {key}.usage_evidence_state 必须是 none/partial/complete/uncertain")
         if evidence_state_required:
-            errors.extend(_validate_structured_flag_evidence_ids(result, role, "s3", flag))
+            errors.extend(_validate_structured_flag_evidence_ids(result, role, "s3", flag, stage=s3))
         for bool_key in (
             "exists",
             "usage_process_visible",
@@ -636,7 +671,7 @@ def validate_s4_effect_flags(result: dict[str, Any], analysis: dict[str, Any]) -
         if evidence_state_required and flag.get("effect_evidence_state") not in S4_EFFECT_EVIDENCE_STATES:
             errors.append(f"S4 {key}.effect_evidence_state 必须是 none/result_only/verified/uncertain")
         if evidence_state_required:
-            errors.extend(_validate_structured_flag_evidence_ids(result, role, "s4", flag))
+            errors.extend(_validate_structured_flag_evidence_ids(result, role, "s4", flag, stage=s4))
         for bool_key in (
             "effect_visible",
             "effect_proposition_matched",

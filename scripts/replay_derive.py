@@ -7,7 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
-from flayr_core.offline_replay import replay_derive_result, replay_many
+from flayr_core.offline_replay import discover_analysis_inputs, replay_derive_result, replay_many
 
 
 def _read_result(path: Path) -> dict:
@@ -29,9 +29,12 @@ def main() -> int:
         paths = [path.expanduser().resolve() for path in args.input]
     else:
         root = args.input_root.expanduser().resolve()
-        paths = sorted(root.glob("sample-*/analysis.json"))
+        try:
+            paths = discover_analysis_inputs(root)
+        except NotADirectoryError:
+            parser.error(f"input-root 不是目录：{root}")
         if not paths:
-            parser.error(f"input-root 下没有找到 sample-*/analysis.json：{root}")
+            parser.error(f"input-root 下没有找到 analysis.json：{root}")
 
     if len(paths) == 1 and args.input and args.output.suffix.lower() == ".json":
         output = args.output.expanduser().resolve()

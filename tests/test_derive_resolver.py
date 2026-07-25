@@ -657,6 +657,32 @@ class DeriveResolverTests(unittest.TestCase):
         )
         self.assertTrue(any("repair 占位证据" in error for error in placeholder))
 
+    def test_structured_s3_evidence_must_belong_to_the_stage(self) -> None:
+        result = {
+            "video_understanding": {
+                "creator": {
+                    "evidence_units": [
+                        {"id": "C3", "time_range": "0.0s - 2.0s", "evidence_strength": "direct"},
+                        {"id": "C6", "time_range": "20.0s - 22.0s", "evidence_strength": "direct"},
+                    ]
+                },
+                "benchmark": {"evidence_units": [{"id": "B3", "time_range": "0.0s - 2.0s"}]},
+            }
+        }
+        stage = {
+            "creator_evidence_ids": ["C3"],
+            "creator_time_range": "0.0s - 2.0s",
+        }
+        errors = _validate_structured_flag_evidence_ids(
+            result,
+            "creator",
+            "s3",
+            {"evidence_ids": ["C6"]},
+            stage=stage,
+        )
+        self.assertTrue(any("必须属于该阶段" in error for error in errors))
+        self.assertTrue(any("必须落在该阶段时间范围内" in error for error in errors))
+
     def test_required_s3_validation_rejects_unknown_structured_evidence_id(self) -> None:
         creator = _s3_flag("partial", "C-not-in-facts")
         benchmark = _s3_flag("complete", "B3")
