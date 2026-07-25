@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import socket
 import tempfile
 import threading
 import time
@@ -17,6 +18,8 @@ from scripts.web_app import (
     JOB_RETENTION_SECONDS,
     MIN_FREE_SPACE_BYTES,
     UPLOAD_STAGING_TTL_SECONDS,
+    UPLOAD_IDLE_TIMEOUT_SECONDS,
+    UPLOAD_TOTAL_TIMEOUT_SECONDS,
     SubmissionRateLimiter,
     WEB_ALLOWED_HOSTS_ENV,
     WEB_AUTH_TOKEN_ENV,
@@ -691,6 +694,42 @@ class WebAppHelpersTests(unittest.TestCase):
                     )
                     self.assertEqual(response.status, 200)
                     self.assertEqual(response.read(), payload)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                store.shutdown()
+
+    def test_http_upload_times_out_when_body_stalls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            server = FlayrServer(("127.0.0.1", 0), store)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with (
+                    mock.patch("scripts.web_app.UPLOAD_IDLE_TIMEOUT_SECONDS", 0.05),
+                    mock.patch("scripts.web_app.UPLOAD_TOTAL_TIMEOUT_SECONDS", 0.1),
+                    socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=2) as client,
+                ):
+                    client.settimeout(2)
+                    client.sendall(
+                        b"POST /api/jobs HTTP/1.0\r\n"
+                        b"Host: 127.0.0.1\r\n"
+                        b"Content-Type: multipart/form-data; boundary=test\r\n"
+                        b"Content-Length: 4\r\n"
+                        b"\r\n"
+                        b"x"
+                    )
+                    response_parts = []
+                    while True:
+                        chunk = client.recv(4096)
+                        if not chunk:
+                            break
+                        response_parts.append(chunk)
+                    response = b"".join(response_parts)
+                self.assertIn(b"400", response)
+                self.assertIn("上传读取超时".encode("utf-8"), response)
             finally:
                 server.shutdown()
                 server.server_close()

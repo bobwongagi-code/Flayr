@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -66,6 +67,9 @@ JOB_RETENTION_SECONDS = 7 * 24 * 60 * 60
 MAX_WEB_STORAGE_BYTES = 20 * 1024 * 1024 * 1024
 MAX_WORKSPACE_STORAGE_BYTES = 10 * 1024 * 1024 * 1024
 MIN_FREE_SPACE_BYTES = 512 * 1024 * 1024
+REQUEST_HEADER_TIMEOUT_SECONDS = 15.0
+UPLOAD_IDLE_TIMEOUT_SECONDS = 30.0
+UPLOAD_TOTAL_TIMEOUT_SECONDS = 30 * 60
 BOUNDARY_BYTES_LIMIT = 200
 DEFAULT_WORKSPACE_ID = "local"
 DEFAULT_OWNER_ID = "local"
@@ -1275,6 +1279,10 @@ class FlayrServer(ThreadingHTTPServer):
 class FlayrHandler(BaseHTTPRequestHandler):
     server: FlayrServer
 
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(REQUEST_HEADER_TIMEOUT_SECONDS)
+
     def log_message(self, format: str, *args: Any) -> None:
         sys.stderr.write("[flayr-web] " + (format % args) + "\n")
 
@@ -1510,53 +1518,75 @@ class FlayrHandler(BaseHTTPRequestHandler):
         return max(1, content_length) * 2
 
     def _read_request_body(self, destination: Any) -> None:
-        transfer_encoding = self.headers.get("Transfer-Encoding", "").lower()
-        if "chunked" in transfer_encoding:
-            total = 0
-            while True:
-                line = self.rfile.readline(128)
-                if not line or len(line) > 127:
-                    raise RequestError("chunked 上传请求无效")
-                try:
-                    size = int(line.split(b";", 1)[0].strip(), 16)
-                except ValueError as exc:
-                    raise RequestError("chunked 上传请求无效") from exc
-                if size < 0:
-                    raise RequestError("chunked 上传请求无效")
-                if size == 0:
-                    while True:
-                        trailer = self.rfile.readline(64 * 1024 + 1)
-                        if trailer in {b"", b"\r\n", b"\n"}:
-                            return
-                        if len(trailer) > 64 * 1024:
-                            raise RequestError("chunked trailer 过大")
-                remaining = size
-                while remaining:
-                    chunk = self.rfile.read(min(UPLOAD_CHUNK_BYTES, remaining))
-                    if not chunk:
-                        raise RequestError("上传请求提前结束")
-                    total += len(chunk)
-                    if total > MAX_REQUEST_BYTES:
-                        raise RequestError("上传请求超过大小限制")
-                    destination.write(chunk)
-                    remaining -= len(chunk)
-                if self.rfile.read(2) != b"\r\n":
-                    raise RequestError("chunked 上传请求无效")
+        started_at = time.monotonic()
+        deadline = started_at + UPLOAD_TOTAL_TIMEOUT_SECONDS
+        previous_timeout = self.connection.gettimeout()
+
+        def read_with_deadline(reader: Any) -> bytes:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RequestError("上传读取超时")
+            self.connection.settimeout(min(UPLOAD_IDLE_TIMEOUT_SECONDS, remaining))
+            try:
+                result = reader()
+            except socket.timeout as exc:
+                raise RequestError("上传读取超时") from exc
+            if time.monotonic() > deadline:
+                raise RequestError("上传读取超时")
+            return result
+
         try:
-            content_length = int(self.headers.get("Content-Length", "-1"))
-        except ValueError:
-            content_length = -1
-        if content_length < 0:
-            raise RequestError("上传请求必须包含 Content-Length 或 chunked 编码")
-        if content_length > MAX_REQUEST_BYTES:
-            raise RequestError("上传请求超过大小限制")
-        remaining = content_length
-        while remaining:
-            chunk = self.rfile.read(min(UPLOAD_CHUNK_BYTES, remaining))
-            if not chunk:
-                raise RequestError("上传请求提前结束")
-            destination.write(chunk)
-            remaining -= len(chunk)
+            transfer_encoding = self.headers.get("Transfer-Encoding", "").lower()
+            if "chunked" in transfer_encoding:
+                total = 0
+                while True:
+                    line = read_with_deadline(lambda: self.rfile.readline(128))
+                    if not line or len(line) > 127:
+                        raise RequestError("chunked 上传请求无效")
+                    try:
+                        size = int(line.split(b";", 1)[0].strip(), 16)
+                    except ValueError as exc:
+                        raise RequestError("chunked 上传请求无效") from exc
+                    if size < 0:
+                        raise RequestError("chunked 上传请求无效")
+                    if size == 0:
+                        while True:
+                            trailer = read_with_deadline(lambda: self.rfile.readline(64 * 1024 + 1))
+                            if trailer in {b"", b"\r\n", b"\n"}:
+                                return
+                            if len(trailer) > 64 * 1024:
+                                raise RequestError("chunked trailer 过大")
+                    remaining = size
+                    while remaining:
+                        chunk = read_with_deadline(
+                            lambda: self.rfile.read(min(UPLOAD_CHUNK_BYTES, remaining))
+                        )
+                        if not chunk:
+                            raise RequestError("上传请求提前结束")
+                        total += len(chunk)
+                        if total > MAX_REQUEST_BYTES:
+                            raise RequestError("上传请求超过大小限制")
+                        destination.write(chunk)
+                        remaining -= len(chunk)
+                    if read_with_deadline(lambda: self.rfile.read(2)) != b"\r\n":
+                        raise RequestError("chunked 上传请求无效")
+            try:
+                content_length = int(self.headers.get("Content-Length", "-1"))
+            except ValueError:
+                content_length = -1
+            if content_length < 0:
+                raise RequestError("上传请求必须包含 Content-Length 或 chunked 编码")
+            if content_length > MAX_REQUEST_BYTES:
+                raise RequestError("上传请求超过大小限制")
+            remaining = content_length
+            while remaining:
+                chunk = read_with_deadline(lambda: self.rfile.read(min(UPLOAD_CHUNK_BYTES, remaining)))
+                if not chunk:
+                    raise RequestError("上传请求提前结束")
+                destination.write(chunk)
+                remaining -= len(chunk)
+        finally:
+            self.connection.settimeout(previous_timeout)
 
     def _serve_job_artifact(
         self,
