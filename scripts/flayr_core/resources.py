@@ -339,7 +339,7 @@ def encode_file_data_url(path: Path, *, max_bytes: int, expected_kind: str = "im
         raise ResourceBudgetExceeded(f"media signature is not audio: {path}")
     if expected_kind == "video" and not mime_type.startswith("video/"):
         raise ResourceBudgetExceeded(f"media signature is not a video: {path}")
-    parts: list[str] = []
+    encoded = bytearray(f"data:{mime_type};base64,".encode("ascii"))
     remainder = b""
     bytes_read = 0
     with path.open("rb") as source:
@@ -353,11 +353,11 @@ def encode_file_data_url(path: Path, *, max_bytes: int, expected_kind: str = "im
             data = remainder + chunk
             usable = len(data) - (len(data) % 3)
             if usable:
-                parts.append(base64.b64encode(data[:usable]).decode("ascii"))
+                encoded.extend(base64.b64encode(data[:usable]))
             remainder = data[usable:]
     if remainder:
-        parts.append(base64.b64encode(remainder).decode("ascii"))
-    return f"data:{mime_type};base64,{''.join(parts)}"
+        encoded.extend(base64.b64encode(remainder))
+    return encoded.decode("ascii")
 
 
 def _sniff_mime_type(path: Path) -> str:

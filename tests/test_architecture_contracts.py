@@ -955,6 +955,7 @@ class ArchitectureContractTests(unittest.TestCase):
                 ),
                 mock.patch.object(llm_api, "run_command", side_effect=fake_run),
                 mock.patch.object(llm_api.time, "sleep"),
+                mock.patch("pathlib.Path.read_text", side_effect=AssertionError("payload was rebuilt as text")),
             ):
                 raw = llm_api.call_llm_api("https://example.test/v1/chat/completions", "secret", payload_path, raw_path)
 

@@ -104,6 +104,12 @@ def _curl_resolve_entries(validated: ValidatedOutboundURL) -> tuple[str, ...]:
     return tuple(entries)
 
 
+def _write_request_json(path: Path, payload: dict[str, Any]) -> None:
+    """Serialize a request directly to its temporary file without a second full string."""
+    with path.open("w", encoding="utf-8") as sink:
+        json.dump(payload, sink, ensure_ascii=False)
+
+
 def read_llm_api_key(args: argparse.Namespace) -> str:
     """优先从环境变量读取 API key，回退到 macOS Keychain。"""
     # env 与 keychain 两条路径都 strip：尾换行混进 Authorization 头会把请求体顶空（400 Request body is required）
@@ -306,24 +312,21 @@ def call_llm_api(
             payload_path.unlink(missing_ok=True)
         raise SystemExit(f"LLM request payload exceeds the single-request byte limit: {request_size}")
     try:
-        payload_text = payload_path.read_text(encoding="utf-8")
+        with payload_path.open("r", encoding="utf-8") as source:
+            payload = json.load(source)
     except (OSError, json.JSONDecodeError) as exc:
         raise SystemExit(f"LLM request payload is invalid: {exc}") from exc
     finally:
         if cleanup_payload:
             payload_path.unlink(missing_ok=True)
-    try:
-        payload = json.loads(payload_text)
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"LLM request payload is invalid: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise SystemExit("LLM request payload must be a JSON object")
     payload["stream"] = True
     stream_options = payload.get("stream_options")
     if not isinstance(stream_options, dict):
         stream_options = {}
     stream_options["include_usage"] = True
     payload["stream_options"] = stream_options
-    if cleanup_payload:
-        payload_path.unlink(missing_ok=True)
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         max_time_seconds = max(
@@ -358,7 +361,7 @@ def call_llm_api(
     with tempfile.TemporaryDirectory(prefix=f".{raw_path.stem}.flayr-tmp.", dir=raw_path.parent) as temp_dir:
         temp_root = Path(temp_dir)
         req_path = temp_root / "request.json"
-        write_text(req_path, json.dumps(payload, ensure_ascii=False))
+        _write_request_json(req_path, payload)
         curl_command = [
             "curl",
             "-sS",
@@ -487,7 +490,7 @@ def call_llm_api(
                     # length 是服务端主动截断，不是可修复的残缺 JSON。先提高同一请求的输出预算再重发。
                     old_budget, new_budget = increase_output_budget(payload)
                     if new_budget > old_budget:
-                        write_text(req_path, json.dumps(payload, ensure_ascii=False))
+                        _write_request_json(req_path, payload)
                         last_error = f"输出被 max_tokens={old_budget} 截断，已提高至 {new_budget} 后重试"
                     else:
                         last_error = f"输出在 max_tokens={old_budget} 仍被截断"
