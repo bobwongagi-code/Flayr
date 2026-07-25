@@ -117,17 +117,17 @@ def process_group_popen_kwargs() -> dict[str, Any]:
     return {"creationflags": creation_flag} if creation_flag else {}
 
 
-def _signal_process_group(process: subprocess.Popen, sig: signal.Signals) -> None:
+def _signal_process_group(process: subprocess.Popen, *, force: bool = False) -> None:
     if process.poll() is not None:
         return
     if os.name == "posix":
         try:
-            os.killpg(process.pid, sig)
+            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
             return
         except (ProcessLookupError, PermissionError):
             pass
     try:
-        if sig == signal.SIGKILL:
+        if force:
             process.kill()
         else:
             process.terminate()
@@ -137,12 +137,12 @@ def _signal_process_group(process: subprocess.Popen, sig: signal.Signals) -> Non
 
 def stop_process_group(process: subprocess.Popen, *, grace_seconds: float = 2.0) -> None:
     """Stop a process and all descendants, with a bounded graceful window."""
-    _signal_process_group(process, signal.SIGTERM)
+    _signal_process_group(process)
     try:
         process.wait(timeout=max(0.0, float(grace_seconds)))
         return
     except subprocess.TimeoutExpired:
-        _signal_process_group(process, signal.SIGKILL)
+        _signal_process_group(process, force=True)
     except (OSError, ProcessLookupError):
         return
     try:

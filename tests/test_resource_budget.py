@@ -119,7 +119,11 @@ class ResourceBudgetTests(unittest.TestCase):
         with mock.patch.object(utils.subprocess, "Popen", wraps=utils.subprocess.Popen) as popen:
             completed = run_command([sys.executable, "-c", "print('ok')"], timeout_seconds=5)
         self.assertEqual(completed.returncode, 0)
-        self.assertTrue(popen.call_args.kwargs.get("start_new_session"))
+        kwargs = popen.call_args.kwargs
+        if os.name == "posix":
+            self.assertTrue(kwargs.get("start_new_session"))
+        else:
+            self.assertGreater(kwargs.get("creationflags", 0), 0)
 
     def test_command_callback_receives_stream_without_stdout_buffer(self) -> None:
         chunks: list[bytes] = []

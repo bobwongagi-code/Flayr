@@ -477,8 +477,11 @@ class WebAppHelpersTests(unittest.TestCase):
             ):
                 store._run_job(job_id)
             self.assertIsNone(read_run_state(run_dir))
-            self.assertIn("start_new_session", popen.call_args.kwargs)
-            self.assertTrue(popen.call_args.kwargs["start_new_session"])
+            kwargs = popen.call_args.kwargs
+            if os.name == "posix":
+                self.assertTrue(kwargs.get("start_new_session"))
+            else:
+                self.assertGreater(kwargs.get("creationflags", 0), 0)
             store.shutdown()
 
     def test_shutdown_stops_running_process_groups_before_waiting_for_workers(self) -> None:

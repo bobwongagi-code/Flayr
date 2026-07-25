@@ -49,8 +49,10 @@ from typing import Any
 
 try:  # works both as ``python scripts/batch_analyze.py`` and as a test module
     from flayr_core.run_manifest import SUCCESS_MANIFEST_NAME, command_digest, validate_success_manifest
+    from flayr_core.utils import process_group_popen_kwargs
 except ModuleNotFoundError:  # pragma: no cover - package import path in test runners
     from scripts.flayr_core.run_manifest import SUCCESS_MANIFEST_NAME, command_digest, validate_success_manifest
+    from scripts.flayr_core.utils import process_group_popen_kwargs
 
 ROOT = Path(__file__).resolve().parents[1]
 SAFE_JOB_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -425,17 +427,17 @@ def _pid_alive(pid: int) -> bool:
         return True  # 进程存在但无权发信号 = 存活
 
 
-def _signal_process_group(proc: subprocess.Popen, sig: signal.Signals) -> None:
+def _signal_process_group(proc: subprocess.Popen, *, force: bool = False) -> None:
     if proc.poll() is not None:
         return
     if os.name == "posix":
         try:
-            os.killpg(proc.pid, sig)
+            os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
             return
         except (ProcessLookupError, PermissionError):
             pass
     try:
-        if sig == signal.SIGKILL:
+        if force:
             proc.kill()
         else:
             proc.terminate()
@@ -445,12 +447,12 @@ def _signal_process_group(proc: subprocess.Popen, sig: signal.Signals) -> None:
 
 def _stop_process(proc: subprocess.Popen, grace_seconds: float = SHUTDOWN_GRACE_SECONDS) -> None:
     """Stop one child process group with its own grace window."""
-    _signal_process_group(proc, signal.SIGTERM)
+    _signal_process_group(proc)
     try:
         proc.wait(timeout=grace_seconds)
         return
     except subprocess.TimeoutExpired:
-        _signal_process_group(proc, signal.SIGKILL)
+        _signal_process_group(proc, force=True)
         proc.wait()
 
 
@@ -495,7 +497,7 @@ def _run_jobs(
                 build_command(job, out, common_args, trusted_args),
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
-                start_new_session=(os.name == "posix"),
+                **process_group_popen_kwargs(),
             )
         except BaseException:
             log_file.close()
