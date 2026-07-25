@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
@@ -12,11 +14,15 @@ from unittest import mock
 from scripts.web_app import (
     FlayrServer,
     JobStore,
+    JOB_RETENTION_SECONDS,
+    MIN_FREE_SPACE_BYTES,
+    UPLOAD_STAGING_TTL_SECONDS,
     SubmissionRateLimiter,
     WEB_ALLOWED_HOSTS_ENV,
     WEB_AUTH_TOKEN_ENV,
     _resolve_web_security,
     _signed_client_cookie,
+    cleanup_upload_files,
     parse_multipart,
     progress_for_run,
     safe_asset_path,
@@ -168,6 +174,165 @@ class WebAppHelpersTests(unittest.TestCase):
                         }
                 self.assertIn("今日任务额度", store.admission_error(owner_id="owner-a", workspace_id="local"))
             finally:
+                store.shutdown()
+
+    def test_duplicate_multipart_fields_are_rejected_without_staging_leaks(self) -> None:
+        boundary = b"----DuplicateBoundary"
+        body = (
+            b"--" + boundary + b"\r\n"
+            b"Content-Disposition: form-data; name=\"creator_video\"; filename=\"one.mp4\"\r\n"
+            b"Content-Type: video/mp4\r\n\r\n"
+            b"first\r\n"
+            b"--" + boundary + b"\r\n"
+            b"Content-Disposition: form-data; name=\"creator_video\"; filename=\"two.mp4\"\r\n"
+            b"Content-Type: video/mp4\r\n\r\n"
+            b"second\r\n"
+            b"--" + boundary + b"--\r\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            body_path = root / "body"
+            body_path.write_bytes(body)
+            with mock.patch("scripts.web_app.WEB_ROOT", root):
+                with self.assertRaisesRegex(Exception, "multipart 字段重复"):
+                    parse_multipart(body_path, f"multipart/form-data; boundary={boundary.decode()}")
+            self.assertEqual(list(root.glob(".upload-part-*")), [])
+
+    def test_cleanup_upload_files_removes_unadopted_and_unknown_parts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / ".upload-part-one"
+            second = Path(tmp) / ".upload-part-two"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            cleanup_upload_files({
+                "creator_video": {"path": first},
+                "unexpected": {"path": second},
+            })
+            self.assertFalse(first.exists())
+            self.assertFalse(second.exists())
+
+    def test_storage_reservation_enforces_quota_and_free_space(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            try:
+                with (
+                    mock.patch("scripts.web_app._directory_size", return_value=0),
+                    mock.patch("scripts.web_app.shutil.disk_usage", return_value=mock.Mock(free=MIN_FREE_SPACE_BYTES)),
+                ):
+                    with self.assertRaisesRegex(Exception, "可用磁盘空间不足"):
+                        store.reserve_upload("local", 1)
+                with (
+                    mock.patch("scripts.web_app._directory_size", return_value=10 * 1024 * 1024 * 1024),
+                    mock.patch("scripts.web_app.shutil.disk_usage", return_value=mock.Mock(free=10**15)),
+                ):
+                    with self.assertRaisesRegex(Exception, "工作区存储空间"):
+                        store.reserve_upload("local", 1)
+                with (
+                    mock.patch("scripts.web_app._directory_size", return_value=0),
+                    mock.patch("scripts.web_app.shutil.disk_usage", return_value=mock.Mock(free=10**15)),
+                ):
+                    store.reserve_upload("local", 128)
+                    self.assertEqual(store._storage_reservations["local"], 128)
+                    store.release_upload("local", 128)
+                    self.assertNotIn("local", store._storage_reservations)
+            finally:
+                store.shutdown()
+
+    def test_startup_gc_removes_old_staging_and_expired_terminal_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stale_upload = root / ".upload-part-old"
+            stale_upload.write_bytes(b"orphan")
+            old_time = time.time() - UPLOAD_STAGING_TTL_SECONDS - 1
+            os.utime(stale_upload, (old_time, old_time))
+            job_root = root / "jobs" / "job-old"
+            (job_root / "run").mkdir(parents=True)
+            (job_root / "run" / "report.html").write_text("<html></html>", encoding="utf-8")
+            old_created_at = "2000-01-01T00:00:00+00:00"
+            (root / "jobs.json").write_text(
+                json.dumps({
+                    "job-old": {
+                        "id": "job-old",
+                        "workspace_id": "local",
+                        "owner_id": "owner-a",
+                        "status": "completed",
+                        "created_at": old_created_at,
+                        "run_dir": str(job_root / "run"),
+                    }
+                }),
+                encoding="utf-8",
+            )
+            store = JobStore(root)
+            try:
+                self.assertFalse(stale_upload.exists())
+                self.assertIsNone(store.get("job-old"))
+                self.assertFalse(job_root.exists())
+            finally:
+                store.shutdown()
+
+    def test_delete_job_removes_index_files_and_running_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root)
+            benchmark = root / "benchmark.mp4"
+            creator = root / "creator.mp4"
+            benchmark.write_bytes(b"benchmark")
+            creator.write_bytes(b"creator")
+            files = {
+                "benchmark_video": {"path": benchmark, "filename": "benchmark.mp4"},
+                "creator_video": {"path": creator, "filename": "creator.mp4"},
+            }
+            try:
+                with mock.patch.object(store._executor, "submit"):
+                    public = store.create({"product_name": "测试"}, files, owner_id="owner-a")
+                job_id = str(public["id"])
+                job_root = root / "jobs" / job_id
+                process = mock.Mock()
+                with store._lock:
+                    store._running_processes[job_id] = process
+                with mock.patch("scripts.web_app.stop_process_group") as stop:
+                    self.assertFalse(store.delete(job_id, owner_id="owner-b", workspace_id="local"))
+                    self.assertTrue(store.delete(job_id, owner_id="owner-a", workspace_id="local"))
+                stop.assert_called_once_with(process, grace_seconds=5.0)
+                self.assertNotIn(job_id, store.jobs)
+                self.assertFalse(job_root.exists())
+            finally:
+                store.shutdown()
+
+    def test_http_delete_job_uses_browser_owner_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root)
+            benchmark = root / "benchmark.mp4"
+            creator = root / "creator.mp4"
+            benchmark.write_bytes(b"benchmark")
+            creator.write_bytes(b"creator")
+            files = {
+                "benchmark_video": {"path": benchmark, "filename": "benchmark.mp4"},
+                "creator_video": {"path": creator, "filename": "creator.mp4"},
+            }
+            with mock.patch.object(store._executor, "submit"):
+                public = store.create({"product_name": "测试"}, files, owner_id="owner-a")
+            job_id = str(public["id"])
+            server = FlayrServer(("127.0.0.1", 0), store)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            url = f"http://127.0.0.1:{server.server_address[1]}/api/jobs/{job_id}"
+            try:
+                signed_owner_a = _signed_client_cookie("owner-a", server.client_cookie_secret)
+                response = urlopen(
+                    Request(
+                        url,
+                        method="DELETE",
+                        headers={"Cookie": f"flayr_client_id={signed_owner_a}"},
+                    )
+                )
+                self.assertEqual(response.status, 204)
+                self.assertNotIn(job_id, store.jobs)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
                 store.shutdown()
 
     def test_parse_multipart_keeps_uploads_in_temp_files(self) -> None:

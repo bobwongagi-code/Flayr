@@ -60,6 +60,11 @@ MAX_FIELD_BYTES = 1024 * 1024
 MAX_REQUEST_BYTES = MAX_VIDEO_BYTES * 2 + 8 * 1024 * 1024
 MAX_SERVED_ASSET_BYTES = MAX_VIDEO_BYTES
 UPLOAD_CHUNK_BYTES = 64 * 1024
+UPLOAD_STAGING_TTL_SECONDS = 60 * 60
+JOB_RETENTION_SECONDS = 7 * 24 * 60 * 60
+MAX_WEB_STORAGE_BYTES = 20 * 1024 * 1024 * 1024
+MAX_WORKSPACE_STORAGE_BYTES = 10 * 1024 * 1024 * 1024
+MIN_FREE_SPACE_BYTES = 512 * 1024 * 1024
 BOUNDARY_BYTES_LIMIT = 200
 DEFAULT_WORKSPACE_ID = "local"
 DEFAULT_OWNER_ID = "local"
@@ -421,6 +426,29 @@ def _servable_asset(path: Path) -> bool:
     return _asset_magic_matches(path)
 
 
+def _directory_size(root: Path) -> int:
+    """Count regular files without following symlinks outside the managed root."""
+    total = 0
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+    return total
+
+
 def _safe_servable_asset(run_dir: Path, relative_path: str) -> Path | None:
     candidate = safe_asset_path(run_dir, relative_path)
     return candidate if candidate is not None and _servable_asset(candidate) else None
@@ -475,7 +503,12 @@ def _copy_part_until_boundary(source: Any, boundary: bytes, sink: Any, limit: in
             del buffer[:flush_length]
 
 
-def parse_multipart(body_path: Path, content_type: str) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
+def parse_multipart(
+    body_path: Path,
+    content_type: str,
+    *,
+    staging_root: Path | None = None,
+) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
     header = Message()
     header["content-type"] = content_type
     boundary_value = header.get_param("boundary", header="content-type")
@@ -487,8 +520,10 @@ def parse_multipart(body_path: Path, content_type: str) -> tuple[dict[str, str],
 
     fields: dict[str, str] = {}
     files: dict[str, dict[str, Any]] = {}
+    seen_names: set[str] = set()
     temp_paths: list[Path] = []
-    WEB_ROOT.mkdir(parents=True, exist_ok=True)
+    staging_root = (staging_root or WEB_ROOT).resolve()
+    staging_root.mkdir(parents=True, exist_ok=True)
     try:
         with body_path.open("rb") as source:
             first = source.readline(BOUNDARY_BYTES_LIMIT + 8)
@@ -518,9 +553,12 @@ def parse_multipart(body_path: Path, content_type: str) -> tuple[dict[str, str],
                 name, filename = _content_disposition(disposition)
                 if not name:
                     raise RequestError("multipart 字段名为空")
+                if name in seen_names:
+                    raise RequestError(f"multipart 字段重复：{name}")
+                seen_names.add(name)
                 if filename is not None:
                     safe_name = Path(filename).name or "upload.bin"
-                    temp = tempfile.NamedTemporaryFile(prefix=".upload-part-", dir=WEB_ROOT, delete=False)
+                    temp = tempfile.NamedTemporaryFile(prefix=".upload-part-", dir=staging_root, delete=False)
                     temp_path = Path(temp.name)
                     temp_paths.append(temp_path)
                     with temp:
@@ -545,6 +583,14 @@ def parse_multipart(body_path: Path, content_type: str) -> tuple[dict[str, str],
         raise
 
 
+def cleanup_upload_files(files: dict[str, dict[str, Any]]) -> None:
+    """Remove parsed upload files that were not adopted into a job."""
+    for item in files.values():
+        raw_path = item.get("path")
+        if raw_path:
+            Path(str(raw_path)).unlink(missing_ok=True)
+
+
 class JobStore:
     def __init__(self, root: Path = WEB_ROOT, *, workspace_id: str = DEFAULT_WORKSPACE_ID) -> None:
         self.root = root
@@ -556,11 +602,65 @@ class JobStore:
         self._running_processes: dict[str, subprocess.Popen] = {}
         self._shutdown_requested = False
         self._admission_reservations: dict[tuple[str, str], int] = {}
+        self._storage_reservations: dict[str, int] = {}
         self.jobs: dict[str, dict[str, Any]] = {}
         self.root.mkdir(parents=True, exist_ok=True)
         self.jobs_root.mkdir(parents=True, exist_ok=True)
+        self._cleanup_upload_staging()
         self._load()
         self._recover_incomplete()
+        self._garbage_collect()
+
+    def _cleanup_upload_staging(self) -> None:
+        cutoff = time.time() - UPLOAD_STAGING_TTL_SECONDS
+        try:
+            candidates = list(self.root.iterdir())
+        except OSError:
+            return
+        for path in candidates:
+            if not path.name.startswith(".upload-"):
+                continue
+            try:
+                if path.stat().st_mtime <= cutoff:
+                    if path.is_dir():
+                        shutil.rmtree(path, ignore_errors=True)
+                    else:
+                        path.unlink(missing_ok=True)
+            except OSError:
+                continue
+
+    def _job_root(self, job_id: str) -> Path | None:
+        if not IDENTITY_PATTERN.fullmatch(str(job_id)):
+            return None
+        jobs_root = self.jobs_root.resolve()
+        candidate = (self.jobs_root / str(job_id)).resolve()
+        try:
+            candidate.relative_to(jobs_root)
+        except ValueError:
+            return None
+        return candidate
+
+    def _garbage_collect(self) -> None:
+        cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=JOB_RETENTION_SECONDS)
+        expired: list[str] = []
+        with self._lock:
+            for job_id, job in self.jobs.items():
+                if job.get("status") not in {"completed", "degraded", "failed"}:
+                    continue
+                try:
+                    created_at = parse_iso(str(job.get("created_at") or ""))
+                except (TypeError, ValueError):
+                    continue
+                if created_at <= cutoff:
+                    expired.append(job_id)
+            for job_id in expired:
+                self.jobs.pop(job_id, None)
+            if expired:
+                self._persist_locked()
+        for job_id in expired:
+            job_root = self._job_root(job_id)
+            if job_root:
+                shutil.rmtree(job_root, ignore_errors=True)
 
     def _load(self) -> None:
         try:
@@ -710,6 +810,69 @@ class JobStore:
         with self._lock:
             return self._admission_error_locked(owner_id, workspace_id)
 
+    def _storage_error_locked(self, workspace_id: str, required_bytes: int) -> str | None:
+        current_bytes = _directory_size(self.root)
+        reserved_bytes = sum(self._storage_reservations.values())
+        if current_bytes + reserved_bytes + required_bytes > MAX_WEB_STORAGE_BYTES:
+            return "服务存储空间已达到上限，请先清理历史任务。"
+        # A JobStore owns one workspace root.  Keep this check separate so a
+        # future multi-workspace store cannot silently skip its workspace cap.
+        workspace_reserved = self._storage_reservations.get(workspace_id, 0)
+        if current_bytes + workspace_reserved + required_bytes > MAX_WORKSPACE_STORAGE_BYTES:
+            return "当前工作区存储空间已达到上限，请先清理历史任务。"
+        try:
+            free_bytes = shutil.disk_usage(self.root).free
+        except OSError:
+            return "无法确认可用磁盘空间，暂时不能接收上传。"
+        if free_bytes < required_bytes + MIN_FREE_SPACE_BYTES:
+            return "可用磁盘空间不足，请先清理后重试。"
+        return None
+
+    def reserve_upload(self, workspace_id: str, required_bytes: int) -> None:
+        workspace_id = _identity_value(workspace_id, "workspace_id", self.workspace_id)
+        required_bytes = max(0, int(required_bytes))
+        with self._lock:
+            storage_error = self._storage_error_locked(workspace_id, required_bytes)
+            if storage_error:
+                raise AdmissionError(storage_error)
+            self._storage_reservations[workspace_id] = (
+                self._storage_reservations.get(workspace_id, 0) + required_bytes
+            )
+
+    def release_upload(self, workspace_id: str, required_bytes: int) -> None:
+        workspace_id = _identity_value(workspace_id, "workspace_id", self.workspace_id)
+        required_bytes = max(0, int(required_bytes))
+        with self._lock:
+            remaining = self._storage_reservations.get(workspace_id, 0) - required_bytes
+            if remaining > 0:
+                self._storage_reservations[workspace_id] = remaining
+            else:
+                self._storage_reservations.pop(workspace_id, None)
+
+    def delete(
+        self,
+        job_id: str,
+        *,
+        owner_id: str,
+        workspace_id: str,
+    ) -> bool:
+        owner_id = _identity_value(owner_id, "owner_id", DEFAULT_OWNER_ID)
+        workspace_id = _identity_value(workspace_id, "workspace_id", self.workspace_id)
+        process: subprocess.Popen | None = None
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if not job or not self._matches_scope(job, owner_id, workspace_id):
+                return False
+            process = self._running_processes.get(job_id)
+            self.jobs.pop(job_id, None)
+            self._persist_locked()
+        if process is not None:
+            stop_process_group(process, grace_seconds=5.0)
+        job_root = self._job_root(job_id)
+        if job_root:
+            shutil.rmtree(job_root, ignore_errors=True)
+        return True
+
     def create(
         self,
         fields: dict[str, str],
@@ -728,11 +891,20 @@ class JobStore:
         try:
             normalized_market = market_code(market_label)
         except ValueError as exc:
+            cleanup_upload_files(files)
             raise RequestError(str(exc)) from exc
-        owner_id = _identity_value(owner_id, "owner_id", DEFAULT_OWNER_ID)
-        workspace_id = _identity_value(workspace_id, "workspace_id", self.workspace_id)
+        try:
+            owner_id = _identity_value(owner_id, "owner_id", DEFAULT_OWNER_ID)
+            workspace_id = _identity_value(workspace_id, "workspace_id", self.workspace_id)
+        except RequestError:
+            cleanup_upload_files(files)
+            raise
         if enforce_limits:
-            self._reserve_admission(owner_id, workspace_id)
+            try:
+                self._reserve_admission(owner_id, workspace_id)
+            except AdmissionError:
+                cleanup_upload_files(files)
+                raise
         job_id = f"job-{uuid.uuid4().hex[:12]}"
         job_root = self.jobs_root / job_id
         input_root = job_root / "inputs"
@@ -784,6 +956,7 @@ class JobStore:
             self._executor.submit(self._run_job, job_id)
             return self.public(job)
         finally:
+            cleanup_upload_files(files)
             if enforce_limits:
                 self._release_admission(owner_id, workspace_id)
 
@@ -1263,13 +1436,18 @@ class FlayrHandler(BaseHTTPRequestHandler):
                 return
         body_path: Path | None = None
         files: dict[str, dict[str, Any]] = {}
+        reserved_storage_bytes = 0
         try:
-            WEB_ROOT.mkdir(parents=True, exist_ok=True)
-            temp = tempfile.NamedTemporaryFile(prefix=".upload-body-", dir=WEB_ROOT, delete=False)
+            requested_storage_bytes = self._upload_storage_reservation_bytes()
+            self.server.store.reserve_upload(self.server.store.workspace_id, requested_storage_bytes)
+            reserved_storage_bytes = requested_storage_bytes
+            upload_root = self.server.store.root
+            upload_root.mkdir(parents=True, exist_ok=True)
+            temp = tempfile.NamedTemporaryFile(prefix=".upload-body-", dir=upload_root, delete=False)
             body_path = Path(temp.name)
             with temp:
                 self._read_request_body(temp)
-            fields, files = parse_multipart(body_path, content_type)
+            fields, files = parse_multipart(body_path, content_type, staging_root=upload_root)
             job = self.server.store.create(
                 fields,
                 files,
@@ -1279,20 +1457,56 @@ class FlayrHandler(BaseHTTPRequestHandler):
             )
             self._json(202, job)
         except AdmissionError as exc:
-            for item in files.values():
-                Path(str(item.get("path"))).unlink(missing_ok=True)
             self._json(503, {"error": str(exc)})
         except RequestError as exc:
-            for item in files.values():
-                Path(str(item.get("path"))).unlink(missing_ok=True)
             self._json(400, {"error": str(exc)})
         except Exception as exc:
-            for item in files.values():
-                Path(str(item.get("path"))).unlink(missing_ok=True)
             self._json(500, {"error": f"任务创建失败：{str(exc)[:200]}"})
         finally:
+            cleanup_upload_files(files)
             if body_path:
                 body_path.unlink(missing_ok=True)
+            if reserved_storage_bytes:
+                self.server.store.release_upload(
+                    self.server.store.workspace_id,
+                    reserved_storage_bytes,
+                )
+
+    def do_DELETE(self) -> None:
+        if not self._authorize_request(state_changing=True):
+            return
+        path = unquote(urlsplit(self.path).path)
+        match = re.fullmatch(r"/api/workspaces/([^/]+)/jobs/([^/]+)", path)
+        if match:
+            job_id = match.group(2)
+            workspace_id = self._workspace_id(match.group(1))
+        else:
+            match = re.fullmatch(r"/api/jobs/([^/]+)", path)
+            if not match:
+                self._json(404, {"error": "资源不存在"})
+                return
+            job_id = match.group(1)
+            workspace_id = self._workspace_id()
+        if workspace_id is None or not self.server.store.delete(
+            job_id,
+            owner_id=self._client_id(),
+            workspace_id=workspace_id,
+        ):
+            self._json(404, {"error": "任务不存在"})
+            return
+        self.send_response(204)
+        self._send_identity_cookie()
+        self.end_headers()
+
+    def _upload_storage_reservation_bytes(self) -> int:
+        try:
+            content_length = int(self.headers.get("Content-Length", "-1"))
+        except ValueError:
+            content_length = -1
+        if content_length < 0:
+            content_length = MAX_REQUEST_BYTES
+        content_length = min(content_length, MAX_REQUEST_BYTES)
+        return max(1, content_length) * 2
 
     def _read_request_body(self, destination: Any) -> None:
         transfer_encoding = self.headers.get("Transfer-Encoding", "").lower()
