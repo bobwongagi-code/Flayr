@@ -2968,12 +2968,15 @@ class ArchitectureContractTests(unittest.TestCase):
             {"stage_analysis": [{"stage": "S1 Hook", "creator_time_range": "0s - 3s", "benchmark_time_range": "0s - 3s"}]},
             ["S1"],
         )
-        for payload in (comparison, repair, review):
+        for payload in (comparison, repair):
             payload_text = json.dumps(payload, ensure_ascii=False)
             self.assertIn("S1-S6 跨模态综合合同", payload_text)
             self.assertIn("禁止按最弱渠道一票否决", payload_text)
             self.assertIn("S3", payload_text)
             self.assertIn("真实使用过程与关键动作可见是硬条件", payload_text)
+        review_text = json.dumps(review, ensure_ascii=False)
+        self.assertIn("不得输出或改写 severity", review_text)
+        self.assertNotIn("creator_multimodal", review_text)
 
     def test_phase_c_does_not_reuse_stale_multimodal_assessment(self) -> None:
         current = {
@@ -2986,9 +2989,30 @@ class ArchitectureContractTests(unittest.TestCase):
             ],
             "improvements": [],
         }
-        review = {"stage_updates": [{"stage": "S1 Hook"}]}
+        review = {
+            "stage_patches": [{
+                "stage": "S1",
+                "fields": {
+                    "creator_evidence_ids": ["C1"],
+                    "benchmark_evidence_ids": ["B1"],
+                    "creator_hook": {"exists": True, "evidence_ids": ["C1"]},
+                    "benchmark_hook": {"exists": True, "evidence_ids": ["B1"]},
+                },
+            }]
+        }
+        facts = {
+            "creator": {"evidence_units": [{"id": "C1"}]},
+            "benchmark": {"evidence_units": [{"id": "B1"}]},
+        }
         with mock.patch.object(pipeline, "_process_llm_result", side_effect=lambda result, *_: result):
-            merged = pipeline.apply_stage_review_updates(current, review, {}, "", {})
+            merged = pipeline.apply_stage_review_updates(
+                current,
+                review,
+                {},
+                "",
+                facts,
+                allowed_stage_codes=["S1"],
+            )
         stage = merged["stage_analysis"][0]
         self.assertNotIn("creator_multimodal", stage)
         self.assertNotIn("benchmark_multimodal", stage)

@@ -683,10 +683,10 @@ _s5_ceiling = _derive_one(
     },
 )
 check(
-    "S5 安全 ceiling 只收窄，不用 legacy 公式赋值",
-    _s5_ceiling["severity"] == "medium"
-    and _s5_ceiling["status"] == "constrained"
-    and _s5_ceiling["constraints"][0]["kind"] == "ceiling"
+    "S5 ceiling 在独立校准前只记录审计候选",
+    _s5_ceiling["severity"] == "large"
+    and _s5_ceiling["status"] == "model_preserved"
+    and next(item for item in _s5_ceiling["constraint_evaluations"] if item["rule"] == "S5_no_trust_ceiling")["status"] == "audit_only"
 )
 _s5_unknown = {
     "severity": "large",

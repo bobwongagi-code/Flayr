@@ -24,6 +24,7 @@ from scripts.flayr_core.postprocess.calibration import (
 )
 from scripts.flayr_core.postprocess.derive import (
     SeverityConstraint,
+    _Endorsement,
     _derive_one,
     resolve_severity,
 )
@@ -32,7 +33,11 @@ from scripts.flayr_core.postprocess.repair_evidence import (
     validate_s2_hard_fact_consistency,
     validate_s3_s4_hard_fact_consistency,
 )
-from scripts.flayr_core.postprocess.validate import validate_s3_usage_flags, validate_s4_effect_flags
+from scripts.flayr_core.postprocess.validate import (
+    _validate_structured_flag_evidence_ids,
+    validate_s3_usage_flags,
+    validate_s4_effect_flags,
+)
 from scripts.flayr_core.validation_cohort import SOURCE_CONTRACT_FILES, _git_value, _worktree_identity, sha256_file
 
 
@@ -625,6 +630,44 @@ class DeriveResolverTests(unittest.TestCase):
                 {"evidence_state_required": True},
             )
 
+    def test_structured_s3_s4_evidence_ids_are_closed_world(self) -> None:
+        result = {
+            "video_understanding": {
+                "creator": {"evidence_units": [{"id": "C3", "evidence_strength": "direct"}]},
+                "benchmark": {"evidence_units": [{"id": "B3", "evidence_strength": "explicit"}]},
+            }
+        }
+        valid_flag = {"evidence_ids": ["C3"]}
+        self.assertEqual(
+            _validate_structured_flag_evidence_ids(result, "creator", "s3", valid_flag),
+            [],
+        )
+        missing = _validate_structured_flag_evidence_ids(
+            result,
+            "creator",
+            "s3",
+            {"evidence_ids": ["C3", "C-not-in-facts"]},
+        )
+        self.assertTrue(any("不存在的 Stage1 证据" in error for error in missing))
+        placeholder = _validate_structured_flag_evidence_ids(
+            result,
+            "creator",
+            "s4",
+            {"evidence_ids": ["C_NO_STAGE_3"]},
+        )
+        self.assertTrue(any("repair 占位证据" in error for error in placeholder))
+
+    def test_required_s3_validation_rejects_unknown_structured_evidence_id(self) -> None:
+        creator = _s3_flag("partial", "C-not-in-facts")
+        benchmark = _s3_flag("complete", "B3")
+        result = _validated_stage_pair(creator, benchmark, 2)
+        result["video_understanding"] = {
+            "creator": {"evidence_units": [{"id": "C3", "evidence_strength": "direct"}]},
+            "benchmark": {"evidence_units": [{"id": "B3", "evidence_strength": "direct"}]},
+        }
+        with self.assertRaisesRegex(SystemExit, "不存在的 Stage1 证据"):
+            validate_s3_usage_flags(result, {"evidence_state_required": True})
+
     def test_s3_partial_state_preserves_model_and_does_not_become_large(self) -> None:
         creator = _s3_flag("partial", "C3")
         benchmark = _s3_flag("complete", "B3")
@@ -1058,7 +1101,7 @@ class DeriveResolverTests(unittest.TestCase):
         self.assertEqual(stage["severity"], "large")
         self.assertEqual(stage["severity_derivation"]["status"], "model_preserved")
 
-    def test_s5_explicit_absence_can_trigger_ceiling(self) -> None:
+    def test_s5_explicit_absence_is_recorded_without_rewriting_severity(self) -> None:
         stage = {
             "stage": "S5 信任放大",
             "severity": "large",
@@ -1086,8 +1129,15 @@ class DeriveResolverTests(unittest.TestCase):
         }
         reconcile_s5_trust_sources(result, True)
         finalize_severity_after_repairs(result, {})
-        self.assertEqual(stage["severity"], "medium")
-        self.assertEqual(stage["severity_derivation"]["constraints"][0]["kind"], "ceiling")
+        evaluation = next(
+            item
+            for item in stage["severity_derivation"]["constraint_evaluations"]
+            if item["rule"] == "S5_no_trust_ceiling"
+        )
+        self.assertEqual(stage["severity"], "large")
+        self.assertEqual(stage["severity_derivation"]["status"], "model_preserved")
+        self.assertEqual(evaluation["status"], "audit_only")
+        self.assertEqual(evaluation["candidate"], {"kind": "ceiling", "level": "medium"})
 
     def test_s5_source_basis_mismatch_is_uncertain_not_absent(self) -> None:
         stage = {
@@ -1186,6 +1236,77 @@ class DeriveResolverTests(unittest.TestCase):
         self.assertEqual(stage["creator_s5"]["_s5_source_status"], "unknown")
         self.assertEqual(stage["benchmark_s5"]["_s5_source_status"], "unknown")
         self.assertEqual(stage["severity"], "large")
+
+    def test_s5_explicit_absence_is_audit_only_until_independently_calibrated(self) -> None:
+        stage = {
+            "model_severity": "large",
+            "severity": "large",
+            "creator_s5": {
+                "exists": False,
+                "trust_evidence_type": "none",
+                "trust_basis": "none",
+                "independent_trust_purpose": False,
+                "duplicates_other_stage": False,
+                "_s5_source_status": "explicit_absent",
+                "evidence_ids": ["C5"],
+            },
+            "benchmark_s5": {
+                "exists": False,
+                "trust_evidence_type": "none",
+                "trust_basis": "none",
+                "independent_trust_purpose": False,
+                "duplicates_other_stage": False,
+                "_s5_source_status": "explicit_absent",
+                "evidence_ids": ["B5"],
+            },
+        }
+        trace = _derive_one(
+            "S5",
+            stage,
+            endorsement={
+                "creator": _Endorsement(False, False, True),
+                "benchmark": _Endorsement(False, False, True),
+            },
+        )
+        evaluation = next(item for item in trace["constraint_evaluations"] if item["rule"] == "S5_no_trust_ceiling")
+        self.assertEqual(trace["severity"], "large")
+        self.assertEqual(evaluation["status"], "audit_only")
+        self.assertEqual(evaluation["reason_code"], "activation_gate_closed")
+
+    def test_s5_product_claim_or_offer_is_not_explicit_absence(self) -> None:
+        stage = {
+            "model_severity": "large",
+            "severity": "large",
+            "creator_s5": {
+                "exists": False,
+                "trust_evidence_type": "none",
+                "trust_basis": "product_claim",
+                "independent_trust_purpose": False,
+                "duplicates_other_stage": False,
+                "_s5_source_status": "product_claim_or_offer",
+                "evidence_ids": ["C5"],
+            },
+            "benchmark_s5": {
+                "exists": False,
+                "trust_evidence_type": "none",
+                "trust_basis": "none",
+                "independent_trust_purpose": False,
+                "duplicates_other_stage": False,
+                "_s5_source_status": "explicit_absent",
+                "evidence_ids": ["B5"],
+            },
+        }
+        trace = _derive_one(
+            "S5",
+            stage,
+            endorsement={
+                "creator": _Endorsement(False, False, True),
+                "benchmark": _Endorsement(False, False, True),
+            },
+        )
+        evaluation = next(item for item in trace["constraint_evaluations"] if item["rule"] == "S5_no_trust_ceiling")
+        self.assertEqual(evaluation["status"], "predicate_not_met")
+        self.assertEqual(evaluation["reason_code"], "s5_product_claim_or_offer")
 
 
 if __name__ == "__main__":

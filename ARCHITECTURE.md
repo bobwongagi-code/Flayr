@@ -31,7 +31,7 @@
 - **阶段二（判断）**：锁定 facts + analysis_input.md（产品信息/三层指引/结构库/QA/schema + 字幕轨/镜头轨）
   单次调用完成 S1-S6 对比、improvements、key_conclusions。
 - **Phase C（回看）**：模型自报 ∪ 代码确定性检测（占位证据/visual_only + medium/large），≤2 阶段、
-  仅一次；切对应阶段原生片段（含音轨）重判，整对象替换后重跑后处理链。规范见 0.6。
+  仅一次；切对应阶段原生片段（含音轨）后只接受受限的事实与证据引用补丁，再重跑后处理链。规范见 0.7。
 - **后处理链**：validate（阻断→repair 重试）/ repair（确定性修补）/ qa_warnings（软警告）。
 - **最终建议收敛**：确定性 severity 与可选 S4 视觉复核全部完成后，若仍有 `large` 阶段未被
   `improvements` 覆盖，只做一次纯文本缺项补全；它不得重判阶段，失败时保留主分析并写明状态。
@@ -80,6 +80,8 @@ evidence_unit 含多模态事实字段 +
 - S4 效果完成度是四态 `effect_evidence_state`：`none`、`result_only`、`verified`、
   `uncertain`。`result_only` 不得被当作 `none` 或 `verified`；S4 large floor 当前只记录
   audit candidate，不启用 severity 改写，直到完成边界校准和全新 blind cohort 门禁。
+- S3/S4 结构化 flag 的 `evidence_ids` 也必须是对应侧 Stage1 `evidence_units` 中的真实、唯一 ID；
+  不得引用不存在的 ID、重复 ID 或 repair 生成的 `_NO_` 占位 ID。主阶段引用和嵌套 flag 引用都必须通过同一闭世界校验。
 - `repair_evidence.py` 只检查状态与硬布尔事实之间的机械矛盾，并把结果写入
   `_postprocess_state.evidence_hard_fact_checks`；它不能推断、重写或降级 S3/S4 的语义状态。
   `partial`、`result_only`、`uncertain` 和 hard-fact conflict 均保留模型 severity。
@@ -118,6 +120,14 @@ derive 的回归必须同时覆盖 resolver 的 max/min 交换律、clamp/confli
 
 - 输入：目标阶段的标杆+达人原生切片（fps3、480px、含音轨），时间窗 = 阶段 time_range **±2s 缓冲**；
   prompt 必须告知"切片边界可能有误差，按功能归属判断，勿把相邻阶段内容算进本阶段"。
+- 输出：`stage_patches[]` 只能包含该阶段双方 `*_evidence_ids` 与双方结构化 flag（S1 为
+  `*_hook`，S2-S6 为 `*_sN`）；禁止输出或写入 `severity`、叙事字段、执行分、商业优先级、
+  improvements 或 multimodal 结论。补丁必须覆盖双方完整事实对，引用只能来自锁定 facts。
+- 应用：合法补丁清除该阶段旧的 multimodal 聚合与 postprocess marker，随后进入同一条
+  repair、validate、resolver 链；非法字段、非目标阶段、重复补丁或未知 evidence_id 一律拒绝。
+- 审计：`phase_c_review` 使用 `schema_version=2` 与
+  `snapshot_schema=phase_c_patch_snapshot_v1`，只记录补丁字段及其应用前后 resolver 结果；
+  旧整段阶段快照在评测中按独立 schema 分开统计，不能与补丁快照合并比较。
 - 输出：完整 stage 对象整体替换；引用口播必须能对上切片音频/转写，听不清标 voice_only 并写明，
   **禁止推断补全未听清的话术**（kakwan S6 幻觉教训）；回看 prompt 不得含方向性压力
   （如"持平必须给 small"——已删）。
@@ -137,6 +147,25 @@ derive 的回归必须同时覆盖 resolver 的 max/min 交换律、clamp/confli
   gap 与 6 个 small 对照，S5 至少各 3 个；总准确率不低于 80%、单阶段不低于 70%、两档错误为 0、
   Stage1 决策事件召回和 Stage2 使用率均不低于 90%、Top-N 根因召回不低于 80%、Phase C 不得引入回归。
 - 相同标杆或相同视频内容的多个配对不是独立样本，cohort 冻结会按 SHA-256 拒绝重复。
+
+历史结果在没有 API 额度时可以通过 `scripts/replay_derive.py` 离线重放 derive：
+`python3 scripts/replay_derive.py --input-root <历史结果目录> --output <重放目录>`。
+该命令只读取已保存的 `analysis.json`，不创建 LLM 请求、不访问网络，并为每个结果保存源文件哈希、可发现的 sidecar 哈希、代码提交、证据强度门控和 derive 前后变化。
+历史产物缺少 Stage1 `evidence_strength` 时，重放必须报告 `gate_closed`，保留模型 severity。离线重放摘要必须把
+`historical_final_to_replay`（历史最终产物和当前代码的差异）与 `model_to_replay`（当前 resolver 相对模型原判的
+实际效果）分开；后者只有一个触发规则时才计入该规则的 `direct_rule_effects`，多规则变化必须标为不可唯一归因。
+因此历史回放只能证明代码路径、安全门控和已生效 ceiling 的离线表现，不能证明 floor 激活后的准确率。
+
+S5 的来源对账 warning 在历史产物中异常集中，`S5_no_trust_ceiling` 在完成独立边界卡、双人盲标、证据状态稳定性与
+新鲜 blind 验收前一律为 `audit_only`，不得改写 severity。其后续边界必须区分：`explicit_absence`（明确没有独立来源）与
+`product_claim_or_offer`（存在产品卖点、规格或优惠主张，但没有可追溯的独立来源）；后者不是 absence，也不能复用 absence
+的 ceiling。S6 CTA ceiling 是当前唯一在历史回放中观察到直接模型修正收益的规则，样本量仍很小，必须在新鲜 blind cohort
+中分层抽样验证，不能据此宣布通用有效。
+
+历史 `are_xie/S5` 保留为“认证来源归属”机制回归样本：它用于验证认证仍归 S5、不会被来源校验或 S5 audit-only 逻辑误删，
+不能作为针对该样本固定最终 severity 的规则。变体 QA 中曾出现的 `*_CERT_S5`、`*_CTA_SRT` 等 ID 已确认是后处理生成的
+非变体 evidence unit 被变体校验器误纳入，不是跨阶段 ID 泄漏；它们应记录为 `QA-NON-VARIANT-UNIT-SKIPPED`，真实多 SKU
+字段问题才记录为 `QA-VARIANT-OBSERVATION-CONFLICT`。
 
 derive 边界卡片属于 `calibration`，不得直接放入 blind cohort。每张卡片至少记录 S3/S4 双侧
 预期四态、双侧 hard-fact 校验结果和 `expected_floor_outcome`（`trigger_large`、

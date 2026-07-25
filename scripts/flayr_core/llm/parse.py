@@ -1178,9 +1178,9 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 "gap": required_text(item, "gap"),
                 "evidence": normalize_evidence(item.get("evidence")),
                 "severity": normalize_severity(item.get("severity")),
-                # 模型直判快照（归一时定格）：severity 后续会被 stabilize/derive 改写，
-                # 校准对照口径必须用这份，不能用链上任何一步之后的值（code review #5）
-                "model_severity": normalize_severity(item.get("severity")),
+                # 模型直判快照（归一时定格）：Phase C 和其它再收口路径必须保留
+                # 已存在的模型基线，不能把上轮 derive 后的最终 severity 误作模型判断。
+                "model_severity": normalize_severity(item.get("model_severity") or item.get("severity")),
                 # 4d：两侧独立执行分（0/0.5/1/2），缺失为 None → derive 优雅跳过
                 "creator_execution": normalize_execution_score(item.get("creator_execution")),
                 "benchmark_execution": normalize_execution_score(item.get("benchmark_execution")),

@@ -33,6 +33,7 @@ from .api import (
     video_to_data_url,
 )
 from .media import build_evidence_sensory_inputs
+from .stage_review_contract import patch_fields_for_stage
 
 ROOT = Path(__file__).resolve().parents[3]
 PHASE_C_WINDOW_PADDING_SECONDS = 2.0
@@ -1531,7 +1532,7 @@ def build_stage_review_payload(
     stage_codes: list[str],
     budget: ResourceBudget | None = None,
 ) -> dict[str, Any]:
-    """Phase C：对低置信阶段切原生视频片段，只重判这些阶段。
+    """Phase C：对低置信阶段切原生视频片段，只返回受限事实补丁。
 
     这是一次性回看，不允许模型继续索要素材；事实清单仍是唯一事实源。
     """
@@ -1583,6 +1584,19 @@ def build_stage_review_payload(
         "creator_multimodal": multimodal_output_example(),
         "benchmark_multimodal": multimodal_output_example(),
     }
+    stage_patch_examples: list[dict[str, Any]] = []
+
+    def add_stage_patch_example(code: str) -> None:
+        stage_patch_examples.append(
+            {
+                "stage": code,
+                "fields": {
+                    field: json.loads(json.dumps(stage_update_example[field], ensure_ascii=False))
+                    for field in patch_fields_for_stage(code)
+                    if field in stage_update_example
+                },
+            }
+        )
     s1_contract = ""
     s2_contract = ""
     s3_contract = ""
@@ -1608,8 +1622,9 @@ def build_stage_review_payload(
         }
         stage_update_example["creator_hook"] = hook_example
         stage_update_example["benchmark_hook"] = hook_example
+        add_stage_patch_example("S1")
         s1_contract = (
-            "目标阶段包含 S1 时，stage_update 必须同时重判 creator_hook 与 benchmark_hook；"
+            "目标阶段包含 S1 时，stage patch 必须同时包含 creator_hook 与 benchmark_hook；"
             "不得沿用当前阶段判断里的旧 hook。先按 structure_library_full.md 判 S1/S2 边界："
             "S1=抢夺注意力，S2=从 Hook 自然过渡到产品；开始回答 Hook、解决方案承接、产品名/卖点或产品成为主角通常是 S2 起点。"
             "exists 只判是否做了留人尝试，不等于 landing：直接产品介绍中若已有具体用户问题、可感知收益、结果承诺、反常识反差或熟悉场景，应填 exists=true，即使 landing_met=false；只有产品名/规格/泛卖点且没有面向用户的具体问题或承诺，才填 exists=false。"
@@ -1638,8 +1653,9 @@ def build_stage_review_payload(
         }
         stage_update_example["creator_s2"] = s2_example
         stage_update_example["benchmark_s2"] = s2_example
+        add_stage_patch_example("S2")
         s2_contract = (
-            "目标阶段包含 S2 时，stage_update 必须同时重判 creator_s2 与 benchmark_s2；"
+            "目标阶段包含 S2 时，stage patch 必须同时包含 creator_s2 与 benchmark_s2；"
             "S2 只判 S1→S2 衔接契约：是否承接 S1、产品身份是否清楚、产品是否成为解决方案/答案。"
             "产品露出不等于产品引出完成；卖点细节/成分/认证/选购建议不要当作 S2 加分，归 S3/S4/S5。"
             "≤15s 且 S2/S3 不可分时 merged_with_s3=true，不因没有独立 S2 扣分。"
@@ -1686,8 +1702,9 @@ def build_stage_review_payload(
         }
         stage_update_example["creator_s3"] = s3_example
         stage_update_example["benchmark_s3"] = s3_example
+        add_stage_patch_example("S3")
         s3_contract = (
-            "目标阶段包含 S3 时，stage_update 必须同时重判 creator_s3 与 benchmark_s3；"
+            "目标阶段包含 S3 时，stage patch 必须同时包含 creator_s3 与 benchmark_s3；"
             "S3 只判真实使用过程：有没有使用过程、是否只有结果无过程、是否只口播静态、核心卖点是否在动作里可见、"
             "使用过程证据是否可接收、动作是否在同一窗口形成可复核卖点证明、产品是否实际作用于目标对象、动作是否新施加/位移/激活材料或改变目标状态、关键动作是否能追到目标状态、场景是单场景/多场景/多人/混合、场景组织是否服务卖点。"
             "只口播/字幕说卖点但画面没演，不算 core_selling_point_visible；只有结果没有过程，S3 最高只能算弱；"
@@ -1723,8 +1740,9 @@ def build_stage_review_payload(
         }
         stage_update_example["creator_s4"] = s4_example
         stage_update_example["benchmark_s4"] = s4_example
+        add_stage_patch_example("S4")
         s4_contract = (
-            "目标阶段包含 S4 时，stage_update 必须同时重判 creator_s4 与 benchmark_s4；"
+            "目标阶段包含 S4 时，stage patch 必须同时包含 creator_s4 与 benchmark_s4；"
             "S4 只判效果是否可见、效果是否显著、是否命中核心视觉命题、是否可信地由产品造成。"
             "只有结果没有过程不能直接高分；需要仔细看才有变化时 requires_close_inspection=true 且 effect_salience=subtle；"
             "没有因果桥时 effect_attribution_supported=false，有跳剪/换物/光线变化风险时 tamper_or_cut_risk=true。"
@@ -1757,8 +1775,9 @@ def build_stage_review_payload(
         }
         stage_update_example["creator_s5"] = s5_example
         stage_update_example["benchmark_s5"] = s5_example
+        add_stage_patch_example("S5")
         s5_contract = (
-            "目标阶段包含 S5 时，stage_update 必须同时重判 creator_s5 与 benchmark_s5；"
+            "目标阶段包含 S5 时，stage patch 必须同时包含 creator_s5 与 benchmark_s5；"
             "S5 只判独立信任材料：数据背书、权威背书、用户证言、场景广度、过程透明。"
             "硬信任可到 2，软信任封顶 1，口播孤证封顶 0.5；"
             + CERTIFICATION_OWNERSHIP_PROMPT
@@ -1797,8 +1816,9 @@ def build_stage_review_payload(
         }
         stage_update_example["creator_s6"] = s6_example
         stage_update_example["benchmark_s6"] = s6_example
+        add_stage_patch_example("S6")
         s6_contract = (
-            "目标阶段包含 S6 时，stage_update 必须同时重判 creator_s6 与 benchmark_s6；"
+            "目标阶段包含 S6 时，stage patch 必须同时包含 creator_s6 与 benchmark_s6；"
             "S6 只判购买动作：是否明确下单/点链接/进购物车，路径是否清楚，利益/紧迫/保障是否适配本品。"
             "没有明确路径时，若结尾同时有面向观众的购买邀请和具体利益点，soft_purchase_invitation_met=true，属于软促单而非无 CTA；仅播报促销/价格而未邀请用户行动，仍为 false。"
             "S6-A 记录明确价格锚定，S6-B 记录可核验限时/限量/库存，S6-C 记录具体赠品或组合利益，S6-E 记录清楚保障；"
@@ -1815,25 +1835,24 @@ def build_stage_review_payload(
                     f"detail_mode=focused_window：每个目标阶段只附阶段时间窗±{PHASE_C_WINDOW_PADDING_SECONDS:g}s 的片段，采样约 {PHASE_C_REVIEW_FPS:g}fps、宽度≤{PHASE_C_REVIEW_MAX_WIDTH}px。",
                     "切片边界可能有缓冲误差，可能混入相邻阶段内容；判断按功能归属，不要把相邻阶段内容算进本阶段。",
                     "若切片内证据不足、画面过稀或关键动作跨出窗口，必须在 review_notes 写明 sparse_window，而不是用主分析旧结论或邻近阶段补证。",
-                    "只重判 target_stages 中列出的阶段；不要改写 video_understanding，不要新增 evidence_unit。",
-                    "必须先在 gap 字段写清判断依据（达人做了什么→标杆做了什么→对购买意愿影响），再给 severity。",
-                    "回看后必须按主分析同一标尺重打 creator_execution 与 benchmark_execution（0=未执行；0.5=做了但基本无效/敷衍/无法有效接收；1=合格有效；2=出色。两侧独立打分，先打分再对比）和 painpoint_relevance——执行分只供诊断和审计，最终 severity 仍由同一 resolver 依据显式 floor/ceiling 约束收口；severity 仍需填写但仅作参考。",
-                    "每个重判的结构化 stage flag 必须保留 proposition_ids，并只引用下方合同中该阶段 allowed_ids；没有实际命中则填空数组。",
+                    "只处理 target_stages 中列出的阶段；不要改写 video_understanding，不要新增 evidence_unit。",
+                    "你只能输出事实与证据引用补丁：不得输出或修改 severity、gap、summary、quote、执行分、痛点相关性、improvements 或 multimodal 结论。",
+                    "每个补丁必须同时给出双方的 stage evidence_ids 和双方结构化 stage flag；不得只更新一侧，也不得遗漏任一允许字段。",
+                    "结构化 stage flag 必须保留 proposition_ids，并只引用下方合同中该阶段 allowed_ids；没有实际命中则填空数组。",
                     s1_contract,
                     s2_contract,
                     s3_contract,
                     s4_contract,
                     s5_contract,
                     s6_contract,
-                    render_multimodal_prompt_contract(native_audio),
                     "只输出严格 JSON，不要 Markdown。",
                     "输出格式：",
                     json.dumps(
                         {
-                            "stage_updates": [
-                                stage_update_example
+                            "stage_patches": [
+                                *stage_patch_examples
                             ],
-                            "review_notes": ["为什么回看后这样判断"],
+                            "review_notes": ["仅描述证据补丁的依据"],
                         },
                         ensure_ascii=False,
                         indent=2,
@@ -1858,15 +1877,12 @@ def build_stage_review_payload(
                 "role": "system",
                 "content": (
                     "你是 Flayr 的低置信阶段复核器。只输出严格 JSON。"
-                    "本轮只能基于用户给出的 facts 和原生视频切片，重判指定 S1-S6 阶段。"
-                    "不得新增、删除或改写 evidence_units；可修正该阶段的 gap、severity、support_status、summary、quote 和 evidence 引用。"
-                    "如果目标阶段包含 S1，必须重新输出 creator_hook 与 benchmark_hook，不得复用旧 hook 判断。"
-                    "每个回看阶段还必须重判 creator_multimodal 与 benchmark_multimodal，综合切片中的画面、口播、字幕和声音节奏净效果。"
-                    "severity 仍按购买意愿影响定级：large=直接影响购买意愿的硬伤；medium=削弱说服力但不致命；small=细节瑕疵或达人持平/更优。"
+                    "本轮只能基于用户给出的 facts 和原生视频切片，为指定 S1-S6 阶段输出允许的事实与证据引用补丁。"
+                    "不得新增、删除或改写 evidence_units；不得输出或改写 severity、gap、summary、quote、support_status、执行分、痛点相关性、improvements 或 multimodal 结论。"
+                    "如果目标阶段包含 S1，补丁必须同时包含 creator_hook 与 benchmark_hook，不得复用旧 hook 判断。"
                     # 接地约束：禁止从含糊音频脑补话术（kakwan S6 幻觉教训）；不预设判断方向。
                     "判断只能基于切片中真实听到/看到的内容：引用口播必须能对上切片音频，"
                     "听不清就写听不清并标 voice_only，禁止推断或补全未听清的话术。"
-                    "达人持平或更优时如实给 small，达人明显缺失时如实给 large，不预设任何方向。"
                     "不要继续要求更多素材。"
                 ),
             },

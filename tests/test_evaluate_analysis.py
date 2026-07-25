@@ -12,11 +12,37 @@ from scripts.evaluate_analysis import (
     _layer_attribution,
     _phase_c_audit,
     _stage_oracle_audit,
+    ground_truth_label_inventory,
     severity_diagnostics,
 )
 
 
 class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
+    def test_gt_inventory_separates_not_applicable_from_missing(self) -> None:
+        inventory = ground_truth_label_inventory({
+            "samples": {
+                "sample": {
+                    "stages": {"S1": "small", "S2": "na"},
+                    "stage_label_statuses": {
+                        "S2": {"status": "not_applicable", "reason": "该阶段不适用。"}
+                    },
+                }
+            }
+        })
+        self.assertEqual(inventory["counts"]["not_applicable"], 1)
+        self.assertEqual(inventory["counts"]["missing"], 4)
+        self.assertEqual(inventory["non_labeled_stages"][0]["reason"], "该阶段不适用。")
+        whole_video = ground_truth_label_inventory({
+            "samples": {
+                "whole": {
+                    "evaluation_scope": "whole_video_observation",
+                    "overall_verdict": "viable",
+                    "overall_reason": "该样本只做全片观察。",
+                }
+            }
+        })
+        self.assertEqual(whole_video["counts"], {})
+        self.assertEqual(whole_video["whole_video_observation_samples"], ["whole"])
     def test_gt_event_time_bounds_reject_reverse_and_nonfinite_values(self) -> None:
         self.assertEqual(_event_time_bounds([1.0, 3.0]), (1.0, 3.0))
         self.assertIsNone(_event_time_bounds([3.0, 1.0]))
@@ -178,10 +204,15 @@ class LayeredEvaluationTest(unittest.TestCase):
         labels = {"samples": {"sample": {"stages": {"S4": "medium"}}}}
         result = {
             "phase_c_review": {
+                "schema_version": 2,
+                "snapshot_schema": "phase_c_patch_snapshot_v1",
                 "applied": True,
                 "requested_stages": ["S4"],
-                "before_stage_analysis": [{"stage": "S4 效果", "severity": "medium"}],
-                "after_stage_analysis": [{"stage": "S4 效果", "severity": "small"}],
+                "patches": [{
+                    "stage": "S4",
+                    "before": {"resolution": {"severity": "medium"}},
+                    "after": {"resolution": {"severity": "small"}},
+                }],
             }
         }
         with tempfile.TemporaryDirectory() as tmp:

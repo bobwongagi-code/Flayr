@@ -25,7 +25,11 @@ if str(ROOT / "scripts") not in sys.path:
 from flayr_core.structure_modules import stage1_event_catalog
 from flayr_core.artifacts import parse_time_range_seconds
 from flayr_core.postprocess.chain import finalize_severity_after_repairs
-from flayr_core.validation_cohort import verify_cohort_lock, validate_blind_sample_contract
+from flayr_core.validation_cohort import (
+    stage_label_status,
+    validate_blind_sample_contract,
+    verify_cohort_lock,
+)
 
 
 SEVERITIES = ("small", "medium", "large")
@@ -226,6 +230,35 @@ def eligible_stages(
             sources.append("analysis")
 
     return eligible, "+".join(sources)
+
+
+def ground_truth_label_inventory(labels: dict[str, Any]) -> dict[str, Any]:
+    """Expose labeled, not-applicable, and missing GT separately from accuracy."""
+    samples = labels.get("samples") if isinstance(labels.get("samples"), dict) else {}
+    records: list[dict[str, str]] = []
+    counts: Counter[str] = Counter()
+    whole_video_observation_samples: list[str] = []
+    for sample_id, label in sorted(samples.items()):
+        if not isinstance(label, dict):
+            continue
+        if str(label.get("evaluation_scope") or STAGE_SEVERITY_SCOPE).strip() == WHOLE_VIDEO_OBSERVATION_SCOPE:
+            whole_video_observation_samples.append(str(sample_id))
+            continue
+        for current_stage in FLAG_SUFFIXES:
+            status, reason = stage_label_status(label, current_stage)
+            counts[status] += 1
+            if status != "labeled":
+                records.append({
+                    "sample_id": str(sample_id),
+                    "stage": current_stage,
+                    "status": status,
+                    "reason": reason,
+                })
+    return {
+        "counts": dict(sorted(counts.items())),
+        "non_labeled_stages": records,
+        "whole_video_observation_samples": whole_video_observation_samples,
+    }
 
 
 def diagnosis(expected: str, final: str, stage: dict[str, Any]) -> str:
@@ -656,9 +689,9 @@ def _stage_oracle_audit(labels: dict[str, Any], run_paths: dict[str, Path]) -> d
 
 
 def _phase_c_audit(labels: dict[str, Any], run_paths: dict[str, Path]) -> dict[str, Any]:
-    """比较 Phase C 前后结果；旧产物无快照时明确不可测。"""
+    """Compare Phase C outcomes without conflating legacy and patch snapshots."""
     label_samples = labels.get("samples") if isinstance(labels.get("samples"), dict) else {}
-    records: list[dict[str, Any]] = []
+    records_by_schema: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for sample_id, path in sorted(run_paths.items()):
         label = label_samples.get(sample_id)
         if not isinstance(label, dict) or not path.exists():
@@ -667,12 +700,29 @@ def _phase_c_audit(labels: dict[str, Any], run_paths: dict[str, Path]) -> dict[s
         review = result.get("phase_c_review") if isinstance(result.get("phase_c_review"), dict) else None
         if not review:
             continue
-        before = _result_stage_map({"stage_analysis": review.get("before_stage_analysis") or []})
-        after = _result_stage_map({"stage_analysis": review.get("after_stage_analysis") or []})
+        schema = str(review.get("snapshot_schema") or "legacy_stage_snapshot_v1")
+        if schema == "phase_c_patch_snapshot_v1":
+            snapshots = review.get("patches") if isinstance(review.get("patches"), list) else []
+            stage_snapshots = {
+                str(snapshot.get("stage") or "").upper(): snapshot
+                for snapshot in snapshots
+                if isinstance(snapshot, dict)
+            }
+        else:
+            before = _result_stage_map({"stage_analysis": review.get("before_stage_analysis") or []})
+            after = _result_stage_map({"stage_analysis": review.get("after_stage_analysis") or []})
+            stage_snapshots = {
+                str(stage).upper(): {
+                    "before": {"resolution": {"severity": (before.get(str(stage)) or {}).get("severity")}},
+                    "after": {"resolution": {"severity": (after.get(str(stage)) or {}).get("severity")}},
+                }
+                for stage in review.get("requested_stages") or []
+            }
         for current_stage in review.get("requested_stages") or []:
+            snapshot = stage_snapshots.get(str(current_stage).upper())
             expected = normalize_ground_truth((label.get("stages") or {}).get(current_stage))
-            before_severity = normalize_severity((before.get(current_stage) or {}).get("severity"))
-            after_severity = normalize_severity((after.get(current_stage) or {}).get("severity"))
+            before_severity = normalize_severity(((snapshot or {}).get("before") or {}).get("resolution", {}).get("severity"))
+            after_severity = normalize_severity(((snapshot or {}).get("after") or {}).get("resolution", {}).get("severity"))
             if review.get("applied") is not True:
                 outcome = "review_failed"
             elif before_severity is None or after_severity is None or expected is None:
@@ -685,7 +735,7 @@ def _phase_c_audit(labels: dict[str, Any], run_paths: dict[str, Path]) -> dict[s
                 outcome = "stable_correct"
             else:
                 outcome = "unchanged_wrong"
-            records.append({
+            records_by_schema[schema].append({
                 "sample_id": sample_id,
                 "stage": current_stage,
                 "expected": expected,
@@ -693,19 +743,41 @@ def _phase_c_audit(labels: dict[str, Any], run_paths: dict[str, Path]) -> dict[s
                 "after": after_severity,
                 "outcome": outcome,
             })
+    summaries = {
+        schema: _phase_c_audit_summary(records)
+        for schema, records in sorted(records_by_schema.items())
+    }
+    records = [row for group in records_by_schema.values() for row in group]
+    if len(summaries) == 1:
+        summary = next(iter(summaries.values()))
+        status = "measured" if summary["measurable_stages"] else "unavailable_without_phase_c_snapshots"
+    elif summaries:
+        summary = {
+            "snapshot_schemas": sorted(summaries),
+            "note": "不同 Phase C 快照 schema 分开统计，不汇总比较。",
+        }
+        status = "measured_separated_by_snapshot_schema"
+    else:
+        summary = _phase_c_audit_summary([])
+        status = "unavailable_without_phase_c_snapshots"
+    return {
+        "status": status,
+        "summary": summary,
+        "snapshot_summaries": summaries,
+        "records": records,
+    }
+
+
+def _phase_c_audit_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     measurable = [row for row in records if row["outcome"] not in {"review_failed", "unavailable_without_snapshot_or_gt"}]
     return {
-        "status": "measured" if measurable else "unavailable_without_phase_c_snapshots",
-        "summary": {
-            "reviewed_stages": len(records),
-            "measurable_stages": len(measurable),
-            "fixed": sum(1 for row in measurable if row["outcome"] == "fixed"),
-            "regressed": sum(1 for row in measurable if row["outcome"] == "regressed"),
-            "unchanged_wrong": sum(1 for row in measurable if row["outcome"] == "unchanged_wrong"),
-            "net_corrections": sum(1 for row in measurable if row["outcome"] == "fixed")
-            - sum(1 for row in measurable if row["outcome"] == "regressed"),
-        },
-        "records": records,
+        "reviewed_stages": len(records),
+        "measurable_stages": len(measurable),
+        "fixed": sum(1 for row in measurable if row["outcome"] == "fixed"),
+        "regressed": sum(1 for row in measurable if row["outcome"] == "regressed"),
+        "unchanged_wrong": sum(1 for row in measurable if row["outcome"] == "unchanged_wrong"),
+        "net_corrections": sum(1 for row in measurable if row["outcome"] == "fixed")
+        - sum(1 for row in measurable if row["outcome"] == "regressed"),
     }
 
 
@@ -1317,7 +1389,7 @@ def evaluate(
     )
     readiness = promotion_readiness(rows, labels, manifest, cohort_lock, chain, decision, phase_c)
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "sources": {
             "ground_truth": labels.get("source"),
             "ground_truth_policy": labels.get("policy"),
@@ -1333,6 +1405,7 @@ def evaluate(
             "diagnoses": dict(sorted(diagnosis_counts.items())),
             "by_partition": {key: dict(value) for key, value in sorted(partition_counts.items())},
             "whole_video_observations": len(whole_video_observations),
+            "ground_truth_label_inventory": ground_truth_label_inventory(labels),
         },
         "by_stage": {key: dict(value) for key, value in sorted(stage_counts.items())},
         "confusion_matrix": {

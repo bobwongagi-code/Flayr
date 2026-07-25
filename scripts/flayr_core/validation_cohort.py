@@ -21,6 +21,7 @@ EXECUTION_VALUES = {0.0, 0.5, 1.0, 2.0}
 RELATIONS = {"creator_better", "matched", "benchmark_better"}
 CONFIDENCE_VALUES = {"low", "medium", "high"}
 STAGES = tuple(f"S{index}" for index in range(1, 7))
+STAGE_LABEL_STATUSES = {"labeled", "not_applicable", "missing"}
 SOURCE_CONTRACT_FILES = (
     "ARCHITECTURE.md",
     "structure_library_full.md",
@@ -82,6 +83,26 @@ def manifest_samples(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
+def stage_label_status(label: dict[str, Any], stage: str) -> tuple[str, str]:
+    """Return the explicit GT status and reason for one stage.
+
+    Historical labels may omit this metadata. They remain readable, but a blind
+    cohort must make every `na` explicit so that inapplicability is never
+    conflated with a missing annotation.
+    """
+    statuses = label.get("stage_label_statuses") if isinstance(label.get("stage_label_statuses"), dict) else {}
+    entry = statuses.get(stage)
+    if isinstance(entry, dict):
+        return str(entry.get("status") or "").strip(), str(entry.get("reason") or "").strip()
+    stages = label.get("stages") if isinstance(label.get("stages"), dict) else {}
+    severity = str(stages.get(stage) or "").strip().lower()
+    if severity == "na":
+        return "not_applicable_legacy", ""
+    if severity in {"small", "medium", "large"}:
+        return "labeled", ""
+    return "missing", ""
+
+
 def validate_blind_sample_contract(
     sample_id: str,
     label: dict[str, Any],
@@ -125,6 +146,13 @@ def validate_blind_sample_contract(
         if severity not in {"small", "medium", "large", "na"}:
             errors.append(f"{sample_id}: {stage} 缺有效 severity")
             continue
+        status, reason = stage_label_status(label, stage)
+        if status not in STAGE_LABEL_STATUSES:
+            errors.append(f"{sample_id}: {stage} stage_label_status 非法")
+        if severity == "na" and (status != "not_applicable" or not reason):
+            errors.append(f"{sample_id}: {stage}=na 必须标记 not_applicable 并说明原因")
+        if severity in {"small", "medium", "large"} and status != "labeled":
+            errors.append(f"{sample_id}: {stage} 有 severity 时 stage_label_status 必须为 labeled")
         if severity == "na":
             continue
         oracle = oracles.get(stage)

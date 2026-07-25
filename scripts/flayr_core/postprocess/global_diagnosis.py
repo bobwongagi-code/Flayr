@@ -9,21 +9,18 @@ from __future__ import annotations
 from typing import Any
 
 from ..artifacts import parse_time_range_seconds
+from .commercial_priority import (
+    COMMERCIAL_PRIORITY_SCHEMA_VERSION,
+    classify_painpoint_relevance,
+    relevance_sort_rank,
+    validate_commercial_priorities,
+)
 
 
 _IMPACT_RANK = {"blocking": 0, "major": 1, "minor": 2, "pass": 3, "unknown": 4}
 _GLOBAL_ORDER = {"selling_point_route": 0, "focus_coherence": 1, "attention_cleanliness": 2}
 _STAGE_ORDER = {"S1": 0, "S4": 1, "S3": 2, "S6": 3, "S2": 4, "S5": 5}
 _TEMPORAL_RANK = {"unknown": 0, "static_only": 1, "focused_temporal": 2, "full_temporal": 3}
-_PAINPOINT_RELEVANCE_RANK = {
-    # 只有标杆命中而达人未命中的核心痛点，才提高同一 severity tier 内的商业优先级。
-    "benchmark_only": 0,
-    "both": 1,
-    "none": 1,
-    "creator_only": 2,
-}
-
-
 def materialize_global_diagnosis(result: dict[str, Any], analysis: dict[str, Any] | None) -> None:
     understanding = result.get("video_understanding") if isinstance(result.get("video_understanding"), dict) else {}
     creator = understanding.get("creator") if isinstance(understanding.get("creator"), dict) else {}
@@ -53,6 +50,9 @@ def materialize_global_diagnosis(result: dict[str, Any], analysis: dict[str, Any
     }
     _annotate_global_causes(result, findings)
     result["commercial_priorities"] = _commercial_priorities(result, findings)
+    errors = validate_commercial_priorities(result["commercial_priorities"])
+    if errors:
+        raise ValueError("commercial priority contract failed: " + "; ".join(errors))
     _reorder_improvements(result)
     priorities = result["commercial_priorities"]
     result["commercial_priority_summary"] = str(priorities[0].get("summary") or "") if priorities else ""
@@ -361,21 +361,8 @@ def _annotate_global_causes(result: dict[str, Any], findings: list[dict[str, Any
 
 
 def _commercial_relevance(stage: dict[str, Any]) -> dict[str, Any]:
-    """读取 Stage2 的分类事实；unknown 只表示未知，不按 none 处理。"""
-    value = str(stage.get("painpoint_relevance") or "").strip().lower()
-    if value not in _PAINPOINT_RELEVANCE_RANK:
-        return {
-            "status": "unknown",
-            "value": None,
-            "priority_rank": None,
-            "source": "stage_analysis.painpoint_relevance",
-        }
-    return {
-        "status": "known",
-        "value": value,
-        "priority_rank": _PAINPOINT_RELEVANCE_RANK[value],
-        "source": "stage_analysis.painpoint_relevance",
-    }
+    """读取 Stage2 分类事实；unknown 只表示门禁关闭，不按 none 处理。"""
+    return classify_painpoint_relevance(stage.get("painpoint_relevance"))
 
 
 def _commercial_priorities(result: dict[str, Any], findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -387,6 +374,7 @@ def _commercial_priorities(result: dict[str, Any], findings: list[dict[str, Any]
         tier = {"blocking": "P0", "major": "P2", "minor": "P4"}[impact]
         priorities.append(
             {
+                "schema_version": COMMERCIAL_PRIORITY_SCHEMA_VERSION,
                 "id": f"global:{finding['id']}",
                 "source": "global",
                 "tier": tier,
@@ -411,13 +399,10 @@ def _commercial_priorities(result: dict[str, Any], findings: list[dict[str, Any]
         tier = {"large": "P1", "medium": "P3", "small": "P5"}.get(severity, "P3")
         status = str(stage.get("creator_absolute_status") or "unknown")
         relevance = _commercial_relevance(stage)
-        relevance_sort_rank = (
-            relevance["priority_rank"]
-            if relevance["status"] == "known" and isinstance(relevance["priority_rank"], int)
-            else 99
-        )
+        relevance_sort_rank_value = relevance_sort_rank(relevance)
         priorities.append(
             {
+                "schema_version": COMMERCIAL_PRIORITY_SCHEMA_VERSION,
                 "id": f"stage:{code}",
                 "source": "stage",
                 "tier": tier,
@@ -429,7 +414,7 @@ def _commercial_priorities(result: dict[str, Any], findings: list[dict[str, Any]
                 "_sort": (
                     int(tier[1]),
                     _stage_failure_rank(status),
-                    relevance_sort_rank,
+                    relevance_sort_rank_value,
                     _STAGE_ORDER.get(code, 99),
                     code,
                 ),

@@ -113,6 +113,7 @@ AUDIT_REASON_CODES = frozenset(
         "benchmark_effect_uncertain",
         "s3_creator_none_benchmark_complete",
         "s4_creator_none_benchmark_verified",
+        "s5_product_claim_or_offer",
         "activation_gate_closed",
         "model_preserved",
         "rule_error",
@@ -132,6 +133,65 @@ def normalize_reason_code(value: Any, fallback: str = "rule_error") -> str:
     return code if code in AUDIT_REASON_CODES else fallback
 
 
+def evidence_strength_gate_report(result: Any) -> dict[str, Any]:
+    """Report the Stage1 evidence-strength gate without inferring missing facts.
+
+    Missing or invalid strengths close the derive gate; they are not converted
+    to ``absent`` and are not treated as a semantic failure.
+    """
+    understanding = result.get("video_understanding") if isinstance(result, dict) else None
+    understanding = understanding if isinstance(understanding, dict) else {}
+    sides: dict[str, dict[str, Any]] = {}
+    for role in ("creator", "benchmark"):
+        side = understanding.get(role) if isinstance(understanding.get(role), dict) else {}
+        units = side.get("evidence_units") if isinstance(side.get("evidence_units"), list) else []
+        seen: set[str] = set()
+        duplicate_ids: list[str] = []
+        missing_ids: list[str] = []
+        invalid: dict[str, str] = {}
+        invalid_unit_count = 0
+        for unit in units:
+            if not isinstance(unit, dict):
+                invalid_unit_count += 1
+                continue
+            unit_id = str(unit.get("id") or "").strip()
+            if not unit_id:
+                invalid_unit_count += 1
+                continue
+            if unit_id in seen:
+                duplicate_ids.append(unit_id)
+            seen.add(unit_id)
+            value = unit.get("evidence_strength")
+            if value is None or (isinstance(value, str) and not value.strip()):
+                missing_ids.append(unit_id)
+            elif str(value).strip().lower() not in EVIDENCE_STATE_STRENGTHS:
+                invalid[unit_id] = str(value)
+        structural_errors = []
+        if duplicate_ids:
+            structural_errors.append("duplicate_evidence_id")
+        if invalid:
+            structural_errors.append("invalid_evidence_strength")
+        if invalid_unit_count:
+            structural_errors.append("invalid_evidence_unit")
+        sides[role] = {
+            "unit_count": len(seen),
+            "status": "ready" if units and not invalid_unit_count and not missing_ids and not invalid and not duplicate_ids else "gate_closed",
+            "missing_strength_ids": sorted(set(missing_ids)),
+            "invalid_strengths": invalid,
+            "duplicate_ids": sorted(set(duplicate_ids)),
+            "invalid_unit_count": invalid_unit_count,
+            "structural_errors": structural_errors,
+        }
+    ready = all(side["status"] == "ready" for side in sides.values())
+    return {
+        "schema_version": 1,
+        "status": "ready" if ready else "gate_closed",
+        "trigger_strengths": ["direct", "explicit"],
+        "sides": sides,
+        "interpretation": "gate_closed means severity-increasing floors must preserve model severity",
+    }
+
+
 __all__ = [
     "AUDIT_REASON_CODES",
     "EVIDENCE_STATE_STRENGTHS",
@@ -145,4 +205,5 @@ __all__ = [
     "s2_hard_fact_snapshot",
     "normalize_evidence_state",
     "normalize_reason_code",
+    "evidence_strength_gate_report",
 ]

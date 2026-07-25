@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "source": "ground-truth-labels.md",
   "policy": {
     "severity_order": [
@@ -133,6 +133,12 @@
         "S5": "na",
         "S6": "small"
       },
+      "stage_label_statuses": {
+        "S5": {
+          "status": "not_applicable",
+          "reason": "该样本未设置独立信任放大环节；这是标注协议下的不适用，不是 GT 缺失。"
+        }
+      },
       "key_events": [
         {
           "id": "benchmark_real_tile_application",
@@ -169,6 +175,12 @@
         "S4": "large",
         "S5": "na",
         "S6": "small"
+      },
+      "stage_label_statuses": {
+        "S5": {
+          "status": "not_applicable",
+          "reason": "该样本未设置独立信任放大环节；这是标注协议下的不适用，不是 GT 缺失。"
+        }
       }
     },
     "carslan-powder-c0": {
@@ -231,6 +243,12 @@
         "S5": "small",
         "S6": "na"
       },
+      "stage_label_statuses": {
+        "S6": {
+          "status": "not_applicable",
+          "reason": "双方均没有可比较的独立 CTA 环节，按标注协议不对 S6 给 severity；这不是 GT 缺失。"
+        }
+      },
       "global_observations": [
         "将清凉感和轻薄感作为主卖点，但两者缺乏可视化证明空间，不适合作为短视频的主信息。"
       ]
@@ -244,6 +262,12 @@
         "S4": "large",
         "S5": "na",
         "S6": "small"
+      },
+      "stage_label_statuses": {
+        "S5": {
+          "status": "not_applicable",
+          "reason": "该样本未设置独立信任放大环节；这是标注协议下的不适用，不是 GT 缺失。"
+        }
       },
       "global_observations": [
         "口红内容的核心竞争在色彩、肤色匹配和上唇效果；只展示口红本体或基础涂抹，在同类高可视化内容中缺乏吸引力。"

@@ -659,8 +659,18 @@ def _s5_flag_explicit_absence(flag: dict[str, Any], source_status: str) -> bool:
         flag.get("exists") is False
         and flag.get("independent_trust_purpose") is False
         and flag.get("duplicates_other_stage") is False
-        and str(flag.get("trust_basis") or "") in {"none", "product_claim", "offer_or_spec"}
+        and str(flag.get("trust_basis") or "") == "none"
         and str(flag.get("trust_evidence_type") or "") in {"none", "unknown"}
+    )
+
+
+def _s5_flag_product_claim_or_offer(flag: dict[str, Any]) -> bool:
+    """Keep product claims and offers distinct from a confirmed lack of trust."""
+    return (
+        flag.get("exists") is False
+        and flag.get("independent_trust_purpose") is False
+        and flag.get("duplicates_other_stage") is False
+        and str(flag.get("trust_basis") or "") in {"product_claim", "offer_or_spec"}
     )
 
 
@@ -719,6 +729,16 @@ def reconcile_s5_trust_sources(result: dict[str, Any], source_signals_required: 
         if _s5_flag_explicit_absence(flag, source_status):
             flag["_s5_source_status"] = "explicit_absent"
             valid_roles[role] = False
+            continue
+        if _s5_flag_product_claim_or_offer(flag):
+            flag["_s5_source_status"] = "product_claim_or_offer"
+            valid_roles[role] = None
+            reconciled.append({
+                "role": role,
+                "basis": basis,
+                "status": "product_claim_or_offer",
+                "reason": "产品主张或优惠不是独立信任来源，也不等同于明确 absence。",
+            })
             continue
         # 来源缺失、不完整或与 flag 声明不一致时保留原 flag，让后续质量门禁触发
         # repair；不能把“无法证明存在”降格成“明确不存在”并触发 ceiling。

@@ -71,6 +71,50 @@ def _role_claim_references(stage: dict[str, Any], role: str) -> list[str]:
     return references
 
 
+def _available_evidence_ids(result: dict[str, Any], role: str) -> set[str]:
+    understanding = result.get("video_understanding")
+    side = understanding.get(role) if isinstance(understanding, dict) else None
+    units = side.get("evidence_units") if isinstance(side, dict) else None
+    return {
+        str(unit.get("id")).strip()
+        for unit in units or []
+        if isinstance(unit, dict) and str(unit.get("id") or "").strip()
+    }
+
+
+def _validate_structured_flag_evidence_ids(
+    result: dict[str, Any],
+    role: str,
+    flag_name: str,
+    flag: dict[str, Any],
+) -> list[str]:
+    """Ensure structured S3/S4 facts reference the locked Stage1 units.
+
+    The stage-level references are checked separately by
+    ``validate_evidence_alignment``. S3/S4 state facts have their own evidence
+    list, so they need the same closed-world check before derive can consume
+    their four-state values.
+    """
+    errors: list[str] = []
+    key = f"{role}_{flag_name}"
+    references = flag.get("evidence_ids")
+    if not isinstance(references, list) or not references:
+        return [f"{key}.evidence_ids 必须是非空数组"]
+    normalized = [str(value).strip() for value in references if str(value).strip()]
+    if len(normalized) != len(references):
+        errors.append(f"{key}.evidence_ids 只能包含非空字符串")
+    if len(normalized) != len(set(normalized)):
+        errors.append(f"{key}.evidence_ids 不能重复")
+    placeholder_ids = [value for value in normalized if "_NO_" in value.upper()]
+    if placeholder_ids:
+        errors.append(f"{key}.evidence_ids 不得引用 repair 占位证据：{', '.join(placeholder_ids)}")
+    available = _available_evidence_ids(result, role)
+    missing = [value for value in normalized if value not in available]
+    if missing:
+        errors.append(f"{key}.evidence_ids 引用了不存在的 Stage1 证据：{', '.join(missing)}")
+    return errors
+
+
 def validate_evidence_alignment(result: dict[str, Any]) -> None:
     """阶段顺序 + evidence_ids 引用合法性 + 认证主张需证据支撑。"""
     understanding = result.get("video_understanding", {})
@@ -214,18 +258,48 @@ def validate_global_gate_observations(result: dict[str, Any]) -> None:
             warnings.append(f"{role}.{status_key} 门控观察未完成，已按 unknown 降级")
             if role == "creator" and str(findings.get(gate_id, {}).get("impact") or "") != "unknown":
                 raise SystemExit(f"{gate_id} 在 creator 观察未完成时不得输出确定性结论。")
-        invalid_units = [
-            str(unit.get("id") or "")
-            for unit in side.get("evidence_units") or []
-            if (
-                isinstance(unit, dict)
-                and "_NO_" not in str(unit.get("id") or "").upper()
-                and unit.get("variant_data_valid") is not True
+        variant_issues = classify_variant_data_issues(side.get("evidence_units"))
+        if variant_issues["observation_conflicts"]:
+            warnings.append(
+                f"[QA-VARIANT-OBSERVATION-CONFLICT] {role}："
+                f"{', '.join(variant_issues['observation_conflicts'])}"
             )
-        ]
-        if invalid_units:
-            warnings.append(f"{role} 变体数据不一致：{', '.join(invalid_units)}")
+        if variant_issues["non_variant_generated_units"]:
+            warnings.append(
+                f"[QA-NON-VARIANT-UNIT-SKIPPED] {role}："
+                f"{', '.join(variant_issues['non_variant_generated_units'])}"
+            )
     append_qa_warnings(result, warnings)
+
+
+def classify_variant_data_issues(units: Any) -> dict[str, list[str]]:
+    """Separate real variant observations from generated non-variant evidence units.
+
+    Post-processing can add S5 certification and S6 transcript evidence after the
+    parser has assigned `variant_data_valid`. Those generated units are not a
+    malformed multi-SKU observation and must not be reported as one.
+    """
+    observation_conflicts: list[str] = []
+    non_variant_generated_units: list[str] = []
+    for unit in units if isinstance(units, list) else []:
+        if not isinstance(unit, dict) or unit.get("variant_data_valid") is True:
+            continue
+        unit_id = str(unit.get("id") or "").strip()
+        if not unit_id or "_NO_" in unit_id.upper():
+            continue
+        variant_ids = unit.get("variant_ids")
+        has_variant_observation = bool(variant_ids) or any(
+            bool(unit.get(field))
+            for field in ("variant_visual_shares", "variant_speech_shares")
+        ) or str(unit.get("variant_relation_mode") or "none").strip().lower() != "none"
+        if has_variant_observation:
+            observation_conflicts.append(unit_id)
+        elif re.search(r"_(?:CERT_S5|CTA_SRT|STAGE_\d+)$", unit_id, re.IGNORECASE):
+            non_variant_generated_units.append(unit_id)
+    return {
+        "observation_conflicts": sorted(set(observation_conflicts)),
+        "non_variant_generated_units": sorted(set(non_variant_generated_units)),
+    }
 
 
 # Q19 用：S6 口播/字幕中的购买指令信号，与 repair.align_timed_cta 的关键词口径一致。
@@ -479,6 +553,8 @@ def validate_s3_usage_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
             continue
         if evidence_state_required and flag.get("usage_evidence_state") not in S3_USAGE_EVIDENCE_STATES:
             errors.append(f"S3 {key}.usage_evidence_state 必须是 none/partial/complete/uncertain")
+        if evidence_state_required:
+            errors.extend(_validate_structured_flag_evidence_ids(result, role, "s3", flag))
         for bool_key in (
             "exists",
             "usage_process_visible",
@@ -559,6 +635,8 @@ def validate_s4_effect_flags(result: dict[str, Any], analysis: dict[str, Any]) -
             continue
         if evidence_state_required and flag.get("effect_evidence_state") not in S4_EFFECT_EVIDENCE_STATES:
             errors.append(f"S4 {key}.effect_evidence_state 必须是 none/result_only/verified/uncertain")
+        if evidence_state_required:
+            errors.extend(_validate_structured_flag_evidence_ids(result, role, "s4", flag))
         for bool_key in (
             "effect_visible",
             "effect_proposition_matched",

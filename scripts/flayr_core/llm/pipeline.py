@@ -60,6 +60,12 @@ from .payload import (
     build_video_fact_payload,
     load_brand_proposition,
 )
+from .stage_review_contract import (
+    PHASE_C_PATCH_SNAPSHOT_SCHEMA,
+    PHASE_C_REVIEW_MODE,
+    PHASE_C_REVIEW_SCHEMA_VERSION,
+    patch_fields_for_stage,
+)
 from .s4_visual_verifier import maybe_apply_s4_visual_verifier
 from .media import select_role_visual_inputs
 from ..postprocess import apply_postprocess_chain
@@ -1080,12 +1086,6 @@ def maybe_refine_low_confidence_stages(
     stage_codes = sorted(candidates, key=lambda c: (_priority.get(c, 2), candidates.index(c)))[:2]
     if not stage_codes:
         return result
-    before_stages = [
-        json.loads(json.dumps(stage, ensure_ascii=False))
-        for stage in result.get("stage_analysis") or []
-        if isinstance(stage, dict) and stage_code(stage.get("stage")) in stage_codes
-    ]
-
     review_payload = build_stage_review_payload(
         args.llm_model,
         analysis,
@@ -1096,10 +1096,13 @@ def maybe_refine_low_confidence_stages(
     )
     if not payload_has_video(review_payload):
         result["phase_c_review"] = {
+            "schema_version": PHASE_C_REVIEW_SCHEMA_VERSION,
+            "mode": PHASE_C_REVIEW_MODE,
+            "snapshot_schema": PHASE_C_PATCH_SNAPSHOT_SCHEMA,
             "requested_stages": stage_codes,
             "applied": False,
             "reason": "low_confidence_stages 已声明，但本地视频切片构造失败。",
-            "before_stage_analysis": before_stages,
+            "patches": [],
         }
         _refresh_final_derived_artifact(analysis, result, ("phase_c_review",))
         return result
@@ -1123,29 +1126,31 @@ def maybe_refine_low_confidence_stages(
             analysis,
             analysis_input,
             locked_video_understanding,
+            allowed_stage_codes=stage_codes,
             fallback_improvements=raw_result.get("improvements"),
         )
     except (SystemExit, json.JSONDecodeError) as exc:
         result["phase_c_review"] = {
+            "schema_version": PHASE_C_REVIEW_SCHEMA_VERSION,
+            "mode": PHASE_C_REVIEW_MODE,
+            "snapshot_schema": PHASE_C_PATCH_SNAPSHOT_SCHEMA,
             "requested_stages": stage_codes,
             "applied": False,
             "reason": f"低置信阶段回看失败：{exc}",
-            "before_stage_analysis": before_stages,
+            "patches": [],
         }
         _refresh_final_derived_artifact(analysis, result, ("phase_c_review",))
         return result
 
     refined["phase_c_review"] = {
+        "schema_version": PHASE_C_REVIEW_SCHEMA_VERSION,
+        "mode": PHASE_C_REVIEW_MODE,
+        "snapshot_schema": PHASE_C_PATCH_SNAPSHOT_SCHEMA,
         "requested_stages": stage_codes,
         "applied": True,
         "response_retention": "ephemeral",
         "notes": review_result.get("review_notes", []),
-        "before_stage_analysis": before_stages,
-        "after_stage_analysis": [
-            json.loads(json.dumps(stage, ensure_ascii=False))
-            for stage in refined.get("stage_analysis") or []
-            if isinstance(stage, dict) and stage_code(stage.get("stage")) in stage_codes
-        ],
+        "patches": _phase_c_patch_snapshots(result, refined, review_result),
     }
     _refresh_final_derived_artifact(analysis, refined, ("phase_c_review",))
     return refined
@@ -1229,22 +1234,21 @@ def apply_stage_review_updates(
     analysis: dict[str, Any],
     analysis_input: str,
     locked_video_understanding: dict[str, Any],
+    *,
+    allowed_stage_codes: list[str],
     fallback_improvements: Any = None,
 ) -> dict[str, Any]:
-    """把 Phase C 返回的 stage_updates 合并回完整结果，再走现有校验链。"""
-    updates = review_result.get("stage_updates")
-    if not isinstance(updates, list) or not updates:
-        raise SystemExit("Phase C review returned no stage_updates.")
+    """Apply only Phase C's closed evidence-and-fact patch, then re-finalize.
 
-    updates_by_code: dict[str, dict[str, Any]] = {}
-    for update in updates:
-        if not isinstance(update, dict):
-            continue
-        code = stage_code(update.get("stage"))
-        if code:
-            updates_by_code[code] = update
-    if not updates_by_code:
-        raise SystemExit("Phase C review returned no valid stage codes.")
+    Phase C cannot replace a stage or directly write conclusions. Every legal
+    patch returns to the shared finalizer, which repairs, validates and invokes
+    the resolver again.
+    """
+    patches_by_code = _validate_stage_review_patches(
+        review_result,
+        locked_video_understanding,
+        allowed_stage_codes,
+    )
 
     merged = json.loads(json.dumps(current_result, ensure_ascii=False))
     # Phase C 只更新阶段。若初轮后处理已过滤掉所有提升点，恢复初轮已通过 schema 的原始条目，
@@ -1254,35 +1258,193 @@ def apply_stage_review_updates(
     merged_stages = []
     for stage in merged.get("stage_analysis", []):
         code = stage_code(stage.get("stage"))
-        if code in updates_by_code:
-            # 字段级合并而非整字典替换：回看若漏掉执行分等新字段，保留原值，
-            # 否则 derive 对复核阶段反而退化为模型直判（code review #1）。
+        if code in patches_by_code:
             base_stage = dict(stage)
-            # 跨模态净效果依赖本次回看片段。Phase C 更新任一阶段时必须重判，
-            # 不能因模型漏字段而沿用旧证据上的综合结论。
+            # Net multimodal assessment is not an allowed Phase C patch. Drop
+            # the stale aggregate instead of letting a fresh fact patch inherit
+            # an earlier conclusion.
             base_stage.pop("creator_multimodal", None)
             base_stage.pop("benchmark_multimodal", None)
-            # S1 hook flags 是 severity 输入事实。S1 回看后必须由回看结果重判，
-            # 不能字段级合并时沿用旧 hook，否则会出现"新 stage 套旧 hook"。
-            if code == "S1":
-                base_stage.pop("creator_hook", None)
-                base_stage.pop("benchmark_hook", None)
-                # S1 hook flags must be repaired again after Phase C replaces them.
-                base_stage.pop("_postprocess_state", None)
-            if code == "S2":
-                base_stage.pop("creator_s2", None)
-                base_stage.pop("benchmark_s2", None)
-            if code == "S3":
-                base_stage.pop("creator_s3", None)
-                base_stage.pop("benchmark_s3", None)
-            if code == "S4":
-                base_stage.pop("creator_s4", None)
-                base_stage.pop("benchmark_s4", None)
-            merged_stages.append({**base_stage, **updates_by_code[code]})
+            # Postprocess markers are derived from prior facts and must be
+            # rebuilt after any patch.
+            base_stage.pop("_postprocess_state", None)
+            base_stage.update(patches_by_code[code])
+            merged_stages.append(base_stage)
         else:
             merged_stages.append(stage)
     merged["stage_analysis"] = merged_stages
     return _process_llm_result(merged, analysis, analysis_input, locked_video_understanding)
+
+
+def _validate_stage_review_patches(
+    review_result: dict[str, Any],
+    locked_video_understanding: dict[str, Any],
+    allowed_stage_codes: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Reject Phase C output outside the closed patch contract before merging."""
+    if not isinstance(review_result, dict):
+        raise SystemExit("Phase C review must be a JSON object.")
+    unexpected_top_level = set(review_result) - {"stage_patches", "review_notes"}
+    if unexpected_top_level:
+        raise SystemExit(
+            "Phase C review contains unsupported top-level fields: "
+            + ", ".join(sorted(unexpected_top_level))
+            + "."
+        )
+    patches = review_result.get("stage_patches")
+    if not isinstance(patches, list) or not patches:
+        raise SystemExit("Phase C review returned no stage_patches.")
+
+    allowed = {stage_code(code) for code in allowed_stage_codes}
+    available_ids = _phase_c_available_evidence_ids(locked_video_understanding)
+    patches_by_code: dict[str, dict[str, Any]] = {}
+    for patch in patches:
+        if not isinstance(patch, dict):
+            raise SystemExit("Each Phase C stage patch must be an object.")
+        if set(patch) != {"stage", "fields"}:
+            raise SystemExit("Each Phase C stage patch may contain only stage and fields.")
+        code = stage_code(patch.get("stage"))
+        if not code or code not in allowed:
+            raise SystemExit(f"Phase C patch targets a stage that was not requested: {patch.get('stage')!r}.")
+        if code in patches_by_code:
+            raise SystemExit(f"Phase C review contains duplicate patch for {code}.")
+        fields = patch.get("fields")
+        if not isinstance(fields, dict) or not fields:
+            raise SystemExit(f"Phase C patch for {code} must contain non-empty fields.")
+        allowed_fields = set(patch_fields_for_stage(code))
+        illegal_fields = set(fields) - allowed_fields
+        if illegal_fields:
+            raise SystemExit(
+                f"Phase C patch for {code} attempts to modify protected fields: "
+                + ", ".join(sorted(illegal_fields))
+                + "."
+            )
+        required_fields = set(patch_fields_for_stage(code))
+        if set(fields) != required_fields:
+            missing = required_fields - set(fields)
+            raise SystemExit(
+                f"Phase C patch for {code} must replace its complete fact pair; missing: "
+                + ", ".join(sorted(missing))
+                + "."
+            )
+        _validate_phase_c_patch_evidence_ids(code, fields, available_ids)
+        patches_by_code[code] = json.loads(json.dumps(fields, ensure_ascii=False))
+    missing_requested = allowed - set(patches_by_code)
+    if missing_requested:
+        raise SystemExit(
+            "Phase C review omitted requested stage patches: " + ", ".join(sorted(missing_requested)) + "."
+        )
+    return patches_by_code
+
+
+def _phase_c_available_evidence_ids(facts: dict[str, Any]) -> dict[str, set[str]]:
+    return {
+        role: {
+            str(unit.get("id"))
+            for unit in ((facts.get(role) or {}).get("evidence_units") or [])
+            if isinstance(unit, dict) and str(unit.get("id") or "").strip()
+        }
+        for role in ("creator", "benchmark")
+    }
+
+
+def _validate_phase_c_patch_evidence_ids(
+    code: str,
+    fields: dict[str, Any],
+    available_ids: dict[str, set[str]],
+) -> None:
+    for role in ("creator", "benchmark"):
+        evidence_key = f"{role}_evidence_ids"
+        evidence_ids = fields.get(evidence_key)
+        if not isinstance(evidence_ids, list) or not evidence_ids:
+            raise SystemExit(f"Phase C patch for {code} requires non-empty {evidence_key}.")
+        normalized_ids = [str(item).strip() for item in evidence_ids]
+        if any(not item for item in normalized_ids):
+            raise SystemExit(f"Phase C patch for {code} has blank {evidence_key}.")
+        missing = sorted(set(normalized_ids) - available_ids[role])
+        if missing:
+            raise SystemExit(
+                f"Phase C patch for {code} references unknown {role} evidence: {', '.join(missing)}."
+            )
+        fact_key = f"{role}_{code.lower()}" if code != "S1" else f"{role}_hook"
+        fact = fields.get(fact_key)
+        if not isinstance(fact, dict):
+            raise SystemExit(f"Phase C patch for {code} requires object field {fact_key}.")
+        for nested_key in ("evidence_ids", "trust_source_evidence_ids"):
+            nested_ids = fact.get(nested_key)
+            if nested_ids is None:
+                continue
+            if not isinstance(nested_ids, list):
+                raise SystemExit(f"Phase C patch for {code} has invalid {fact_key}.{nested_key}.")
+            normalized_nested = [str(item).strip() for item in nested_ids]
+            if any(not item for item in normalized_nested):
+                raise SystemExit(f"Phase C patch for {code} has blank {fact_key}.{nested_key}.")
+            nested_missing = sorted(set(normalized_nested) - available_ids[role])
+            if nested_missing:
+                raise SystemExit(
+                    f"Phase C patch for {code} references unknown {role} evidence in {fact_key}.{nested_key}: "
+                    + ", ".join(nested_missing)
+                    + "."
+                )
+
+
+def _phase_c_patch_snapshots(
+    before_result: dict[str, Any],
+    after_result: dict[str, Any],
+    review_result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Record versioned patch-before/patch-after snapshots, never full stages."""
+    before_stages = {
+        stage_code(stage.get("stage")): stage
+        for stage in before_result.get("stage_analysis") or []
+        if isinstance(stage, dict)
+    }
+    after_stages = {
+        stage_code(stage.get("stage")): stage
+        for stage in after_result.get("stage_analysis") or []
+        if isinstance(stage, dict)
+    }
+    snapshots: list[dict[str, Any]] = []
+    for patch in review_result.get("stage_patches") or []:
+        if not isinstance(patch, dict):
+            continue
+        code = stage_code(patch.get("stage"))
+        fields = patch.get("fields")
+        if not code or not isinstance(fields, dict):
+            continue
+        snapshots.append(
+            {
+                "stage": code,
+                "applied_fields": sorted(fields),
+                "before": _phase_c_stage_snapshot(before_stages.get(code) or {}, code),
+                "after": _phase_c_stage_snapshot(after_stages.get(code) or {}, code),
+                "finalization": {
+                    "repair_validation_resolver": "completed",
+                    "resolver_status": str(
+                        ((after_stages.get(code) or {}).get("severity_derivation") or {}).get("status") or "unknown"
+                    ),
+                },
+            }
+        )
+    return snapshots
+
+
+def _phase_c_stage_snapshot(stage: dict[str, Any], code: str) -> dict[str, Any]:
+    fields = {
+        field: copy.deepcopy(stage[field])
+        for field in patch_fields_for_stage(code)
+        if field in stage
+    }
+    trace = stage.get("severity_derivation") if isinstance(stage.get("severity_derivation"), dict) else {}
+    return {
+        "patchable_fields": fields,
+        "resolution": {
+            "model_severity": stage.get("model_severity"),
+            "severity": stage.get("severity"),
+            "resolver_status": trace.get("status"),
+            "constraints": copy.deepcopy(trace.get("constraints") or []),
+        },
+    }
 
 
 def stage_code(value: Any) -> str:

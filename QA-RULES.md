@@ -169,7 +169,7 @@ python3 scripts/dev_test_stage2.py runs/<run-dir> --dry
 规则：
 
 - 阶段二不得新增、删除或改写 `video_understanding.{benchmark,creator}.evidence_units`。
-- Phase C 回看也只能修 `stage_analysis`，不能改 facts。
+- Phase C 回看只能提交受限的 `stage_analysis` 事实与证据引用补丁，不能改 facts、severity、叙事字段或提升点。
 
 处理：已阻断 + prompt 约束。
 
@@ -266,7 +266,7 @@ python3 scripts/dev_test_stage2.py runs/<run-dir> --dry
 - S3 的真实使用过程、S4 的可见效果、S5 的可信来源、S6 的购买动作不能被其他渠道替代。S5 来源存在后可由清晰展示和解释增强，但通用氛围不能凭空造出来源。
 - “必须存在”沿用各阶段现有结构化 flag 判据：S3 检查真实动作、接触、变化和连续性；S4 检查肉眼可见差异及模块约束；S5 检查来源可信、具体、相关且可核验；S6 检查结尾购买邀请与行动路径。不新增跨品类写死秒数。
 - `strong/effective` 必须有正向主导渠道和本阶段证据；`strong` 不得与 `strong_negative` 同时成立。
-- Phase C 回看必须重判该阶段两侧多模态结论，禁止把回看前的旧净效果沿用到新证据。
+- Phase C 回看不得写入多模态结论；应用事实补丁时必须清除该阶段回看前的旧净效果，禁止旧净效果沿用到新证据。
 - 旧结果没有多模态字段时走历史兼容路径；新主分析必须完整输出，缺失或自相矛盾时触发 Repair/阻断。
 
 处理：已进入主分析 + Repair + Phase C + 确定性 derive + 证据门禁。
@@ -541,12 +541,15 @@ PY
 - L4：Phase C 前正确、回看后错误。
 - 缺少足够 oracle 时必须写 `unresolved`，不得根据最终结果编造根因。
 
-Phase C 现在保存 `before_stage_analysis` / `after_stage_analysis` 快照，仅用于离线净收益评估，不改变主分析。
+Phase C 使用 `schema_version=2` 的 `phase_c_patch_snapshot_v1`，只保存合法补丁字段与应用前后
+resolver 结果，仅用于离线净收益评估。历史 `before_stage_analysis` / `after_stage_analysis` 整段快照
+按 legacy schema 单独统计，不能和补丁快照混合比较。
 
 ### Q24 derive 约束与校准门禁
 
 - `model_severity` 是默认值；derive 只能提交 floor/ceiling，floor 取 max、ceiling 取 min，冲突保留模型并复用共享 Phase C 预算。
 - `usage_evidence_state` / `effect_evidence_state` 是 Stage1/Stage2 的结构化事实。`partial`、`result_only`、`uncertain`、缺字段、非法值或证据强度不是 `direct|explicit` 时，不得触发提高 severity 的 floor。
+- S3/S4 结构化 flag 的 `evidence_ids` 必须是对应侧 Stage1 `evidence_units` 中存在且不重复的真实 ID；不得使用不存在的 ID 或 `_NO_` repair 占位证据。
 - `repair_evidence.py` 只检查状态与核心布尔事实之间的机械矛盾；不得把 `partial` 改成 `none`，不得把 `result_only` 改成 `verified`，也不得重写模型 severity。
 - 每个 severity-increasing floor 必须有 repair/hard-fact marker；缺 marker 只能写 audit，不得由直接调用 derive 的路径绕过。
 - S4 large floor 没有手动开关，也不能从 `analysis.json` 读取激活字段。只有通过 `postprocess/calibration.py::load_s4_large_floor_activation_evidence` 的摘要校验、至少 24 张 calibration 边界卡、双人边界复核、至少 5 次稳定重复运行、至少 12 对全新 frozen blind、4 个品类、2 个市场、已测 floor coverage 且无 derive/Phase C 回归后，才允许把可信 manifest 显式传入收口入口触发；否则必须保持 `audit_only`。

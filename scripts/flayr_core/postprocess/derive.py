@@ -396,8 +396,9 @@ def _s5_has_any_trust(stage: dict[str, Any]) -> bool:
 def _s5_absence_is_explicit(flag: dict[str, Any]) -> bool:
     """只允许 repair 已确认的 absence 触发 S5 ceiling。
 
-    直接调用 derive 的旧结果没有私有状态时，仍兼容明确的 ``trust_basis=none``
-    旗标；经过新 repair 的 unknown 状态则优先于这个兼容回退，绝不触发 ceiling。
+    直接调用 derive 的旧结果没有私有状态时，只兼容明确的 ``trust_basis=none``
+    旗标。产品主张和优惠不是独立背书，但也不等同 absence；经过新 repair 的
+    unknown 或 product_claim_or_offer 状态绝不触发 ceiling。
     """
     status = flag.get("_s5_source_status")
     if status is not None:
@@ -406,7 +407,7 @@ def _s5_absence_is_explicit(flag: dict[str, Any]) -> bool:
         flag.get("exists") is False
         and flag.get("independent_trust_purpose") is False
         and flag.get("duplicates_other_stage") is False
-        and str(flag.get("trust_basis") or "") in {"none", "product_claim", "offer_or_spec"}
+        and str(flag.get("trust_basis") or "") == "none"
         and str(flag.get("trust_evidence_type") or "") in {"none", "unknown"}
     )
 
@@ -1077,12 +1078,30 @@ def _derive_one(
             skip(rule, "uncertain_fact", "S5 信任事实不完整，不能把 unknown 当作无背书。")
         elif b_endorsement.verbal or b_endorsement.visual or c_endorsement.verbal or c_endorsement.visual:
             skip(rule, "predicate_not_met", "至少一侧存在明确硬背书观察。")
+        elif "product_claim_or_offer" in {creator.get("_s5_source_status"), benchmark.get("_s5_source_status")}:
+            skip(
+                rule,
+                "predicate_not_met",
+                "S5 只有产品主张或优惠，不能等同于明确无独立来源。",
+                reason_code="s5_product_claim_or_offer",
+                evidence=(*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)),
+            )
         elif not _s5_absence_is_explicit(creator) or not _s5_absence_is_explicit(benchmark):
             skip(rule, "uncertain_fact", "S5 来源 absence 未被明确确认，不能把 unknown 当作无背书。")
         elif _s5_has_any_trust(stage):
             skip(rule, "predicate_not_met", "至少一侧存在明确软/结构化信任材料。")
         elif creator.get("exists") is False and benchmark.get("exists") is False:
-            add("ceiling", "medium", rule, "双方明确没有信任放大材料，模型不能把该阶段判为 large。", (*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)))
+            # S5 has a high historical source-reconciliation warning rate. Until its
+            # source-state boundary has separate calibration evidence, preserve the
+            # model and retain this as an auditable candidate rather than a ceiling.
+            skip(
+                rule,
+                "audit_only",
+                "双方明确没有信任放大材料；S5 ceiling 在独立校准前只记录候选，不改写 severity。",
+                reason_code="activation_gate_closed",
+                evidence=(*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)),
+                candidate={"kind": "ceiling", "level": "medium"},
+            )
         else:
             skip(rule, "predicate_not_met", "双方没有同时明确声明 S5 不存在。")
 

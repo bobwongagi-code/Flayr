@@ -9,6 +9,7 @@ from scripts.flayr_core.validation_cohort import (
     build_cohort_lock,
     spend_cohort_lock,
     sha256_file,
+    stage_label_status,
     validate_blind_sample_contract,
     verify_cohort_lock,
 )
@@ -63,6 +64,18 @@ class ValidationCohortTest(unittest.TestCase):
         errors = validate_blind_sample_contract("sample", broken, sample)
         self.assertTrue(any("S4" in error for error in errors))
         self.assertTrue(any("top_root_causes" in error for error in errors))
+
+    def test_blind_na_requires_explicit_not_applicable_reason(self) -> None:
+        label = self._label()
+        label["stages"]["S5"] = "na"
+        label["stage_oracles"].pop("S5")
+        errors = validate_blind_sample_contract("sample", label, {"group": "blind"})
+        self.assertTrue(any("not_applicable" in error for error in errors))
+        label["stage_label_statuses"] = {
+            "S5": {"status": "not_applicable", "reason": "此视频不涉及独立信任放大。"}
+        }
+        self.assertEqual(validate_blind_sample_contract("sample", label, {"group": "blind"}), [])
+        self.assertEqual(stage_label_status(label, "S5"), ("not_applicable", "此视频不涉及独立信任放大。"))
 
     def test_lock_detects_drift_and_can_be_spent(self) -> None:
         repo = Path(__file__).resolve().parents[1]
