@@ -55,7 +55,6 @@ Flayr/
 ├── scripts/
 │   ├── flayr.py                  # CLI 主入口
 │   ├── batch_analyze.py          # 批量作业、断点续跑与限并发
-│   ├── dev_test_stage2.py        # 阶段二独立测试工具（复用阶段一产物，调 prompt 用）
 │   ├── evaluate_analysis.py      # 分析结果与人工 GT 对照
 │   ├── manage_validation_cohort.py # 冻结/校验/消费 blind cohort（不调模型）
 │   ├── verify_analysis_contracts.py # S1-S6 与跨模块契约门

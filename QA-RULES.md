@@ -121,7 +121,7 @@ LLM raw JSON
 
 ```bash
 python3 -m py_compile scripts/flayr_core/llm/parse.py
-python3 scripts/dev_test_stage2.py runs/<run-dir> --dry
+python3 -m unittest tests.test_analysis_model
 ```
 
 ### Q02 stage_analysis 顺序固定为 S1-S6
@@ -610,22 +610,19 @@ resolver 结果，仅用于离线净收益评估。历史 `before_stage_analysis
 基础验收：
 
 ```bash
-python3 -m py_compile scripts/flayr.py scripts/dev_test_stage2.py scripts/flayr_core/*.py scripts/flayr_core/llm/*.py scripts/flayr_core/postprocess/*.py
+python3 -m py_compile scripts/flayr.py scripts/flayr_core/*.py scripts/flayr_core/llm/*.py scripts/flayr_core/postprocess/*.py
 python3 -m json.tool references/analysis-output-schema.json >/dev/null
-python3 scripts/dev_test_stage2.py runs/<run-dir> --dry
 python3 scripts/manage_validation_cohort.py verify runs/validation/<cohort-id>.lock.json
 ```
 
-稳定性验收：
+derive 与离线 replay 合同验收：
 
 ```bash
-python3 scripts/dev_test_stage2.py runs/<run-dir> --repeat 5 --reuse-existing
+python3 -m unittest tests.test_derive_resolver tests.test_offline_replay
 ```
 
 期望：
 
-- `finish_reason_all_stop = true`
-- S3 severity 稳定。
-- 其他阶段 severity 不被带偏。
-- `ambiguity_count = 0`
-- 验收结果 `PASS`
+- floor/ceiling 合并不依赖规则触发顺序。
+- evidence_strength 缺失时 gate 保持关闭。
+- 离线 replay 不调用模型，并保留来源身份。
