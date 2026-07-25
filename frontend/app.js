@@ -483,7 +483,7 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
   function checkReady(){
     var ready = uploadState.files.benchmark && uploadState.files.creator;
     $('btn-start').disabled = !ready;
-    $('cta-hint').textContent = ready ? '两条视频已就绪 · 提交后预计约 18 分钟完成' : '请上传两条视频后开始分析';
+    $('cta-hint').textContent = ready ? '两条视频已就绪 · 提交后会根据素材和模型情况处理' : '请上传两条视频后开始分析';
   }
 
   function wireDropzone(role){
