@@ -39,13 +39,10 @@ from scripts.flayr_core.run_state import (
     COMPLETED,
     DEGRADED,
     FAILED,
-    PROCESSING,
     REPORT_GENERATING,
     RunStateError,
-    initialize_run_state,
     read_run_state,
     recover_run_state,
-    transition_run_state,
 )
 
 
@@ -549,7 +546,6 @@ class JobStore:
             shutil.rmtree(job_root, ignore_errors=True)
             raise
         run_dir.mkdir(parents=True, exist_ok=False)
-        initialize_run_state(run_dir, job_id=job_id)
         now = utc_now()
         job = {
             "id": job_id,
@@ -693,68 +689,6 @@ class JobStore:
         job["phase"] = phase
         job["estimated_remaining_seconds"] = estimated_remaining_seconds(progress)
 
-    @staticmethod
-    def _run_artifacts(run_dir: Path) -> tuple[str, ...]:
-        names = [
-            name
-            for name in (
-                "analysis.json",
-                "validated_normalized_result.json",
-                "final_derived_result.json",
-                "postprocess_change_log.json",
-                "bd_report.html",
-                "creator_report.html",
-                "report.html",
-            )
-            if (run_dir / name).is_file()
-        ]
-        return tuple(names)
-
-    def _advance_run_state(self, run_dir: Path) -> None:
-        """Advance only when the next lifecycle artifact is observable."""
-        state = _run_state(run_dir)
-        artifacts = self._run_artifacts(run_dir)
-        try:
-            if state == PROCESSING and any(
-                name in artifacts
-                for name in ("validated_normalized_result.json", "final_derived_result.json", "postprocess_change_log.json")
-            ):
-                transition_run_state(
-                    run_dir,
-                    ANALYSIS_COMPLETED,
-                    artifacts=artifacts,
-                )
-                state = ANALYSIS_COMPLETED
-        except RunStateError:
-            # The terminal result path performs an explicit consistency check;
-            # a transient or corrupt state must not make polling crash.
-            return
-
-    def _publish_terminal_state(
-        self,
-        run_dir: Path,
-        job_id: str,
-        target: str,
-        *,
-        reason: str = "",
-        artifacts: tuple[str, ...] = (),
-    ) -> bool:
-        current = _run_state(run_dir)
-        if current in {COMPLETED, DEGRADED, FAILED}:
-            return current == target
-        try:
-            # Complete normal transitions that may have happened between two
-            # five-second polling ticks before publishing the terminal state.
-            if current == PROCESSING:
-                transition_run_state(run_dir, ANALYSIS_COMPLETED, artifacts=artifacts)
-                current = ANALYSIS_COMPLETED
-            if current == ANALYSIS_COMPLETED:
-                transition_run_state(run_dir, REPORT_GENERATING, artifacts=artifacts)
-            transition_run_state(run_dir, target, reason=reason, artifacts=artifacts)
-        except RunStateError:
-            return False
-        return True
-
     def _run_job(self, job_id: str) -> None:
         job = self.get(job_id)
         if not job:
@@ -766,7 +700,6 @@ class JobStore:
         command = self._command(job)
         self._update(job_id, status="running", phase="素材处理与转写")
         try:
-            transition_run_state(run_dir, PROCESSING, artifacts=self._run_artifacts(run_dir))
             with log_path.open("ab") as log:
                 log.write(("$ " + " ".join(command) + "\n").encode("utf-8", "replace"))
                 process = subprocess.Popen(
@@ -779,7 +712,6 @@ class JobStore:
                 while process.poll() is None:
                     current = self.get(job_id)
                     if current:
-                        self._advance_run_state(run_dir)
                         progress, phase = progress_for_run(run_dir)
                         self._update(
                             job_id,
@@ -856,14 +788,7 @@ class JobStore:
         }
         state = _analysis_state(run_dir)
         if returncode == 0 and state == "completed" and validate_success_manifest(run_dir, expected):
-            if not self._publish_terminal_state(
-                run_dir,
-                job_id,
-                COMPLETED,
-                artifacts=self._run_artifacts(run_dir) + (SUCCESS_MANIFEST_NAME,),
-            ):
-                returncode = 1
-            else:
+            if _run_state(run_dir) == COMPLETED:
                 self._update(
                     job_id,
                     status="completed",
@@ -872,6 +797,7 @@ class JobStore:
                     estimated_remaining_seconds=0,
                 )
                 return
+            returncode = 1
         if returncode == 0 and state == "degraded" and (run_dir / "degraded_manifest.json").is_file() and report_variants_ready(run_dir):
             reason = "辅助产物已降级，不影响报告结论。"
             try:
@@ -879,13 +805,7 @@ class JobStore:
                 reason = str(payload.get("reason") or reason)
             except (OSError, json.JSONDecodeError):
                 pass
-            if self._publish_terminal_state(
-                run_dir,
-                job_id,
-                DEGRADED,
-                reason=reason[:500],
-                artifacts=self._run_artifacts(run_dir) + ("degraded_manifest.json",),
-            ):
+            if _run_state(run_dir) == DEGRADED:
                 self._update(
                     job_id,
                     status="degraded",

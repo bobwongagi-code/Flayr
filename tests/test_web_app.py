@@ -99,6 +99,32 @@ class WebAppHelpersTests(unittest.TestCase):
             transition_run_state(run_dir, DEGRADED)
             self.assertEqual(progress_for_run(run_dir), (100, "报告生成（部分分析能力降级）"))
 
+    def test_web_worker_does_not_create_or_advance_lifecycle_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root)
+            job_id = "job-observer-only"
+            run_dir = root / "run"
+            log_path = root / "worker.log"
+            run_dir.mkdir()
+            store.jobs[job_id] = {
+                "id": job_id,
+                "status": "queued",
+                "run_dir": str(run_dir),
+                "log_path": str(log_path),
+            }
+            finished_process = mock.Mock()
+            finished_process.poll.return_value = 0
+            finished_process.wait.return_value = 0
+            with (
+                mock.patch.object(store, "_command", return_value=["flayr-test"]),
+                mock.patch("scripts.web_app.subprocess.Popen", return_value=finished_process),
+                mock.patch.object(store, "_finish"),
+            ):
+                store._run_job(job_id)
+            self.assertIsNone(read_run_state(run_dir))
+            store.shutdown()
+
     def test_job_store_does_not_expose_internal_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = JobStore(Path(tmp))
@@ -371,6 +397,7 @@ class WebAppHelpersTests(unittest.TestCase):
                 public = store.create({"product_name": "测试"}, files, owner_id="owner-a")
             job_id = str(public["id"])
             run_dir = Path(str(store.jobs[job_id]["run_dir"]))
+            initialize_run_state(run_dir, job_id=job_id)
             transition_run_state(run_dir, PROCESSING)
             store.jobs[job_id]["status"] = "running"
             store._persist_locked()
