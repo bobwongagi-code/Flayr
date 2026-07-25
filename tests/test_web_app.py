@@ -118,12 +118,28 @@ class WebAppHelpersTests(unittest.TestCase):
             finished_process.wait.return_value = 0
             with (
                 mock.patch.object(store, "_command", return_value=["flayr-test"]),
-                mock.patch("scripts.web_app.subprocess.Popen", return_value=finished_process),
+                mock.patch("scripts.web_app.subprocess.Popen", return_value=finished_process) as popen,
                 mock.patch.object(store, "_finish"),
             ):
                 store._run_job(job_id)
             self.assertIsNone(read_run_state(run_dir))
+            self.assertIn("start_new_session", popen.call_args.kwargs)
+            self.assertTrue(popen.call_args.kwargs["start_new_session"])
             store.shutdown()
+
+    def test_shutdown_stops_running_process_groups_before_waiting_for_workers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            process = mock.Mock()
+            with (
+                mock.patch("scripts.web_app.stop_process_group") as stop,
+                mock.patch.object(store._executor, "shutdown", wraps=store._executor.shutdown) as executor_shutdown,
+            ):
+                with store._lock:
+                    store._running_processes["job-running"] = process
+                store.shutdown()
+            stop.assert_called_once_with(process, grace_seconds=5.0)
+            executor_shutdown.assert_called_once_with(wait=True, cancel_futures=True)
 
     def test_job_store_does_not_expose_internal_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

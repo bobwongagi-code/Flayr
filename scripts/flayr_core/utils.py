@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import selectors
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -108,6 +109,48 @@ def run_command(
     )
 
 
+def process_group_popen_kwargs() -> dict[str, Any]:
+    """Start a command in an isolated process group/session for safe cleanup."""
+    if os.name == "posix":
+        return {"start_new_session": True}
+    creation_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    return {"creationflags": creation_flag} if creation_flag else {}
+
+
+def _signal_process_group(process: subprocess.Popen, sig: signal.Signals) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, sig)
+            return
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        if sig == signal.SIGKILL:
+            process.kill()
+        else:
+            process.terminate()
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def stop_process_group(process: subprocess.Popen, *, grace_seconds: float = 2.0) -> None:
+    """Stop a process and all descendants, with a bounded graceful window."""
+    _signal_process_group(process, signal.SIGTERM)
+    try:
+        process.wait(timeout=max(0.0, float(grace_seconds)))
+        return
+    except subprocess.TimeoutExpired:
+        _signal_process_group(process, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        return
+    try:
+        process.wait()
+    except (OSError, ProcessLookupError):
+        pass
+
+
 def _run_command_bounded(
     command: list[str],
     timeout_seconds: int,
@@ -128,6 +171,7 @@ def _run_command_bounded(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=False,
+            **process_group_popen_kwargs(),
         )
     except OSError as exc:
         return subprocess.CompletedProcess(command, 127, "", str(exc))
@@ -190,18 +234,12 @@ def _run_command_bounded(
         timed_out = True
     finally:
         if timed_out or output_exceeded or process.poll() is None:
+            stop_process_group(process)
+        else:
             try:
-                process.kill()
-            except OSError:
-                pass
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            try:
-                process.kill()
-            except OSError:
-                pass
-            process.wait()
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                stop_process_group(process)
         for stream in (process.stdin, process.stdout, process.stderr):
             if stream is not None:
                 stream.close()

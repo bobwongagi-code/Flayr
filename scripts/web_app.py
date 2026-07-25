@@ -44,6 +44,7 @@ from scripts.flayr_core.run_state import (
     read_run_state,
     recover_run_state,
 )
+from scripts.flayr_core.utils import process_group_popen_kwargs, stop_process_group
 
 
 WEB_ROOT = ROOT / "runs" / "_web"
@@ -399,6 +400,8 @@ class JobStore:
         self.workspace_id = _identity_value(workspace_id, "workspace_id", DEFAULT_WORKSPACE_ID)
         self._lock = threading.RLock()
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="flayr-job")
+        self._running_processes: dict[str, subprocess.Popen] = {}
+        self._shutdown_requested = False
         self.jobs: dict[str, dict[str, Any]] = {}
         self.root.mkdir(parents=True, exist_ok=True)
         self.jobs_root.mkdir(parents=True, exist_ok=True)
@@ -699,6 +702,7 @@ class JobStore:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         command = self._command(job)
         self._update(job_id, status="running", phase="素材处理与转写")
+        process: subprocess.Popen | None = None
         try:
             with log_path.open("ab") as log:
                 log.write(("$ " + " ".join(command) + "\n").encode("utf-8", "replace"))
@@ -708,7 +712,13 @@ class JobStore:
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     env=os.environ.copy(),
+                    **process_group_popen_kwargs(),
                 )
+                with self._lock:
+                    self._running_processes[job_id] = process
+                    stop_requested = self._shutdown_requested
+                if stop_requested:
+                    stop_process_group(process, grace_seconds=5.0)
                 while process.poll() is None:
                     current = self.get(job_id)
                     if current:
@@ -735,6 +745,11 @@ class JobStore:
                 phase="分析失败",
                 estimated_remaining_seconds=0,
             )
+        finally:
+            if process is not None:
+                with self._lock:
+                    if self._running_processes.get(job_id) is process:
+                        self._running_processes.pop(job_id, None)
 
     def _command(self, job: dict[str, Any]) -> list[str]:
         command = [
@@ -841,7 +856,12 @@ class JobStore:
         return f"分析未完成（退出码 {returncode}），请重新上传后重试。"
 
     def shutdown(self) -> None:
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        with self._lock:
+            self._shutdown_requested = True
+            running = list(self._running_processes.values())
+        for process in running:
+            stop_process_group(process, grace_seconds=5.0)
+        self._executor.shutdown(wait=True, cancel_futures=True)
 
 
 class FlayrServer(ThreadingHTTPServer):

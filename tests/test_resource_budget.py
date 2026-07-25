@@ -5,11 +5,12 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from flayr_core import resources
+from flayr_core import resources, utils
 from flayr_core.resources import ResourceBudget, ResourceBudgetExceeded, ResourceLimits, encode_file_data_url
 from flayr_core.utils import cleanup_stale_temp_entries, run_command
 
@@ -113,6 +114,12 @@ class ResourceBudgetTests(unittest.TestCase):
             resources._ACTIVE_BUDGET.reset(token)
         self.assertEqual(completed.returncode, 125)
         self.assertLessEqual(len(completed.stdout.encode("utf-8")), 128)
+
+    def test_command_runs_in_an_isolated_process_group(self) -> None:
+        with mock.patch.object(utils.subprocess, "Popen", wraps=utils.subprocess.Popen) as popen:
+            completed = run_command([sys.executable, "-c", "print('ok')"], timeout_seconds=5)
+        self.assertEqual(completed.returncode, 0)
+        self.assertTrue(popen.call_args.kwargs.get("start_new_session"))
 
     def test_command_callback_receives_stream_without_stdout_buffer(self) -> None:
         chunks: list[bytes] = []
