@@ -32,6 +32,20 @@ class ProjectContractTests(unittest.TestCase):
         for version in ("3.11", "3.12", "3.13"):
             self.assertIn(version, workflow)
 
+    def test_local_reports_and_frontend_have_no_remote_font_requests(self) -> None:
+        for relative_path in (
+            "assets/bd_report.html",
+            "assets/creator_report.html",
+            "frontend/index.html",
+        ):
+            content = (ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertNotIn("fonts.googleapis.com", content, relative_path)
+            self.assertNotIn("fonts.gstatic.com", content, relative_path)
+
+        styles = (ROOT / "frontend" / "styles.css").read_text(encoding="utf-8")
+        self.assertNotIn("fonts.googleapis.com", styles)
+        self.assertNotIn("fonts.gstatic.com", styles)
+
     def test_release_and_dependency_contracts_are_explicit(self) -> None:
         version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
