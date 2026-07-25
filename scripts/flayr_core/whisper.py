@@ -16,6 +16,11 @@ def run_whisper(
     transcript_path: Path,
     result: dict[str, Any],
 ) -> None:
+    segments_path = role_dir / "transcript.srt"
+    result["transcript_segments_path"] = None
+    result["transcript_segments_available"] = False
+    transcript_path.unlink(missing_ok=True)
+    segments_path.unlink(missing_ok=True)
     whisper_command = deps["whisper"]
     language = deps["whisper_language"]
     if language == "auto" and whisper_command in {"whisper-cli", "whisper-cpp"}:
@@ -70,6 +75,7 @@ def run_whisper(
         command = [whisper_command, str(audio_path)]
         generated = audio_path.with_suffix(".txt")
 
+    generated.unlink(missing_ok=True)
     completed = run_command(command)
     if completed.returncode != 0:
         write_text(transcript_path, "Whisper failed. Fill transcript manually.\n")
@@ -82,9 +88,9 @@ def run_whisper(
     else:
         write_text(transcript_path, completed.stdout.strip() + "\n")
     result["transcription_status"] = "completed"
-    segments_path = role_dir / "transcript.srt"
-    if segments_path.exists():
+    if segments_path.is_file() and segments_path.read_text(encoding="utf-8", errors="ignore").strip():
         result["transcript_segments_path"] = str(segments_path)
+        result["transcript_segments_available"] = True
 
 
 def detect_whisper_language(deps: dict[str, Any], audio_path: Path) -> dict[str, Any] | None:

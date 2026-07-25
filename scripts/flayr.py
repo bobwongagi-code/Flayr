@@ -454,6 +454,14 @@ def _prepare_explicit_run_dir(run_dir: Path, *, reuse: bool) -> None:
     if run_dir.exists() and not run_dir.is_dir():
         raise SystemExit(f"--output-dir 不是目录：{run_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
+    for entry in run_dir.iterdir():
+        if entry.is_dir() and not entry.is_symlink() and (
+            entry.name.startswith(".benchmark.generation-")
+            or entry.name.startswith(".creator.generation-")
+            or entry.name.startswith(".benchmark.previous-")
+            or entry.name.startswith(".creator.previous-")
+        ):
+            shutil.rmtree(entry, ignore_errors=True)
     entries = [entry for entry in run_dir.iterdir() if entry.name != RUN_STATE_FILE]
     if not entries:
         if reuse:
@@ -688,13 +696,31 @@ def load_existing_video_result(
         return None
     if not transcript.is_file() or _is_stale_placeholder(transcript):
         return None
-    segment_path = Path(str(info.get("transcript_segments_path") or transcript.with_name(transcript.stem + ".txt")))
-    if not segment_path.is_file() or _is_stale_placeholder(segment_path):
+    segment_value = str(info.get("transcript_segments_path") or "").strip()
+    if segment_value:
+        segment_path = _current_role_artifact(info, "transcript_segments_path", role_dir)
+        if segment_path is None or _is_stale_placeholder(segment_path):
+            return None
+    elif info.get("transcript_segments_available") is True:
         return None
     audio_value = str(info.get("audio_path") or "").strip()
     if audio_value and not Path(audio_value).is_file():
         return None
     return info
+
+
+def _current_role_artifact(info: dict[str, Any], key: str, role_dir: Path) -> Path | None:
+    """Resolve an explicitly recorded artifact without directory fallbacks."""
+    raw = str(info.get(key) or "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    root = role_dir.expanduser().resolve()
+    try:
+        candidate.resolve().relative_to(root)
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
 
 
 def _preprocess_artifact_metadata(path: Path) -> dict[str, Any]:
@@ -753,6 +779,42 @@ def _is_stale_placeholder(path: Path) -> bool:
     return text.startswith(("待转写", "待翻译", "待生成", "pending:"))
 
 
+def _rewrite_generation_paths(value: Any, old_root: Path, new_root: Path) -> Any:
+    old = str(old_root.resolve())
+    new = str(new_root.resolve())
+    if isinstance(value, dict):
+        return {key: _rewrite_generation_paths(item, old_root, new_root) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_rewrite_generation_paths(item, old_root, new_root) for item in value]
+    if isinstance(value, str) and (value == old or value.startswith(old + "/")):
+        return new + value[len(old):]
+    return value
+
+
+def _promote_preprocess_generation(
+    staging_dir: Path,
+    role_dir: Path,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Publish a complete generation while keeping old artifacts out of the build."""
+    backup_dir = role_dir.parent / f".{role_dir.name}.previous-{uuid.uuid4().hex}"
+    if role_dir.exists():
+        role_dir.replace(backup_dir)
+    try:
+        staging_dir.replace(role_dir)
+    except Exception:
+        if not role_dir.exists() and backup_dir.exists():
+            backup_dir.replace(role_dir)
+        raise
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir, ignore_errors=True)
+    published = _rewrite_generation_paths(result, staging_dir, role_dir)
+    if not isinstance(published, dict):
+        raise TypeError("preprocess generation result must be a mapping")
+    write_json(role_dir / "_preprocess.json", published)
+    return published
+
+
 def process_video(
     role: str,
     video_path: Path,
@@ -780,6 +842,26 @@ def process_video(
             ensure_video_evidence_artifacts(role_dir, cached)
             print(f"[reuse] {role}: 复用已有预处理（跳过抽帧/转写/OCR）")
             return cached
+
+    staging_dir = run_dir / f".{role}.generation-{uuid.uuid4().hex}"
+    staging_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        result = _process_video_generation(role, video_path, staging_dir, deps, args, budget=budget)
+        return _promote_preprocess_generation(staging_dir, role_dir, result)
+    except Exception:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+
+
+def _process_video_generation(
+    role: str,
+    video_path: Path,
+    role_dir: Path,
+    deps: dict[str, Any],
+    args: argparse.Namespace,
+    budget: ResourceBudget | None = None,
+) -> dict[str, Any]:
+    """Build one isolated role generation; callers publish it only after completion."""
     frames_dir = role_dir / "frames"
     focus_frames_dir = role_dir / "focus_frames"
     role_dir.mkdir(parents=True, exist_ok=True)
@@ -810,6 +892,7 @@ def process_video(
         "audio_quality": {},
         "transcript_path": None,
         "transcript_segments_path": None,
+        "transcript_segments_available": False,
         "transcription_status": "not_started",
         "requested_language": args.whisper_language,
         "detected_language": None,
@@ -905,8 +988,9 @@ def ensure_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> Non
     timeline_dir = Path(str(existing.get("timeline_views_dir") or role_dir / "timeline_views"))
     selection_report = Path(str(existing.get("frame_selection_report_path") or role_dir / "frames" / "selection_report.json"))
     audit_path = Path(str(existing.get("audit_path") or role_dir / "video_evidence_audit.json"))
-    transcript_ready = not (role_dir / "transcript.srt").is_file() or Path(
-        str(existing.get("transcript_pack_path") or role_dir / "transcript_packed.md")
+    segment_path = _current_role_artifact(info, "transcript_segments_path", role_dir)
+    transcript_ready = segment_path is None or Path(
+        str(existing.get("transcript_pack_path") or "__missing_transcript_pack__")
     ).is_file()
     if existing and timeline_dir.is_dir() and selection_report.is_file() and audit_path.is_file() and transcript_ready:
         return

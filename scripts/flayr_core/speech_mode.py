@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .transcript import current_transcript_segments_path
+
 
 NON_SPEECH_LABELS = {
     "*outro music*",
@@ -32,7 +34,7 @@ def classify_speech_mode(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]
     """Classify the dominant evidence spine for this video."""
     transcript = read_text(role_dir / "transcript.txt").strip()
     transcript_lower = transcript.lower()
-    srt_segments = count_srt_segments(role_dir / "transcript.srt")
+    srt_segments = count_srt_segments(current_transcript_segments_path(info))
     subtitle_segments = count_subtitle_segments(role_dir / "subtitle_track.json")
     audio_exists = bool(info.get("audio_path") and Path(str(info.get("audio_path"))).is_file())
     transcription_status = str(info.get("transcription_status") or "").strip()
@@ -94,8 +96,8 @@ def has_effective_speech(transcript: str, srt_segments: int, transcription_statu
     return transcription_status == "completed" and len(text) >= 8
 
 
-def count_srt_segments(path: Path) -> int:
-    if not path.is_file():
+def count_srt_segments(path: Path | None) -> int:
+    if path is None or not path.is_file():
         return 0
     text = path.read_text(encoding="utf-8", errors="ignore")
     return len(re.findall(r"-->", text))

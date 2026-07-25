@@ -24,6 +24,7 @@ from ..stage_ownership import (
     apply_certification_ownership_policy,
 )
 from ..subtitle_track import render_subtitle_track_markdown
+from ..transcript import current_transcript_segments_path
 from ..video_evidence import parse_srt_segments
 from ..resources import ResourceBudget
 from .api import (
@@ -48,6 +49,13 @@ def full_analysis_output_budget(model: str) -> int:
 
 def read_text_if_exists(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="ignore").strip() if path.is_file() else "（缺失）"
+
+
+def _video_evidence_path(info: dict[str, Any], key: str) -> Path:
+    evidence = info.get("video_evidence") if isinstance(info.get("video_evidence"), dict) else {}
+    raw = str(evidence.get(key) or "").strip()
+    path = Path(raw) if raw else Path(f"__missing_{key}__")
+    return path if path.is_file() else Path(f"__missing_{key}__")
 
 
 def read_track_markdown(track_path: Path, renderer: Any, disabled_hint: str) -> str:
@@ -445,10 +453,10 @@ def build_video_fact_payload(
             read_text_if_exists(role_dir / "transcript.txt"),
             "",
             "## 紧凑口播索引（先按这个理解口播顺序；逐字引用仍以 transcript.srt 为准）",
-            read_text_if_exists(role_dir / "transcript_packed.md"),
+            read_text_if_exists(_video_evidence_path(info, "transcript_pack_path")),
             "",
             "## 带时间戳口播分段（口播时间归因的权威依据）",
-            read_text_if_exists(role_dir / "transcript.srt"),
+            read_text_if_exists(current_transcript_segments_path(info) or Path("__missing_transcript_segments__")),
             "",
             "## 中文翻译",
             read_text_if_exists(role_dir / "transcript.zh.txt"),
@@ -759,7 +767,7 @@ def build_video_identity_payload(
             f"# 单视频产品身份提取：{role}",
             f"- 运营声明产品：{analysis.get('product', {}).get('name') or '未填写'}（只作核对线索）",
             "## 紧凑转写",
-            read_text_if_exists(role_dir / "transcript_packed.md"),
+            read_text_if_exists(_video_evidence_path(info, "transcript_pack_path")),
             "## OCR 字幕轨",
             read_track_markdown(role_dir / "subtitle_track.json", render_subtitle_track_markdown, "（未生成 OCR 字幕轨）"),
             "## 输出 JSON",
@@ -922,7 +930,8 @@ def build_s1_boundary_hint_block(analysis: dict[str, Any] | None, facts: dict[st
         if not isinstance(info, dict):
             continue
         role_dir = Path(str(info.get("work_dir") or ""))
-        segments = parse_srt_segments(role_dir / "transcript.srt")[:4]
+        transcript_path = current_transcript_segments_path(info)
+        segments = parse_srt_segments(transcript_path)[:4] if transcript_path else []
         if not segments:
             continue
         candidate = infer_s1_boundary_candidate(role, segments, facts)

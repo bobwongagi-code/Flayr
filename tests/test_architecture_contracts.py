@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import flayr
-from flayr_core import report as report_module, subtitle_track, translation, utils, video
+from flayr_core import report as report_module, subtitle_track, translation, utils, video, whisper
 from flayr_core.report import (
     ReportAssetContext,
     executive_summary,
@@ -83,7 +83,7 @@ from flayr_core.postprocess.chain import stamp_comparison_eligibility
 from flayr_core.postprocess.audit import PostprocessAudit, build_field_sources
 from flayr_core.postprocess.derive import _derive_one, _s3_usage_exec, _s4_effect_exec, _s6_cta_exec
 from flayr_core.postprocess.global_diagnosis import materialize_global_diagnosis
-from flayr_core.video_evidence import parse_srt_time_range
+from flayr_core.video_evidence import build_transcript_pack, parse_srt_time_range
 from flayr_core.postprocess.repair import (
     align_stage_flag_evidence,
     apply_comparison_eligibility,
@@ -3070,7 +3070,11 @@ class ArchitectureContractTests(unittest.TestCase):
             frames.mkdir(parents=True)
             transcript = role_dir / "transcript.txt"
             transcript.write_text("cached transcript", encoding="utf-8")
-            transcript_segments = role_dir / "transcript.txt"
+            transcript_segments = role_dir / "transcript.srt"
+            transcript_segments.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\ncurrent segment\n",
+                encoding="utf-8",
+            )
             args = self._cache_args()
             deps = self._cache_deps()
             fingerprint = flayr.build_preprocess_fingerprint(video, deps, args)
@@ -3080,6 +3084,7 @@ class ArchitectureContractTests(unittest.TestCase):
                         "frames_dir": str(frames),
                         "transcript_path": str(transcript),
                         "transcript_segments_path": str(transcript_segments),
+                        "transcript_segments_available": True,
                         "preprocess_fingerprint": fingerprint,
                         "preprocess_completed": True,
                         "preprocess_artifacts": flayr._build_preprocess_artifact_manifest(role_dir),
@@ -3097,6 +3102,83 @@ class ArchitectureContractTests(unittest.TestCase):
 
             args.whisper_language = "th"
             self.assertIsNone(flayr.load_existing_video_result(role_dir, flayr.build_preprocess_fingerprint(video, deps, args)))
+
+    def test_transcript_consumers_never_fallback_to_role_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            role_dir = Path(tmp)
+            (role_dir / "transcript.srt").write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nstale segment\n",
+                encoding="utf-8",
+            )
+            info = {"work_dir": str(role_dir)}
+            self.assertEqual(read_srt_segments(info), [])
+            self.assertEqual(build_transcript_pack(role_dir, info), {})
+
+    def test_preprocess_rebuild_publishes_isolated_generation_without_old_srt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            source = root / "source.mp4"
+            source.write_bytes(b"video")
+            role_dir = run_dir / "creator"
+            role_dir.mkdir()
+            (role_dir / "transcript.srt").write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nstale segment\n",
+                encoding="utf-8",
+            )
+            args = self._cache_args()
+            deps = {
+                "ffmpeg": None,
+                "ffprobe": None,
+                "whisper": None,
+                "whisper_model": None,
+                "whisper_model_th": None,
+            }
+            result = flayr.process_video("creator", source, run_dir, deps, args)
+            self.assertEqual(result["transcript_segments_path"], None)
+            self.assertFalse((role_dir / "transcript.srt").exists())
+            self.assertTrue((role_dir / "_preprocess.json").is_file())
+            self.assertEqual(list(run_dir.glob(".creator.generation-*")), [])
+
+    def test_whisper_backend_switch_clears_previous_segments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            role_dir = Path(tmp)
+            audio = role_dir / "audio.wav"
+            audio.write_bytes(b"audio")
+            transcript = role_dir / "transcript.txt"
+            deps = {
+                "whisper": "whisper-cli",
+                "whisper_model": None,
+                "whisper_model_th": None,
+                "whisper_language": "en",
+            }
+
+            def first_backend(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                (role_dir / "transcript.txt").write_text("old transcript", encoding="utf-8")
+                (role_dir / "transcript.srt").write_text(
+                    "1\n00:00:00,000 --> 00:00:01,000\nold segment\n",
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with mock.patch.object(whisper, "run_command", side_effect=first_backend):
+                first = {}
+                whisper.run_whisper(deps, audio, role_dir, transcript, first)
+            self.assertTrue(first["transcript_segments_available"])
+
+            deps["whisper"] = "whisper"
+
+            def second_backend(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                (role_dir / "audio.txt").write_text("new transcript", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with mock.patch.object(whisper, "run_command", side_effect=second_backend):
+                second = {}
+                whisper.run_whisper(deps, audio, role_dir, transcript, second)
+            self.assertFalse(second["transcript_segments_available"])
+            self.assertIsNone(second["transcript_segments_path"])
+            self.assertFalse((role_dir / "transcript.srt").exists())
 
     def test_default_run_dir_is_unique(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(flayr, "DEFAULT_RUNS_DIR", Path(tmp)):

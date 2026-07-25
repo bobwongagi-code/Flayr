@@ -19,6 +19,7 @@ from ..artifacts import (
     parse_timestamp_seconds,
 )
 from ..llm.parse import is_effective_voiceover
+from ..transcript import current_transcript_segments_path
 
 
 # ---------------------------------------------------------------------------
@@ -26,12 +27,8 @@ from ..llm.parse import is_effective_voiceover
 # ---------------------------------------------------------------------------
 
 def read_srt_segments(info: dict[str, Any]) -> list[dict[str, Any]]:
-    configured = str(info.get("transcript_segments_path") or "").strip()
-    path = Path(configured) if configured else Path("__missing_transcript_segments__")
-    if not path.is_file():
-        work_dir = Path(str(info.get("work_dir") or ""))
-        path = work_dir / "transcript.srt"
-    if not path.is_file():
+    path = current_transcript_segments_path(info)
+    if path is None:
         return []
     blocks = re.split(r"\n\s*\n", path.read_text(encoding="utf-8", errors="ignore").strip())
     segments: list[dict[str, Any]] = []

@@ -29,6 +29,7 @@ from .artifacts import (
     sample_evenly,
 )
 from .utils import write_json, write_text
+from .transcript import current_transcript_segments_path
 
 SIGNATURE_SIZE = 16
 DEDUP_THRESHOLD_PERCENT = 8.0
@@ -90,7 +91,7 @@ def audit_video_evidence(role_dir: Path, result: dict[str, Any]) -> dict[str, An
         ("selection_report", result.get("frame_selection_report_path")),
         ("selection_report_html", result.get("frame_selection_report_html_path")),
     ]
-    if (role_dir / "transcript.srt").is_file():
+    if result.get("transcript_pack_path"):
         checks.extend(
             [
                 ("transcript_pack", result.get("transcript_pack_path")),
@@ -318,7 +319,9 @@ def fit_image(image: Image.Image, width: int, height: int) -> Image.Image:
 
 
 def build_transcript_pack(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]:
-    srt_path = Path(str(info.get("transcript_segments_path") or role_dir / "transcript.srt"))
+    srt_path = current_transcript_segments_path(info)
+    if srt_path is None:
+        return {}
     segments = parse_srt_segments(srt_path)
     if not segments:
         return {}
@@ -390,7 +393,8 @@ def build_timeline_views(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]
     if duration > 6:
         ranges.append(("cta", max(0.0, float(duration) - 6.0), float(duration)))
 
-    transcript = parse_srt_segments(Path(str(info.get("transcript_segments_path") or role_dir / "transcript.srt")))
+    transcript_path = current_transcript_segments_path(info)
+    transcript = parse_srt_segments(transcript_path) if transcript_path else []
     written: list[dict[str, Any]] = []
     for label, start, end in ranges:
         out_path = out_dir / f"{label}.jpg"

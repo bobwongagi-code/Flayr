@@ -29,6 +29,7 @@ from .shot_track import render_shot_track_markdown
 from .speech_mode import speech_mode_prompt
 from .stage_ownership import CERTIFICATION_OWNERSHIP_PROMPT, apply_certification_ownership_policy
 from .subtitle_track import render_subtitle_track_markdown
+from .transcript import current_transcript_segments_path
 from .utils import read_optional_text, write_text
 
 
@@ -181,7 +182,7 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
                 "",
                 "### 带时间戳口播分段",
                 "",
-                read_optional_text(role_dir / "transcript.srt"),
+                read_optional_text(current_transcript_segments_path(info) or Path("__missing_transcript_segments__")),
                 "",
                 "### 中文翻译",
                 "",
@@ -297,7 +298,7 @@ def render_video_evidence_markdown(role_dir: Path, info: dict[str, Any]) -> str:
             path = item.get("path") or ""
             lines.append(f"  - {label}: {start}s-{end}s {path}")
     packed = evidence.get("transcript_pack_path") if isinstance(evidence, dict) else None
-    packed_path = Path(str(packed or role_dir / "transcript_packed.md"))
+    packed_path = Path(str(packed or "__missing_transcript_pack__"))
     lines.extend(["", "#### 紧凑口播索引", ""])
     lines.append(read_optional_text(packed_path))
     return "\n".join(str(line) for line in lines)

@@ -1268,7 +1268,10 @@ with tempfile.TemporaryDirectory() as td:
             }
         ],
     }
-    repair_s1_hook_boundaries(_boundary_result, {"videos": {"creator": {"work_dir": str(role_dir)}}})
+    repair_s1_hook_boundaries(
+        _boundary_result,
+        {"videos": {"creator": {"work_dir": str(role_dir), "transcript_segments_path": str(role_dir / "transcript.srt")}}},
+    )
     _fixed = _boundary_result["stage_analysis"][0]["creator_hook"]
     check("S1 边界候选后处理：10.4s 收回 6.8s 且 leak 压 landing=false",
           _fixed["hook_boundary_seconds"] == 6.8
@@ -1367,7 +1370,10 @@ with tempfile.TemporaryDirectory() as td:
             }
         ],
     }
-    repair_s1_hook_boundaries(_promo_result, {"videos": {"creator": {"work_dir": str(role_dir)}}})
+    repair_s1_hook_boundaries(
+        _promo_result,
+        {"videos": {"creator": {"work_dir": str(role_dir), "transcript_segments_path": str(role_dir / "transcript.srt")}}},
+    )
     _promo_fixed = _promo_result["stage_analysis"][0]["creator_hook"]
     check("S1 leak 复核：促销 Hook 内的优惠词不算窗口泄漏",
           _promo_fixed["landing_met"] is True and _promo_fixed["landing_window_leak"] is False)
