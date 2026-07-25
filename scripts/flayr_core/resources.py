@@ -323,7 +323,7 @@ def encode_file_data_url(path: Path, *, max_bytes: int, expected_kind: str = "im
     """Bounded, signature-checked base64 encoding for providers without file upload APIs.
 
     The file is read in chunks; the encoded string is still assembled because the
-    current OpenAI-compatible providers accept a data URL, not a local path.
+    Approved providers accept a data URL, not a local path.
     """
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 0:
         raise ValueError("max_bytes must be a non-negative integer")

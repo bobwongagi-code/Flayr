@@ -349,12 +349,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--llm-model",
-        help="Optional OpenAI-compatible chat model used to generate analysis_result.json.",
+        help="Optional approved-provider chat model used to generate analysis_result.json.",
     )
     parser.add_argument(
         "--llm-api-url",
         default="https://api.openai.com/v1/chat/completions",
-        help="OpenAI-compatible chat completions endpoint.",
+        help="Approved-provider Chat Completions endpoint; only allowlisted official domains are accepted.",
     )
     parser.add_argument(
         "--llm-api-key-env",

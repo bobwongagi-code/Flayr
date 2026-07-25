@@ -32,7 +32,7 @@ class LlmApiContractTests(unittest.TestCase):
 
     def test_unknown_provider_is_conservative(self) -> None:
         capabilities = provider_capabilities("https://example.test/v1/chat/completions", "vision-test")
-        self.assertEqual(capabilities.profile, "unknown_openai_compatible")
+        self.assertEqual(capabilities.profile, "unknown_provider")
         self.assertEqual(capabilities.confidence, "unverified")
         self.assertFalse(can_send_standalone_audio("https://example.test/v1/chat/completions", "vision-test"))
         self.assertFalse(can_analyze_native_audio("https://example.test/v1/chat/completions", "vision-test"))

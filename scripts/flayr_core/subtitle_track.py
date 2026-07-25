@@ -177,7 +177,7 @@ def ocr_frame_with_retry(
 
 
 def build_ocr_payload(frame_path: Path, model: str) -> dict[str, Any]:
-    """OpenAI-compatible vision OCR request payload."""
+    """Approved-provider vision OCR request payload."""
     payload = {
         "model": model,
         "messages": [

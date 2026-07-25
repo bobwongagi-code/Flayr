@@ -1,6 +1,6 @@
 """flayr_core.llm.payload：LLM 请求 payload 构造。
 
-每个 build_*_payload 都返回 OpenAI 兼容的 chat completions 请求体。
+每个 build_*_payload 都返回已批准供应商使用的 chat completions 请求体。
 不调用 LLM、不解析响应，纯粹组装文本 + 图片 + system prompt。
 """
 
@@ -1476,7 +1476,7 @@ def build_llm_comparison_payload(
     payload = build_llm_payload(model, user_text, [])
     # temperature=0：对比判断要可复现，消除 severity 在边界 case（如 S3）上的抖动。
     payload["temperature"] = 0.0
-    # Keep one deterministic output budget across compatible providers.
+    # Keep one deterministic output budget across approved providers.
     payload["max_tokens"] = full_analysis_output_budget(model)
 
     # Phase B：把每条 evidence 的关键帧 + 切片音频挂到 user message（增强判断的感官输入）。

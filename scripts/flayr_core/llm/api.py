@@ -50,10 +50,11 @@ LLM_TRANSPORT_DIAGNOSTIC_BYTES = 64 * 1024
 
 @dataclass(frozen=True)
 class ProviderCapabilities:
-    """Declared capabilities for a known OpenAI-compatible provider profile.
+    """Declared capabilities for a known approved provider profile.
 
     This is a static compatibility matrix, not a live capability probe. Unknown
-    endpoints are conservative and must not be treated as audio-capable.
+    endpoints are blocked by the outbound allowlist and must not be treated as
+    audio-capable.
     """
 
     profile: str
@@ -63,7 +64,7 @@ class ProviderCapabilities:
 
 
 def provider_capabilities(api_url: str, model: str = "") -> ProviderCapabilities:
-    """Look up the explicit compatibility profile for an endpoint/model pair."""
+    """Look up the explicit approved-provider profile for an endpoint/model pair."""
     normalized_model = str(model or "").strip().lower()
     try:
         hostname = (urlsplit(str(api_url or "")).hostname or "").lower()
@@ -77,7 +78,7 @@ def provider_capabilities(api_url: str, model: str = "") -> ProviderCapabilities
             native_audio_analysis=True,
         )
     return ProviderCapabilities(
-        profile="unknown_openai_compatible",
+        profile="unknown_provider",
         confidence="unverified",
         standalone_audio_input=False,
         native_audio_analysis=False,
@@ -271,7 +272,7 @@ def call_llm_api(
     cleanup_payload: bool = True,
     cleanup_raw: bool = True,
 ) -> str:
-    """流式（SSE）调用 OpenAI 兼容 chat completions，分块拼装后合成标准 completion JSON 返回。
+    """流式（SSE）调用已批准供应商的 chat completions，分块拼装后合成标准 completion JSON 返回。
 
     为什么流式：非流式下大响应体会被网络/代理按体积静默截断（无错误、finish_reason=None、
     body 不完整），导致 JSON 残缺，且无法靠重发修复（重发也截断在同一长度）。流式分块传输
@@ -571,7 +572,7 @@ def parse_sse_stream(sse_path: Path) -> tuple[str, dict[str, Any] | None, bool, 
 
 
 def extract_chat_completion_text(response: dict[str, Any]) -> str:
-    """从 OpenAI 兼容响应中提取文本内容，兼容 chat.completions 和 responses 两种 schema。"""
+    """从供应商响应中提取文本，兼容 chat.completions 和 responses 两种 schema。"""
     choices = response.get("choices")
     if isinstance(choices, list) and choices:
         message = choices[0].get("message", {})

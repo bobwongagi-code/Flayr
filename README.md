@@ -133,7 +133,7 @@ python3 scripts/flayr.py \
 | `--creator-video` | 达人视频路径 |
 | `--product-name` | 产品名称 |
 | `--llm-model` | 多模态视觉模型名称（推荐 `qwen3.6-plus`） |
-| `--llm-api-url` | OpenAI 兼容 API 端点 |
+| `--llm-api-url` | 已批准供应商的 Chat Completions 端点；当前网络策略仅允许 OpenAI 和 DashScope 官方域名 |
 | `--llm-api-key-keychain-service` | macOS Keychain 服务名（或用 `--llm-api-key-env` 走环境变量） |
 | `--llm-include-images` | 默认启用：完整 Step-0 + 单视频事实抽取 + omni 对比链；`--no-llm-include-images` 仅保留给旧文本路径兼容调试 |
 | `--whisper-model` | Whisper 模型文件路径 |
