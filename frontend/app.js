@@ -567,7 +567,7 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
     apiJson('/api/jobs', { method:'POST', body:form }).then(function(raw){
       var job = mergeJob(mapJob(raw));
       updateNavBadge();
-      showToast('已提交分析任务，预计约 18 分钟完成');
+      showToast('已提交分析任务，处理时间会根据视频和模型情况变化');
       resetUploadForm();
       $('btn-start-label').textContent = '开始分析';
       openReport(job.id);

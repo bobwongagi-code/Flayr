@@ -412,7 +412,21 @@ def progress_for_run(run_dir: Path) -> tuple[int, str]:
 
 
 def estimated_remaining_seconds(progress: int) -> int:
-    return max(0, round(18 * 60 * (1 - max(0, min(progress, 100)) / 100)))
+    """Return a deliberately coarse phase bucket, not a second-precise ETA."""
+    progress = max(0, min(int(progress), 100))
+    if progress >= 100:
+        return 0
+    for threshold, remaining in (
+        (92, 2 * 60),
+        (84, 5 * 60),
+        (72, 10 * 60),
+        (58, 15 * 60),
+        (32, 20 * 60),
+        (18, 25 * 60),
+    ):
+        if progress >= threshold:
+            return remaining
+    return 30 * 60
 
 
 def safe_asset_path(run_dir: Path, relative_path: str) -> Path | None:
@@ -1149,7 +1163,7 @@ class JobStore:
                 "status": "queued",
                 "progress": 0,
                 "phase": "素材处理与转写",
-                "estimated_remaining_seconds": 18 * 60,
+                "estimated_remaining_seconds": estimated_remaining_seconds(0),
                 "created_at": now,
                 "failure_reason": "",
                 "degraded_reason": "",

@@ -26,6 +26,7 @@ from scripts.web_app import (
     _resolve_web_security,
     _signed_client_cookie,
     cleanup_upload_files,
+    estimated_remaining_seconds,
     parse_multipart,
     progress_for_run,
     safe_asset_path,
@@ -432,6 +433,15 @@ class WebAppHelpersTests(unittest.TestCase):
             self.assertEqual(progress_for_run(run_dir), (92, "报告生成"))
             (run_dir / "_SUCCESS.json").write_text("{}", encoding="utf-8")
             self.assertEqual(progress_for_run(run_dir), (100, "报告生成"))
+
+    def test_estimated_remaining_time_uses_coarse_phase_buckets(self) -> None:
+        self.assertEqual(estimated_remaining_seconds(0), 30 * 60)
+        self.assertEqual(estimated_remaining_seconds(10), 30 * 60)
+        self.assertEqual(estimated_remaining_seconds(18), 25 * 60)
+        self.assertEqual(estimated_remaining_seconds(50), 20 * 60)
+        self.assertEqual(estimated_remaining_seconds(57), estimated_remaining_seconds(50))
+        self.assertEqual(estimated_remaining_seconds(92), 2 * 60)
+        self.assertEqual(estimated_remaining_seconds(100), 0)
 
     def test_degraded_progress_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
