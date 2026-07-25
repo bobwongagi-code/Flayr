@@ -8,6 +8,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.flayr_core.llm.parse import normalize_s3_flags, normalize_s4_flags, normalize_video_understanding
+from scripts.flayr_core.evidence_states import (
+    S1_HOOK_FLOOR_FIELDS,
+    S3_HARD_FACT_FIELDS,
+    hard_fact_fingerprint,
+)
 from scripts.flayr_core.postprocess.chain import finalize_severity_after_repairs
 from scripts.flayr_core.postprocess.calibration import (
     summarize_floor_coverage,
@@ -29,6 +34,9 @@ from scripts.flayr_core.postprocess.repair_evidence import (
 )
 from scripts.flayr_core.postprocess.validate import validate_s3_usage_flags, validate_s4_effect_flags
 from scripts.flayr_core.validation_cohort import SOURCE_CONTRACT_FILES, _git_value, _worktree_identity, sha256_file
+
+
+_ACTIVATION_FIXTURE_ROOT = tempfile.TemporaryDirectory(prefix="flayr-activation-fixture-")
 
 
 def _s3_flag(state: str, evidence_id: str, **overrides: object) -> dict[str, object]:
@@ -102,6 +110,23 @@ def _s4_flag(state: str, evidence_id: str, **overrides: object) -> dict[str, obj
     return {"effect_evidence_state": state, "evidence_ids": [evidence_id], **fields}
 
 
+def _s1_repaired_stage(stage: dict[str, object]) -> dict[str, object]:
+    hooks = {
+        role: stage.get(f"{role}_hook") if isinstance(stage.get(f"{role}_hook"), dict) else {}
+        for role in ("creator", "benchmark")
+    }
+    return {
+        **stage,
+        "_postprocess_state": {
+            "s1_hook_boundaries": {
+                "status": "repaired",
+                "checked_fields": list(S1_HOOK_FLOOR_FIELDS),
+                "facts_sha256": hard_fact_fingerprint(hooks, S1_HOOK_FLOOR_FIELDS),
+            }
+        },
+    }
+
+
 def _evidence_facts(creator_id: str, benchmark_id: str, strength: str = "direct") -> dict[str, object]:
     return {
         "video_understanding": {
@@ -126,30 +151,56 @@ def _file_identity(path: Path) -> dict[str, object]:
 
 
 def _synthetic_cohort_lock() -> dict[str, object]:
-    """Build a structurally complete lock over stable repository files."""
+    """Build a complete lock over isolated labels, manifest, and video fixtures."""
     root = Path(__file__).resolve().parents[1]
+    fixture_root = Path(_ACTIVATION_FIXTURE_ROOT.name)
     worktree = _worktree_identity(root)
     sample_ids = [f"blind-{index}" for index in range(12)]
     source_contract_files = {
         relative: _file_identity(root / relative)
         for relative in SOURCE_CONTRACT_FILES
     }
+    label_samples: dict[str, object] = {}
+    manifest_samples: list[dict[str, object]] = []
     locked_samples = []
     for index, sample_id in enumerate(sample_ids):
-        creator_path = root / ("ARCHITECTURE.md" if index % 2 == 0 else "QA-RULES.md")
-        benchmark_path = root / ("QA-RULES.md" if index % 2 == 0 else "ARCHITECTURE.md")
+        creator_path = fixture_root / f"{sample_id}-creator.mp4"
+        benchmark_path = fixture_root / f"{sample_id}-benchmark.mp4"
+        creator_path.write_bytes(f"creator-{sample_id}".encode("utf-8"))
+        benchmark_path.write_bytes(f"benchmark-{sample_id}".encode("utf-8"))
+        label = {
+            "partition": "blind",
+            "evaluation_scope": "whole_video_observation",
+            "overall_verdict": "fixture",
+            "overall_reason": "activation contract fixture",
+        }
+        label_samples[sample_id] = label
+        manifest_samples.append(
+            {
+                "id": sample_id,
+                "group": "blind",
+                "product_category": f"category-{index % 4}",
+                "target_market": f"market-{index % 2}",
+                "creator_video": str(creator_path),
+                "benchmark_video": str(benchmark_path),
+            }
+        )
         locked_samples.append(
             {
                 "id": sample_id,
                 "product_category": f"category-{index % 4}",
                 "target_market": f"market-{index % 2}",
-                "gt_sha256": "0" * 64,
+                "gt_sha256": _canonical_sha256(label),
                 "videos": {
                     "creator": _file_identity(creator_path),
                     "benchmark": _file_identity(benchmark_path),
                 },
             }
         )
+    labels_path = fixture_root / "labels.json"
+    manifest_path = fixture_root / "manifest.json"
+    labels_path.write_text(json.dumps({"samples": label_samples}, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    manifest_path.write_text(json.dumps({"samples": manifest_samples}, ensure_ascii=False, sort_keys=True), encoding="utf-8")
     return {
         "schema_version": 1,
         "status": "frozen",
@@ -166,8 +217,8 @@ def _synthetic_cohort_lock() -> dict[str, object]:
             "worktree_fingerprint_sha256": worktree["fingerprint_sha256"],
         },
         "model_config": {"model": "test-model", "api_url": "https://example.invalid", "temperature": 0},
-        "labels": _file_identity(root / "references/analysis-output-schema.json"),
-        "manifest": _file_identity(root / "references/analysis-output-schema.json"),
+        "labels": _file_identity(labels_path),
+        "manifest": _file_identity(manifest_path),
         "source_contract_files": source_contract_files,
         "sample_ids": sample_ids,
         "samples": locked_samples,
@@ -206,9 +257,10 @@ def _s4_activation_evidence() -> dict[str, object]:
             expected_floor_outcome = "no_trigger_medium_kept"
         cards.append(
             {
-                "sample_id": f"calibration-{index}",
+                "sample_id": "youkoubo-c1/S4" if index == 12 else f"calibration-{index}",
                 "partition": "calibration",
                 "stage": stage,
+                **({"background_known": False} if index == 12 else {}),
                 "annotation_a": annotation_a,
                 "annotation_b": annotation_b,
                 "expected_creator_state": creator_state,
@@ -220,8 +272,17 @@ def _s4_activation_evidence() -> dict[str, object]:
                 "expected_floor_outcome": expected_floor_outcome,
             }
         )
+    repeat_input_fingerprint = _canonical_sha256({"fixture": "s3-core-hard-facts", "sample_id": "stability-1"})
     repeat_observations = [
-        {"action_target_contact_met": True, "critical_action_continuity_met": False}
+        {
+            "input_fingerprint": repeat_input_fingerprint,
+            "usage_process_visible": True,
+            "core_selling_point_visible": True,
+            "action_proof_met": True,
+            "action_target_contact_met": True,
+            "action_application_change_visible": True,
+            "critical_action_continuity_met": False,
+        }
         for _ in range(5)
     ]
     blind_samples = [
@@ -262,7 +323,15 @@ def _s4_activation_evidence() -> dict[str, object]:
         },
         "repeat_stability": {
             "observations": repeat_observations,
-            "fields": ["action_target_contact_met", "critical_action_continuity_met"],
+            "fields": [
+                "usage_process_visible",
+                "core_selling_point_visible",
+                "action_proof_met",
+                "action_target_contact_met",
+                "action_application_change_visible",
+                "critical_action_continuity_met",
+            ],
+            "input_fingerprint": repeat_input_fingerprint,
             "status": "measured",
             "stable": True,
         },
@@ -414,16 +483,41 @@ class DeriveResolverTests(unittest.TestCase):
             "triggered",
         )
 
+    def test_hard_fact_marker_is_bound_to_current_flag_values(self) -> None:
+        creator = {
+            "exists": True,
+            "merged_with_s3": False,
+            "handoff_met": False,
+            "product_identity_clear": False,
+            "product_role_clear": False,
+            "evidence_ids": ["C2"],
+        }
+        benchmark = {
+            "exists": True,
+            "merged_with_s3": False,
+            "handoff_met": True,
+            "product_identity_clear": True,
+            "product_role_clear": True,
+            "evidence_ids": ["B2"],
+        }
+        result = {"stage_analysis": [{}, {"creator_s2": creator, "benchmark_s2": benchmark}]}
+        validate_s2_hard_fact_consistency(result)
+        creator["handoff_met"] = True
+        trace = _derive_one("S2", result["stage_analysis"][1], facts=_evidence_facts("C2", "B2"))
+        evaluation = next(item for item in trace["constraint_evaluations"] if item["rule"] == "S2_contract_floor")
+        self.assertEqual(evaluation["status"], "uncertain_fact")
+        self.assertEqual(evaluation["reason_code"], "repair_incomplete")
+
     def test_missing_and_uncertain_facts_are_logged_separately_and_do_not_trigger(self) -> None:
-        marker = {"_postprocess_state": {"s1_hook_boundaries": "repaired"}}
+        creator_hook = {"landing_met": False}
+        benchmark_hook = {"landing_met": True}
         missing = _derive_one(
             "S1",
-            {
-                **marker,
+            _s1_repaired_stage({
                 "severity": "small",
-                "creator_hook": {"landing_met": False},
-                "benchmark_hook": {"landing_met": True},
-            },
+                "creator_hook": creator_hook,
+                "benchmark_hook": benchmark_hook,
+            }),
             facts={},
         )
         self.assertEqual(missing["status"], "model_preserved")
@@ -432,12 +526,11 @@ class DeriveResolverTests(unittest.TestCase):
 
         uncertain = _derive_one(
             "S1",
-            {
-                **marker,
+            _s1_repaired_stage({
                 "severity": "small",
                 "creator_hook": {"landing_met": None, "evidence_ids": ["C1"]},
                 "benchmark_hook": {"landing_met": True, "evidence_ids": ["B1"]},
-            },
+            }),
             facts={},
         )
         landing_uncertain = next(item for item in uncertain["constraint_evaluations"] if item["rule"] == "S1_landing_floor")
@@ -445,12 +538,11 @@ class DeriveResolverTests(unittest.TestCase):
         self.assertEqual(uncertain["status"], "model_preserved")
 
     def test_s1_medium_floor_requires_direct_or_explicit_evidence_strength(self) -> None:
-        stage = {
-            "_postprocess_state": {"s1_hook_boundaries": "repaired"},
+        stage = _s1_repaired_stage({
             "severity": "small",
             "creator_hook": {"landing_met": False, "evidence_ids": ["C1"]},
             "benchmark_hook": {"landing_met": True, "evidence_ids": ["B1"]},
-        }
+        })
         inferred_facts = {
             "video_understanding": {
                 "creator": {"evidence_units": [{"id": "C1", "evidence_strength": "inferred"}]},
@@ -490,7 +582,7 @@ class DeriveResolverTests(unittest.TestCase):
 
         after_repair = _derive_one(
             "S1",
-            {**flags, "_postprocess_state": {"s1_hook_boundaries": "repaired"}},
+            _s1_repaired_stage(flags),
         )
         self.assertEqual(after_repair["severity"], "small")
         hook_evaluation = next(
@@ -507,7 +599,7 @@ class DeriveResolverTests(unittest.TestCase):
         }
         enabled = _derive_one(
             "S1",
-            {**flags, "_postprocess_state": {"s1_hook_boundaries": "repaired"}},
+            _s1_repaired_stage(flags),
             facts=explicit_facts,
         )
         self.assertEqual(enabled["severity"], "large")
@@ -763,15 +855,34 @@ class DeriveResolverTests(unittest.TestCase):
         self.assertEqual(trace["constraints"][0]["rule"], "S4_visible_effect_floor")
 
     def test_s4_large_floor_rejects_incomplete_activation_evidence(self) -> None:
-        evidence = _load_trusted_s4_activation_evidence(_s4_activation_evidence())
-        evidence.payload["repeat_stability"] = {"status": "measured", "stable": True, "runs": 1}
-        self.assertTrue(validate_s4_large_floor_activation_evidence(evidence))
+        payload = _s4_activation_evidence()
+        payload["repeat_stability"] = {"status": "measured", "stable": True, "runs": 1}
+        with self.assertRaisesRegex(ValueError, "repeat stability"):
+            _load_trusted_s4_activation_evidence(payload)
 
     def test_s4_activation_rejects_loaded_payload_mutation(self) -> None:
         evidence = _load_trusted_s4_activation_evidence(_s4_activation_evidence())
         evidence.payload["blind_cohort"]["fresh"] = False
-        errors = validate_s4_large_floor_activation_evidence(evidence)
-        self.assertIn("modified after loading", errors[0])
+        self.assertEqual(validate_s4_large_floor_activation_evidence(evidence), [])
+        with self.assertRaises(AttributeError):
+            evidence.payload = {}
+
+    def test_s4_activation_requires_repeat_stability_of_closed_core_fact_set(self) -> None:
+        payload = _s4_activation_evidence()
+        payload["repeat_stability"]["fields"] = ["unrelated_field"]
+        with self.assertRaisesRegex(ValueError, "closed core hard-fact field set"):
+            _load_trusted_s4_activation_evidence(payload)
+
+    def test_s4_activation_rejects_spent_cohort_lock(self) -> None:
+        payload = _s4_activation_evidence()
+        lock = json.loads(json.dumps(payload["blind_cohort"]["cohort_lock"]))
+        lock["status"] = "spent"
+        lock_sha256 = _canonical_sha256(lock)
+        payload["blind_cohort"]["cohort_lock"] = lock
+        payload["blind_cohort"]["lock_sha256"] = lock_sha256
+        payload["provenance"]["blind_cohort_lock_sha256"] = lock_sha256
+        with self.assertRaisesRegex(ValueError, "status must be frozen"):
+            _load_trusted_s4_activation_evidence(payload)
 
     def test_s4_activation_rejects_result_artifact_dict_even_when_shape_is_valid(self) -> None:
         self.assertTrue(validate_s4_large_floor_activation_evidence(_s4_activation_evidence()))
@@ -811,6 +922,12 @@ class DeriveResolverTests(unittest.TestCase):
                 card["expected_benchmark_state"] = "verified"
         errors = validate_derive_calibration_cards(cards)
         self.assertTrue(any("S4 benchmark boundary coverage missing: result_only" in error for error in errors))
+
+        cards = [dict(card) for card in evidence["calibration"]["cards"]]
+        required = next(card for card in cards if card["sample_id"] == "youkoubo-c1/S4")
+        required["background_known"] = True
+        errors = validate_derive_calibration_cards(cards)
+        self.assertTrue(any("background_known=false" in error for error in errors))
 
     def test_benchmark_result_only_has_closed_audit_reason_code(self) -> None:
         result = _validated_stage_pair(

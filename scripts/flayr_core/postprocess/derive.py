@@ -19,9 +19,15 @@ from typing import Any, NamedTuple
 
 from ..evidence_states import (
     EVIDENCE_STATE_STRENGTHS,
+    S1_HOOK_FLOOR_FIELDS,
+    S2_HARD_FACT_FIELDS,
+    S3_HARD_FACT_FIELDS,
+    S4_HARD_FACT_FIELDS,
     S3_USAGE_EVIDENCE_STATES,
     S4_EFFECT_EVIDENCE_STATES,
+    hard_fact_fingerprint,
     normalize_reason_code,
+    s2_hard_fact_snapshot,
 )
 from ..multimodal import channel_requirement_for, has_multimodal_assessment, multimodal_execution
 from .calibration import TrustedS4ActivationEvidence, validate_s4_large_floor_activation_evidence
@@ -645,6 +651,27 @@ def _hard_fact_check(stage: dict[str, Any], flag_key: str) -> dict[str, Any] | N
     return check if isinstance(check, dict) else None
 
 
+def _hard_fact_fields(flag_key: str) -> tuple[str, ...] | None:
+    if flag_key.endswith("_s2"):
+        return S2_HARD_FACT_FIELDS
+    if flag_key.endswith("_s3"):
+        return S3_HARD_FACT_FIELDS
+    if flag_key.endswith("_s4"):
+        return S4_HARD_FACT_FIELDS
+    return None
+
+
+def _hard_fact_marker_matches(stage: dict[str, Any], flag_key: str, check: dict[str, Any]) -> bool:
+    fields = _hard_fact_fields(flag_key)
+    flag = stage.get(flag_key)
+    if fields is None or not isinstance(flag, dict):
+        return False
+    if tuple(check.get("checked_fields") or ()) != fields:
+        return False
+    snapshot = s2_hard_fact_snapshot(flag) if flag_key.endswith("_s2") else flag
+    return check.get("facts_sha256") == hard_fact_fingerprint(snapshot, fields)
+
+
 def _hard_fact_gate_failure(
     stage: dict[str, Any],
     creator_key: str,
@@ -668,7 +695,30 @@ def _hard_fact_gate_failure(
             "reason": "severity-increasing floor 的 hard-fact 校验不一致或不完整。",
             "evidence": {"creator": creator_check, "benchmark": benchmark_check},
         }
+    if not _hard_fact_marker_matches(stage, creator_key, creator_check) or not _hard_fact_marker_matches(
+        stage, benchmark_key, benchmark_check
+    ):
+        return {
+            "status": "uncertain_fact",
+            "reason_code": "repair_incomplete",
+            "reason": "severity-increasing floor 的 hard-fact marker 未绑定当前字段快照。",
+            "evidence": {"creator": creator_check, "benchmark": benchmark_check},
+        }
     return None
+
+
+def _s1_repair_ready(stage: dict[str, Any]) -> bool:
+    postprocess_state = stage.get("_postprocess_state")
+    marker = postprocess_state.get(_S1_REPAIR_STATE_KEY) if isinstance(postprocess_state, dict) else None
+    if not isinstance(marker, dict) or marker.get("status") != _S1_REPAIR_STATE_VALUE:
+        return False
+    if tuple(marker.get("checked_fields") or ()) != S1_HOOK_FLOOR_FIELDS:
+        return False
+    hooks = {
+        role: stage.get(f"{role}_hook") if isinstance(stage.get(f"{role}_hook"), dict) else {}
+        for role in ("creator", "benchmark")
+    }
+    return marker.get("facts_sha256") == hard_fact_fingerprint(hooks, S1_HOOK_FLOOR_FIELDS)
 
 
 def _s3_basic_process(flag: dict[str, Any]) -> bool:
@@ -747,8 +797,7 @@ def _derive_one(
         (floors if kind == "floor" else ceilings).append(constraint)
         evaluations.append(_constraint_evaluation(rule, "triggered", reason, kind=kind, level=level, evidence_ids=list(constraint.evidence_ids)))
 
-    s1_state = (stage.get("_postprocess_state") or {}).get(_S1_REPAIR_STATE_KEY)
-    s1_ready = s1_state == _S1_REPAIR_STATE_VALUE
+    s1_ready = _s1_repair_ready(stage)
 
     if stage_id == "S1":
         rule = "S1_hook_exists_floor"

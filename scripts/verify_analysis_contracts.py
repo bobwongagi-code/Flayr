@@ -299,6 +299,10 @@ from flayr_core.postprocess.repair_stages import (  # noqa: E402
     S1_POSTPROCESS_STATE_KEY,
     repair_s1_hook_boundaries,
 )
+from flayr_core.evidence_states import (  # noqa: E402
+    S1_HOOK_FLOOR_FIELDS,
+    hard_fact_fingerprint,
+)
 from flayr_core.llm.parse import (  # noqa: E402
     normalize_hook_flags,
     normalize_product_profile,
@@ -580,7 +584,8 @@ repair_s1_hook_boundaries(_s1_result, {})
 _s1_state = _s1_result["stage_analysis"][0].get(S1_POSTPROCESS_STATE_KEY, {})
 check(
     "S1 repair 写入 canonical 消费 marker",
-    _s1_state.get(S1_HOOK_BOUNDARIES_STATE_KEY) == S1_HOOK_BOUNDARIES_REPAIRED,
+    isinstance(_s1_state.get(S1_HOOK_BOUNDARIES_STATE_KEY), dict)
+    and _s1_state[S1_HOOK_BOUNDARIES_STATE_KEY].get("status") == S1_HOOK_BOUNDARIES_REPAIRED,
 )
 _s1_before = _derive_one(
     "S1",
@@ -596,10 +601,19 @@ check(
 )
 
 _s1_landing_stage = {
-    S1_POSTPROCESS_STATE_KEY: {S1_HOOK_BOUNDARIES_STATE_KEY: S1_HOOK_BOUNDARIES_REPAIRED},
     "severity": "small",
     "creator_hook": {"landing_met": False, "evidence_ids": ["C1"]},
     "benchmark_hook": {"landing_met": True, "evidence_ids": ["B1"]},
+}
+_s1_landing_stage[S1_POSTPROCESS_STATE_KEY] = {
+    S1_HOOK_BOUNDARIES_STATE_KEY: {
+        "status": S1_HOOK_BOUNDARIES_REPAIRED,
+        "checked_fields": list(S1_HOOK_FLOOR_FIELDS),
+        "facts_sha256": hard_fact_fingerprint(
+            {"creator": _s1_landing_stage["creator_hook"], "benchmark": _s1_landing_stage["benchmark_hook"]},
+            S1_HOOK_FLOOR_FIELDS,
+        ),
+    }
 }
 _s1_missing = _derive_one("S1", _s1_landing_stage, facts={})
 _s1_missing_eval = next(

@@ -22,8 +22,13 @@ from ..artifacts import (
     parse_timestamp_seconds,
 )
 from ..evidence_states import (
+    S2_HARD_FACT_FIELDS,
+    S3_HARD_FACT_FIELDS,
+    S4_HARD_FACT_FIELDS,
     S3_USAGE_EVIDENCE_STATES,
     S4_EFFECT_EVIDENCE_STATES,
+    hard_fact_fingerprint,
+    s2_hard_fact_snapshot,
 )
 from ..llm.parse import S5_SOURCE_STATUSES, is_effective_voiceover, normalize_s5_source_status
 from .utils import (
@@ -275,13 +280,7 @@ def validate_s2_hard_fact_consistency(result: dict[str, Any]) -> None:
     if not isinstance(stages, list) or len(stages) < 2 or not isinstance(stages[1], dict):
         return
     s2 = stages[1]
-    required_fields = (
-        "exists",
-        "merged_with_s3",
-        "handoff_met",
-        "product_identity_clear",
-        "product_role_clear",
-    )
+    required_fields = S2_HARD_FACT_FIELDS
     checks: dict[str, dict[str, Any]] = {}
     for role in ("creator", "benchmark"):
         flag = s2.get(f"{role}_s2")
@@ -303,6 +302,10 @@ def validate_s2_hard_fact_consistency(result: dict[str, Any]) -> None:
             "missing_fields": missing,
             "checked_fields": list(required_fields),
         }
+        if not missing:
+            checks[f"{role}_s2"]["facts_sha256"] = hard_fact_fingerprint(
+                s2_hard_fact_snapshot(flag), required_fields
+            )
     postprocess_state = s2.setdefault("_postprocess_state", {})
     if isinstance(postprocess_state, dict):
         postprocess_state["s2_hard_fact_checks"] = checks
@@ -321,30 +324,8 @@ def validate_s3_s4_hard_fact_consistency(result: dict[str, Any]) -> None:
     if not isinstance(s3, dict) or not isinstance(s4, dict):
         return
 
-    s3_fields = (
-        "exists",
-        "usage_process_visible",
-        "real_usage_met",
-        "core_selling_point_visible",
-        "action_proof_met",
-        "action_target_contact_met",
-        "action_application_change_visible",
-        "critical_action_continuity_met",
-        "result_only_without_process",
-        "mouth_only_or_static",
-        "fake_or_staged",
-    )
-    s4_fields = (
-        "effect_visible",
-        "effect_proposition_matched",
-        "visual_difference_observed",
-        "module_constraints_met",
-        "effect_attribution_supported",
-        "process_linked_effect",
-        "result_only_without_process",
-        "requires_close_inspection",
-        "tamper_or_cut_risk",
-    )
+    s3_fields = S3_HARD_FACT_FIELDS
+    s4_fields = S4_HARD_FACT_FIELDS
     s3_positive_fields = tuple(
         field
         for field in s3_fields
@@ -410,9 +391,19 @@ def validate_s3_s4_hard_fact_consistency(result: dict[str, Any]) -> None:
     for stage in (s3, s4):
         postprocess_state = stage.setdefault("_postprocess_state", {})
         if isinstance(postprocess_state, dict):
-            postprocess_state["evidence_hard_fact_checks"] = {
-                key: value for key, value in state_checks.items() if key.endswith("_s3") or key.endswith("_s4")
+            checks = {
+                key: dict(value)
+                for key, value in state_checks.items()
+                if key.endswith("_s3") or key.endswith("_s4")
             }
+            for key, check in checks.items():
+                if check.get("status") == "incomplete":
+                    continue
+                flag = s3.get(key) if key.endswith("_s3") else s4.get(key)
+                fields = s3_fields if key.endswith("_s3") else s4_fields
+                if isinstance(flag, dict):
+                    check["facts_sha256"] = hard_fact_fingerprint(flag, fields)
+            postprocess_state["evidence_hard_fact_checks"] = checks
 
 
 def reconcile_s3_s4_evidence_coherence(result: dict[str, Any]) -> None:

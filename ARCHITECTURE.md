@@ -68,8 +68,9 @@ evidence_unit 含多模态事实字段 +
   floor，这是有意的安全停用，不是 resolver 失效；只有新事实链产出强度后才进入校准。
 - 使用状态与证据强度是两个独立门禁，必须同时满足（状态 predicate AND `direct|explicit`），
   不能用一个轴替代另一个轴。
-- S1 Hook large floor 还要求 `repair_s1_hook_boundaries` 写入消费 marker；没有 marker
-  的路径不能消费修复前的 Hook 边界字段。S1 landing/命题锚定只提交 medium floor。
+- S1 Hook large floor 还要求 `repair_s1_hook_boundaries` 在所有修复完成后写入消费 marker；marker
+  必须带 checked fields 与修复后事实快照哈希，没有或过期的 marker 不能消费修复前的 Hook 边界字段。
+  S1 landing/命题锚定只提交 medium floor。
 - 主分析、Repair 重跑和 Phase C 都从 `llm/parse.py` 归一后的同一份 S1/S3/S4 flag 读取，
   并在消费前经过同一条 `repair_s1_hook_boundaries` / hard-fact marker 链；不得在任一路径
   另行维护 landing、使用完成度或效果完成度判断。
@@ -151,7 +152,7 @@ repair 的 hard-fact 检查使用同一批卡片验证机械矛盾，不承担�
 S4 large floor 的启用不是可手动翻转的布尔开关。只有通过摘要校验的外部 activation manifest，
 经 `postprocess/calibration.py::load_s4_large_floor_activation_evidence` 加载为可信对象，再显式
 传入 severity 收口入口时才可启用；结果文件中的 `derive_activation_evidence` 字段永远不具备激活权限：
-至少 24 张 calibration 边界卡、S3/S4 边界覆盖、双人盲标通过、至少 5 次硬事实重复运行且稳定、
+至少 24 张 calibration 边界卡、S3/S4 边界覆盖、双人盲标通过、至少 5 次固定核心 hard-fact 字段的重复运行且稳定（每次观察绑定同一 input fingerprint）、
 至少 12 对全新且已冻结的 blind cohort（至少 4 个品类、2 个市场）、floor coverage 已测量且无
 derive/Phase C 回归。缺任一证据都保持 `audit_only`；当前工作树没有这组真实验收证据，因此不启用。
 

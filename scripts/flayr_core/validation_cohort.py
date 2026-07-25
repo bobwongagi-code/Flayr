@@ -327,6 +327,7 @@ def verify_cohort_lock(lock: dict[str, Any]) -> list[str]:
         current_worktree = _worktree_identity(repo_root)
         if current_worktree["fingerprint_sha256"] != code.get("worktree_fingerprint_sha256"):
             errors.append("代码工作树已漂移")
+    loaded_documents: dict[str, dict[str, Any]] = {}
     for label in ("labels", "manifest"):
         identity = lock.get(label)
         if not isinstance(identity, dict):
@@ -335,21 +336,82 @@ def verify_cohort_lock(lock: dict[str, Any]) -> list[str]:
         path = Path(str(identity.get("path") or ""))
         if not path.is_file() or sha256_file(path) != identity.get("sha256"):
             errors.append(f"{label} 已漂移或缺失")
-    for relative, identity in (lock.get("source_contract_files") or {}).items():
+            continue
+        try:
+            loaded_documents[label] = read_json(path)
+        except (OSError, TypeError, ValueError) as exc:
+            errors.append(f"{label} 无法读取：{exc}")
+    source_contracts = lock.get("source_contract_files")
+    if not isinstance(source_contracts, dict):
+        errors.append("缺 source_contract_files")
+    else:
+        missing_contracts = sorted(set(SOURCE_CONTRACT_FILES) - set(source_contracts))
+        if missing_contracts:
+            errors.append("缺 source contract identity：" + ",".join(missing_contracts))
+    for relative, identity in (source_contracts or {}).items():
         if not isinstance(identity, dict):
             errors.append(f"source contract identity 非法：{relative}")
             continue
         path = Path(str(identity.get("path") or ""))
         if not path.is_file() or sha256_file(path) != identity.get("sha256"):
             errors.append(f"source contract 已漂移或缺失：{relative}")
-    for sample in lock.get("samples") or []:
+    label_samples = loaded_documents.get("labels", {}).get("samples")
+    manifest_by_id = manifest_samples(loaded_documents.get("manifest", {}))
+    locked_samples = lock.get("samples")
+    sample_ids = lock.get("sample_ids")
+    if not isinstance(sample_ids, list) or any(not str(value).strip() for value in sample_ids):
+        errors.append("cohort lock sample_ids 必须是非空字符串列表")
+        sample_ids = []
+    if len(sample_ids) != len(set(str(value) for value in sample_ids)):
+        errors.append("cohort lock sample_ids 不能重复")
+    if not isinstance(locked_samples, list):
+        errors.append("cohort lock samples 必须是列表")
+        locked_samples = []
+    locked_ids = [str(sample.get("id") or "").strip() for sample in locked_samples if isinstance(sample, dict)]
+    if locked_ids != [str(value).strip() for value in sample_ids]:
+        errors.append("cohort lock sample_ids 与 samples 不一致")
+    if not isinstance(label_samples, dict):
+        errors.append("labels.samples 必须是对象")
+        label_samples = {}
+    for sample in locked_samples:
         if not isinstance(sample, dict):
             errors.append("cohort sample 非 object")
             continue
-        for role, identity in (sample.get("videos") or {}).items():
+        sample_id = str(sample.get("id") or "").strip()
+        label = label_samples.get(sample_id)
+        manifest_sample = manifest_by_id.get(sample_id)
+        if not isinstance(label, dict):
+            errors.append(f"{sample_id}: locked GT 缺失")
+        elif sample.get("gt_sha256") != sha256_json(label):
+            errors.append(f"{sample_id}: locked GT 已漂移")
+        if not isinstance(manifest_sample, dict):
+            errors.append(f"{sample_id}: locked manifest sample 缺失")
+        else:
+            if manifest_sample.get("group") != "blind":
+                errors.append(f"{sample_id}: manifest sample 必须属于 blind cohort")
+            if str(manifest_sample.get("product_category") or "") != str(sample.get("product_category") or ""):
+                errors.append(f"{sample_id}: product_category 已漂移")
+            if str(manifest_sample.get("target_market") or "") != str(sample.get("target_market") or ""):
+                errors.append(f"{sample_id}: target_market 已漂移")
+        if isinstance(label, dict) and isinstance(manifest_sample, dict):
+            errors.extend(validate_blind_sample_contract(sample_id, label, manifest_sample))
+        locked_videos = sample.get("videos") if isinstance(sample.get("videos"), dict) else {}
+        for role, field in (("creator", "creator_video"), ("benchmark", "benchmark_video")):
+            identity = locked_videos.get(role)
+            if not isinstance(identity, dict):
+                errors.append(f"{sample_id}.{role} 缺视频 identity")
+                continue
             path = Path(str((identity or {}).get("path") or ""))
             if not path.is_file() or sha256_file(path) != (identity or {}).get("sha256"):
-                errors.append(f"{sample.get('id')}.{role} 视频已漂移或缺失")
+                errors.append(f"{sample_id}.{role} 视频已漂移或缺失")
+            if isinstance(manifest_sample, dict):
+                try:
+                    manifest_identity = _file_identity(resolve_manifest_video_path(manifest_sample.get(field)))
+                except (OSError, TypeError, ValueError) as exc:
+                    errors.append(f"{sample_id}.{field}: {exc}")
+                else:
+                    if manifest_identity != identity:
+                        errors.append(f"{sample_id}.{role} lock 与 manifest 视频 identity 不一致")
     return errors
 
 

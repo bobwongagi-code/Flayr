@@ -14,6 +14,7 @@ import re
 from typing import Any
 
 from ..artifacts import format_seconds, parse_time_range_seconds, parse_timestamp_seconds
+from ..evidence_states import S1_HOOK_FLOOR_FIELDS, hard_fact_fingerprint
 from ..stage_catalog import stage_tuples
 
 STAGES = stage_tuples()
@@ -134,11 +135,6 @@ def repair_s1_hook_boundaries(result: dict[str, Any], analysis: dict[str, Any]) 
     s1 = next((stage for stage in result.get("stage_analysis", []) if str(stage.get("stage", "")).startswith("S1")), None)
     if not isinstance(s1, dict):
         return
-    # derive 只消费经过这一轮 repair 的 canonical S1 facts。即使本轮没有
-    # 可应用候选也要写入，表示前置检查已完成，而不是表示一定发生了改写。
-    postprocess_state = s1.setdefault(S1_POSTPROCESS_STATE_KEY, {})
-    if isinstance(postprocess_state, dict):
-        postprocess_state[S1_HOOK_BOUNDARIES_STATE_KEY] = S1_HOOK_BOUNDARIES_REPAIRED
     for role, side in (("creator", "creator"), ("benchmark", "benchmark")):
         hook = s1.get(f"{side}_hook")
         if not isinstance(hook, dict):
@@ -171,6 +167,20 @@ def repair_s1_hook_boundaries(result: dict[str, Any], analysis: dict[str, Any]) 
                     "系统按 S1 边界复核：该理由借用了边界后的 S2/S3 材料，landing 改为 false。",
                 )
         repair_s1_anchor_proposition(role, hook, result, analysis)
+
+    # derive 只消费经过这一轮 repair 的 canonical S1 facts。Marker 写在
+    # 所有修复完成之后，并绑定修复后事实，避免直接调用 derive 时伪造状态字符串。
+    postprocess_state = s1.setdefault(S1_POSTPROCESS_STATE_KEY, {})
+    if isinstance(postprocess_state, dict):
+        hooks = {
+            role: s1.get(f"{role}_hook") if isinstance(s1.get(f"{role}_hook"), dict) else {}
+            for role in ("creator", "benchmark")
+        }
+        postprocess_state[S1_HOOK_BOUNDARIES_STATE_KEY] = {
+            "status": S1_HOOK_BOUNDARIES_REPAIRED,
+            "checked_fields": list(S1_HOOK_FLOOR_FIELDS),
+            "facts_sha256": hard_fact_fingerprint(hooks, S1_HOOK_FLOOR_FIELDS),
+        }
 
 
 def append_system_note(target: dict[str, Any], key: str, note: str) -> None:

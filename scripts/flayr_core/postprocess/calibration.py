@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import re
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -33,6 +34,15 @@ EXPECTED_FLOOR_OUTCOMES = (
 HARD_FACT_CHECK_STATUSES = ("consistent", "state_conflict", "incomplete")
 ACTIVATION_EVIDENCE_KIND = "s4_large_floor_activation_v1"
 ACTIVATION_EVIDENCE_SCHEMA_VERSION = 1
+REQUIRED_S4_CALIBRATION_SAMPLE_ID = "youkoubo-c1/S4"
+REPEAT_STABILITY_FIELDS = (
+    "usage_process_visible",
+    "core_selling_point_visible",
+    "action_proof_met",
+    "action_target_contact_met",
+    "action_application_change_visible",
+    "critical_action_continuity_met",
+)
 _EXPLICIT_STRENGTHS = {"direct", "explicit"}
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TRUST_TOKEN = object()
@@ -46,15 +56,32 @@ class TrustedS4ActivationEvidence:
     offline result artifact from enabling a production severity rule.
     """
 
-    __slots__ = ("payload", "source_path", "source_sha256", "payload_sha256")
+    __slots__ = ("_payload", "_source_path", "_source_sha256", "_payload_sha256")
 
     def __init__(self, payload: dict[str, Any], source_path: str, source_sha256: str, token: object) -> None:
         if token is not _TRUST_TOKEN:
             raise TypeError("TrustedS4ActivationEvidence must be loaded from a pinned manifest")
-        self.payload = payload
-        self.source_path = source_path
-        self.source_sha256 = source_sha256
-        self.payload_sha256 = _sha256_json(payload)
+        self._payload = deepcopy(payload)
+        self._source_path = source_path
+        self._source_sha256 = source_sha256
+        self._payload_sha256 = _sha256_json(self._payload)
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        """Return a copy so callers cannot mutate the trusted snapshot."""
+        return deepcopy(self._payload)
+
+    @property
+    def source_path(self) -> str:
+        return self._source_path
+
+    @property
+    def source_sha256(self) -> str:
+        return self._source_sha256
+
+    @property
+    def payload_sha256(self) -> str:
+        return self._payload_sha256
 
     @classmethod
     def _from_loader(cls, payload: dict[str, Any], source_path: str, source_sha256: str) -> "TrustedS4ActivationEvidence":
@@ -96,6 +123,8 @@ def _validate_blind_cohort_lock(
         return ["blind cohort must include a complete cohort_lock object"]
 
     errors: list[str] = []
+    if lock.get("status") != "frozen":
+        errors.append("cohort_lock.status must be frozen for activation")
     if _sha256_json(lock) != expected_lock_sha256:
         errors.append("blind cohort lock does not match blind_cohort.lock_sha256")
 
@@ -259,6 +288,11 @@ def validate_derive_calibration_card(card: Any) -> list[str]:
     stage = str(card.get("stage") or "").strip()
     if stage not in CALIBRATION_STAGES:
         errors.append("stage must be S3 or S4")
+    if sample_id == REQUIRED_S4_CALIBRATION_SAMPLE_ID:
+        if stage != "S4":
+            errors.append(f"{REQUIRED_S4_CALIBRATION_SAMPLE_ID} must be an S4 card")
+        if card.get("background_known") is not False:
+            errors.append(f"{REQUIRED_S4_CALIBRATION_SAMPLE_ID} must be marked background_known=false")
 
     allowed_states = S3_USAGE_EVIDENCE_STATES if stage == "S3" else S4_EFFECT_EVIDENCE_STATES
     if stage not in CALIBRATION_STAGES:
@@ -413,6 +447,14 @@ def validate_derive_calibration_cards(cards: Any) -> list[str]:
             missing = sorted(required - observed)
             if missing:
                 errors.append(f"calibration {stage} {role} boundary coverage missing: {','.join(missing)}")
+    required_s4_cards = [
+        card for card in cards
+        if isinstance(card, dict) and str(card.get("sample_id") or "").strip() == REQUIRED_S4_CALIBRATION_SAMPLE_ID
+    ]
+    if len(required_s4_cards) != 1:
+        errors.append(f"calibration cards must include exactly one {REQUIRED_S4_CALIBRATION_SAMPLE_ID} card")
+    elif required_s4_cards[0].get("background_known") is not False:
+        errors.append(f"{REQUIRED_S4_CALIBRATION_SAMPLE_ID} must be an unknown-background blind-style card")
     if annotator_ids != {"annotator_a", "annotator_b"}:
         errors.append("calibration cards must contain the two fixed independent annotators")
     return list(dict.fromkeys(errors))
@@ -459,13 +501,40 @@ def _validate_s4_activation_payload(payload: Any) -> list[str]:
     repeat = payload.get("repeat_stability") if isinstance(payload.get("repeat_stability"), dict) else {}
     observations = repeat.get("observations")
     fields = repeat.get("fields")
-    if not isinstance(observations, list) or not isinstance(fields, list) or not fields:
+    repeat_valid = isinstance(observations, list) and isinstance(fields, list) and bool(fields)
+    if not repeat_valid:
         errors.append("repeat stability must include raw observations and fields")
         repeat_summary = {}
     else:
-        repeat_summary = summarize_repeat_stability(observations, fields)
-        if repeat.get("status") != repeat_summary["status"] or repeat.get("stable") is not repeat_summary["stable"]:
-            errors.append("repeat stability summary does not match raw observations")
+        field_names = [field for field in fields if isinstance(field, str) and field.strip()]
+        if len(field_names) != len(fields) or len(field_names) != len(set(field_names)):
+            errors.append("repeat stability fields must be non-empty and unique")
+            repeat_valid = False
+        if set(field_names) != set(REPEAT_STABILITY_FIELDS):
+            errors.append("repeat stability must measure the closed core hard-fact field set")
+            repeat_valid = False
+        input_fingerprint = repeat.get("input_fingerprint")
+        if not _is_sha256(input_fingerprint):
+            errors.append("repeat stability input_fingerprint must be a sha256")
+            repeat_valid = False
+        for index, observation in enumerate(observations):
+            if not isinstance(observation, dict):
+                errors.append(f"repeat stability observation[{index}] must be an object")
+                repeat_valid = False
+                continue
+            if observation.get("input_fingerprint") != input_fingerprint:
+                errors.append(f"repeat stability observation[{index}] input fingerprint does not match")
+                repeat_valid = False
+            for field in REPEAT_STABILITY_FIELDS:
+                if observation.get(field) not in {True, False}:
+                    errors.append(f"repeat stability observation[{index}].{field} must be bool")
+                    repeat_valid = False
+        if repeat_valid:
+            repeat_summary = summarize_repeat_stability(observations, fields)
+            if repeat.get("status") != repeat_summary["status"] or repeat.get("stable") is not repeat_summary["stable"]:
+                errors.append("repeat stability summary does not match raw observations")
+        else:
+            repeat_summary = {}
     if repeat_summary.get("status") != "measured" or repeat_summary.get("stable") is not True:
         errors.append("hard-fact repeat stability is not measured and stable")
     if _count(repeat_summary.get("runs")) < MIN_REPEAT_RUNS:
@@ -515,9 +584,13 @@ def _validate_s4_activation_payload(payload: Any) -> list[str]:
         errors.append("floor coverage must include raw records")
         coverage_summary = {}
     else:
-        coverage_summary = summarize_floor_coverage(coverage_records)
-        if coverage.get("status") != coverage_summary["status"] or coverage.get("derive_regressions") != coverage_summary["derive_regressions"]:
-            errors.append("floor coverage summary does not match raw records")
+        if any(not isinstance(record, dict) for record in coverage_records):
+            errors.append("floor coverage records must be objects")
+            coverage_summary = {}
+        else:
+            coverage_summary = summarize_floor_coverage(coverage_records)
+            if coverage.get("status") != coverage_summary["status"] or coverage.get("derive_regressions") != coverage_summary["derive_regressions"]:
+                errors.append("floor coverage summary does not match raw records")
     if coverage_summary.get("status") != "measured":
         errors.append("floor coverage is unavailable without blind ground truth")
     if _count(coverage_summary.get("derive_regressions"), default=-1) != 0:
@@ -557,6 +630,8 @@ __all__ = [
     "HARD_FACT_CHECK_STATUSES",
     "ACTIVATION_EVIDENCE_KIND",
     "ACTIVATION_EVIDENCE_SCHEMA_VERSION",
+    "REPEAT_STABILITY_FIELDS",
+    "REQUIRED_S4_CALIBRATION_SAMPLE_ID",
     "MIN_BOUNDARY_CARDS",
     "MIN_BLIND_CATEGORIES",
     "MIN_BLIND_MARKETS",

@@ -8,6 +8,7 @@ from pathlib import Path
 from scripts.flayr_core.validation_cohort import (
     build_cohort_lock,
     spend_cohort_lock,
+    sha256_file,
     validate_blind_sample_contract,
     verify_cohort_lock,
 )
@@ -90,6 +91,44 @@ class ValidationCohortTest(unittest.TestCase):
                 {"model": "future-model", "api_url": "https://example.invalid", "temperature": 0.0},
             )
             self.assertEqual(verify_cohort_lock(lock), [])
+            changed_label = self._label()
+            changed_label["overall_note"] = "changed after freeze"
+            labels_path.write_text(json.dumps({"samples": {"sample": changed_label}}), encoding="utf-8")
+            drifted_gt = json.loads(json.dumps(lock))
+            drifted_gt["labels"]["sha256"] = sha256_file(labels_path)
+            drifted_gt["labels"]["size_bytes"] = labels_path.stat().st_size
+            self.assertTrue(any("GT 已漂移" in error for error in verify_cohort_lock(drifted_gt)))
+            invalid_label = self._label()
+            invalid_label["partition"] = "calibration"
+            labels_path.write_text(json.dumps({"samples": {"sample": invalid_label}}), encoding="utf-8")
+            invalid_contract = json.loads(json.dumps(lock))
+            invalid_contract["labels"]["sha256"] = sha256_file(labels_path)
+            invalid_contract["labels"]["size_bytes"] = labels_path.stat().st_size
+            self.assertTrue(any("GT partition" in error for error in verify_cohort_lock(invalid_contract)))
+            labels_path.write_text(json.dumps({"samples": {"sample": self._label()}}), encoding="utf-8")
+            changed_manifest = {
+                "samples": [{
+                    "id": "sample",
+                    "group": "blind",
+                    "product_category": "changed",
+                    "target_market": "th",
+                    "creator_video": str(creator),
+                    "benchmark_video": str(benchmark),
+                }]
+            }
+            manifest_path.write_text(json.dumps(changed_manifest), encoding="utf-8")
+            drifted_manifest = json.loads(json.dumps(lock))
+            drifted_manifest["manifest"]["sha256"] = sha256_file(manifest_path)
+            drifted_manifest["manifest"]["size_bytes"] = manifest_path.stat().st_size
+            self.assertTrue(any("product_category 已漂移" in error for error in verify_cohort_lock(drifted_manifest)))
+            manifest_path.write_text(json.dumps({"samples": [{
+                "id": "sample",
+                "group": "blind",
+                "product_category": "test",
+                "target_market": "th",
+                "creator_video": str(creator),
+                "benchmark_video": str(benchmark),
+            }]}), encoding="utf-8")
             drifted_code = json.loads(json.dumps(lock))
             drifted_code["code"]["worktree_fingerprint_sha256"] = "0" * 64
             self.assertTrue(any("工作树" in error for error in verify_cohort_lock(drifted_code)))
