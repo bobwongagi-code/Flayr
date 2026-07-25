@@ -7,7 +7,12 @@ import unittest
 from pathlib import Path
 
 from scripts.flayr_core.evidence_states import evidence_strength_gate_report
-from scripts.flayr_core.offline_replay import discover_analysis_inputs, replay_derive_result, replay_many
+from scripts.flayr_core.offline_replay import (
+    MAX_REPLAY_INPUT_FILE_BYTES,
+    discover_analysis_inputs,
+    replay_derive_result,
+    replay_many,
+)
 
 
 class OfflineReplayTests(unittest.TestCase):
@@ -118,6 +123,42 @@ class OfflineReplayTests(unittest.TestCase):
                 [item["sample_id"] for item in report["records"]],
                 ["a__run_01", "a__run_02", "b__run_01"],
             )
+
+    def test_discovery_excludes_replay_outputs_and_rejects_oversized_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "history"
+            source = root / "sample-a" / "analysis.json"
+            source.parent.mkdir(parents=True)
+            source.write_text(json.dumps(self._result()), encoding="utf-8")
+            derived = root / "replay" / "sample-a" / "analysis.json"
+            derived.parent.mkdir(parents=True)
+            derived.write_text(
+                json.dumps({
+                    **self._result(),
+                    "offline_derive_replay": {
+                        "mode": "offline_derive_only",
+                    },
+                }),
+                encoding="utf-8",
+            )
+            self.assertEqual(discover_analysis_inputs(root), [source.resolve()])
+
+            oversized = root / "sample-b" / "analysis.json"
+            oversized.parent.mkdir(parents=True)
+            oversized.write_bytes(b"{" + b"x" * MAX_REPLAY_INPUT_FILE_BYTES)
+            with self.assertRaisesRegex(ValueError, "单文件上限"):
+                discover_analysis_inputs(root)
+
+    def test_replay_rejects_consuming_its_own_derived_result(self) -> None:
+        result = self._result()
+        result["offline_derive_replay"] = {"mode": "offline_derive_only"}
+        with self.assertRaisesRegex(ValueError, "派生结果"):
+            replay_derive_result(result)
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "analysis.json"
+            source.write_text(json.dumps(result), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "派生结果"):
+                replay_many([source])
 
     def test_evidence_strength_missing_is_a_closed_gate_not_absent(self) -> None:
         report = evidence_strength_gate_report(self._result())

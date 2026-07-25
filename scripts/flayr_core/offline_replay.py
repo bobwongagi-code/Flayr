@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 import subprocess
 from datetime import datetime, timezone
@@ -20,6 +21,10 @@ from .postprocess.derive import derive_severity_from_facts
 
 
 OFFLINE_REPLAY_SCHEMA_VERSION = 2
+MAX_REPLAY_INPUT_FILES = 1000
+MAX_REPLAY_INPUT_DEPTH = 16
+MAX_REPLAY_INPUT_FILE_BYTES = 64 * 1024 * 1024
+MAX_REPLAY_INPUT_TOTAL_BYTES = 512 * 1024 * 1024
 SIDECAR_ARTIFACT_NAMES = (
     "analysis_result.json",
     "llm_response.json",
@@ -95,6 +100,52 @@ def _sidecar_identities(source_path: Path) -> dict[str, dict[str, Any]]:
         if candidate.is_file() and candidate != source_path:
             identities[name] = _file_identity(candidate)
     return identities
+
+
+def _read_bounded_json(path: Path) -> tuple[dict[str, Any], int]:
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ValueError(f"replay input 不可读取：{path}") from exc
+    if size > MAX_REPLAY_INPUT_FILE_BYTES:
+        raise ValueError(
+            f"replay input 超过单文件上限 {MAX_REPLAY_INPUT_FILE_BYTES} bytes：{path}"
+        )
+    try:
+        with path.open("rb") as source:
+            raw = source.read(MAX_REPLAY_INPUT_FILE_BYTES + 1)
+    except OSError as exc:
+        raise ValueError(f"replay input 不可读取：{path}") from exc
+    if len(raw) > MAX_REPLAY_INPUT_FILE_BYTES:
+        raise ValueError(
+            f"replay input 超过单文件上限 {MAX_REPLAY_INPUT_FILE_BYTES} bytes：{path}"
+        )
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"replay input 不是有效 JSON：{path}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"replay input must be a JSON object: {path}")
+    return value, len(raw)
+
+
+def read_analysis_input(path: Path) -> dict[str, Any]:
+    """Read one bounded analysis artifact for CLI and library callers."""
+    value, _ = _read_bounded_json(path.expanduser().resolve())
+    return value
+
+
+def _is_replay_derived_result(value: dict[str, Any]) -> bool:
+    metadata = value.get("offline_derive_replay")
+    return isinstance(metadata, dict) and metadata.get("mode") == "offline_derive_only"
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _severity_transitions(
@@ -187,6 +238,8 @@ def _resolver_effects(model_transitions: list[dict[str, Any]]) -> dict[str, Any]
 
 def replay_derive_result(source_result: dict[str, Any], source_path: Path | None = None) -> dict[str, Any]:
     """Run derive deterministically and attach an auditable offline trace."""
+    if _is_replay_derived_result(source_result):
+        raise ValueError("replay input 已经是离线派生结果，不能再次作为原始输入")
     replayed = copy.deepcopy(source_result)
     before = _stage_snapshot(replayed)
     derive_severity_from_facts(replayed, replayed)
@@ -246,16 +299,52 @@ def _severity_rank(value: Any) -> int:
     return {"small": 0, "medium": 1, "large": 2}.get(str(value or ""), -1)
 
 
-def discover_analysis_inputs(root: Path) -> list[Path]:
-    """Discover saved analysis artifacts at any depth without following directories."""
+def discover_analysis_inputs(
+    root: Path,
+    *,
+    exclude_root: Path | None = None,
+) -> list[Path]:
+    """Discover bounded original analysis artifacts without following symlinks."""
     resolved_root = root.expanduser().resolve()
     if not resolved_root.is_dir():
         raise NotADirectoryError(resolved_root)
-    return sorted(
-        path
-        for path in resolved_root.rglob("analysis.json")
-        if path.is_file()
-    )
+    resolved_exclude = exclude_root.expanduser().resolve() if exclude_root else None
+    if resolved_exclude and not _path_is_under(resolved_exclude, resolved_root):
+        resolved_exclude = None
+    paths: list[Path] = []
+    total_bytes = 0
+    candidate_count = 0
+    for current, directories, filenames in os.walk(resolved_root, followlinks=False):
+        current_path = Path(current).resolve()
+        if resolved_exclude and _path_is_under(current_path, resolved_exclude):
+            directories[:] = []
+            continue
+        relative_depth = len(current_path.relative_to(resolved_root).parts)
+        if relative_depth > MAX_REPLAY_INPUT_DEPTH:
+            raise ValueError(f"replay input 目录深度超过上限 {MAX_REPLAY_INPUT_DEPTH}：{current_path}")
+        directories[:] = [
+            name
+            for name in directories
+            if not (current_path / name).is_symlink()
+        ]
+        if "analysis.json" not in filenames:
+            continue
+        candidate = current_path / "analysis.json"
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        candidate_count += 1
+        if candidate_count > MAX_REPLAY_INPUT_FILES:
+            raise ValueError(f"replay 输入文件数超过上限 {MAX_REPLAY_INPUT_FILES}")
+        value, size = _read_bounded_json(candidate)
+        total_bytes += size
+        if total_bytes > MAX_REPLAY_INPUT_TOTAL_BYTES:
+            raise ValueError(
+                f"replay 输入总大小超过上限 {MAX_REPLAY_INPUT_TOTAL_BYTES} bytes"
+            )
+        if _is_replay_derived_result(value):
+            continue
+        paths.append(candidate)
+    return sorted(paths)
 
 
 def _safe_sample_component(value: str) -> str:
@@ -289,11 +378,19 @@ def replay_many(paths: Iterable[Path]) -> dict[str, Any]:
     """Replay multiple saved artifacts and return a report without writing files."""
     records: list[dict[str, Any]] = []
     seen_sample_ids: dict[str, Path] = {}
+    total_bytes = 0
     for path in paths:
         source = path.expanduser().resolve()
-        value = json.loads(source.read_text(encoding="utf-8"))
-        if not isinstance(value, dict):
-            raise ValueError(f"replay input must be a JSON object: {source}")
+        if len(records) >= MAX_REPLAY_INPUT_FILES:
+            raise ValueError(f"replay 输入文件数超过上限 {MAX_REPLAY_INPUT_FILES}")
+        value, size = _read_bounded_json(source)
+        total_bytes += size
+        if total_bytes > MAX_REPLAY_INPUT_TOTAL_BYTES:
+            raise ValueError(
+                f"replay 输入总大小超过上限 {MAX_REPLAY_INPUT_TOTAL_BYTES} bytes"
+            )
+        if _is_replay_derived_result(value):
+            raise ValueError(f"replay input 是派生结果，不能再次消费：{source}")
         result = replay_derive_result(value, source)
         metadata = result["offline_derive_replay"]
         sample_id = _sample_id_for_source(source)
@@ -360,8 +457,13 @@ def replay_many(paths: Iterable[Path]) -> dict[str, Any]:
 
 
 __all__ = [
+    "MAX_REPLAY_INPUT_DEPTH",
+    "MAX_REPLAY_INPUT_FILES",
+    "MAX_REPLAY_INPUT_FILE_BYTES",
+    "MAX_REPLAY_INPUT_TOTAL_BYTES",
     "OFFLINE_REPLAY_SCHEMA_VERSION",
     "discover_analysis_inputs",
+    "read_analysis_input",
     "replay_derive_result",
     "replay_many",
     "sha256_file",

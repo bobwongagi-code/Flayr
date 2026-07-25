@@ -7,14 +7,24 @@ import argparse
 import json
 from pathlib import Path
 
-from flayr_core.offline_replay import discover_analysis_inputs, replay_derive_result, replay_many
+from flayr_core.offline_replay import (
+    discover_analysis_inputs,
+    read_analysis_input,
+    replay_derive_result,
+    replay_many,
+)
 
 
 def _read_result(path: Path) -> dict:
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise ValueError(f"input must be a JSON object: {path}")
-    return value
+    return read_analysis_input(path)
+
+
+def _ensure_output_outside_input_root(input_root: Path, output_root: Path) -> None:
+    try:
+        output_root.relative_to(input_root)
+    except ValueError:
+        return
+    raise ValueError("replay output 不能位于 input-root 内，否则会在下一次运行中消费自身输出")
 
 
 def main() -> int:
@@ -29,6 +39,8 @@ def main() -> int:
         paths = [path.expanduser().resolve() for path in args.input]
     else:
         root = args.input_root.expanduser().resolve()
+        output_root = args.output.expanduser().resolve()
+        _ensure_output_outside_input_root(root, output_root)
         try:
             paths = discover_analysis_inputs(root)
         except NotADirectoryError:
@@ -38,6 +50,8 @@ def main() -> int:
 
     if len(paths) == 1 and args.input and args.output.suffix.lower() == ".json":
         output = args.output.expanduser().resolve()
+        if output == paths[0].expanduser().resolve():
+            parser.error("单输入 replay 的 output 不能覆盖 input")
         output.parent.mkdir(parents=True, exist_ok=True)
         replay = replay_derive_result(_read_result(paths[0]), paths[0])
         output.write_text(json.dumps(replay, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
