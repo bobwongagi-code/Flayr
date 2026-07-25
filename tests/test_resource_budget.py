@@ -138,6 +138,21 @@ class ResourceBudgetTests(unittest.TestCase):
         self.assertEqual(completed.stdout, "")
         self.assertEqual(b"".join(chunks), b"ab")
 
+    def test_non_posix_pipe_reader_preserves_stdin_and_callbacks(self) -> None:
+        chunks: list[bytes] = []
+        with mock.patch.object(utils.os, "name", "nt"):
+            completed = run_command(
+                [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read()); sys.stdout.flush()"],
+                timeout_seconds=5,
+                max_output_bytes=128,
+                stdin_text="streamed input",
+                stdout_callback=chunks.append,
+                capture_stdout=False,
+            )
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(b"".join(chunks), b"streamed input")
+
     def test_report_and_download_budget_counters_are_hard_limits(self) -> None:
         budget = ResourceBudget(ResourceLimits(max_report_bytes=10, max_download_bytes=4))
         with self.assertRaises(ResourceBudgetExceeded):

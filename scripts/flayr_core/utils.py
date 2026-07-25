@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import selectors
 import signal
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -151,6 +153,110 @@ def stop_process_group(process: subprocess.Popen, *, grace_seconds: float = 2.0)
         pass
 
 
+def _consume_command_output(
+    process: subprocess.Popen,
+    command: list[str],
+    timeout_seconds: int,
+    output_limit: int,
+    budget: Any,
+    *,
+    stdout_callback: Callable[[bytes], None] | None = None,
+    stderr_callback: Callable[[bytes], None] | None = None,
+    capture_stdout: bool = True,
+    capture_stderr: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Read Windows pipe handles from worker threads with the same bounds."""
+    assert process.stdout is not None and process.stderr is not None
+    events: queue.Queue[tuple[str, bytes | None]] = queue.Queue(maxsize=8)
+    stop_readers = threading.Event()
+
+    def emit(event: tuple[str, bytes | None]) -> None:
+        while not stop_readers.is_set():
+            try:
+                events.put(event, timeout=0.1)
+                return
+            except queue.Full:
+                continue
+
+    def drain(name: str, stream: Any) -> None:
+        try:
+            while True:
+                chunk = stream.read(64 * 1024)
+                if not chunk:
+                    break
+                emit((name, chunk))
+        except (OSError, ValueError):
+            pass
+        finally:
+            emit((name, None))
+
+    readers = [
+        threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
+        threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    open_streams = {"stdout", "stderr"}
+    captured_bytes = 0
+    deadline = time.monotonic() + timeout_seconds
+    timed_out = False
+    output_exceeded = False
+    try:
+        while open_streams:
+            remaining = min(deadline - time.monotonic(), budget.remaining_wall_seconds())
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                name, chunk = events.get(timeout=min(0.25, remaining))
+            except queue.Empty:
+                continue
+            if chunk is None:
+                open_streams.discard(name)
+                continue
+            remaining_output = output_limit - captured_bytes
+            if len(chunk) > remaining_output:
+                chunk = chunk[: max(0, remaining_output)]
+                output_exceeded = True
+            if chunk:
+                callback = stdout_callback if name == "stdout" else stderr_callback
+                if callback is not None:
+                    callback(chunk)
+                if name == "stdout" and capture_stdout:
+                    buffers[name].extend(chunk)
+                elif name == "stderr" and capture_stderr:
+                    buffers[name].extend(chunk)
+                captured_bytes += len(chunk)
+            if output_exceeded:
+                break
+    except ResourceBudgetExceeded:
+        timed_out = True
+    finally:
+        stop_readers.set()
+        if timed_out or output_exceeded or process.poll() is None:
+            stop_process_group(process)
+        else:
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                stop_process_group(process)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+        for reader in readers:
+            reader.join(timeout=1)
+
+    stdout = bytes(buffers["stdout"]).decode("utf-8", errors="replace")
+    stderr = bytes(buffers["stderr"]).decode("utf-8", errors="replace")
+    if output_exceeded:
+        return subprocess.CompletedProcess(command, 125, stdout, f"{stderr}\ncommand output exceeded {output_limit} bytes".strip())
+    if timed_out:
+        return subprocess.CompletedProcess(command, 124, stdout, f"{stderr}\ncommand timed out after {timeout_seconds}s".strip())
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
 def _run_command_bounded(
     command: list[str],
     timeout_seconds: int,
@@ -186,6 +292,19 @@ def _run_command_bounded(
                 process.stdin.close()
             except OSError:
                 pass
+
+    if os.name != "posix":
+        return _consume_command_output(
+            process,
+            command,
+            timeout_seconds,
+            output_limit,
+            budget,
+            stdout_callback=stdout_callback,
+            stderr_callback=stderr_callback,
+            capture_stdout=capture_stdout,
+            capture_stderr=capture_stderr,
+        )
 
     selector = selectors.DefaultSelector()
     assert process.stdout is not None and process.stderr is not None
