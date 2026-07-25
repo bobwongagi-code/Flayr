@@ -17,7 +17,18 @@ preprocessing fingerprint. A missing optional tool produces an explicit
 The development-only dependency is pinned in
 [`requirements-dev.lock`](requirements-dev.lock):
 
-- `Pillow==11.3.0`: contact sheets and visual evidence artifacts.
+- `Pillow==12.3.0`: contact sheets and visual evidence artifacts.
+- `ruff==0.16.0`: focused CI lint gate for new errors and undefined names.
+- `black==26.5.1`: formatting gate for maintained CI helpers.
+- `mypy==2.3.0`: focused static typing gate for maintained contract modules.
+- `bandit==1.9.4`: high-confidence security lint gate.
+- `coverage==7.15.2`: test coverage measurement with a 55% minimum gate.
+- `pip-audit==2.10.1`: dependency vulnerability audit.
+
+The repository predates full-repository Black and strict typing. CI therefore
+checks the maintained CI helpers and selected contract modules, while the
+focused Ruff gate catches syntax errors, undefined names and new high-risk
+lint failures across the source tree.
 
 Pillow is optional for the core analysis path. The project does not carry the
 removed voice-cloning or video-generation SDK dependencies.

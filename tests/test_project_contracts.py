@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -25,12 +26,16 @@ class ProjectContractTests(unittest.TestCase):
         self.assertNotIn("/Users/", cli)
         self.assertNotIn("VidLingo.Qwen", readme)
 
-    def test_ci_covers_supported_python_versions_on_linux_and_macos(self) -> None:
+    def test_ci_covers_supported_python_versions_across_host_os(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
         self.assertIn("ubuntu-latest", workflow)
         self.assertIn("macos-latest", workflow)
+        self.assertIn("windows-latest", workflow)
         for version in ("3.11", "3.12", "3.13"):
             self.assertIn(version, workflow)
+        self.assertIn("run-quality-gates.sh", workflow)
+        for tool in ("ruff", "black", "mypy", "bandit", "pip_audit", "coverage"):
+            self.assertRegex(workflow + (ROOT / "scripts" / "run-quality-gates.sh").read_text(encoding="utf-8"), re.escape(tool))
 
     def test_local_reports_and_frontend_have_no_remote_font_requests(self) -> None:
         for relative_path in (
@@ -52,7 +57,7 @@ class ProjectContractTests(unittest.TestCase):
         lock = (ROOT / "requirements-dev.lock").read_text(encoding="utf-8").lower()
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
         self.assertIn(f"## [{version}]", changelog)
-        self.assertIn("pillow==11.3.0", lock)
+        self.assertIn("pillow==12.3.0", lock)
         self.assertNotIn("dashscope", lock)
         self.assertNotIn("certifi", lock)
         self.assertIn("requirements-dev.lock", workflow)

@@ -7,6 +7,8 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -155,7 +157,6 @@ def main() -> int:
             apply_finalized_analysis_result(analysis, normalized_result, llm_result_path)
     elif args.analysis_result_json:
         merge_analysis_result(analysis, args.analysis_result_json, analysis_input_path.read_text(encoding="utf-8"))
-    comparison_stopped = analysis.get("analysis_status") in {"not_comparable", "comparison_uncertain"}
     if args.mode in {"compare", "improve"} and analysis.get("analysis_run_state") == "not_run":
         if not getattr(args, "allow_degraded", False):
             write_json(run_dir / "analysis.json", analysis)

@@ -2,7 +2,8 @@
 
 ## [Unreleased]
 
-Changes for the next release are recorded here before the version is updated.
+- Upgraded the development Pillow pin to `12.3.0` and added reproducible CI
+  quality, security, dependency-audit and coverage tooling.
 
 ## [0.1.0]
 
