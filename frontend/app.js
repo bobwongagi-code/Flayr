@@ -17,6 +17,7 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
   var activeJobId = null;
   var pollTimer = null;
   var demoReportMarkup = null;
+  var recoveryWarningShown = false;
   var reportAudienceState = {
     jobId: null,
     selectedAudience: null,
@@ -91,6 +92,10 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
 
   function loadJobs(){
     return apiJson('/api/jobs').then(function(body){
+      if (body.recovery_warning && !recoveryWarningShown){
+        recoveryWarningShown = true;
+        showToast(body.recovery_warning);
+      }
       jobs = (body.jobs || []).map(mapJob);
       updateNavBadge();
       if ($('view-jobs').classList.contains('active')) renderJobList();

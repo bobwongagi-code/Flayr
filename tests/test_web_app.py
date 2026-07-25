@@ -107,7 +107,8 @@ class WebAppHelpersTests(unittest.TestCase):
                     )
                 )
                 self.assertEqual(response.status, 200)
-                self.assertEqual(response.read().decode("utf-8"), '{"jobs": []}')
+                payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload, {"jobs": [], "recovery_warning": ""})
 
                 with self.assertRaises(HTTPError) as error:
                     open_direct(
@@ -272,6 +273,39 @@ class WebAppHelpersTests(unittest.TestCase):
                 self.assertFalse(job_root.exists())
             finally:
                 store.shutdown()
+
+    def test_corrupt_job_index_is_quarantined_and_rebuilt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root)
+            benchmark = root / "benchmark.mp4"
+            creator = root / "creator.mp4"
+            benchmark.write_bytes(b"benchmark")
+            creator.write_bytes(b"creator")
+            files = {
+                "benchmark_video": {"path": benchmark, "filename": "benchmark.mp4"},
+                "creator_video": {"path": creator, "filename": "creator.mp4"},
+            }
+            with mock.patch.object(store._executor, "submit"):
+                public = store.create({"product_name": "恢复测试"}, files, owner_id="owner-a")
+            job_id = str(public["id"])
+            with store._lock:
+                store._persist_locked()
+            backup = (root / "jobs.json.bak").read_bytes()
+            store.shutdown()
+
+            (root / "jobs.json").write_text('{"truncated":', encoding="utf-8")
+            recovered_store = JobStore(root)
+            try:
+                self.assertIn(job_id, recovered_store.jobs)
+                self.assertEqual(recovered_store.jobs[job_id]["product_name"], "恢复测试")
+                self.assertIn("任务索引损坏", recovered_store.recovery_warning)
+                self.assertEqual((root / "jobs.json.bak").read_bytes(), backup)
+                quarantined = list(root.glob("jobs.json.corrupt-*"))
+                self.assertEqual(len(quarantined), 1)
+                self.assertTrue((root / "jobs" / job_id / "job.json").is_file())
+            finally:
+                recovered_store.shutdown()
 
     def test_delete_job_removes_index_files_and_running_process(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

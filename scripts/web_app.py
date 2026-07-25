@@ -47,12 +47,13 @@ from scripts.flayr_core.run_state import (
     read_run_state,
     recover_run_state,
 )
-from scripts.flayr_core.utils import process_group_popen_kwargs, stop_process_group
+from scripts.flayr_core.utils import process_group_popen_kwargs, stop_process_group, write_json
 
 
 WEB_ROOT = ROOT / "runs" / "_web"
 JOBS_ROOT = WEB_ROOT / "jobs"
 JOBS_FILE = WEB_ROOT / "jobs.json"
+JOB_METADATA_FILE = "job.json"
 FRONTEND_INDEX = ROOT / "frontend" / "index.html"
 FRONTEND_ROOT = ROOT / "frontend"
 DEFAULT_PORT = 8787
@@ -106,6 +107,46 @@ class AdmissionError(RequestError):
 
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _fsync_directory(path: Path) -> None:
+    """Best-effort directory fsync after a durable atomic rename."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    """Write a small index/metadata file durably before publishing it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = temporary.name
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, path)
+        _fsync_directory(path.parent)
+    finally:
+        if temporary_path:
+            Path(temporary_path).unlink(missing_ok=True)
 
 
 def parse_iso(value: str) -> dt.datetime:
@@ -601,6 +642,7 @@ class JobStore:
         self.root = root
         self.jobs_root = root / "jobs"
         self.state_path = root / "jobs.json"
+        self.state_backup_path = root / "jobs.json.bak"
         self.workspace_id = _identity_value(workspace_id, "workspace_id", DEFAULT_WORKSPACE_ID)
         self._lock = threading.RLock()
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="flayr-job")
@@ -609,12 +651,16 @@ class JobStore:
         self._admission_reservations: dict[tuple[str, str], int] = {}
         self._storage_reservations: dict[str, int] = {}
         self.jobs: dict[str, dict[str, Any]] = {}
+        self.recovery_warning = ""
+        self._index_write_blocked = False
+        self._preserve_existing_backup = False
         self.root.mkdir(parents=True, exist_ok=True)
         self.jobs_root.mkdir(parents=True, exist_ok=True)
         self._cleanup_upload_staging()
         self._load()
         self._recover_incomplete()
         self._garbage_collect()
+        self._preserve_existing_backup = False
 
     def _cleanup_upload_staging(self) -> None:
         cutoff = time.time() - UPLOAD_STAGING_TTL_SECONDS
@@ -667,13 +713,160 @@ class JobStore:
             if job_root:
                 shutil.rmtree(job_root, ignore_errors=True)
 
-    def _load(self) -> None:
+    @staticmethod
+    def _coerce_jobs_payload(payload: Any) -> dict[str, dict[str, Any]] | None:
+        if not isinstance(payload, dict):
+            return None
+        return {str(key): value for key, value in payload.items() if isinstance(value, dict)}
+
+    @staticmethod
+    def _read_json_object(path: Path) -> dict[str, Any] | None:
         try:
-            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            payload = {}
-        if isinstance(payload, dict):
-            self.jobs = {str(key): value for key, value in payload.items() if isinstance(value, dict)}
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _quarantine_corrupt_index(self) -> str | None:
+        if not self.state_path.exists():
+            return None
+        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        quarantine = self.state_path.with_name(
+            f"{self.state_path.name}.corrupt-{stamp}-{uuid.uuid4().hex[:8]}"
+        )
+        try:
+            os.replace(self.state_path, quarantine)
+            _fsync_directory(self.root)
+        except OSError as exc:
+            self._index_write_blocked = True
+            self.recovery_warning = f"任务索引损坏且无法隔离：{exc}。已进入只读恢复模式。"
+            sys.stderr.write(f"[flayr-web] recovery warning: {self.recovery_warning}\n")
+            return None
+        return quarantine.name
+
+    def _read_job_metadata(self, job_root: Path, fallback: dict[str, Any]) -> dict[str, Any]:
+        metadata = self._read_json_object(job_root / JOB_METADATA_FILE)
+        merged = dict(fallback)
+        if metadata:
+            merged.update(metadata)
+        return merged
+
+    @staticmethod
+    def _input_path(job_root: Path, role: str) -> Path | None:
+        input_root = job_root / "inputs"
+        try:
+            candidates = sorted(
+                path for path in input_root.iterdir()
+                if path.is_file() and path.name.startswith(f"{role}-")
+            )
+        except OSError:
+            return None
+        return candidates[0].resolve() if candidates else None
+
+    def _rebuild_job_from_directory(
+        self,
+        job_root: Path,
+        fallback: dict[str, Any],
+    ) -> dict[str, Any]:
+        job_id = job_root.name
+        job = self._read_job_metadata(job_root, fallback)
+        run_dir = (job_root / "run").resolve()
+        job["id"] = job_id
+        job["run_dir"] = str(run_dir)
+        job["log_path"] = str((job_root / "worker.log").resolve())
+        for role in ("benchmark_video", "creator_video"):
+            path = self._input_path(job_root, role)
+            if path:
+                job[f"{role}_path"] = str(path)
+        job.setdefault("workspace_id", self.workspace_id)
+        job.setdefault("visibility", "private")
+        job.setdefault("product_name", "未命名分析")
+        job.setdefault("market", "未指定市场")
+        job.setdefault("failure_reason", "")
+        job.setdefault("degraded_reason", "")
+        if not job.get("created_at"):
+            try:
+                created = dt.datetime.fromtimestamp(job_root.stat().st_mtime, dt.timezone.utc)
+                job["created_at"] = created.replace(microsecond=0).isoformat()
+            except OSError:
+                job["created_at"] = utc_now()
+
+        expected_inputs = {
+            role: Path(str(job[f"{role}_path"]))
+            for role in ("benchmark_video", "creator_video")
+            if job.get(f"{role}_path")
+        }
+        lifecycle = _run_state(run_dir)
+        complete = run_dir.is_dir() and validate_success_manifest(run_dir, expected_inputs)
+        degraded = run_dir.is_dir() and (
+            (run_dir / "degraded_manifest.json").is_file() and report_variants_ready(run_dir)
+        )
+        if complete:
+            job.update({
+                "status": "completed",
+                "progress": 100,
+                "phase": "报告生成",
+                "estimated_remaining_seconds": 0,
+            })
+        elif degraded and lifecycle != COMPLETED:
+            job.update({
+                "status": "degraded",
+                "progress": 100,
+                "phase": "报告生成（部分分析能力降级）",
+                "estimated_remaining_seconds": 0,
+            })
+        elif lifecycle == FAILED or not run_dir.is_dir():
+            job.update({
+                "status": "failed",
+                "progress": 0,
+                "phase": "素材处理与转写",
+                "estimated_remaining_seconds": 0,
+                "failure_reason": job.get("failure_reason") or "任务索引恢复后未发现完整产物。",
+            })
+        else:
+            job["status"] = "running"
+            job["progress"], job["phase"] = progress_for_run(run_dir)
+            job["estimated_remaining_seconds"] = estimated_remaining_seconds(job["progress"])
+        return job
+
+    def _rebuild_index_from_jobs(self, fallback: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        rebuilt: dict[str, dict[str, Any]] = {}
+        try:
+            candidates = sorted(self.jobs_root.iterdir(), key=lambda path: path.name)
+        except OSError:
+            candidates = []
+        for job_root in candidates:
+            if not job_root.is_dir() or not IDENTITY_PATTERN.fullmatch(job_root.name):
+                continue
+            rebuilt[job_root.name] = self._rebuild_job_from_directory(
+                job_root,
+                fallback.get(job_root.name, {}),
+            )
+        if rebuilt:
+            return rebuilt
+        return dict(fallback)
+
+    def _load(self) -> None:
+        payload = self._read_json_object(self.state_path)
+        recovery_required = self.state_path.exists() and payload is None
+        fallback = self._read_json_object(self.state_backup_path) or {}
+        if recovery_required:
+            quarantined = self._quarantine_corrupt_index()
+            self._preserve_existing_backup = self.state_backup_path.is_file()
+            self.jobs = self._rebuild_index_from_jobs(fallback)
+            source = f"从 {len(self.jobs)} 个任务目录/备份记录重建"
+            if quarantined:
+                source += f"，原文件已隔离为 {quarantined}"
+            self.recovery_warning = f"任务索引损坏，已{source}。请核对任务列表中的恢复结果。"
+            sys.stderr.write(f"[flayr-web] recovery warning: {self.recovery_warning}\n")
+        else:
+            self.jobs = self._coerce_jobs_payload(payload or {}) or {}
+            if not self.state_path.exists() and self.jobs_root.exists():
+                rebuilt = self._rebuild_index_from_jobs(fallback)
+                if rebuilt:
+                    self.jobs = rebuilt
+                    self.recovery_warning = f"任务索引缺失，已从 {len(self.jobs)} 个任务目录/备份记录重建。"
+                    sys.stderr.write(f"[flayr-web] recovery warning: {self.recovery_warning}\n")
         changed = False
         for job in self.jobs.values():
             if not job.get("workspace_id"):
@@ -682,13 +875,23 @@ class JobStore:
             if not job.get("visibility"):
                 job["visibility"] = "private"
                 changed = True
-        if changed:
+        if (
+            not self._index_write_blocked
+            and (changed or recovery_required or self.recovery_warning)
+        ):
             self._persist_locked()
 
     def _persist_locked(self) -> None:
-        temp = self.state_path.with_name(f".{self.state_path.name}.{uuid.uuid4().hex}.tmp")
-        temp.write_text(json.dumps(self.jobs, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temp, self.state_path)
+        if self._index_write_blocked:
+            raise OSError("任务索引处于只读恢复模式，无法安全覆盖原文件")
+        payload = (json.dumps(self.jobs, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        if self.state_path.is_file() and not self._preserve_existing_backup:
+            _atomic_write_bytes(self.state_backup_path, self.state_path.read_bytes())
+        _atomic_write_bytes(self.state_path, payload)
+
+    def _write_job_metadata(self, job_root: Path, job: dict[str, Any]) -> None:
+        write_json(job_root / JOB_METADATA_FILE, job)
+        _fsync_directory(job_root)
 
     def _recover_incomplete(self) -> None:
         with self._lock:
@@ -956,6 +1159,7 @@ class JobStore:
                 "log_path": str((job_root / "worker.log").resolve()),
             }
             with self._lock:
+                self._write_job_metadata(job_root, job)
                 self.jobs[job_id] = job
                 self._persist_locked()
             self._executor.submit(self._run_job, job_id)
@@ -1356,7 +1560,13 @@ class FlayrHandler(BaseHTTPRequestHandler):
                 owner_id=self._client_id(),
                 workspace_id=self.server.store.workspace_id,
             )
-            self._json(200, {"jobs": [self.server.store.public(job) for job in jobs]})
+            self._json(
+                200,
+                {
+                    "jobs": [self.server.store.public(job) for job in jobs],
+                    "recovery_warning": self.server.store.recovery_warning,
+                },
+            )
             return
         match = re.fullmatch(r"/api/workspaces/([^/]+)/jobs/([^/]+)/(analysis|report|creator-report)", path)
         if match:
