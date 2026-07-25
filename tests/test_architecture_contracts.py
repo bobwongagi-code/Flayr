@@ -944,7 +944,15 @@ class ArchitectureContractTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stderr="__FLAYR_HTTP_STATUS__200\n", stdout="")
 
             with (
-                mock.patch.object(llm_api, "validate_outbound_url"),
+                mock.patch.object(
+                    llm_api,
+                    "validate_outbound_url",
+                    return_value=SimpleNamespace(
+                        hostname="example.test",
+                        port=443,
+                        resolved_addresses=("203.0.113.10", "2001:db8::10"),
+                    ),
+                ),
                 mock.patch.object(llm_api, "run_command", side_effect=fake_run),
                 mock.patch.object(llm_api.time, "sleep"),
             ):
@@ -954,6 +962,9 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertIn("--speed-limit", calls[0])
             self.assertIn("--speed-time", calls[0])
             self.assertEqual(calls[0][calls[0].index("--max-redirs") + 1], "0")
+            self.assertIn("--resolve", calls[0])
+            self.assertIn("example.test:443:203.0.113.10", calls[0])
+            self.assertIn("example.test:443:[2001:db8::10]", calls[0])
             self.assertNotIn("-L", calls[0])
             self.assertEqual(calls[0][calls[0].index("--max-time") + 1], "1800")
             self.assertIn('"finish_reason": "stop"', raw)

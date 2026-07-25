@@ -28,7 +28,7 @@ from ..resources import (
     encode_file_data_url,
     finite_nonnegative,
 )
-from ..network import OutboundURLPolicyError, validate_outbound_url
+from ..network import OutboundURLPolicyError, ValidatedOutboundURL, validate_outbound_url
 from ..utils import cleanup_stale_temp_entries, run_command, write_text
 
 LLM_CURL_MAX_TIME_SECONDS = 1800
@@ -92,6 +92,15 @@ def can_send_standalone_audio(api_url: str, model: str = "") -> bool:
 def can_analyze_native_audio(api_url: str, model: str = "") -> bool:
     """Return the matrix decision for direct waveform perception."""
     return provider_capabilities(api_url, model).native_audio_analysis
+
+
+def _curl_resolve_entries(validated: ValidatedOutboundURL) -> tuple[str, ...]:
+    """Pin curl to the public addresses validated for the original hostname."""
+    entries = []
+    for address in validated.resolved_addresses:
+        curl_address = f"[{address}]" if ":" in address else address
+        entries.append(f"{validated.hostname}:{validated.port}:{curl_address}")
+    return tuple(entries)
 
 
 def read_llm_api_key(args: argparse.Namespace) -> str:
@@ -274,11 +283,16 @@ def call_llm_api(
             payload_path.unlink(missing_ok=True)
         raise SystemExit("LLM streaming 需要 curl，但系统未找到 curl。")
     try:
-        validate_outbound_url(api_url)
+        validated_url = validate_outbound_url(api_url)
     except OutboundURLPolicyError as exc:
         if cleanup_payload:
             payload_path.unlink(missing_ok=True)
         raise SystemExit(str(exc)) from exc
+    resolve_entries = _curl_resolve_entries(validated_url)
+    if not resolve_entries:
+        if cleanup_payload:
+            payload_path.unlink(missing_ok=True)
+        raise SystemExit("API 域名没有可用于连接的已验证公网地址")
 
     active_budget = budget or current_budget()
     request_size = payload_path.stat().st_size if payload_path.is_file() else -1
@@ -380,6 +394,7 @@ def call_llm_api(
             "%{stderr}__FLAYR_HTTP_STATUS__%{http_code}\\n",
             api_url,
         ]
+        curl_command[1:1] = [item for entry in resolve_entries for item in ("--resolve", entry)]
 
         last_error = ""
         retry_reason = str(initial_retry_reason or "")[:200]
