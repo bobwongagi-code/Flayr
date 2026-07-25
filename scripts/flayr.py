@@ -1073,6 +1073,7 @@ def ensure_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> Non
     if existing and timeline_dir.is_dir() and selection_report.is_file() and audit_path.is_file() and transcript_ready:
         return
     info["video_evidence"] = build_video_evidence_artifacts(role_dir, info)
+    info["preprocess_artifacts"] = _build_preprocess_artifact_manifest(role_dir)
     write_json(role_dir / "_preprocess.json", info)
 
 

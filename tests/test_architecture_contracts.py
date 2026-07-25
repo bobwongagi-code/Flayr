@@ -3127,6 +3127,35 @@ class ArchitectureContractTests(unittest.TestCase):
             args.whisper_language = "th"
             self.assertIsNone(flayr.load_existing_video_result(role_dir, flayr.build_preprocess_fingerprint(video, deps, args)))
 
+    def test_secondary_evidence_rebuild_refreshes_preprocess_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            role_dir = Path(tmp)
+            frames_dir = role_dir / "frames"
+            frames_dir.mkdir()
+            (frames_dir / "frame_001.jpg").write_bytes(b"frame")
+            info: dict[str, object] = {
+                "audio_quality": {"status": "ready"},
+                "speech_mode": {"mode": "spoken"},
+                "video_evidence": {},
+                "preprocess_artifacts": flayr._build_preprocess_artifact_manifest(role_dir),
+            }
+
+            def build_secondary(root: Path, _info: dict[str, object]) -> dict[str, object]:
+                (root / "timeline_views").mkdir()
+                (root / "timeline_views" / "timeline.json").write_text("{}", encoding="utf-8")
+                (root / "frames" / "selection_report.json").write_text("{}", encoding="utf-8")
+                (root / "video_evidence_audit.json").write_text("{}", encoding="utf-8")
+                return {
+                    "timeline_views_dir": str(root / "timeline_views"),
+                    "frame_selection_report_path": str(root / "frames" / "selection_report.json"),
+                    "audit_path": str(root / "video_evidence_audit.json"),
+                }
+
+            with mock.patch.object(flayr, "build_video_evidence_artifacts", side_effect=build_secondary):
+                flayr.ensure_video_evidence_artifacts(role_dir, info)
+            self.assertTrue(flayr._preprocess_artifacts_match(role_dir, info["preprocess_artifacts"]))
+            self.assertIn("timeline_views/timeline.json", info["preprocess_artifacts"]["files"])
+
     def test_transcript_consumers_never_fallback_to_role_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             role_dir = Path(tmp)
