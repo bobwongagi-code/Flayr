@@ -152,6 +152,13 @@ def run_coverage_check() -> list[str]:
 
 
 def main() -> int:
+    # Windows runners may expose cp1252 even though the gate emits Chinese and
+    # status symbols. Keep diagnostics visible without turning encoding into a
+    # false gate failure.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
     item_violations = run_item_checks()
     unregistered = run_coverage_check()
 

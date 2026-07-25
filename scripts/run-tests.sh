@@ -2,6 +2,10 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+# CI output includes Chinese diagnostics and Unicode status markers. Force a
+# stable encoding so Windows console defaults cannot turn a passing gate into
+# an encoding failure.
+export PYTHONIOENCODING="utf-8:replace"
 PYTHON_BIN="${PYTHON_BIN:-}"
 if [[ -z "$PYTHON_BIN" ]]; then
   if command -v python3 >/dev/null 2>&1; then
