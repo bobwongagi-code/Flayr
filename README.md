@@ -195,11 +195,14 @@ python3 scripts/flayr.py \
 ```bash
 python3 scripts/manage_validation_cohort.py freeze \
   --sample <sample-id> \
+  --provider <provider-id> \
   --model <model-id> \
   --api-url <compatible-api-url> \
   --temperature 0 \
   --output runs/validation/<cohort-id>.lock.json
 ```
+
+冻结时还必须显式锁定完整模型执行配置：生成上限、top-p/seed、response format、stop 序列、传输重试、完成尝试次数，以及 connect/read/low-speed/overall timeout；缺少 `FLAYR_VALIDATION_ROOT`、代码提交、prompt/schema/evaluator/GT/video identity 或模型配置 hash 时，freeze 会返回 `CohortFreezeStatus BLOCKED`。
 
 `evaluate_analysis.py --cohort-lock ...` 会分别报告预处理可用性、Stage1 事实召回、Stage2
 证据使用/判断、derive oracle 回放、Phase C 净收益和 Top-N 商业根因。cohort 结果一旦打开或用于

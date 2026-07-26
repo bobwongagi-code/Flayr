@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.flayr_core.validation_cohort import (
     build_cohort_lock,
@@ -16,6 +18,29 @@ from scripts.flayr_core.validation_cohort import (
 
 
 class ValidationCohortTest(unittest.TestCase):
+    def _use_validation_root(self, root: Path) -> None:
+        patcher = patch.dict(os.environ, {"FLAYR_VALIDATION_ROOT": str(root)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _model_config(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "provider": "test-provider",
+            "api_url": "https://example.invalid",
+            "model": "future-model",
+            "fallback_model": None,
+            "temperature": 0.0,
+            "max_tokens": 16384,
+            "top_p": None,
+            "seed": None,
+            "response_format": None,
+            "stop": None,
+            "transport_retry": 2,
+            "completion_attempts": 3,
+            "timeout": {"connect": 30, "read": None, "low_speed": 180, "overall": 1800},
+        }
+
     def _label(self) -> dict:
         stages = {f"S{index}": "small" for index in range(1, 7)}
         events = [
@@ -85,6 +110,7 @@ class ValidationCohortTest(unittest.TestCase):
             benchmark = root / "benchmark.mp4"
             creator.write_bytes(b"creator")
             benchmark.write_bytes(b"benchmark")
+            self._use_validation_root(root)
             labels_path = root / "labels.json"
             manifest_path = root / "manifest.json"
             labels_path.write_text(json.dumps({"samples": {"sample": self._label()}}), encoding="utf-8")
@@ -101,7 +127,7 @@ class ValidationCohortTest(unittest.TestCase):
                 labels_path,
                 manifest_path,
                 ["sample"],
-                {"model": "future-model", "api_url": "https://example.invalid", "temperature": 0.0},
+                self._model_config(),
             )
             self.assertEqual(verify_cohort_lock(lock), [])
             changed_label = self._label()
@@ -160,6 +186,7 @@ class ValidationCohortTest(unittest.TestCase):
             shared.write_bytes(b"shared")
             new_creator.write_bytes(b"new")
             benchmark.write_bytes(b"benchmark")
+            self._use_validation_root(root)
             labels_path = root / "labels.json"
             manifest_path = root / "manifest.json"
             labels_path.write_text(json.dumps({"samples": {"new": self._label()}}), encoding="utf-8")
@@ -185,7 +212,7 @@ class ValidationCohortTest(unittest.TestCase):
                     labels_path,
                     manifest_path,
                     ["new"],
-                    {"model": "future-model", "api_url": "https://example.invalid", "temperature": 0.0},
+                    self._model_config(),
                 )
 
 
