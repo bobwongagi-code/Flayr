@@ -68,6 +68,7 @@ from .stage_review_contract import (
 )
 from .s4_visual_verifier import maybe_apply_s4_visual_verifier
 from .media import select_role_visual_inputs
+from ..finalization import facade as finalization_facade
 from ..postprocess import apply_postprocess_chain
 from ..postprocess.audit import MAX_CHANGE_ENTRIES, PostprocessAudit, build_field_sources
 from ..postprocess.derive import critical_severity_stages
@@ -1075,11 +1076,14 @@ def maybe_refine_low_confidence_stages(
         return result
     # 候选 = 模型自报 ∪ 素材不足确定性检测 ∪ resolver 冲突阶段。
     # 按优先级取 2：P1 链路致命节点 S1/S6（判错代价最高）→ P2 高杠杆验证节点 S4 → P3 其他。
+    legacy_critical_candidates = finalization_facade.legacy_phase_c_candidate_set(
+        critical_severity_stages(result),
+    )
     candidates: list[str] = []
     for code in [
         *extract_low_confidence_stages(raw_result),
         *detect_low_confidence_stages(result),
-        *critical_severity_stages(result),
+        *[candidate.stage_id for candidate in legacy_critical_candidates.candidates],
     ]:
         if code not in candidates:
             candidates.append(code)

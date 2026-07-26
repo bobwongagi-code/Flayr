@@ -1,14 +1,14 @@
-"""One-way adapters from the existing LEGACY_V1 result structures.
+"""Adapters from and into the existing LEGACY_V1 finalization path.
 
-No function in this module changes a legacy result. The adapter copies the
-fields needed by the typed views and can reconstruct the resolver's existing
-dictionary for equivalence tests.
+The projection functions are read-only views.  The production ``resolve``
+entry point is deliberately a one-line delegation to the existing derive
+implementation; it does not add rules or transform its inputs.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .contracts import (
@@ -23,6 +23,47 @@ from .contracts import (
 
 
 _STAGE_CODE_RE = re.compile(r"^(S[1-6])(?:\b|$)")
+
+
+def resolve(
+    result: dict[str, Any],
+    analysis: dict[str, Any] | None = None,
+    *,
+    activation_evidence: Any = None,
+) -> None:
+    """Production adapter that delegates unchanged to the LEGACY_V1 derive path."""
+
+    from ..postprocess.derive import derive_severity_from_facts
+
+    derive_severity_from_facts(
+        result,
+        analysis,
+        activation_evidence=activation_evidence,
+    )
+
+
+def legacy_phase_c_candidate_set(
+    stage_ids: Sequence[str],
+    *,
+    trigger: str = "critical_severity_stages",
+) -> LegacyPhaseCCandidateSet:
+    """Project old candidate stage IDs without changing order or cardinality."""
+
+    if isinstance(stage_ids, (str, bytes)):
+        raise TypeError("legacy Phase C stage_ids must be a sequence of strings")
+    if not isinstance(trigger, str) or not trigger:
+        raise TypeError("legacy Phase C trigger must be a non-empty string")
+    candidates = []
+    for stage_id in stage_ids:
+        if not isinstance(stage_id, str):
+            raise TypeError("legacy Phase C stage_ids must contain strings")
+        candidates.append(
+            LegacyPhaseCCandidateView(
+                stage_id=stage_id,
+                legacy_source_refs=(trigger,),
+            )
+        )
+    return LegacyPhaseCCandidateSet(candidates=tuple(candidates))
 
 
 def _required_text(value: Any, field_name: str) -> str:

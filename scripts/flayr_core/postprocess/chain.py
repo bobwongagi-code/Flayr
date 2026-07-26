@@ -57,8 +57,8 @@ from .claims_my import (
     reconcile_certification_ownership,
 )
 
-# severity resolver：模型默认值 + 只收窄区间的确定性 floor/ceiling 约束。
-from .derive import derive_severity_from_facts
+# severity resolver：通过 PR-0A facade 保持既有模型默认值与 floor/ceiling 规则。
+from ..finalization import facade as finalization_facade
 from .calibration import TrustedS4ActivationEvidence
 from .proposition import materialize_cross_stage_inputs, materialize_quality_audits
 
@@ -115,18 +115,18 @@ def finalize_severity_after_repairs(
         ("postprocess.validate_s3_s4_hard_fact_consistency", validate_s3_s4_hard_fact_consistency, (normalized,)),
         (
             "postprocess.derive_severity_from_facts",
-            derive_severity_from_facts,
+            finalization_facade.resolve,
             (normalized, analysis),
         ),
     )
     for rule, function, args in steps:
         if audit is None:
-            if function is derive_severity_from_facts:
+            if function is finalization_facade.resolve:
                 function(*args, activation_evidence=activation_evidence)
             else:
                 function(*args)
         else:
-            if function is derive_severity_from_facts:
+            if function is finalization_facade.resolve:
                 audit.run(normalized, rule, function, *args, activation_evidence=activation_evidence)
             else:
                 audit.run(normalized, rule, function, *args)

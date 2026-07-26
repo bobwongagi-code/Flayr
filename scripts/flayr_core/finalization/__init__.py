@@ -1,7 +1,7 @@
-"""PR-0A typed views around the existing LEGACY_V1 finalization path.
+"""PR-0A typed views and the compatibility entry around LEGACY_V1.
 
-This package is intentionally projection-only. It does not own severity
-rules, candidate qualification, planning, budgeting, or Phase C execution.
+This package does not own severity rules, candidate qualification, planning,
+budgeting, or Phase C execution. Its production entry delegates to LEGACY_V1.
 """
 
 from .contracts import (
@@ -15,8 +15,10 @@ from .contracts import (
 )
 from .facade import (
     from_legacy_resolution,
+    legacy_phase_c_candidate_set,
     legacy_provisional_projection,
     legacy_terminal_projection,
+    resolve,
 )
 
 __all__ = [
@@ -28,6 +30,8 @@ __all__ = [
     "LegacyTerminalProjection",
     "SeverityResolutionFacade",
     "from_legacy_resolution",
+    "legacy_phase_c_candidate_set",
     "legacy_provisional_projection",
     "legacy_terminal_projection",
+    "resolve",
 ]
