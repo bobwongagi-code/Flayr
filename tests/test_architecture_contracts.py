@@ -1472,6 +1472,15 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn("具体未解问题", comparison_text)
         self.assertIn("答案可在 S2 承接", comparison_text)
 
+    def test_repair_prompt_enforces_stage_evidence_ownership(self) -> None:
+        repair = build_llm_repair_payload("test", "{}", "error", "input")
+        repair_text = repair["messages"][0]["content"]
+
+        self.assertIn("只能引用对应侧、时间与该阶段 time_range 相交", repair_text)
+        self.assertIn("嵌套 flag 的 evidence_ids 必须是该阶段主 evidence_ids 的子集", repair_text)
+        self.assertIn("S4 不得把 S5 的用户评论、认证或反馈引用成效果证据", repair_text)
+        self.assertIn("effect_evidence_state(none/result_only/verified/uncertain)", repair_text)
+
     def test_brand_proposition_resolves_validation_run_names(self) -> None:
         self.assertEqual(resolve_brand_key("validation-are_xie"), "are_xie")
         self.assertEqual(resolve_brand_key("scope-probe-carslan-b0"), "carslan")
