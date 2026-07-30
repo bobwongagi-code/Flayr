@@ -50,6 +50,45 @@ def _complete_s6_flags(*, exists: bool, evidence_id: str) -> dict[str, object]:
     }
 
 
+def _phase_c_absent_flag(code: str) -> dict[str, object]:
+    """Minimal fact payloads for the shared empty-evidence policy tests."""
+    if code == "S1":
+        return {"exists": False, "evidence_ids": []}
+    if code == "S2":
+        return {"exists": False, "evidence_ids": []}
+    if code == "S3":
+        return {
+            "exists": False,
+            "usage_evidence_state": "none",
+            "usage_process_visible": False,
+            "real_usage_met": False,
+            "core_selling_point_visible": False,
+            "evidence_ids": [],
+        }
+    if code == "S4":
+        return {
+            "effect_type": "none",
+            "effect_evidence_state": "none",
+            "effect_visible": False,
+            "evidence_ids": [],
+        }
+    if code == "S5":
+        return {"exists": False, "trust_evidence_type": "none", "evidence_ids": []}
+    if code == "S6":
+        return {"exists": False, "evidence_ids": []}
+    raise AssertionError(f"unsupported stage: {code}")
+
+
+def _phase_c_fields(code: str, *, creator: dict[str, object], benchmark: dict[str, object]) -> dict[str, object]:
+    flag_name = "hook" if code == "S1" else code.lower()
+    return {
+        "creator_evidence_ids": [],
+        "benchmark_evidence_ids": [],
+        f"creator_{flag_name}": creator,
+        f"benchmark_{flag_name}": benchmark,
+    }
+
+
 def _full_phase_c_result(facts: dict[str, object]) -> dict[str, object]:
     def stage(index: int) -> dict[str, object]:
         return {
@@ -258,6 +297,114 @@ class PhaseCPatchTests(unittest.TestCase):
                 {"stage_patches": [{"stage": "S4", "fields": fields}]},
                 facts,
                 ["S4"],
+            )
+
+    def test_s4_non_absence_empty_benchmark_evidence_is_rejected_symmetrically(self) -> None:
+        fields = _phase_c_fields(
+            "S4",
+            creator=_phase_c_absent_flag("S4"),
+            benchmark={
+                "effect_type": "aesthetic_display",
+                "effect_evidence_state": "result_only",
+                "effect_visible": True,
+                "evidence_ids": [],
+            },
+        )
+
+        with self.assertRaisesRegex(SystemExit, "requires non-empty benchmark_evidence_ids"):
+            pipeline._validate_stage_review_patches(
+                {"stage_patches": [{"stage": "S4", "fields": fields}]},
+                {"creator": {"evidence_units": []}, "benchmark": {"evidence_units": []}},
+                ["S4"],
+            )
+
+    def test_s4_non_absence_empty_nested_evidence_is_rejected_when_stage_evidence_exists(self) -> None:
+        fields = {
+            "creator_evidence_ids": ["C1"],
+            "benchmark_evidence_ids": [],
+            "creator_s4": {
+                "effect_type": "process_visualization",
+                "effect_evidence_state": "verified",
+                "effect_visible": True,
+                "evidence_ids": [],
+            },
+            "benchmark_s4": _phase_c_absent_flag("S4"),
+        }
+
+        with self.assertRaisesRegex(SystemExit, "requires non-empty creator_s4.evidence_ids"):
+            pipeline._validate_stage_review_patches(
+                {"stage_patches": [{"stage": "S4", "fields": fields}]},
+                {"creator": {"evidence_units": [{"id": "C1"}]}, "benchmark": {"evidence_units": []}},
+                ["S4"],
+            )
+
+    def test_s3_none_empty_evidence_is_allowed_but_partial_empty_evidence_is_rejected(self) -> None:
+        absent_fields = _phase_c_fields(
+            "S3",
+            creator=_phase_c_absent_flag("S3"),
+            benchmark=_phase_c_absent_flag("S3"),
+        )
+        patches = pipeline._validate_stage_review_patches(
+            {"stage_patches": [{"stage": "S3", "fields": absent_fields}]},
+            {"creator": {"evidence_units": []}, "benchmark": {"evidence_units": []}},
+            ["S3"],
+        )
+        self.assertEqual(patches["S3"]["creator_evidence_ids"], [])
+
+        partial_creator = dict(_phase_c_absent_flag("S3"))
+        partial_creator.update(
+            {
+                "exists": True,
+                "usage_evidence_state": "partial",
+                "usage_process_visible": True,
+                "real_usage_met": True,
+            }
+        )
+        with self.assertRaisesRegex(SystemExit, "requires non-empty creator_evidence_ids"):
+            pipeline._validate_stage_review_patches(
+                {
+                    "stage_patches": [{
+                        "stage": "S3",
+                        "fields": _phase_c_fields(
+                            "S3",
+                            creator=partial_creator,
+                            benchmark=_phase_c_absent_flag("S3"),
+                        ),
+                    }]
+                },
+                {"creator": {"evidence_units": []}, "benchmark": {"evidence_units": []}},
+                ["S3"],
+            )
+
+    def test_absent_empty_evidence_policy_covers_s1_s5_s6_and_keeps_s2_strict(self) -> None:
+        for code in ("S1", "S5", "S6"):
+            with self.subTest(stage=code):
+                fields = _phase_c_fields(
+                    code,
+                    creator=_phase_c_absent_flag(code),
+                    benchmark=_phase_c_absent_flag(code),
+                )
+                patches = pipeline._validate_stage_review_patches(
+                    {"stage_patches": [{"stage": code, "fields": fields}]},
+                    {"creator": {"evidence_units": []}, "benchmark": {"evidence_units": []}},
+                    [code],
+                )
+                self.assertEqual(patches[code]["creator_evidence_ids"], [])
+
+        with self.assertRaisesRegex(SystemExit, "requires non-empty creator_evidence_ids"):
+            pipeline._validate_stage_review_patches(
+                {
+                    "stage_patches": [{
+                        "stage": "S2",
+                        "fields": _phase_c_fields(
+                            "S2",
+                            creator=_phase_c_absent_flag("S2"),
+                            benchmark=_phase_c_absent_flag("S2"),
+                        ),
+                    }]
+                },
+                {"creator": {"evidence_units": []}, "benchmark": {"evidence_units": []}},
+                ["S2"],
             )
 
     def test_legal_patch_runs_repair_validation_and_resolver_after_stale_state_is_removed(self) -> None:

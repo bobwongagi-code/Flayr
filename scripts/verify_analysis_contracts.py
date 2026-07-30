@@ -342,9 +342,11 @@ def _s3_flag(
     scene="single_scene", single_continuity=True, single_variation=False, multi_logic=False,
     multi_transition=False, multi_role=False, role_design=False, role_interaction=False,
     distinct_personas=False, steps_clear=False, pov_immersive=False, overlays=None,
+    state="complete",
 ):
     return {
         "exists": exists,
+        "usage_evidence_state": state,
         "module_type": module,
         "usage_process_visible": usage,
         "result_only_without_process": result_only,
@@ -1627,6 +1629,7 @@ _absent_s3 = _s3_flag(
     context=False,
     continuity=False,
     overlays=["none"],
+    state="none",
 )
 _absent_s3["evidence_ids"] = []
 try:
@@ -1635,10 +1638,20 @@ try:
             "stage_analysis": [
                 {"stage": "S1 Hook"},
                 {"stage": "S2 产品引出"},
-                {"stage": "S3 使用过程", "creator_s3": _absent_s3, "benchmark_s3": dict(_valid_s3)},
-            ]
+                {
+                    "stage": "S3 使用过程",
+                    "creator_evidence_ids": [],
+                    "benchmark_evidence_ids": ["C2"],
+                    "creator_s3": _absent_s3,
+                    "benchmark_s3": dict(_valid_s3),
+                },
+            ],
+            "video_understanding": {
+                "creator": {"evidence_units": []},
+                "benchmark": {"evidence_units": [{"id": "C2"}]},
+            },
         },
-        {"s3_flags_required": True},
+        {"s3_flags_required": True, "evidence_state_required": True},
     )
     _s3_absent_empty_evidence_ok = True
 except SystemExit:
@@ -1653,10 +1666,20 @@ try:
             "stage_analysis": [
                 {"stage": "S1 Hook"},
                 {"stage": "S2 产品引出"},
-                {"stage": "S3 使用过程", "creator_s3": _present_s3_no_evidence, "benchmark_s3": dict(_valid_s3)},
-            ]
+                {
+                    "stage": "S3 使用过程",
+                    "creator_evidence_ids": [],
+                    "benchmark_evidence_ids": ["C2"],
+                    "creator_s3": _present_s3_no_evidence,
+                    "benchmark_s3": dict(_valid_s3),
+                },
+            ],
+            "video_understanding": {
+                "creator": {"evidence_units": []},
+                "benchmark": {"evidence_units": [{"id": "C2"}]},
+            },
         },
-        {"s3_flags_required": True},
+        {"s3_flags_required": True, "evidence_state_required": True},
     )
     _s3_present_empty_evidence_failed = False
 except SystemExit as exc:

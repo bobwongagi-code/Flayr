@@ -16,6 +16,54 @@ S3_USAGE_EVIDENCE_STATES = ("none", "partial", "complete", "uncertain")
 S4_EFFECT_EVIDENCE_STATES = ("none", "result_only", "verified", "uncertain")
 EVIDENCE_STATE_STRENGTHS = ("direct", "explicit", "inferred", "absent")
 
+
+def stage_flag_has_absent_evidence_state(stage_code: str, flag: Any) -> bool:
+    """Return whether a stage flag explicitly describes no supporting evidence.
+
+    This is the shared absence contract for both the production validators and
+    the Phase C evidence-and-fact patch validator.  S2 is intentionally not
+    included: its contract requires a non-empty time-window evidence anchor
+    even when the product-introduction function itself is absent.
+    """
+    if not isinstance(flag, dict):
+        return False
+    code = str(stage_code or "").strip().upper()
+    if code == "S1":
+        return flag.get("exists") is False
+    if code == "S2":
+        return False
+    if code == "S3":
+        return (
+            flag.get("usage_evidence_state") == "none"
+            and flag.get("exists") is False
+            and flag.get("usage_process_visible") is False
+            and flag.get("real_usage_met") is False
+            and flag.get("core_selling_point_visible") is False
+        )
+    if code == "S4":
+        return (
+            str(flag.get("effect_type") or "").strip() == "none"
+            and str(flag.get("effect_evidence_state") or "").strip() == "none"
+            and flag.get("effect_visible") is False
+        )
+    if code == "S5":
+        return (
+            flag.get("exists") is False
+            or str(flag.get("trust_evidence_type") or "").strip() in {"none", "unknown"}
+        )
+    if code == "S6":
+        return flag.get("exists") is False
+    return False
+
+
+def stage_flag_allows_empty_evidence(stage_code: str, flag: Any) -> bool:
+    """Return whether ``flag.evidence_ids=[]`` is legal for this stage."""
+    return (
+        isinstance(flag, dict)
+        and flag.get("evidence_ids") == []
+        and stage_flag_has_absent_evidence_state(stage_code, flag)
+    )
+
 # These are the exact facts consumed by severity-increasing derive rules. Keep
 # them centralized so repair markers and derive cannot silently disagree about
 # which inputs were checked.

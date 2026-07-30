@@ -72,6 +72,40 @@ def _s3_flag(state: str, evidence_id: str, **overrides: object) -> dict[str, obj
     return {"usage_evidence_state": state, "evidence_ids": [evidence_id], **fields}
 
 
+def _s3_validation_flag(state: str, evidence_ids: list[str]) -> dict[str, object]:
+    """Complete S3 flag fixture for the production evidence-state validator."""
+    absent = state == "none"
+    flag = _s3_flag(state, evidence_ids[0] if evidence_ids else "unused")
+    flag.update(
+        {
+            "evidence_ids": evidence_ids,
+            "module_type": "unknown" if absent else "A",
+            "process_framing_met": not absent,
+            "demonstrated_selling_points": [] if absent else ["核心卖点"],
+            "missing_selling_points": ["核心卖点"] if absent else [],
+            "scene_mode": "unknown" if absent else "single_scene",
+            "usage_context_fit": not absent,
+            "continuity_met": not absent,
+            "richness_met": False,
+            "single_scene_continuity_met": False,
+            "single_scene_variation_met": False,
+            "multi_scene_logic_met": False,
+            "multi_scene_transition_met": False,
+            "multi_scene_role_adaptation_met": False,
+            "role_design_met": False,
+            "role_interaction_met": False,
+            "distinct_personas_met": False,
+            "steps_clear_met": False,
+            "pov_immersive_met": False,
+            "presentation_overlays": ["none"],
+            "start_seconds": 0.0,
+            "end_seconds": 1.0,
+            "usage_reason": "没有可观察的产品操作" if absent else "真实使用动作中演示核心卖点",
+        }
+    )
+    return flag
+
+
 def _s4_flag(state: str, evidence_id: str, **overrides: object) -> dict[str, object]:
     fields = {
         "effect_visible": False,
@@ -671,6 +705,32 @@ class DeriveResolverTests(unittest.TestCase):
             }],
         }
         validate_s4_effect_flags(result, {"evidence_state_required": True})
+
+    def test_required_s3_explicit_absence_can_have_no_evidence_ids(self) -> None:
+        absent = _s3_validation_flag("none", [])
+        benchmark = _s3_validation_flag("complete", ["B3"])
+        result = {
+            "video_understanding": {
+                "creator": {"evidence_units": []},
+                "benchmark": {"evidence_units": [{"id": "B3"}]},
+            },
+            "stage_analysis": [
+                {},
+                {},
+                {
+                    "creator_evidence_ids": [],
+                    "benchmark_evidence_ids": ["B3"],
+                    "creator_s3": absent,
+                    "benchmark_s3": benchmark,
+                },
+            ],
+        }
+        validate_s3_usage_flags(result, {"evidence_state_required": True})
+
+        present_without_evidence = _s3_validation_flag("partial", [])
+        result["stage_analysis"][2]["creator_s3"] = present_without_evidence
+        with self.assertRaisesRegex(SystemExit, "creator_s3.evidence_ids"):
+            validate_s3_usage_flags(result, {"evidence_state_required": True})
 
     def test_structured_s3_s4_evidence_ids_are_closed_world(self) -> None:
         result = {

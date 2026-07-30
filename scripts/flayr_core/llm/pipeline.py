@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ..artifacts import parse_time_range_seconds
+from ..evidence_states import stage_flag_allows_empty_evidence
 from ..multimodal import sanitize_audio_observations
 from ..utils import write_json, write_text
 from ..analysis_model import ANALYSIS_RESULT_CONTRACT, AnalysisResult, schema_sha256
@@ -1540,6 +1541,14 @@ def _validate_phase_c_patch_evidence_ids(
             if not isinstance(nested_ids, list):
                 raise SystemExit(f"Phase C patch for {code} has invalid {fact_key}.{nested_key}.")
             normalized_nested = [str(item).strip() for item in nested_ids]
+            if (
+                nested_key == "evidence_ids"
+                and not normalized_nested
+                and not allows_empty_evidence
+            ):
+                raise SystemExit(
+                    f"Phase C patch for {code} requires non-empty {fact_key}.{nested_key}."
+                )
             if any(not item for item in normalized_nested):
                 raise SystemExit(f"Phase C patch for {code} has blank {fact_key}.{nested_key}.")
             if len(normalized_nested) != len(set(normalized_nested)):
@@ -1578,14 +1587,8 @@ def _validate_phase_c_patch_evidence_ids(
 
 
 def _phase_c_allows_empty_evidence(code: str, fact: dict[str, Any]) -> bool:
-    """Allow only an explicit S4 absence fact to carry no evidence IDs."""
-    return (
-        code == "S4"
-        and str(fact.get("effect_type") or "").strip() == "none"
-        and str(fact.get("effect_evidence_state") or "").strip() == "none"
-        and fact.get("effect_visible") is False
-        and fact.get("evidence_ids") == []
-    )
+    """Delegate the closed empty-evidence policy to the shared stage contract."""
+    return stage_flag_allows_empty_evidence(code, fact)
 
 
 def _phase_c_patch_snapshots(

@@ -17,7 +17,11 @@ import re
 from typing import Any
 
 from ..artifacts import parse_time_range_seconds
-from ..evidence_states import S3_USAGE_EVIDENCE_STATES, S4_EFFECT_EVIDENCE_STATES
+from ..evidence_states import (
+    S3_USAGE_EVIDENCE_STATES,
+    S4_EFFECT_EVIDENCE_STATES,
+    stage_flag_has_absent_evidence_state,
+)
 from ..llm.parse import (
     hook_reason_window_leaks,
     is_effective_voiceover,
@@ -588,7 +592,7 @@ def validate_s3_usage_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
             continue
         if evidence_state_required and flag.get("usage_evidence_state") not in S3_USAGE_EVIDENCE_STATES:
             errors.append(f"S3 {key}.usage_evidence_state 必须是 none/partial/complete/uncertain")
-        if evidence_state_required:
+        if evidence_state_required and not stage_flag_has_absent_evidence_state("S3", flag):
             errors.extend(_validate_structured_flag_evidence_ids(result, role, "s3", flag, stage=s3))
         for bool_key in (
             "exists",
@@ -672,11 +676,7 @@ def validate_s4_effect_flags(result: dict[str, Any], analysis: dict[str, Any]) -
             errors.append(f"S4 {key}.effect_evidence_state 必须是 none/result_only/verified/uncertain")
         effect_type = str(flag.get("effect_type") or "").strip()
         effect_state = str(flag.get("effect_evidence_state") or "").strip()
-        effect_absent = (
-            effect_state == "none"
-            and effect_type == "none"
-            and flag.get("effect_visible") is False
-        )
+        effect_absent = stage_flag_has_absent_evidence_state("S4", flag)
         if evidence_state_required and not effect_absent:
             errors.extend(_validate_structured_flag_evidence_ids(result, role, "s4", flag, stage=s4))
         for bool_key in (
