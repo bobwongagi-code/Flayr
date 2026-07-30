@@ -32,6 +32,7 @@ from ..evidence_states import (
 )
 from ..llm.parse import S5_SOURCE_STATUSES, is_effective_voiceover, normalize_s5_source_status
 from .utils import (
+    adjacent_review_range,
     ensure_evidence_unit,
     evidence_mentions_product,
     evidence_overlaps_range,
@@ -849,6 +850,96 @@ def improvement_reference_stage(item: dict[str, Any], stages: list[Any]) -> dict
 
 # region fill ----------------------------------------------------------------
 
+def _stage_reference_ids(stage: dict[str, Any], role: str) -> set[str]:
+    return {
+        str(value).strip()
+        for value in stage.get(f"{role}_evidence_ids") or []
+        if str(value).strip()
+    }
+
+
+def _stage_review_range_from_facts(
+    result: dict[str, Any],
+    role: str,
+    stage_index: int,
+    stage: dict[str, Any],
+) -> str:
+    """Derive a bounded review window from already locked neighboring facts."""
+    range_key = f"{role}_time_range"
+    if parse_time_range_seconds(stage.get(range_key), None) is not None:
+        return str(stage.get(range_key) or "")
+
+    role_result = result.get("video_understanding", {}).get(role, {})
+    units = role_result.get("evidence_units", []) if isinstance(role_result, dict) else []
+    units_by_id = {
+        str(unit.get("id")): unit
+        for unit in units
+        if isinstance(unit, dict) and str(unit.get("id") or "").strip()
+    }
+
+    def timed_units(ids: set[str]) -> list[dict[str, Any]]:
+        return [
+            units_by_id[item]
+            for item in ids
+            if item in units_by_id and parse_time_range_seconds(units_by_id[item].get("time_range"), None) is not None
+        ]
+
+    current_units = timed_units(_stage_reference_ids(stage, role))
+    if current_units:
+        ranges = [parse_time_range_seconds(unit.get("time_range"), None) for unit in current_units]
+        start = min(item[0] for item in ranges if item is not None)
+        end = max(item[1] for item in ranges if item is not None)
+        return f"{format_seconds(start)} - {format_seconds(max(end, start + 0.5))}"
+
+    stages = result.get("stage_analysis") or []
+    before: dict[str, Any] | None = None
+    before_end: float | None = None
+    for previous_stage in reversed(stages[:stage_index]):
+        previous_ids = _stage_reference_ids(previous_stage, role)
+        candidates = timed_units(previous_ids)
+        if candidates:
+            before = max(
+                candidates,
+                key=lambda unit: parse_time_range_seconds(unit.get("time_range"), None)[1],
+            )
+            before_end = parse_time_range_seconds(before.get("time_range"), None)[1]
+            break
+
+    after: dict[str, Any] | None = None
+    future_candidates: list[dict[str, Any]] = []
+    seen_before = {str(before.get("id"))} if before else set()
+    for future_stage in stages[stage_index + 1 :]:
+        future_ids = _stage_reference_ids(future_stage, role)
+        future_candidates.extend(unit for unit in timed_units(future_ids) if str(unit.get("id")) not in seen_before)
+    if before_end is not None:
+        after = min(
+            (
+                unit
+                for unit in future_candidates
+                if parse_time_range_seconds(unit.get("time_range"), None)[0] >= before_end
+            ),
+            key=lambda unit: parse_time_range_seconds(unit.get("time_range"), None)[0],
+            default=None,
+        )
+    if after is None and future_candidates:
+        after = min(
+            future_candidates,
+            key=lambda unit: parse_time_range_seconds(unit.get("time_range"), None)[0],
+        )
+    if before is not None and after is not None:
+        review_range = adjacent_review_range(before, after, "")
+        if review_range:
+            return review_range
+    if before is not None:
+        _, end = parse_time_range_seconds(before.get("time_range"), None)
+        return f"{format_seconds(end)} - {format_seconds(end + 0.5)}"
+    if after is not None:
+        start, _ = parse_time_range_seconds(after.get("time_range"), None)
+        end = start if start > 0 else 0.5
+        return f"{format_seconds(max(0.0, start - 0.5))} - {format_seconds(end)}"
+
+    return ""
+
 def fill_missing_evidence_references(result: dict[str, Any]) -> None:
     """阶段引用的 evidence_unit 不在该阶段时间内时，补占位单元或就近匹配。
 
@@ -859,6 +950,10 @@ def fill_missing_evidence_references(result: dict[str, Any]) -> None:
         for role, code in (("benchmark", "B"), ("creator", "C")):
             key = f"{role}_evidence_ids"
             units = understanding.get(role, {}).get("evidence_units", [])
+            if parse_time_range_seconds(stage.get(f"{role}_time_range"), None) is None:
+                review_range = _stage_review_range_from_facts(result, role, index - 1, stage)
+                if review_range:
+                    stage[f"{role}_time_range"] = review_range
             references = {str(item) for item in stage.get(key, [])}
             overlapping = [
                 str(unit.get("id"))
@@ -907,6 +1002,10 @@ def materialize_spoken_stage_evidence(result: dict[str, Any]) -> None:
             if not is_effective_voiceover(quote):
                 continue
             units = understanding.get(role, {}).get("evidence_units", [])
+            if parse_time_range_seconds(stage.get(f"{role}_time_range"), None) is None:
+                review_range = _stage_review_range_from_facts(result, role, index - 1, stage)
+                if review_range:
+                    stage[f"{role}_time_range"] = review_range
             references = {str(item) for item in stage.get(f"{role}_evidence_ids", [])}
             if any(
                 str(unit.get("id")) in references

@@ -88,6 +88,7 @@ from flayr_core.video_evidence import build_transcript_pack, parse_srt_time_rang
 from flayr_core.postprocess.repair import (
     align_stage_flag_evidence,
     apply_comparison_eligibility,
+    fill_missing_evidence_references,
     prune_multimodal_evidence_to_stage,
     reconcile_s3_s4_evidence_coherence,
     reconcile_unsupported_cta,
@@ -110,6 +111,7 @@ from flayr_core.postprocess.validate import (
     validate_s1_hook_flags,
     validate_s3_usage_flags,
     validate_s6_cta_flags,
+    validate_evidence_alignment,
     validate_stage_time_coherence,
 )
 from flayr_core.prompt import write_analysis_input
@@ -2823,6 +2825,67 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(stage["creator_evidence_ids"], ["C3"])
         self.assertEqual(stage["creator_summary"], "半脸前后对比展示哑光效果")
         self.assertEqual(stage["creator_support_status"], "visual_only")
+
+    def test_missing_stage_range_uses_locked_neighbor_window_for_placeholder(self) -> None:
+        result = {
+            "video_understanding": {
+                "creator": {
+                    "evidence_units": [
+                        {
+                            "id": "C5",
+                            "time_range": "42.0s - 48.0s",
+                            "voiceover": "",
+                            "functions": ["S3_usage", "S5_trust"],
+                        },
+                        {
+                            "id": "C6",
+                            "time_range": "48.0s - 64.0s",
+                            "voiceover": "",
+                            "functions": ["S5_trust"],
+                        },
+                    ]
+                },
+                "benchmark": {
+                    "evidence_units": [
+                        {"id": f"B{index}", "time_range": f"{index}s - {index + 1}s"}
+                        for index in range(1, 7)
+                    ]
+                },
+            },
+            "stage_analysis": [
+                {
+                    "stage": f"S{index}",
+                    "creator_time_range": creator_range,
+                    "creator_evidence_ids": creator_ids,
+                    "benchmark_time_range": f"{index}s - {index + 1}s",
+                    "benchmark_evidence_ids": [f"B{index}"],
+                }
+                for index, (creator_range, creator_ids) in enumerate(
+                    [
+                        ("0s - 1s", ["C5"]),
+                        ("1s - 2s", ["C5"]),
+                        ("42s - 48s", ["C5"]),
+                        ("", []),
+                        ("48s - 64s", ["C6"]),
+                        ("64s - 84s", ["C6"]),
+                    ],
+                    start=1,
+                )
+            ],
+        }
+
+        fill_missing_evidence_references(result)
+
+        stage = result["stage_analysis"][3]
+        self.assertEqual(stage["creator_time_range"], "48.0s - 48.5s")
+        self.assertEqual(stage["creator_evidence_ids"], ["C_NO_STAGE_4"])
+        placeholder = next(
+            unit
+            for unit in result["video_understanding"]["creator"]["evidence_units"]
+            if unit["id"] == "C_NO_STAGE_4"
+        )
+        self.assertEqual(placeholder["time_range"], "48.0s - 48.5s")
+        validate_evidence_alignment(result)
 
     def test_repair_preserves_original_improvements_when_model_drops_them(self) -> None:
         original = {"improvements": [{"title": "保留的合法建议"}], "stage_analysis": [{"stage": "旧"}]}
