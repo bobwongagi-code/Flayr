@@ -670,7 +670,14 @@ def validate_s4_effect_flags(result: dict[str, Any], analysis: dict[str, Any]) -
             continue
         if evidence_state_required and flag.get("effect_evidence_state") not in S4_EFFECT_EVIDENCE_STATES:
             errors.append(f"S4 {key}.effect_evidence_state 必须是 none/result_only/verified/uncertain")
-        if evidence_state_required:
+        effect_type = str(flag.get("effect_type") or "").strip()
+        effect_state = str(flag.get("effect_evidence_state") or "").strip()
+        effect_absent = (
+            effect_state == "none"
+            and effect_type == "none"
+            and flag.get("effect_visible") is False
+        )
+        if evidence_state_required and not effect_absent:
             errors.extend(_validate_structured_flag_evidence_ids(result, role, "s4", flag, stage=s4))
         for bool_key in (
             "effect_visible",
@@ -703,7 +710,6 @@ def validate_s4_effect_flags(result: dict[str, Any], analysis: dict[str, Any]) -
             errors.append(f"S4 {key}.effect_salience 必须是 none/subtle/clear/strong")
         if not str(flag.get("effect_reason") or "").strip():
             errors.append(f"S4 {key}.effect_reason 不能为空")
-        effect_type = str(flag.get("effect_type") or "").strip()
         needs_evidence = flag.get("effect_visible") is True or effect_type not in {"", "none", "unknown"}
         if needs_evidence and not flag.get("evidence_ids"):
             errors.append(f"S4 {key}.evidence_ids 不能为空")

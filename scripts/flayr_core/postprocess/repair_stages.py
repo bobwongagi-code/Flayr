@@ -385,7 +385,13 @@ def hook_reason_window_leaks(reason: str, boundary_seconds: Any, tolerance: floa
     return bool(vals and max(vals) > float(boundary_seconds) + tolerance)
 
 def align_clear_commerce_evidence(result: dict[str, Any]) -> None:
-    """按关键词把 benchmark 的高确定性事实归到对应阶段（成分→S2, feedback→S4, KKM 认证→S5 等）。"""
+    """按关键词补齐 benchmark 阶段事实，但不覆盖已有真实阶段引用。
+
+    Structured stage flags may carry a more specific evidence assignment than
+    the keyword fallback.  Overwriting the stage-level reference alone would
+    leave the stage and its nested flag inconsistent, so this helper only
+    fills missing or repair-placeholder references.
+    """
     stages = result.get("stage_analysis", [])
     units = result.get("video_understanding", {}).get("benchmark", {}).get("evidence_units", [])
     if len(stages) != len(STAGES) or not isinstance(units, list):
@@ -400,14 +406,26 @@ def align_clear_commerce_evidence(result: dict[str, Any]) -> None:
         4: find_evidence_unit(units, r"KKM|KKMA|kelulusan|认证"),
         5: find_evidence_unit(units, r"beli|bagun|troli|cart|dekat sini|下单|购买"),
     }
+
+    def assign_if_missing(index: int, unit: dict[str, Any] | None) -> None:
+        if not unit:
+            return
+        existing = [
+            str(value).strip()
+            for value in stages[index].get("benchmark_evidence_ids", [])
+            if str(value).strip()
+        ]
+        if existing and not all("_NO_" in value.upper() for value in existing):
+            return
+        assign_benchmark_unit(stages[index], unit)
+
     for index, unit in assignments.items():
-        if unit:
-            assign_benchmark_unit(stages[index], unit)
+        assign_if_missing(index, unit)
 
     mapped_ids = {str(unit.get("id")) for unit in assignments.values() if unit}
     usage_unit = first_unmapped_overlapping_unit(units, mapped_ids, stages[2].get("benchmark_time_range"))
     if usage_unit:
-        assign_benchmark_unit(stages[2], usage_unit)
+        assign_if_missing(2, usage_unit)
         return
     placeholder = {
         "id": "B_NO_USAGE",
@@ -419,7 +437,7 @@ def align_clear_commerce_evidence(result: dict[str, Any]) -> None:
         "subtitle_fact": "",
     }
     ensure_evidence_unit(units, placeholder)
-    assign_benchmark_unit(stages[2], placeholder)
+    assign_if_missing(2, placeholder)
 
 
 def align_timed_cta_from_transcript(result: dict[str, Any], analysis: dict[str, Any]) -> None:

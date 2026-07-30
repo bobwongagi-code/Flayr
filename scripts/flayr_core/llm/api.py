@@ -28,14 +28,21 @@ from ..resources import (
     encode_file_data_url,
     finite_nonnegative,
 )
-from ..network import OutboundURLPolicyError, ValidatedOutboundURL, validate_outbound_url
+from ..network import (
+    DEFAULT_QWEN_API_HOSTS,
+    DEFAULT_TRANSCRIPT_ONLY_QWEN_HOSTS,
+    OutboundURLPolicyError,
+    ValidatedOutboundURL,
+    validate_outbound_url,
+)
 from ..utils import cleanup_stale_temp_entries, run_command, write_text
 
 LLM_CURL_MAX_TIME_SECONDS = 1800
 LLM_CURL_LOW_SPEED_LIMIT_BYTES_PER_SECOND = 1
 LLM_CURL_LOW_SPEED_TIME_SECONDS = 180
 LLM_CURL_RETRIES = 2
-LLM_MAX_OUTPUT_TOKENS = 32768
+LLM_MAX_OUTPUT_TOKENS = 65536
+LLM_GENERIC_MAX_OUTPUT_TOKENS = 32768
 VIDEO_DATA_URL_MAX_DURATION_SECONDS = 180.0
 VIDEO_DATA_URL_MAX_BYTES = 24 * 1024 * 1024
 VIDEO_TRANSCODE_TIMEOUT_SECONDS = 300
@@ -70,7 +77,14 @@ def provider_capabilities(api_url: str, model: str = "") -> ProviderCapabilities
         hostname = (urlsplit(str(api_url or "")).hostname or "").lower()
     except ValueError:
         hostname = ""
-    if hostname == "dashscope.aliyuncs.com" and normalized_model.startswith("qwen"):
+    if hostname in DEFAULT_TRANSCRIPT_ONLY_QWEN_HOSTS and normalized_model.startswith("qwen"):
+        return ProviderCapabilities(
+            profile="beijing_maas_qwen_transcript_visual",
+            confidence="runtime_verified",
+            standalone_audio_input=False,
+            native_audio_analysis=False,
+        )
+    if hostname in DEFAULT_QWEN_API_HOSTS and normalized_model.startswith("qwen"):
         return ProviderCapabilities(
             profile="dashscope_qwen_compatible",
             confidence="verified_matrix",
@@ -108,6 +122,29 @@ def _write_request_json(path: Path, payload: dict[str, Any]) -> None:
     """Serialize a request directly to its temporary file without a second full string."""
     with path.open("w", encoding="utf-8") as sink:
         json.dump(payload, sink, ensure_ascii=False)
+
+
+def _write_completion_response(
+    raw_path: Path,
+    content: str,
+    usage: dict[str, Any] | None,
+    finish_reason: str,
+    *,
+    cleanup_raw: bool,
+) -> str:
+    """Persist one assembled completion while keeping raw response cleanup bounded."""
+    response: dict[str, Any] = {
+        "choices": [{"message": {"content": content}, "finish_reason": finish_reason}]
+    }
+    if usage:
+        response["usage"] = usage
+    raw_text = json.dumps(response, ensure_ascii=False)
+    try:
+        write_text(raw_path, raw_text)
+    finally:
+        if cleanup_raw:
+            raw_path.unlink(missing_ok=True)
+    return raw_text
 
 
 def read_llm_api_key(args: argparse.Namespace) -> str:
@@ -461,6 +498,10 @@ def call_llm_api(
                 # 鉴权/请求错误等硬错误快速失败，不浪费重试。
                 if not is_retryable_error(last_error, http_status=http_status):
                     break
+                if "total wall time budget exceeded" in last_error:
+                    # Retrying after the shared run budget is exhausted cannot
+                    # make progress and would create an untracked extra call.
+                    break
             else:
                 if response_size > request_limit:
                     last_error = "LLM response exceeded the single-request byte limit"
@@ -474,26 +515,35 @@ def call_llm_api(
                         break
                     continue
                 if complete and content and finish_reason != "length":
-                    response: dict[str, Any] = {
-                        "choices": [{"message": {"content": content}, "finish_reason": finish_reason or "stop"}]
-                    }
-                    if usage:
-                        response["usage"] = usage
-                    raw_text = json.dumps(response, ensure_ascii=False)
-                    try:
-                        write_text(raw_path, raw_text)
-                    finally:
-                        if cleanup_raw:
-                            raw_path.unlink(missing_ok=True)
-                    return raw_text
+                    return _write_completion_response(
+                        raw_path,
+                        content,
+                        usage,
+                        finish_reason or "stop",
+                        cleanup_raw=cleanup_raw,
+                    )
                 if finish_reason == "length":
                     # length 是服务端主动截断，不是可修复的残缺 JSON。先提高同一请求的输出预算再重发。
                     old_budget, new_budget = increase_output_budget(payload)
+                    budget_field = output_budget_field(payload)
                     if new_budget > old_budget:
                         _write_request_json(req_path, payload)
-                        last_error = f"输出被 max_tokens={old_budget} 截断，已提高至 {new_budget} 后重试"
+                        last_error = f"输出被 {budget_field}={old_budget} 截断，已提高至 {new_budget} 后重试"
                     else:
-                        last_error = f"输出在 max_tokens={old_budget} 仍被截断"
+                        last_error = f"输出在 {budget_field}={old_budget} 仍被截断"
+                        # The cap is already reached. Returning the partial
+                        # text lets the outer pipeline perform its single JSON
+                        # repair; repeating the identical request only burns
+                        # wall time and model quota.
+                        if content:
+                            return _write_completion_response(
+                                raw_path,
+                                content,
+                                usage,
+                                "length",
+                                cleanup_raw=cleanup_raw,
+                            )
+                        break
                 else:
                     # 流被中途截断（无 [DONE]/finish_reason）→ 传输问题，可重试。
                     last_error = "流式响应不完整（连接在 [DONE] 前中断）" if content else "流式响应无内容"
@@ -510,14 +560,21 @@ def call_llm_api(
 
 
 def increase_output_budget(payload: dict[str, Any]) -> tuple[int, int]:
-    """length 截断时把单次输出预算翻倍，最多到服务端兼容上限。"""
+    """length 截断时把单次输出预算翻倍，并保留 provider 字段语义。"""
+    budget_field = output_budget_field(payload)
     try:
-        old_budget = int(payload.get("max_tokens") or 8192)
+        old_budget = int(payload.get(budget_field) or 8192)
     except (TypeError, ValueError):
         old_budget = 8192
-    new_budget = min(max(old_budget * 2, 16384), LLM_MAX_OUTPUT_TOKENS)
-    payload["max_tokens"] = new_budget
+    cap = LLM_MAX_OUTPUT_TOKENS if budget_field == "max_completion_tokens" else LLM_GENERIC_MAX_OUTPUT_TOKENS
+    new_budget = min(max(old_budget * 2, 16384), cap)
+    payload[budget_field] = new_budget
     return old_budget, new_budget
+
+
+def output_budget_field(payload: dict[str, Any]) -> str:
+    """Return the output-limit field already selected by the request builder."""
+    return "max_completion_tokens" if "max_completion_tokens" in payload else "max_tokens"
 
 
 def parse_curl_http_status(stderr_text: str) -> int | None:

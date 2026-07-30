@@ -20,6 +20,7 @@ from ..artifacts import (
 )
 from .api import (
     audio_to_mp3_data_url,
+    can_send_standalone_audio,
     image_to_data_url,
 )
 from ..resources import ResourceBudget
@@ -126,10 +127,12 @@ def build_evidence_sensory_inputs(
     frames_per_unit: int = 1,
     window_end_seconds: float | None = None,
     api_url: str = "",
+    model: str = "",
     budget: ResourceBudget | None = None,
 ) -> list[dict[str, Any]]:
     """为阶段二对比判断准备每条 evidence_unit 的感官证据。"""
     content: list[dict[str, Any]] = []
+    standalone_audio = can_send_standalone_audio(api_url, model)
     videos = analysis.get("videos", {})
     for role in ("benchmark", "creator"):
         role_facts = facts.get(role) or {}
@@ -153,13 +156,17 @@ def build_evidence_sensory_inputs(
                 content.append(
                     {"type": "image_url", "image_url": {"url": image_to_data_url(frame_path), "detail": "low"}}
                 )
-            seg = audio_to_mp3_data_url(
-                audio_path,
-                start=start,
-                duration=max(0.1, end - start),
-                max_duration_seconds=600.0,
-                max_data_bytes=8 * 1024 * 1024,
-                budget=budget,
+            seg = (
+                audio_to_mp3_data_url(
+                    audio_path,
+                    start=start,
+                    duration=max(0.1, end - start),
+                    max_duration_seconds=600.0,
+                    max_data_bytes=8 * 1024 * 1024,
+                    budget=budget,
+                )
+                if standalone_audio
+                else None
             )
             if seg is not None:
                 content.append({"type": "text", "text": f"【{label}｜该时段音频】"})

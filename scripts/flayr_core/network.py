@@ -9,9 +9,18 @@ from typing import Iterable
 from urllib.parse import urlsplit
 
 
+DEFAULT_QWEN_API_HOSTS = frozenset({
+    "dashscope.aliyuncs.com",
+    "llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com",
+})
+
+DEFAULT_TRANSCRIPT_ONLY_QWEN_HOSTS = frozenset({
+    "llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com",
+})
+
 DEFAULT_ALLOWED_API_HOSTS = frozenset({
     "api.openai.com",
-    "dashscope.aliyuncs.com",
+    *DEFAULT_QWEN_API_HOSTS,
 })
 
 

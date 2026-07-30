@@ -630,6 +630,48 @@ class DeriveResolverTests(unittest.TestCase):
                 {"evidence_state_required": True},
             )
 
+    def test_s4_explicit_absence_can_have_no_evidence_ids(self) -> None:
+        absent = {
+            "effect_type": "none",
+            "effect_evidence_state": "none",
+            "effect_visible": False,
+            "effect_salience": "none",
+            "effect_proposition_matched": False,
+            "comparison_control_met": False,
+            "closeup_or_focus_met": False,
+            "visual_difference_observed": False,
+            "module_constraints_met": False,
+            "effect_maximized": False,
+            "requires_close_inspection": False,
+            "effect_attribution_supported": False,
+            "result_only_without_process": False,
+            "process_linked_effect": False,
+            "tamper_or_cut_risk": False,
+            "effect_reason": "该侧没有效果呈现。",
+            "evidence_ids": [],
+            "proposition_ids": [],
+        }
+        benchmark = dict(absent)
+        benchmark.update(
+            {
+                "effect_type": "aesthetic_display",
+                "effect_evidence_state": "result_only",
+                "effect_reason": "只有结果主张，没有因果桥。",
+                "evidence_ids": ["B4"],
+            }
+        )
+        result = {
+            "video_understanding": {
+                "creator": {"evidence_units": []},
+                "benchmark": {"evidence_units": [{"id": "B4"}]},
+            },
+            "stage_analysis": [{}, {}, {}, {
+                "creator_s4": absent,
+                "benchmark_s4": benchmark,
+            }],
+        }
+        validate_s4_effect_flags(result, {"evidence_state_required": True})
+
     def test_structured_s3_s4_evidence_ids_are_closed_world(self) -> None:
         result = {
             "video_understanding": {

@@ -32,6 +32,16 @@ def is_child_toothpaste_context(analysis_input: str) -> bool:
     return "儿童牙膏" in context or "toothpaste" in context
 
 
+def is_malaysia_market_context(analysis_input: str) -> bool:
+    """Return whether the runtime product context targets Malaysia.
+
+    Language detection may remain ``auto`` even when the market is fixed to
+    Malaysia.  Health recommendation sanitization must not skip that case.
+    """
+    context = product_context(analysis_input)
+    return bool(re.search(r"目标市场\s*[:：]\s*my\b", context, flags=re.IGNORECASE))
+
+
 # ---------------------------------------------------------------------------
 # validate（会抛 SystemExit）
 # ---------------------------------------------------------------------------
@@ -245,7 +255,7 @@ def sanitize_health_recommendations(result: dict[str, Any], analysis_input: str)
     if not any(marker.lower() in analysis_input.lower() for marker in health_product_markers):
         return
     target_language = "ms" if "检测语言：ms" in analysis_input else ""
-    if target_language != "ms":
+    if target_language != "ms" and not is_malaysia_market_context(analysis_input):
         return
 
     # 与 validate_recommendation_safety 同源的违规关键词

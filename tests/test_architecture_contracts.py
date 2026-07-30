@@ -56,6 +56,7 @@ from flayr_core.llm.payload import (
     build_improvement_reconciliation_payload,
     build_llm_comparison_payload,
     build_llm_repair_payload,
+    full_analysis_output_fields,
     build_stage_review_payload,
     build_video_fact_payload,
     full_analysis_output_budget,
@@ -95,7 +96,12 @@ from flayr_core.postprocess.repair import (
     validate_s3_s4_hard_fact_consistency,
 )
 from flayr_core.postprocess.repair_stages import infer_s1_boundary_candidate
-from flayr_core.postprocess.health_rewrite import is_child_toothpaste_context
+from flayr_core.postprocess.repair_stages import align_clear_commerce_evidence
+from flayr_core.postprocess.health_rewrite import (
+    is_child_toothpaste_context,
+    sanitize_health_recommendations,
+    validate_recommendation_safety,
+)
 from flayr_core.postprocess.validate import (
     validate_analysis_dimensions,
     validate_chain_relationships,
@@ -920,6 +926,210 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(s4["creator_s4"], {"effect_visible": True})
         self.assertEqual(merged["improvements"], original["improvements"])
 
+    def test_repair_preserves_omitted_nested_s3_fields(self) -> None:
+        original = {
+            "stage_analysis": [
+                {
+                    "stage": "S3 使用过程",
+                    "creator_s3": {
+                        "exists": True,
+                        "usage_evidence_state": "partial",
+                        "evidence_ids": ["C3"],
+                    },
+                    "benchmark_s3": {
+                        "exists": False,
+                        "usage_evidence_state": "partial",
+                        "evidence_ids": ["B3"],
+                    },
+                }
+            ]
+        }
+        repaired = {
+            "stage_analysis": [
+                {
+                    "stage": "S3 使用过程",
+                    "creator_s3": {"exists": True, "usage_evidence_state": None},
+                    "benchmark_s3": {"exists": False},
+                }
+            ]
+        }
+
+        merged = preserve_valid_repair_sections(original, repaired)
+        creator = merged["stage_analysis"][0]["creator_s3"]
+        benchmark = merged["stage_analysis"][0]["benchmark_s3"]
+        self.assertEqual(creator["usage_evidence_state"], "partial")
+        self.assertEqual(creator["evidence_ids"], ["C3"])
+        self.assertEqual(benchmark["usage_evidence_state"], "partial")
+        self.assertEqual(benchmark["evidence_ids"], ["B3"])
+
+    def test_repair_preserves_valid_stage_evidence_context(self) -> None:
+        original = {
+            "stage_analysis": [
+                {"stage": f"S{index}"}
+                for index in range(1, 4)
+            ] + [
+                {
+                    "stage": "S4 效果呈现",
+                    "benchmark_time_range": "10.0s - 20.0s",
+                    "benchmark_evidence_ids": ["B4"],
+                    "benchmark_s4": {"evidence_ids": ["B4"]},
+                    "creator_time_range": "none",
+                    "creator_evidence_ids": [],
+                }
+            ],
+        }
+        repaired = {
+            "stage_analysis": [
+                {"stage": f"S{index}"}
+                for index in range(1, 4)
+            ] + [
+                {
+                    "stage": "S4 效果呈现",
+                    "benchmark_time_range": "20.0s - 30.0s",
+                    "benchmark_evidence_ids": ["B2"],
+                    "benchmark_s4": {"evidence_ids": ["B2"]},
+                    "creator_time_range": "15.0s - 25.0s",
+                    "creator_evidence_ids": ["C3"],
+                }
+            ],
+        }
+        merged = preserve_valid_repair_sections(original, repaired)
+        stage = merged["stage_analysis"][3]
+        self.assertEqual(stage["benchmark_time_range"], "10.0s - 20.0s")
+        self.assertEqual(stage["benchmark_evidence_ids"], ["B4"])
+        self.assertEqual(stage["benchmark_s4"]["evidence_ids"], ["B4"])
+        self.assertEqual(stage["creator_time_range"], "15.0s - 25.0s")
+        self.assertEqual(stage["creator_evidence_ids"], ["C3"])
+
+    def test_repair_keeps_non_independent_s5_basis_flags_coherent(self) -> None:
+        original = {
+            "stage_analysis": [
+                {"stage": f"S{index}"}
+                for index in range(1, 5)
+            ] + [
+                {
+                    "stage": "S5 信任放大",
+                    "benchmark_s5": {
+                        "exists": True,
+                        "trust_basis": "independent_user",
+                        "independent_trust_purpose": True,
+                    },
+                }
+            ],
+        }
+        repaired = {
+            "stage_analysis": [
+                {"stage": f"S{index}"}
+                for index in range(1, 5)
+            ] + [
+                {
+                    "stage": "S5 信任放大",
+                    "benchmark_s5": {
+                        "trust_basis": "product_claim",
+                    },
+                }
+            ],
+        }
+        merged = preserve_valid_repair_sections(original, repaired)
+        flag = merged["stage_analysis"][4]["benchmark_s5"]
+        self.assertEqual(flag["trust_basis"], "product_claim")
+        self.assertFalse(flag["exists"])
+        self.assertFalse(flag["independent_trust_purpose"])
+
+    def test_time_clamp_accepts_fact_precision_at_video_end(self) -> None:
+        result = {
+            "video_understanding": {
+                "benchmark": {"evidence_units": [{"id": "B5", "time_range": "38.3s - 45.7s"}]},
+                "creator": {"evidence_units": [{"id": "C5", "time_range": "78.3s - 84.3s"}]},
+            },
+            "stage_analysis": [
+                {
+                    "benchmark_time_range": "38.3s - 45.7s",
+                    "creator_time_range": "78.3s - 84.3s",
+                }
+                for _ in range(6)
+            ],
+            "improvements": [],
+        }
+        analysis = {
+            "videos": {
+                "benchmark": {"duration_seconds": 45.666667},
+                "creator": {"duration_seconds": 84.266667},
+            }
+        }
+        pipeline._clamp_result_time_ranges(result, analysis)
+        self.assertEqual(result["stage_analysis"][5]["benchmark_time_range"], "38.3s - 45.7s")
+        self.assertEqual(result["stage_analysis"][5]["creator_time_range"], "78.3s - 84.3s")
+
+    def test_health_sanitizer_runs_for_auto_language_in_malaysia_market(self) -> None:
+        analysis_input = (
+            "## 产品信息\n"
+            "- 品类：保健品 - 女性生理期营养补充\n"
+            "- 目标市场：my\n"
+            "- 检测语言：auto\n"
+        )
+        result = {
+            "improvements": [
+                {
+                    "title": "增加痛点Hook提升停留率",
+                    "suggestion": "Period lambat datang",
+                    "creator_script": "Korang pernah tak rasa macam ni? Period lambat datang...",
+                    "creator_script_zh": "经期延迟时可以这样表达。",
+                }
+            ]
+        }
+
+        sanitize_health_recommendations(result, analysis_input)
+        validate_recommendation_safety(result, analysis_input)
+        self.assertNotIn("period", result["improvements"][0]["creator_script"].lower())
+
+    def test_commerce_evidence_alignment_does_not_split_s4_stage_and_flag(self) -> None:
+        result = {
+            "video_understanding": {
+                "benchmark": {
+                    "evidence_units": [
+                        {
+                            "id": "B3",
+                            "time_range": "13.8s - 25.5s",
+                            "information": "用户评论反馈",
+                            "voiceover": "",
+                            "voiceover_zh": "",
+                        },
+                        {
+                            "id": "B4",
+                            "time_range": "25.5s - 38.3s",
+                            "information": "展示产品并出现效果字幕",
+                            "voiceover": "",
+                            "voiceover_zh": "",
+                        },
+                    ]
+                }
+            },
+            "stage_analysis": [
+                {"stage": f"S{index}", "benchmark_evidence_ids": []}
+                for index in range(1, 7)
+            ],
+        }
+        result["stage_analysis"][2].update(
+            {
+                "benchmark_time_range": "25.5s - 38.3s",
+                "benchmark_evidence_ids": ["B4"],
+            }
+        )
+        result["stage_analysis"][3].update(
+            {
+                "benchmark_time_range": "25.5s - 38.3s",
+                "benchmark_evidence_ids": ["B4"],
+                "benchmark_s4": {"evidence_ids": ["B4"]},
+            }
+        )
+
+        align_clear_commerce_evidence(result)
+
+        stage = result["stage_analysis"][3]
+        self.assertEqual(stage["benchmark_evidence_ids"], ["B4"])
+        self.assertEqual(stage["benchmark_s4"]["evidence_ids"], ["B4"])
+
     def test_llm_stream_retries_cleanup_sensitive_artifacts_and_accept_only_completed_stream(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1014,6 +1224,52 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertFalse(payload_path.exists())
             self.assertFalse(response_path.exists())
 
+    def test_fetch_json_completion_does_not_retry_after_shared_budget_exhaustion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            response_path = root / "response.json"
+            payload_path.write_text("{}", encoding="utf-8")
+            args = SimpleNamespace(llm_api_url="https://example.test/v1/chat/completions")
+            with (
+                mock.patch.object(
+                    pipeline,
+                    "call_llm_api",
+                    side_effect=SystemExit("total wall time budget exceeded (1800s)"),
+                ) as call,
+                mock.patch.object(pipeline.time, "sleep") as sleep,
+                self.assertRaises(SystemExit),
+            ):
+                pipeline.fetch_json_completion(args, "secret", payload_path, response_path, max_attempts=3)
+            self.assertEqual(call.call_count, 1)
+            sleep.assert_not_called()
+            self.assertFalse(payload_path.exists())
+            self.assertFalse(response_path.exists())
+
+    def test_fetch_json_completion_does_not_retry_after_http_403(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            response_path = root / "response.json"
+            payload_path.write_text("{}", encoding="utf-8")
+            args = SimpleNamespace(llm_api_url="https://example.test/v1/chat/completions")
+            with (
+                mock.patch.object(
+                    pipeline,
+                    "call_llm_api",
+                    side_effect=SystemExit(
+                        "LLM streaming request failed: HTTP 403: Workspace endpoint access denied."
+                    ),
+                ) as call,
+                mock.patch.object(pipeline.time, "sleep") as sleep,
+                self.assertRaises(SystemExit),
+            ):
+                pipeline.fetch_json_completion(args, "secret", payload_path, response_path, max_attempts=3)
+            self.assertEqual(call.call_count, 1)
+            sleep.assert_not_called()
+            self.assertFalse(payload_path.exists())
+            self.assertFalse(response_path.exists())
+
     def test_reuse_preprocessing_reuses_existing_product_foundation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1085,7 +1341,16 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertTrue(llm_api.can_send_standalone_audio(url, "qwen3-omni-flash"))
         self.assertTrue(llm_api.can_analyze_native_audio(url, "qwen3-omni-flash"))
         self.assertFalse(llm_api.can_send_standalone_audio("https://example.test/v1/chat/completions", "vision-test"))
-        self.assertEqual(full_analysis_output_budget("other-model"), 16384)
+        self.assertEqual(full_analysis_output_budget("qwen3.6-plus"), 65536)
+        self.assertEqual(full_analysis_output_budget("other-model"), 32768)
+        self.assertEqual(full_analysis_output_fields("qwen3.6-plus"), {"max_completion_tokens": 65536})
+        self.assertEqual(full_analysis_output_fields("other-model"), {"max_tokens": 32768})
+
+    def test_cli_exposes_an_explicit_run_wall_time_budget(self) -> None:
+        default_args = flayr.build_parser().parse_args(["compare"])
+        self.assertEqual(default_args.max_total_wall_time, 1800.0)
+        extended_args = flayr.build_parser().parse_args(["compare", "--max-total-wall-time", "3600"])
+        self.assertEqual(extended_args.max_total_wall_time, 3600.0)
 
     def test_llm_transfer_closed_error_is_retryable(self) -> None:
         self.assertTrue(
@@ -2965,6 +3230,7 @@ class ArchitectureContractTests(unittest.TestCase):
 
         self.assertIn(CERTIFICATION_OWNERSHIP_PROMPT, comparison_text)
         self.assertIn(CERTIFICATION_OWNERSHIP_PROMPT, repair_text)
+        self.assertIn("不得保留 authority/traceable_data/independent_user", repair_text)
         self.assertIn(CERTIFICATION_OWNERSHIP_PROMPT, analysis_input)
         self.assertNotIn("开头的背书/认证类内容按钩子算", comparison_text)
         self.assertNotIn("只归入 S2", repair_text)
@@ -3062,6 +3328,9 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertIn(field, repair_text)
             self.assertIn(field, review_text)
             self.assertIn(field, schema_text)
+
+        self.assertIn("usage_evidence_state", comparison_text)
+        self.assertIn("usage_evidence_state", repair_text)
         self.assertIn("distinct_personas_met", inspect.getsource(validate_s3_usage_flags))
         self.assertIn("action_application_change_visible", inspect.getsource(validate_s3_usage_flags))
         self.assertIn("soft_purchase_invitation_met", inspect.getsource(validate_s6_cta_flags))

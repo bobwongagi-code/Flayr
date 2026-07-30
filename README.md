@@ -121,6 +121,7 @@ python3 scripts/flayr.py \
   --whisper-model /path/to/ggml-large-v3-turbo-q5_0.bin \
   --llm-model qwen3.6-plus \
   --llm-api-url https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions \
+  --max-total-wall-time 3600 \
   --llm-api-key-env FLAYR_LLM_API_KEY \
   improve
 ```
@@ -133,7 +134,8 @@ python3 scripts/flayr.py \
 | `--creator-video` | 达人视频路径 |
 | `--product-name` | 产品名称 |
 | `--llm-model` | 多模态视觉模型名称（推荐 `qwen3.6-plus`） |
-| `--llm-api-url` | 已批准供应商的 Chat Completions 端点；当前网络策略仅允许 OpenAI 和 DashScope 官方域名 |
+| `--llm-api-url` | 已批准供应商的 Chat Completions 端点；当前网络策略允许 OpenAI、DashScope 官方域名和登记的北京 MaaS Qwen 端点 |
+| `--max-total-wall-time` | 单次运行总墙钟上限；默认 1800 秒，慢模型验证可显式提高，例如 3600 秒 |
 | `--llm-api-key-keychain-service` | macOS Keychain 服务名（或用 `--llm-api-key-env` 走环境变量） |
 | `--llm-include-images` | 默认启用：完整 Step-0 + 单视频事实抽取 + omni 对比链；`--no-llm-include-images` 仅保留给旧文本路径兼容调试 |
 | `--whisper-model` | Whisper 模型文件路径 |

@@ -25,6 +25,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ..artifacts import parse_time_range_seconds
 from ..multimodal import sanitize_audio_observations
 from ..utils import write_json, write_text
 from ..analysis_model import ANALYSIS_RESULT_CONTRACT, AnalysisResult, schema_sha256
@@ -110,6 +111,33 @@ def _analysis_artifact_dir(analysis: dict[str, Any]) -> Path | None:
         return Path(str(value)).expanduser().resolve()
     except (OSError, RuntimeError, TypeError, ValueError):
         return None
+
+
+def _clamp_result_time_ranges(result: dict[str, Any], analysis: dict[str, Any]) -> None:
+    """Clamp rounded fact timestamps against a matching rounded video duration.
+
+    Facts and stage ranges are serialized to one decimal place, while ffprobe
+    durations can retain sub-frame precision (for example 45.666667s).  Use a
+    shallow analysis copy for this boundary check so a legitimate final 45.7s
+    fact is not erased, without changing the exact duration retained elsewhere.
+    """
+    videos = analysis.get("videos") if isinstance(analysis, dict) else None
+    if not isinstance(videos, dict):
+        clamp_result_time_ranges(result, analysis)
+        return
+    rounded_videos: dict[str, Any] = {}
+    for role, info in videos.items():
+        if not isinstance(info, dict):
+            rounded_videos[role] = info
+            continue
+        rounded_info = dict(info)
+        duration = rounded_info.get("duration_seconds")
+        if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+            rounded_info["duration_seconds"] = round(float(duration), 1)
+        rounded_videos[role] = rounded_info
+    clamp_analysis = dict(analysis)
+    clamp_analysis["videos"] = rounded_videos
+    clamp_result_time_ranges(result, clamp_analysis)
 
 
 def _write_raw_model_response(
@@ -345,7 +373,7 @@ def finalize_analysis_result(
     validate_recommendation_safety(normalized, analysis_input)
     validate_creator_script_language(normalized, analysis_input)
     audited_step("postprocess.remove_unverified_brand_models", remove_unverified_brand_models, normalized, analysis)
-    audited_step("postprocess.clamp_result_time_ranges", clamp_result_time_ranges, normalized, analysis)
+    audited_step("postprocess.clamp_result_time_ranges", _clamp_result_time_ranges, normalized, analysis)
     # 全局门控须在提升点完成最终过滤后生成，避免商业优先级引用已被清除的建议。
     audited_step("postprocess.materialize_global_diagnosis", materialize_global_diagnosis, normalized, analysis)
     validate_quality_contract(normalized, analysis)
@@ -449,10 +477,31 @@ def fetch_json_completion(
                     **request_options,
                 )
             except SystemExit as exc:
+                error_text = str(exc)
+                if _is_permanent_llm_error(error_text):
+                    # HTTP 4xx responses are configuration, authorization, or
+                    # request-contract failures. Re-entering the outer retry
+                    # loop would repeat the same rejected request and spend
+                    # model quota without changing the outcome.
+                    raise
+                if any(
+                    marker in error_text
+                    for marker in (
+                        "total wall time budget exceeded",
+                        "LLM call budget exceeded",
+                        "total upload budget exceeded",
+                        "download budget exceeded",
+                        "cost estimate budget exceeded",
+                    )
+                ):
+                    # Shared run-budget exhaustion is a hard stop. Re-entering
+                    # the outer retry loop would only spend more time while
+                    # the same budget remains unavailable.
+                    raise
                 # 底层已做同一 SSE 请求的传输重试；仍失败时重取完整响应，不能让单次网络中断终止整条 pipeline。
                 if attempt + 1 >= max_attempts:
                     raise
-                outer_retry_reason = str(exc)[:200]
+                outer_retry_reason = error_text[:200]
                 time.sleep(5 * (attempt + 1))
                 continue
         raw = json.loads(raw_text)
@@ -461,7 +510,7 @@ def fetch_json_completion(
             parse_json_text(last_text)
             return last_text
         except SystemExit:
-            # max_tokens 截断（finish_reason=length）重发也会在同处截断，直接交给 repair，不徒劳重取。
+            # 输出预算截断（finish_reason=length）重发也会在同处截断，直接交给 repair，不徒劳重取。
             if str(raw.get("choices", [{}])[0].get("finish_reason")) == "length":
                 break
             if attempt + 1 >= max_attempts:
@@ -831,6 +880,11 @@ def parse_and_validate_llm_result(
         raise SystemExit(f"LLM output repair failed. First error: {first_error}. Repair error: {exc}") from exc
 
 
+def _is_permanent_llm_error(error_text: str) -> bool:
+    """Return whether the transport error is a non-retryable HTTP 4xx failure."""
+    return bool(re.search(r"\bHTTP\s+(?:400|401|403|404|405|422)\b", str(error_text or "")))
+
+
 def _finish_validated_llm_result(
     args: argparse.Namespace,
     api_key: str,
@@ -884,14 +938,30 @@ def preserve_valid_repair_sections(
     original: dict[str, Any] | None,
     repaired: dict[str, Any],
 ) -> dict[str, Any]:
-    """Repair 只覆盖它实际输出的字段，避免一次小修复清空完整阶段结果。"""
+    """Repair 只覆盖它实际输出的字段，避免清空完整阶段或嵌套 flag。"""
     if not isinstance(original, dict):
         return repaired
+
+    def merge_value(original_value: Any, repaired_value: Any) -> Any:
+        """Preserve omitted/null nested repair fields without inventing values."""
+        if repaired_value is None or (isinstance(repaired_value, str) and not repaired_value.strip()):
+            return json.loads(json.dumps(original_value, ensure_ascii=False))
+        if isinstance(original_value, dict) and isinstance(repaired_value, dict):
+            merged_value = dict(repaired_value)
+            for nested_key, nested_original in original_value.items():
+                if nested_key not in merged_value:
+                    merged_value[nested_key] = json.loads(json.dumps(nested_original, ensure_ascii=False))
+                else:
+                    merged_value[nested_key] = merge_value(nested_original, merged_value[nested_key])
+            return merged_value
+        return repaired_value
+
     repaired = dict(repaired)
     original_stages = original.get("stage_analysis")
     repaired_stages = repaired.get("stage_analysis")
     if isinstance(original_stages, list) and isinstance(repaired_stages, list):
         merged_stages: list[Any] = []
+        flag_names = {1: "hook", 2: "s2", 3: "s3", 4: "s4", 5: "s5", 6: "s6"}
         for index, repaired_stage in enumerate(repaired_stages, start=1):
             original_stage = original_stages[index - 1] if index <= len(original_stages) else None
             if not isinstance(original_stage, dict) or not isinstance(repaired_stage, dict):
@@ -899,12 +969,64 @@ def preserve_valid_repair_sections(
                 continue
             merged_stage = dict(repaired_stage)
             for key, value in original_stage.items():
-                current = merged_stage.get(key)
-                if key not in merged_stage or current is None or (isinstance(current, str) and not current.strip()):
-                    if key in {"creator_module_id", "benchmark_module_id"}:
-                        merged_stage[key] = canonical_module_id(value, index)
-                    else:
-                        merged_stage[key] = json.loads(json.dumps(value, ensure_ascii=False))
+                if key in {"creator_module_id", "benchmark_module_id"} and (
+                    key not in merged_stage
+                    or merged_stage.get(key) is None
+                    or (isinstance(merged_stage.get(key), str) and not merged_stage[key].strip())
+                ):
+                    merged_stage[key] = canonical_module_id(value, index)
+                else:
+                    merged_stage[key] = merge_value(value, merged_stage.get(key))
+
+            # A failed first pass has already validated the stage-level evidence
+            # context before repair is requested.  Do not let a full JSON repair
+            # move an otherwise valid stage to another fact unit/time window.
+            # Missing original context remains repairable; only valid, non-empty
+            # original context is protected here.
+            flag_name = flag_names.get(index)
+            if flag_name:
+                for role in ("benchmark", "creator"):
+                    evidence_key = f"{role}_evidence_ids"
+                    time_key = f"{role}_time_range"
+                    flag_key = f"{role}_{flag_name}"
+                    merged_flag = merged_stage.get(flag_key)
+                    if isinstance(merged_flag, dict) and str(merged_flag.get("trust_basis") or "") in {
+                        "product_claim",
+                        "offer_or_spec",
+                        "none",
+                        "unknown",
+                    }:
+                        # These are already non-independent bases in the S5
+                        # contract.  Keep their dependent booleans coherent
+                        # even when repair omitted them and merge restored the
+                        # original values.
+                        merged_flag["exists"] = False
+                        merged_flag["independent_trust_purpose"] = False
+                    original_ids = [
+                        str(value).strip()
+                        for value in original_stage.get(evidence_key, [])
+                        if str(value).strip()
+                    ]
+                    original_time = original_stage.get(time_key)
+                    has_valid_context = bool(original_ids) and parse_time_range_seconds(original_time, None) is not None
+                    if not has_valid_context:
+                        continue
+                    merged_stage[evidence_key] = json.loads(json.dumps(original_ids, ensure_ascii=False))
+                    merged_stage[time_key] = json.loads(json.dumps(original_time, ensure_ascii=False))
+                    original_flag = original_stage.get(flag_key)
+                    original_flag_ids = (
+                        [str(value).strip() for value in original_flag.get("evidence_ids", []) if str(value).strip()]
+                        if isinstance(original_flag, dict)
+                        else []
+                    )
+                    if (
+                        isinstance(merged_flag, dict)
+                        and original_flag_ids
+                        and set(original_flag_ids).issubset(set(original_ids))
+                    ):
+                        merged_flag["evidence_ids"] = json.loads(
+                            json.dumps(original_flag_ids, ensure_ascii=False)
+                        )
             merged_stages.append(merged_stage)
         repaired["stage_analysis"] = merged_stages
     repaired_improvements = repaired.get("improvements")

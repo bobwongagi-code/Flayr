@@ -29,7 +29,7 @@ from flayr_core.llm.pipeline import (
 from flayr_core.prompt import write_analysis_input
 from flayr_core.creator_report import write_creator_report
 from flayr_core.report import write_report
-from flayr_core.resources import ResourceBudget, ResourceBudgetExceeded, finite_nonnegative
+from flayr_core.resources import ResourceBudget, ResourceBudgetExceeded, ResourceLimits, finite_nonnegative
 from flayr_core.run_manifest import SUCCESS_MANIFEST_NAME, command_digest, write_success_manifest
 from flayr_core.run_state import (
     COMPLETED,
@@ -107,7 +107,11 @@ def _record_run_failure(run_dir: Path, reason: str) -> None:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    budget = ResourceBudget()
+    try:
+        limits = ResourceLimits(max_total_wall_time=args.max_total_wall_time)
+    except ValueError as exc:
+        raise SystemExit(f"--max-total-wall-time 无效：{exc}") from exc
+    budget = ResourceBudget(limits)
     # 所有预处理、OCR、LLM、下载、报告和子进程都从这个 run 级对象取预算。
     budget.activate()
     args._resource_budget = budget
@@ -151,7 +155,11 @@ def main() -> int:
         print_scope_summary(run_dir, deps, videos, eligibility)
         return 0
     if args.llm_model and not args.analysis_result_json:
-        completed = run_large_model_analysis(args, analysis, analysis_input_path, run_dir)
+        try:
+            completed = run_large_model_analysis(args, analysis, analysis_input_path, run_dir)
+        except (Exception, SystemExit) as exc:
+            _record_run_failure(run_dir, f"LLM 分析失败：{exc}")
+            raise
         if completed:
             llm_result_path, normalized_result = completed
             apply_finalized_analysis_result(analysis, normalized_result, llm_result_path)
@@ -313,6 +321,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional selling points, target user, or other product notes.",
     )
     parser.add_argument("--output-dir", type=Path, help="Output run directory.")
+    parser.add_argument(
+        "--max-total-wall-time",
+        type=float,
+        default=ResourceLimits().max_total_wall_time,
+        help=(
+            "单次运行总墙钟上限（秒），默认 1800；只影响本次 run 的资源预算，"
+            "不改变单个 HTTP 请求的 timeout。慢模型验证可显式提高。"
+        ),
+    )
     parser.add_argument(
         "--skip-whisper",
         action="store_true",

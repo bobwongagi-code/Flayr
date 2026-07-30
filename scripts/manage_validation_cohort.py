@@ -45,7 +45,9 @@ def main() -> int:
     freeze.add_argument("--api-url", required=True)
     freeze.add_argument("--fallback-model", default=None)
     freeze.add_argument("--temperature", type=float, default=0.0)
-    freeze.add_argument("--max-tokens", type=int, default=16384)
+    # Qwen3.6 Plus uses max_completion_tokens=65536 for the full contract;
+    # this field records the equivalent output ceiling in the freeze manifest.
+    freeze.add_argument("--max-tokens", type=int, default=65536)
     freeze.add_argument("--top-p", type=float, default=None)
     freeze.add_argument("--seed", type=int, default=None)
     freeze.add_argument("--response-format", type=json.loads, default=None, help="JSON object，例如 '{\"type\":\"json_object\"}'")

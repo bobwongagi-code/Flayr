@@ -43,6 +43,13 @@ class NetworkPolicyTests(unittest.TestCase):
         self.assertEqual(validated.hostname, "api.openai.com")
         self.assertEqual(validated.resolved_addresses, ("8.8.8.8",))
 
+    def test_accepts_beijing_maas_qwen_endpoint(self) -> None:
+        answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]
+        url = "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions"
+        with mock.patch("flayr_core.network.socket.getaddrinfo", return_value=answer):
+            validated = validate_outbound_url(url)
+        self.assertEqual(validated.hostname, "llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com")
+
 
 if __name__ == "__main__":
     unittest.main()

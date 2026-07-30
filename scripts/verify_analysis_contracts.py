@@ -2403,12 +2403,16 @@ check("Step-0 地基门禁同时要求计划和合同",
 check("S4 verifier 兜底复合 primary",
       "复合条件" in inspect.getsource(s4_visual_verifier_module._visual_verifier_scope_rule)
       and "不能直接把 primary 判 false" in inspect.getsource(s4_visual_verifier_module._visual_verifier_scope_rule))
-_length_payload = {"max_tokens": 16384}
+_length_payload = {"model": "qwen3.6-plus", "max_completion_tokens": 32768}
 _old_budget, _new_budget = increase_output_budget(_length_payload)
-_capped_old, _capped_new = increase_output_budget({"max_tokens": LLM_MAX_OUTPUT_TOKENS})
+_capped_payload = {"model": "qwen3.6-plus", "max_completion_tokens": LLM_MAX_OUTPUT_TOKENS}
+_capped_old, _capped_new = increase_output_budget(_capped_payload)
+_generic_length_payload = {"model": "other-model", "max_tokens": 16384}
+_generic_old, _generic_new = increase_output_budget(_generic_length_payload)
 check("LLM length 重试提高输出预算并封顶",
-      (_old_budget, _new_budget, _length_payload["max_tokens"]) == (16384, 32768, 32768)
-      and (_capped_old, _capped_new) == (32768, 32768))
+      (_old_budget, _new_budget, _length_payload["max_completion_tokens"]) == (32768, 65536, 65536)
+      and (_capped_old, _capped_new, _capped_payload["max_completion_tokens"]) == (65536, 65536, 65536)
+      and (_generic_old, _generic_new, _generic_length_payload["max_tokens"]) == (16384, 32768, 32768))
 check("LLM TLS 瞬断进入重试", is_retryable_error("LibreSSL SSL_connect: SSL_ERROR_SYSCALL"))
 
 print()

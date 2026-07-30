@@ -40,11 +40,32 @@ ROOT = Path(__file__).resolve().parents[3]
 PHASE_C_WINDOW_PADDING_SECONDS = 2.0
 PHASE_C_REVIEW_FPS = 3.0
 PHASE_C_REVIEW_MAX_WIDTH = 480
+QWEN36_PLUS_MODEL_PREFIX = "qwen3.6-plus"
+GENERIC_FULL_ANALYSIS_OUTPUT_BUDGET = 32768
+QWEN36_PLUS_FULL_ANALYSIS_OUTPUT_BUDGET = 65536
+
+
+def _uses_qwen36_plus_completion_budget(model: str) -> bool:
+    return str(model or "").strip().lower().startswith(QWEN36_PLUS_MODEL_PREFIX)
 
 
 def full_analysis_output_budget(model: str) -> int:
     """Output budget for Flayr's full six-stage JSON contract."""
-    return 16384
+    # Qwen3.6 Plus supports a 64K max completion budget.  Its thinking content
+    # is included in that budget, so the full contract must use the provider's
+    # completion-token field rather than the deprecated answer-only max_tokens.
+    if _uses_qwen36_plus_completion_budget(model):
+        return QWEN36_PLUS_FULL_ANALYSIS_OUTPUT_BUDGET
+    # Preserve the existing generic-provider ceiling.
+    return GENERIC_FULL_ANALYSIS_OUTPUT_BUDGET
+
+
+def full_analysis_output_fields(model: str) -> dict[str, int]:
+    """Return the provider-appropriate output-limit fields for full analysis."""
+    budget = full_analysis_output_budget(model)
+    if _uses_qwen36_plus_completion_budget(model):
+        return {"max_completion_tokens": budget}
+    return {"max_tokens": budget}
 
 
 def read_text_if_exists(path: Path) -> str:
@@ -365,9 +386,14 @@ def build_video_fact_payload(
     mode_prompt = speech_mode_prompt(info.get("speech_mode") if isinstance(info.get("speech_mode"), dict) else {})
     native_audio = can_analyze_native_audio(api_url, model)
 
-    # 优先走原生视频；失败则降级为抽帧。
+    # 只有已验证可直接感知音轨的 provider 才走含音轨的原生视频；其余端点
+    # 使用本地 Whisper/时间戳 + 画面帧，避免把未声明的音频模态送入请求。
     video_path = Path(str(info.get("path") or ""))
-    video_data_url = video_to_data_url(video_path, budget=budget) if video_path.is_file() else None
+    video_data_url = (
+        video_to_data_url(video_path, budget=budget)
+        if native_audio and video_path.is_file()
+        else None
+    )
     native_video = video_data_url is not None
 
     visual_source_hint = (
@@ -1290,7 +1316,8 @@ def build_llm_comparison_payload(
         '"process_linked_effect": bool（能看到产品使用动作与结果变化之间的连续或可信连接）, '
         '"tamper_or_cut_risk": bool（存在换场景/跳剪/光线变化/对象替换导致作弊感时 true）, '
         '"effect_reason": "一句话说明效果是否可见、因果是否成立；只有结果没过程要直说", '
-        '"evidence_ids": ["C1"], "proposition_ids": ["proof.1"]（该侧效果实际证明的合同命题 ID）}。\n'
+        '"evidence_ids": ["C1"]（effect_type=none 且 effect_visible=false 且 effect_evidence_state=none 时可为空；否则填支撑该侧 S4 判断的事实 ID）, '
+        '"proposition_ids": ["proof.1"]（该侧效果实际证明的合同命题 ID）}。\n'
         "S4 铁律：只给结果、没有过程，不等于高分效果展示。"
         "先读 product_profile.proof_contract：mode=instant_visual/process_result 时，才按合同里的 before_state→after_state 与 observable_signal 判直接视觉效果；"
         "mode=sensory_proxy 时，只能把可见的品尝/闻香/触感等真实反应作为感知代理，不能升级成产品功效；"
@@ -1309,7 +1336,7 @@ def build_llm_comparison_payload(
         "S4 强制：stage_analysis 第 4 项（S4 效果呈现）必须再含 creator_s4 与 benchmark_s4 两个对象"
         "（结构见上方：effect_type/effect_evidence_state/effect_visible/effect_salience/effect_proposition_matched/comparison_control_met/"
         "closeup_or_focus_met/visual_difference_observed/module_constraints_met/effect_maximized/requires_close_inspection/effect_attribution_supported/result_only_without_process/"
-        "process_linked_effect/tamper_or_cut_risk/effect_reason/evidence_ids/proposition_ids）。"
+        "process_linked_effect/tamper_or_cut_risk/effect_reason/evidence_ids/proposition_ids；effect_type=none 且 effect_visible=false 且 effect_evidence_state=none 时 evidence_ids 可为空）。"
         "S4 flag 只服务效果因果判断；不要用 S3 的使用过程完整性替代 S4 效果可见性，也不要用单纯结果图替代因果证明。"
     )
     s5_flag_block = (
@@ -1476,37 +1503,59 @@ def build_llm_comparison_payload(
     payload = build_llm_payload(model, user_text, [])
     # temperature=0：对比判断要可复现，消除 severity 在边界 case（如 S3）上的抖动。
     payload["temperature"] = 0.0
-    # Keep one deterministic output budget across approved providers.
-    payload["max_tokens"] = full_analysis_output_budget(model)
+    # Keep one deterministic full-analysis budget while using Qwen's
+    # completion-token semantics for thinking models.
+    payload.pop("max_tokens", None)
+    payload.update(full_analysis_output_fields(model))
 
-    # Phase B：把每条 evidence 的关键帧 + 切片音频挂到 user message（增强判断的感官输入）。
+    standalone_audio = can_send_standalone_audio(api_url, model)
+
+    # Phase B：根据 provider 能力把每条 evidence 的画面帧与可用音频挂到 user message。
     if analysis is not None:
-        sensory = build_evidence_sensory_inputs(analysis, facts, api_url=api_url, budget=budget)
+        sensory = build_evidence_sensory_inputs(
+            analysis,
+            facts,
+            api_url=api_url,
+            model=model,
+            budget=budget,
+        )
         if sensory:
             user_msg = payload["messages"][1]
             base_text = user_msg["content"] if isinstance(user_msg["content"], str) else ""
+            sensory_hint = (
+                "下面按 role 和 evidence id 附上对应时段的画面与原声。"
+                if standalone_audio
+                else "下面按 role 和 evidence id 附上对应时段的画面帧；声音只使用已校验的本地转写、时间戳和 audio QC 文本。"
+            )
             user_msg["content"] = [
                 {"type": "text", "text": base_text},
                 {
                     "type": "text",
                     "text": (
                         "## 各 evidence 对应的感官切片（仅辅助判断声画质感，不可据此新增或改写事实）\n"
-                        "下面按 role 和 evidence id 附上对应时段的画面与原声。"
-                        "请按 S1-S6 功能阶段自行对齐两条视频的 evidence 做横向对比。"
+                        + sensory_hint
+                        + "请按 S1-S6 功能阶段自行对齐两条视频的 evidence 做横向对比。"
                     ),
                 },
                 *sensory,
             ]
 
-    payload["messages"][0]["content"] += (
-        "本次对比分析的唯一事实来源是用户提供的已校验单视频事实清单；"
-        "不得新增 evidence_unit，不得改写口播，不得把 benchmark 与 creator 的口播或画面互换。"
-        "\n\n## 感官素材使用规则（Phase B）\n"
+    audio_sensory_rule = (
         "随请求附带了每条 evidence 对应时段的关键帧和切片音频。"
         "帧和音频仅用于评估已有 evidence 的声画质感、强度与情绪，以支撑 severity 和对比结论；"
         "不得据此新增或改写 facts 的事实单元；"
         "当帧/音频与 facts 文字描述冲突时以 facts 为准，可在该处判断理由中标注'此处存在感知歧义'。"
-        "请按 S1-S6 功能阶段对齐两条视频的 evidence 再做横向对比，不要按绝对时间对齐。"
+        if standalone_audio
+        else "随请求附带了每条 evidence 对应时段的关键帧，未附带 input_audio。"
+        "声音判断只使用已校验的本地转写、时间戳和 audio QC 文本，不得推断模型直接听到了音轨；"
+        "不得据此新增或改写 facts 的事实单元。"
+    )
+    payload["messages"][0]["content"] += (
+        "本次对比分析的唯一事实来源是用户提供的已校验单视频事实清单；"
+        "不得新增 evidence_unit，不得改写口播，不得把 benchmark 与 creator 的口播或画面互换。"
+        "\n\n## 感官素材使用规则（Phase B）\n"
+        + audio_sensory_rule
+        + "请按 S1-S6 功能阶段对齐两条视频的 evidence 再做横向对比，不要按绝对时间对齐。"
         "判断口播表现时必须尊重 speech_mode：spoken 视频评口播骨架；subtitle_driven 视频评字幕文案轨；"
         "visual_driven/music_driven 视频不得因 voiceover 为空而直接扣分，必须看画面变化、OCR、BGM/节奏是否完成同一阶段功能。"
         "\n\n## 低置信阶段声明（Phase C）\n"
@@ -2091,8 +2140,9 @@ def build_llm_payload(
             },
         ],
         "temperature": 0.2,
-        # 16384：Qwen 默认 max_tokens 偏低（2048-4096），完整 stage_analysis + improvements 需要 12K+ tokens。
-        "max_tokens": 16384,
+        # 完整 stage_analysis + improvements 需要超过 16K tokens；
+        # 与 full_analysis_output_budget 保持一致，避免进入昂贵的 repair 路径。
+        **full_analysis_output_fields(model),
     }
 
 
@@ -2118,7 +2168,7 @@ def build_llm_repair_payload(
     repair_contract_block = json.dumps(repair_contract, ensure_ascii=False, indent=2)
     return {
         "model": model,
-        "max_tokens": full_analysis_output_budget(model),
+        **full_analysis_output_fields(model),
         "messages": [
             {
                 "role": "system",
@@ -2138,8 +2188,8 @@ def build_llm_repair_payload(
                     "hook_boundary_seconds 按 structure_library_full.md 的 S1 留人机制→S2 产品引出/解决方案承接功能切换判断，不得写死固定秒数；S2-A 承接式引出可早于产品实物或产品名出现，不能等产品画面才切 S2。"
                     "landing_met 按 type 无关三件套判断：0 到 hook_boundary_seconds 内对象明确、张力明确、可感知承诺/证据或具体未解问题，缺一即 false；痛点提问的答案可以在 S2 承接，不要求 S1 先说出产品；不得用后续 S2/S3 产品介绍补足 S1 landing。若引用边界后材料，landing_window_leak=true 且 landing_met=false。"
                     + "S2 产品引出必须补齐 creator_s2 与 benchmark_s2 两个对象，字段为 exists(bool)、merged_with_s3(bool)、module_type(A-D或unknown)、handoff_met(bool)、s1_s2_compatible(bool)、product_identity_clear(bool)、product_role_clear(bool)、excluded_or_risky_module(bool)、start_seconds(number)、end_seconds(number)、handoff_reason(非空)、evidence_ids(非空数组)、proposition_ids(数组)。"
-                    "S3 使用过程必须补齐 creator_s3 与 benchmark_s3 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、usage_process_visible(bool)、result_only_without_process(bool)、mouth_only_or_static(bool)、real_usage_met(bool)、core_selling_point_visible(bool)、process_framing_met(bool)、action_proof_met(bool)、action_target_contact_met(bool)、action_application_change_visible(bool)、critical_action_continuity_met(bool)、demonstrated_selling_points(数组)、missing_selling_points(数组)、scene_mode(single_scene/multi_scene/multi_person/hybrid/unknown)、usage_context_fit(bool)、continuity_met(bool)、richness_met(bool)、single_scene_continuity_met(bool)、single_scene_variation_met(bool)、multi_scene_logic_met(bool)、multi_scene_transition_met(bool)、multi_scene_role_adaptation_met(bool)、role_design_met(bool)、role_interaction_met(bool)、distinct_personas_met(bool)、steps_clear_met(bool)、pov_immersive_met(bool)、presentation_overlays(数组)、fake_or_staged(bool)、start_seconds(number)、end_seconds(number)、usage_reason(非空)、evidence_ids(非空数组)、proposition_ids(数组)。"
-                    "S4 效果呈现必须补齐 creator_s4 与 benchmark_s4 两个对象，字段为 effect_type(before_after/split_screen/person_vs_person/product_vs_alt/quantified_test/process_visualization/aesthetic_display/none)、effect_visible(bool)、effect_salience(none/subtle/clear/strong)、effect_proposition_matched(bool)、comparison_control_met(bool)、closeup_or_focus_met(bool)、visual_difference_observed(bool)、module_constraints_met(bool)、effect_maximized(bool)、requires_close_inspection(bool)、effect_attribution_supported(bool)、result_only_without_process(bool)、process_linked_effect(bool)、tamper_or_cut_risk(bool)、effect_reason(非空)、evidence_ids(非空数组)、proposition_ids(数组)。"
+                    "S3 使用过程必须补齐 creator_s3 与 benchmark_s3 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、usage_evidence_state(none|partial|complete|uncertain)、usage_process_visible(bool)、result_only_without_process(bool)、mouth_only_or_static(bool)、real_usage_met(bool)、core_selling_point_visible(bool)、process_framing_met(bool)、action_proof_met(bool)、action_target_contact_met(bool)、action_application_change_visible(bool)、critical_action_continuity_met(bool)、demonstrated_selling_points(数组)、missing_selling_points(数组)、scene_mode(single_scene/multi_scene/multi_person/hybrid/unknown)、usage_context_fit(bool)、continuity_met(bool)、richness_met(bool)、single_scene_continuity_met(bool)、single_scene_variation_met(bool)、multi_scene_logic_met(bool)、multi_scene_transition_met(bool)、multi_scene_role_adaptation_met(bool)、role_design_met(bool)、role_interaction_met(bool)、distinct_personas_met(bool)、steps_clear_met(bool)、pov_immersive_met(bool)、presentation_overlays(数组)、fake_or_staged(bool)、start_seconds(number)、end_seconds(number)、usage_reason(非空)、evidence_ids(非空数组)、proposition_ids(数组)。"
+                    "S4 效果呈现必须补齐 creator_s4 与 benchmark_s4 两个对象，字段为 effect_type(before_after/split_screen/person_vs_person/product_vs_alt/quantified_test/process_visualization/aesthetic_display/none)、effect_visible(bool)、effect_salience(none/subtle/clear/strong)、effect_proposition_matched(bool)、comparison_control_met(bool)、closeup_or_focus_met(bool)、visual_difference_observed(bool)、module_constraints_met(bool)、effect_maximized(bool)、requires_close_inspection(bool)、effect_attribution_supported(bool)、result_only_without_process(bool)、process_linked_effect(bool)、tamper_or_cut_risk(bool)、effect_reason(非空)、evidence_ids(数组；effect_type=none 且 effect_visible=false 且 effect_evidence_state=none 时可为空，否则必须非空)、proposition_ids(数组)。"
                     "S5 信任放大必须补齐 creator_s5 与 benchmark_s5 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、trust_evidence_type(hard/soft/mixed/none/unknown)、trust_basis(authority/traceable_data/independent_user/social_consensus/process_transparency/product_claim/offer_or_spec/none/unknown)、trust_source_evidence_ids(数组；只允许引用 Stage1 同类型且带来源说明的证据)、trust_source_visible(bool)、trust_source_credible(bool)、trust_claim_specific(bool)、product_relevance_met(bool)、independent_trust_purpose(bool)、duplicates_other_stage(bool)、voice_only(bool)、risky_or_unsupported(bool)、start_seconds(number)、end_seconds(number)、trust_reason(非空)、evidence_ids(数组；exists=false 或 trust_evidence_type=none/unknown 可为空)、proposition_ids(数组)。"
                     "S6 CTA 必须补齐 creator_s6 与 benchmark_s6 两个对象，字段为 exists(bool)、module_type(A-E或unknown)、direct_order_met(bool)、action_path_clear(bool)、soft_purchase_invitation_met(bool)、offer_or_incentive_clear(bool)、price_anchor_met(bool)、urgency_evidence_met(bool)、gift_stack_met(bool)、guarantee_clear_met(bool)、urgency_met(bool)、product_value_recalled(bool)、module_fit_met(bool)、ending_position_met(bool)、depends_on_valid_s4(bool)、compliance_risk(bool)、start_seconds(number)、end_seconds(number)、cta_reason(非空)、evidence_ids(数组；exists=false 可为空)、proposition_ids(数组)。"
                     "必须补齐 s3_s4_relationship 和 promise_chain；promise_chain.chain_closed 必须是 bool，broken_at 只能是 S2/S3/S4/none/unknown；promise_chain 只审计 S1-S4，不得把 S5/S6/CTA/促单/下单问题写成承诺链断点。"
@@ -2149,6 +2199,7 @@ def build_llm_repair_payload(
                     "输出必须精炼，每个描述字段最多一句，improvements 按 GMV 杠杆排序保留 1-5 条；不要为凑数编造。"
                     "任何列表最多 3 条；不要枚举或重复不存在的音效、镜头或功能，缺失证据只写一句概括。"
                     "保留原分析含义，但补齐缺失字段、修正字段类型和 JSON 语法。"
+                    "S5 修复硬规则：若 trust_source_evidence_ids 为空，或 Stage1 没有带同类 trust_source_signals 与 trust_source_reference 的来源，不得保留 authority/traceable_data/independent_user/social_consensus/process_transparency 任何独立信任 basis；仅有产品/来源自述时改为 trust_basis=product_claim，否则改为 trust_basis=none 或 unknown，并同步 exists=false、independent_trust_purpose=false、trust_source_evidence_ids=[]、proposition_ids=[]。"
                 ),
             },
             {
