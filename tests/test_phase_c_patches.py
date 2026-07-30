@@ -276,3 +276,23 @@ class PhaseCPatchTests(unittest.TestCase):
         self.assertIn('"stage_patches"', text)
         self.assertNotIn('"stage_updates"', text)
         self.assertIn("不得输出或修改 severity", text)
+
+    def test_s4_review_payload_requires_effect_evidence_state(self) -> None:
+        payload = build_stage_review_payload(
+            "test",
+            {"videos": {}},
+            self.facts,
+            {
+                "stage_analysis": [
+                    {
+                        "stage": "S4 效果呈现",
+                        "creator_time_range": "0s - 2s",
+                        "benchmark_time_range": "0s - 2s",
+                    }
+                ]
+            },
+            ["S4"],
+        )
+        text = payload["messages"][1]["content"][0]["text"]
+        self.assertIn('"effect_evidence_state": "none|result_only|verified|uncertain"', text)
+        self.assertIn("两侧都必须输出 effect_evidence_state", text)

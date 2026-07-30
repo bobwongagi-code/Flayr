@@ -1779,6 +1779,7 @@ def build_stage_review_payload(
         stage_update_example["core_question"] = "用户能不能看见效果并相信效果由产品造成"
         s4_example = {
             "effect_type": "before_after|split_screen|person_vs_person|product_vs_alt|quantified_test|process_visualization|aesthetic_display|none",
+            "effect_evidence_state": "none|result_only|verified|uncertain",
             "effect_visible": True,
             "effect_salience": "strong",
             "effect_proposition_matched": True,
@@ -1801,6 +1802,7 @@ def build_stage_review_payload(
         add_stage_patch_example("S4")
         s4_contract = (
             "目标阶段包含 S4 时，stage patch 必须同时包含 creator_s4 与 benchmark_s4；"
+            "两侧都必须输出 effect_evidence_state=none/result_only/verified/uncertain（none=没有效果证据，result_only=只有结果图或结果叙述没有因果桥，verified=效果可见且归因/过程可信，uncertain=证据冲突或不足；result_only 不得写成 verified）；"
             "S4 只判效果是否可见、效果是否显著、是否命中核心视觉命题、是否可信地由产品造成。"
             "只有结果没有过程不能直接高分；需要仔细看才有变化时 requires_close_inspection=true 且 effect_salience=subtle；"
             "没有因果桥时 effect_attribution_supported=false，有跳剪/换物/光线变化风险时 tamper_or_cut_risk=true。"
