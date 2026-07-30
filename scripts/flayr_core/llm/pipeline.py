@@ -1514,9 +1514,16 @@ def _validate_phase_c_patch_evidence_ids(
     for role in ("creator", "benchmark"):
         evidence_key = f"{role}_evidence_ids"
         evidence_ids = fields.get(evidence_key)
-        if not isinstance(evidence_ids, list) or not evidence_ids:
-            raise SystemExit(f"Phase C patch for {code} requires non-empty {evidence_key}.")
+        fact_key = f"{role}_{code.lower()}" if code != "S1" else f"{role}_hook"
+        fact = fields.get(fact_key)
+        if not isinstance(fact, dict):
+            raise SystemExit(f"Phase C patch for {code} requires object field {fact_key}.")
+        allows_empty_evidence = _phase_c_allows_empty_evidence(code, fact)
+        if not isinstance(evidence_ids, list):
+            raise SystemExit(f"Phase C patch for {code} requires {evidence_key} to be an array.")
         normalized_ids = [str(item).strip() for item in evidence_ids]
+        if not normalized_ids and not allows_empty_evidence:
+            raise SystemExit(f"Phase C patch for {code} requires non-empty {evidence_key}.")
         if any(not item for item in normalized_ids):
             raise SystemExit(f"Phase C patch for {code} has blank {evidence_key}.")
         if len(normalized_ids) != len(set(normalized_ids)):
@@ -1526,10 +1533,6 @@ def _validate_phase_c_patch_evidence_ids(
             raise SystemExit(
                 f"Phase C patch for {code} references unknown {role} evidence: {', '.join(missing)}."
             )
-        fact_key = f"{role}_{code.lower()}" if code != "S1" else f"{role}_hook"
-        fact = fields.get(fact_key)
-        if not isinstance(fact, dict):
-            raise SystemExit(f"Phase C patch for {code} requires object field {fact_key}.")
         for nested_key in ("evidence_ids", "trust_source_evidence_ids"):
             nested_ids = fact.get(nested_key)
             if nested_ids is None:
@@ -1572,6 +1575,17 @@ def _validate_phase_c_patch_evidence_ids(
                         + ", ".join(outside_time)
                         + "."
                     )
+
+
+def _phase_c_allows_empty_evidence(code: str, fact: dict[str, Any]) -> bool:
+    """Allow only an explicit S4 absence fact to carry no evidence IDs."""
+    return (
+        code == "S4"
+        and str(fact.get("effect_type") or "").strip() == "none"
+        and str(fact.get("effect_evidence_state") or "").strip() == "none"
+        and fact.get("effect_visible") is False
+        and fact.get("evidence_ids") == []
+    )
 
 
 def _phase_c_patch_snapshots(

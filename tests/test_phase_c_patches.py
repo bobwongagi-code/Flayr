@@ -196,6 +196,70 @@ class PhaseCPatchTests(unittest.TestCase):
                 allowed_stage_codes=["S6"],
             )
 
+    def test_s4_absence_patch_allows_empty_role_evidence(self) -> None:
+        facts = {
+            "creator": {"evidence_units": []},
+            "benchmark": {"evidence_units": [{"id": "B1", "time_range": "0.0s - 2.0s"}]},
+        }
+        current = {
+            "stage_analysis": [{
+                "stage": "S4 效果呈现",
+                "creator_time_range": "0.0s - 2.0s",
+                "benchmark_time_range": "0.0s - 2.0s",
+            }]
+        }
+        fields = {
+            "creator_evidence_ids": [],
+            "benchmark_evidence_ids": ["B1"],
+            "creator_s4": {
+                "effect_type": "none",
+                "effect_evidence_state": "none",
+                "effect_visible": False,
+                "evidence_ids": [],
+            },
+            "benchmark_s4": {
+                "effect_type": "none",
+                "effect_evidence_state": "none",
+                "effect_visible": False,
+                "evidence_ids": [],
+            },
+        }
+
+        patches = pipeline._validate_stage_review_patches(
+            {"stage_patches": [{"stage": "S4", "fields": fields}]},
+            facts,
+            ["S4"],
+            current_result=current,
+        )
+
+        self.assertEqual(patches["S4"]["creator_evidence_ids"], [])
+
+    def test_s4_non_absence_patch_still_requires_evidence(self) -> None:
+        facts = {"creator": {"evidence_units": []}, "benchmark": {"evidence_units": []}}
+        fields = {
+            "creator_evidence_ids": [],
+            "benchmark_evidence_ids": [],
+            "creator_s4": {
+                "effect_type": "process_visualization",
+                "effect_evidence_state": "verified",
+                "effect_visible": True,
+                "evidence_ids": [],
+            },
+            "benchmark_s4": {
+                "effect_type": "none",
+                "effect_evidence_state": "none",
+                "effect_visible": False,
+                "evidence_ids": [],
+            },
+        }
+
+        with self.assertRaisesRegex(SystemExit, "requires non-empty creator_evidence_ids"):
+            pipeline._validate_stage_review_patches(
+                {"stage_patches": [{"stage": "S4", "fields": fields}]},
+                facts,
+                ["S4"],
+            )
+
     def test_legal_patch_runs_repair_validation_and_resolver_after_stale_state_is_removed(self) -> None:
         facts = {
             "creator": {"evidence_units": [{"id": "C1", "time_range": "0.0s - 2.0s", "voiceover": "现在下单", "functions": ["S1", "S2", "S3", "S4", "S5", "S6"]}]},
