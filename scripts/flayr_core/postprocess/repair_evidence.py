@@ -270,6 +270,205 @@ def _check_evidence_state_consistency(
     }
 
 
+_STAGE_FLAG_NAMES = {
+    1: "hook",
+    2: "s2",
+    3: "s3",
+    4: "s4",
+    5: "s5",
+    6: "s6",
+}
+
+
+def _check_evidence_reference_temporal_consistency(
+    units: Any,
+    references: Any,
+    stage_range: Any,
+    *,
+    reference: str,
+) -> dict[str, Any]:
+    """Check that referenced locked facts overlap the recorded stage window.
+
+    This is a read-only contract check. It deliberately reuses
+    ``evidence_overlaps_range`` so repair, validation, and Phase C keep the
+    same strict-positive-overlap semantics: a shared endpoint is not overlap;
+    a unit crossing a boundary still overlaps both windows and is not rejected
+    by this rule alone.
+    """
+    result: dict[str, Any] = {
+        "reference": reference,
+        "stage_time_range": stage_range,
+    }
+    if references is None:
+        return {
+            **result,
+            "status": "incomplete",
+            "reason_code": "missing_field",
+            "evidence_ids": [],
+        }
+    if not isinstance(references, list):
+        return {
+            **result,
+            "status": "incomplete",
+            "reason_code": "missing_field",
+            "evidence_ids": [],
+        }
+
+    evidence_ids = [str(value).strip() for value in references if str(value).strip()]
+    result["evidence_ids"] = evidence_ids
+    # Empty evidence can be valid for explicit absent/none states. The state
+    # validators own that semantic decision; this check has no timestamp to
+    # compare and therefore remains neutral.
+    if not evidence_ids:
+        return {
+            **result,
+            "status": "consistent",
+            "reason_code": "predicate_not_met",
+        }
+
+    if parse_time_range_seconds(stage_range, None) is None:
+        return {
+            **result,
+            "status": "incomplete",
+            "reason_code": "hard_fact_missing",
+            "missing_fields": ["stage_time_range"],
+        }
+
+    units_by_id = {
+        str(unit.get("id") or "").strip(): unit
+        for unit in units or []
+        if isinstance(unit, dict) and str(unit.get("id") or "").strip()
+    }
+    missing_ids = [evidence_id for evidence_id in evidence_ids if evidence_id not in units_by_id]
+    if missing_ids:
+        return {
+            **result,
+            "status": "incomplete",
+            "reason_code": "missing_field",
+            "missing_evidence_ids": missing_ids,
+        }
+
+    invalid_time_ids = [
+        evidence_id
+        for evidence_id in evidence_ids
+        if parse_time_range_seconds(units_by_id[evidence_id].get("time_range"), None) is None
+    ]
+    if invalid_time_ids:
+        return {
+            **result,
+            "status": "incomplete",
+            "reason_code": "hard_fact_missing",
+            "invalid_time_range_evidence_ids": invalid_time_ids,
+        }
+
+    outside_ids = [
+        evidence_id
+        for evidence_id in evidence_ids
+        if not evidence_overlaps_range(units_by_id[evidence_id], stage_range)
+    ]
+    if outside_ids:
+        return {
+            **result,
+            "status": "state_conflict",
+            "reason_code": "evidence_temporal_mismatch",
+            "conflicting_evidence_ids": outside_ids,
+            "evidence_time_ranges": {
+                evidence_id: units_by_id[evidence_id].get("time_range")
+                for evidence_id in outside_ids
+            },
+        }
+    return {
+        **result,
+        "status": "consistent",
+        "reason_code": "predicate_not_met",
+    }
+
+
+def validate_stage_evidence_temporal_consistency(result: dict[str, Any]) -> None:
+    """Record the S1-S6 evidence-to-stage temporal contract without rewriting.
+
+    Stage-level references, structured flag references, multimodal channel
+    references, and S5 source references all point back to the same locked
+    Stage1 evidence units. Only a reference with no positive time intersection
+    becomes ``state_conflict``; missing/invalid inputs remain ``incomplete`` so
+    the existing structural validators can report their own failure.
+    """
+    stages = result.get("stage_analysis")
+    if not isinstance(stages, list):
+        return
+    understanding = result.get("video_understanding")
+    understanding = understanding if isinstance(understanding, dict) else {}
+
+    for index, stage in enumerate(stages, start=1):
+        if not isinstance(stage, dict):
+            continue
+        checks: dict[str, dict[str, Any]] = {}
+        flag_name = _STAGE_FLAG_NAMES.get(index)
+        for role in ("creator", "benchmark"):
+            role_understanding = understanding.get(role)
+            role_understanding = role_understanding if isinstance(role_understanding, dict) else {}
+            units = role_understanding.get("evidence_units")
+            units = units if isinstance(units, list) else []
+            stage_range = stage.get(f"{role}_time_range")
+
+            stage_reference = f"{role}_evidence_ids"
+            if stage_reference in stage:
+                checks[stage_reference] = _check_evidence_reference_temporal_consistency(
+                    units,
+                    stage.get(stage_reference),
+                    stage_range,
+                    reference=stage_reference,
+                )
+
+            if flag_name:
+                flag_key = f"{role}_{flag_name}"
+                flag = stage.get(flag_key)
+                if isinstance(flag, dict):
+                    evidence_key = f"{flag_key}.evidence_ids"
+                    if "evidence_ids" in flag:
+                        checks[evidence_key] = _check_evidence_reference_temporal_consistency(
+                            units,
+                            flag.get("evidence_ids"),
+                            stage_range,
+                            reference=evidence_key,
+                        )
+                    if flag_name == "s5" and "trust_source_evidence_ids" in flag:
+                        source_key = f"{flag_key}.trust_source_evidence_ids"
+                        checks[source_key] = _check_evidence_reference_temporal_consistency(
+                            units,
+                            flag.get("trust_source_evidence_ids"),
+                            stage_range,
+                            reference=source_key,
+                        )
+
+            multimodal = stage.get(f"{role}_multimodal")
+            channel_refs = multimodal.get("channel_evidence_ids") if isinstance(multimodal, dict) else None
+            if isinstance(channel_refs, dict):
+                for channel, references in channel_refs.items():
+                    if not isinstance(references, list):
+                        continue
+                    channel_key = f"{role}_multimodal.channel_evidence_ids.{channel}"
+                    checks[channel_key] = _check_evidence_reference_temporal_consistency(
+                        units,
+                        references,
+                        stage_range,
+                        reference=channel_key,
+                    )
+
+        has_temporal_conflict = any(
+            isinstance(check, dict) and check.get("status") == "state_conflict"
+            for check in checks.values()
+        )
+        # S3/S4 already carry read-only hard-fact markers consumed by derive;
+        # keep their positive audit marker. For S1/S2/S5/S6 only persist a
+        # marker when the new guard actually found a conflict, preserving the
+        # existing clean-result shape for stages with no issue.
+        if checks and (index in {3, 4} or has_temporal_conflict):
+            postprocess_state = stage.setdefault("_postprocess_state", {})
+            if isinstance(postprocess_state, dict):
+                postprocess_state["evidence_temporal_checks"] = checks
+
+
 def validate_s2_hard_fact_consistency(result: dict[str, Any]) -> None:
     """Record the read-only S2 contract marker consumed by its floor rule.
 
@@ -318,6 +517,7 @@ def validate_s3_s4_hard_fact_consistency(result: dict[str, Any]) -> None:
     The marker is stored under ``_postprocess_state`` so it cannot be mistaken
     for an LLM fact. derive reads this marker as a precondition for a floor.
     """
+    validate_stage_evidence_temporal_consistency(result)
     stages = result.get("stage_analysis")
     if not isinstance(stages, list) or len(stages) < 4:
         return
@@ -389,6 +589,24 @@ def validate_s3_s4_hard_fact_consistency(result: dict[str, Any]) -> None:
             },
             result_only="result_only",
         )
+        for stage, suffix in ((s3, "s3"), (s4, "s4")):
+            postprocess_state = stage.get("_postprocess_state")
+            temporal_checks = postprocess_state.get("evidence_temporal_checks", {}) if isinstance(postprocess_state, dict) else {}
+            temporal_conflicts = [
+                check
+                for key, check in temporal_checks.items()
+                if key.startswith(f"{role}_")
+                and isinstance(check, dict)
+                and check.get("status") == "state_conflict"
+            ]
+            if temporal_conflicts:
+                flag_key = f"{role}_{suffix}"
+                state_checks[flag_key] = {
+                    **state_checks[flag_key],
+                    "status": "state_conflict",
+                    "reason_code": "evidence_temporal_mismatch",
+                    "temporal_conflicts": temporal_conflicts,
+                }
     for stage in (s3, s4):
         postprocess_state = stage.setdefault("_postprocess_state", {})
         if isinstance(postprocess_state, dict):

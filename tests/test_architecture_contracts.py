@@ -80,7 +80,7 @@ from flayr_core.multimodal import channel_requirement_for, multimodal_execution
 from flayr_core.llm.pipeline import preserve_valid_repair_sections
 from flayr_core.postprocess.proposition import materialize_cross_stage_inputs, materialize_quality_audits
 from flayr_core.postprocess.utils import parse_srt_timestamp, read_srt_segments
-from flayr_core.postprocess.chain import stamp_comparison_eligibility
+from flayr_core.postprocess.chain import finalize_severity_after_repairs, stamp_comparison_eligibility
 from flayr_core.postprocess.audit import PostprocessAudit, build_field_sources
 from flayr_core.postprocess.derive import _derive_one, _s3_usage_exec, _s4_effect_exec, _s6_cta_exec
 from flayr_core.postprocess.global_diagnosis import materialize_global_diagnosis
@@ -95,6 +95,7 @@ from flayr_core.postprocess.repair import (
     reconcile_s5_trust_sources,
     stabilize_improvement_priorities,
     validate_s3_s4_hard_fact_consistency,
+    validate_stage_evidence_temporal_consistency,
 )
 from flayr_core.postprocess.repair_stages import infer_s1_boundary_candidate
 from flayr_core.postprocess.repair_stages import align_clear_commerce_evidence
@@ -1131,6 +1132,131 @@ class ArchitectureContractTests(unittest.TestCase):
         stage = result["stage_analysis"][3]
         self.assertEqual(stage["benchmark_evidence_ids"], ["B4"])
         self.assertEqual(stage["benchmark_s4"]["evidence_ids"], ["B4"])
+
+    def test_repair_marks_are_xie_cross_stage_evidence_as_temporal_state_conflict(self) -> None:
+        fixture_path = ROOT / "tests" / "fixtures" / "are_xie_s4_temporal_mismatch.json"
+        result = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+        finalize_severity_after_repairs(result, {})
+
+        s4 = result["stage_analysis"][3]
+        temporal = s4["_postprocess_state"]["evidence_temporal_checks"]
+        self.assertEqual(temporal["benchmark_evidence_ids"]["status"], "consistent")
+        self.assertEqual(temporal["benchmark_s4.evidence_ids"]["status"], "state_conflict")
+        self.assertEqual(
+            temporal["benchmark_s4.evidence_ids"]["reason_code"],
+            "evidence_temporal_mismatch",
+        )
+        self.assertEqual(
+            temporal["benchmark_s4.evidence_ids"]["conflicting_evidence_ids"],
+            ["B3"],
+        )
+        self.assertEqual(
+            temporal["benchmark_multimodal.channel_evidence_ids.visual"]["reason_code"],
+            "evidence_temporal_mismatch",
+        )
+
+        hard_fact = s4["_postprocess_state"]["evidence_hard_fact_checks"]["benchmark_s4"]
+        self.assertEqual(hard_fact["status"], "state_conflict")
+        self.assertEqual(hard_fact["reason_code"], "evidence_temporal_mismatch")
+
+    def test_repair_temporal_check_covers_all_stage_flags_and_both_sides(self) -> None:
+        stages = []
+        for index, flag_name in enumerate(("hook", "s2", "s3", "s4", "s5", "s6"), start=1):
+            stages.append(
+                {
+                    "stage": f"S{index}",
+                    "benchmark_time_range": "0.0s - 1.0s",
+                    "creator_time_range": "0.0s - 1.0s",
+                    f"benchmark_{flag_name}": {"evidence_ids": ["B_OUTSIDE"]},
+                    f"creator_{flag_name}": {"evidence_ids": ["C_OUTSIDE"]},
+                }
+            )
+        result = {
+            "video_understanding": {
+                "benchmark": {"evidence_units": [{"id": "B_OUTSIDE", "time_range": "2.0s - 3.0s"}]},
+                "creator": {"evidence_units": [{"id": "C_OUTSIDE", "time_range": "2.0s - 3.0s"}]},
+            },
+            "stage_analysis": stages,
+        }
+
+        validate_stage_evidence_temporal_consistency(result)
+
+        for index, flag_name in enumerate(("hook", "s2", "s3", "s4", "s5", "s6")):
+            checks = result["stage_analysis"][index]["_postprocess_state"]["evidence_temporal_checks"]
+            for role in ("benchmark", "creator"):
+                check = checks[f"{role}_{flag_name}.evidence_ids"]
+                self.assertEqual(check["status"], "state_conflict")
+                self.assertEqual(check["reason_code"], "evidence_temporal_mismatch")
+
+    def test_repair_temporal_check_accepts_empty_absence_and_positive_overlap(self) -> None:
+        result = {
+            "video_understanding": {
+                "benchmark": {
+                    "evidence_units": [
+                        {"id": "B_CROSS", "time_range": "24.0s - 27.0s"},
+                    ]
+                },
+                "creator": {
+                    "evidence_units": [
+                        {"id": "C_CROSS", "time_range": "24.0s - 27.0s"},
+                    ]
+                },
+            },
+            "stage_analysis": [
+                {"stage": f"S{index}", "benchmark_time_range": "0.0s - 1.0s", "creator_time_range": "0.0s - 1.0s"}
+                for index in range(1, 7)
+            ],
+        }
+        s4 = result["stage_analysis"][3]
+        s4.update(
+            {
+                "benchmark_s4": {"evidence_ids": []},
+                "creator_s4": {"evidence_ids": []},
+                "benchmark_time_range": "25.5s - 38.3s",
+                "creator_time_range": "25.5s - 38.3s",
+            }
+        )
+        validate_stage_evidence_temporal_consistency(result)
+        checks = s4["_postprocess_state"]["evidence_temporal_checks"]
+        self.assertEqual(checks["benchmark_s4.evidence_ids"]["status"], "consistent")
+        self.assertEqual(checks["creator_s4.evidence_ids"]["status"], "consistent")
+
+        s4["benchmark_s4"]["evidence_ids"] = ["B_CROSS"]
+        s4["creator_s4"]["evidence_ids"] = ["C_CROSS"]
+        validate_stage_evidence_temporal_consistency(result)
+        checks = s4["_postprocess_state"]["evidence_temporal_checks"]
+        self.assertEqual(checks["benchmark_s4.evidence_ids"]["status"], "consistent")
+        self.assertEqual(checks["creator_s4.evidence_ids"]["status"], "consistent")
+
+    def test_s3_temporal_mismatch_is_checked_symmetrically(self) -> None:
+        result = {
+            "video_understanding": {
+                "benchmark": {"evidence_units": [{"id": "B3", "time_range": "13.8s - 25.5s"}]},
+                "creator": {"evidence_units": [{"id": "C3", "time_range": "13.8s - 25.5s"}]},
+            },
+            "stage_analysis": [
+                {"stage": f"S{index}", "benchmark_time_range": "0.0s - 1.0s", "creator_time_range": "0.0s - 1.0s"}
+                for index in range(1, 7)
+            ],
+        }
+        result["stage_analysis"][2].update(
+            {
+                "benchmark_time_range": "25.5s - 38.3s",
+                "creator_time_range": "25.5s - 38.3s",
+                "benchmark_s3": {"evidence_ids": ["B3"]},
+                "creator_s3": {"evidence_ids": ["C3"]},
+            }
+        )
+
+        validate_stage_evidence_temporal_consistency(result)
+
+        checks = result["stage_analysis"][2]["_postprocess_state"]["evidence_temporal_checks"]
+        for role, evidence_id in (("benchmark", "B3"), ("creator", "C3")):
+            check = checks[f"{role}_s3.evidence_ids"]
+            self.assertEqual(check["status"], "state_conflict")
+            self.assertEqual(check["reason_code"], "evidence_temporal_mismatch")
+            self.assertEqual(check["conflicting_evidence_ids"], [evidence_id])
 
     def test_llm_stream_retries_cleanup_sensitive_artifacts_and_accept_only_completed_stream(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

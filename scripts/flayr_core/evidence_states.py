@@ -151,6 +151,7 @@ AUDIT_REASON_CODES = frozenset(
         "precondition_missing",
         "repair_incomplete",
         "state_hard_fact_conflict",
+        "evidence_temporal_mismatch",
         "creator_usage_partial",
         "benchmark_usage_partial",
         "creator_usage_uncertain",

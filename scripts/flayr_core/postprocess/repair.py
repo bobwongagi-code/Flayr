@@ -39,6 +39,7 @@ from .repair_evidence import (
     reconcile_s5_trust_sources,
     reconcile_unsupported_cta,
     split_quote_clauses,
+    validate_stage_evidence_temporal_consistency,
 )
 from .repair_stages import (
     apply_comparison_eligibility,
@@ -82,6 +83,7 @@ __all__ = [
     "bind_improvement_base_material",
     "reconcile_s3_s4_evidence_coherence",
     "validate_s3_s4_hard_fact_consistency",
+    "validate_stage_evidence_temporal_consistency",
     "validate_s2_hard_fact_consistency",
     "reconcile_s5_trust_sources",
     "reconcile_unsupported_cta",

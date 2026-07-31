@@ -1,0 +1,91 @@
+{
+  "sample_id": "are_xie",
+  "evaluation_role": "mechanism_regression",
+  "purpose": "repair temporal-boundary guard only; not a severity or accuracy label",
+  "video_understanding": {
+    "benchmark": {
+      "evidence_units": [
+        {
+          "id": "B3",
+          "time_range": "13.8s - 25.5s",
+          "information": "用户评论反馈"
+        },
+        {
+          "id": "B4",
+          "time_range": "25.5s - 38.3s",
+          "information": "展示产品并出现效果字幕"
+        }
+      ]
+    },
+    "creator": {
+      "evidence_units": [
+        {
+          "id": "C4",
+          "time_range": "25.5s - 38.3s",
+          "information": "达人素材"
+        }
+      ]
+    }
+  },
+  "stage_analysis": [
+    {
+      "stage": "S1 Hook",
+      "benchmark_time_range": "0.0s - 6.0s",
+      "creator_time_range": "0.0s - 6.0s",
+      "benchmark_evidence_ids": [],
+      "creator_evidence_ids": []
+    },
+    {
+      "stage": "S2 Intro",
+      "benchmark_time_range": "6.0s - 13.8s",
+      "creator_time_range": "6.0s - 13.8s",
+      "benchmark_evidence_ids": [],
+      "creator_evidence_ids": []
+    },
+    {
+      "stage": "S3 Usage",
+      "benchmark_time_range": "13.8s - 25.5s",
+      "creator_time_range": "13.8s - 25.5s",
+      "benchmark_evidence_ids": [],
+      "creator_evidence_ids": []
+    },
+    {
+      "stage": "S4 Effect",
+      "benchmark_time_range": "25.5s - 38.3s",
+      "creator_time_range": "25.5s - 38.3s",
+      "benchmark_evidence_ids": ["B4"],
+      "creator_evidence_ids": ["C4"],
+      "benchmark_s4": {
+        "effect_type": "none",
+        "effect_evidence_state": "none",
+        "evidence_ids": ["B3"]
+      },
+      "benchmark_multimodal": {
+        "channel_evidence_ids": {
+          "visual": ["B3"],
+          "speech": [],
+          "text": [],
+          "sound_rhythm": []
+        }
+      }
+    },
+    {
+      "stage": "S5 Trust",
+      "benchmark_time_range": "13.8s - 25.5s",
+      "creator_time_range": "13.8s - 25.5s",
+      "benchmark_evidence_ids": ["B3"],
+      "creator_evidence_ids": [],
+      "benchmark_s5": {
+        "evidence_ids": ["B3"],
+        "trust_source_evidence_ids": ["B3"]
+      }
+    },
+    {
+      "stage": "S6 CTA",
+      "benchmark_time_range": "38.3s - 45.7s",
+      "creator_time_range": "38.3s - 45.7s",
+      "benchmark_evidence_ids": [],
+      "creator_evidence_ids": []
+    }
+  ]
+}
