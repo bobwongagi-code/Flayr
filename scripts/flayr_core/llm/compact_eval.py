@@ -1,0 +1,1598 @@
+"""Compact, isolated model-contract evaluation for Flayr.
+
+This module deliberately does not call the production comparison payload,
+repair path, finalizer, or report writers.  It measures whether a model can
+make six stage judgments under a small, stable response contract.  A valid
+result is an experiment artifact, never an ``analysis_result.json``.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import hashlib
+import json
+import math
+import re
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any
+
+from ..artifacts import parse_time_range_seconds
+from ..evidence_states import EVIDENCE_STATE_STRENGTHS
+from ..postprocess.utils import evidence_overlaps_range
+from ..resources import ResourceBudget, ResourceBudgetExceeded, ResourceLimits, encode_file_data_url
+from ..stage_catalog import DEFAULT_STAGES
+from ..utils import write_bytes, write_json
+from ..video import probe_duration_seconds
+from .api import call_llm_api, extract_chat_completion_text, image_to_data_url, read_llm_api_key, video_to_data_url
+from .parse import parse_json_text
+
+
+COMPACT_EVAL_SCHEMA_VERSION = 1
+COMPACT_EVAL_ROLE = "compact_judgment_on_locked_facts"
+SEVERITY_ONLY_ROLE = "severity_judgment_on_locked_facts"
+VISUAL_EXTRACTION_ROLE = "visual_fact_extraction_on_locked_frames"
+EVALUATION_ROLES = frozenset({"model_calibration", "mechanism_regression", "blind_validation"})
+DECISION_SCOPE_BY_ROLE = {
+    "model_calibration": "calibration_only",
+    "mechanism_regression": "mechanism_regression_only",
+    "blind_validation": "blind_validation_only",
+}
+COMPACT_OUTPUT_BUDGET = 8192
+COMPACT_MAX_REASON_CHARS = 240
+COMPACT_MAX_BASIS_CHARS = 320
+COMPACT_MAX_EVIDENCE_IDS = 4
+EXTRACTION_MAX_UNITS = 12
+EXTRACTION_MAX_INFORMATION_CHARS = 240
+RAW_VIDEO_ENCODING = {
+    "fps": 2.0,
+    "max_width": 480,
+    "max_duration_seconds": 180.0,
+    "max_data_bytes": 8 * 1024 * 1024,
+    "timeout_seconds": 300,
+}
+RAW_VIDEO_ROLES = ("benchmark", "creator")
+COMPACT_SEVERITIES = frozenset({"small", "medium", "large"})
+COMPACT_STATES = frozenset({"none", "partial", "complete", "uncertain"})
+COMPACT_CONFIDENCES = frozenset({"high", "medium", "low"})
+_STAGE_CODE_RE = re.compile(r"^(S[1-6])(?:\s|$)")
+
+
+class CompactEvaluationError(ValueError):
+    """Raised when a frozen bundle or compact model result is invalid."""
+
+
+@dataclass(frozen=True)
+class FrozenCompactBundle:
+    """The exact non-model inputs shared by one model comparison cohort."""
+
+    run_dir: Path
+    context: dict[str, Any]
+    allowed_evidence_ids: dict[str, dict[str, set[str]]]
+    visual_inputs: tuple[dict[str, str], ...]
+    source_digest: str
+    stage_time_ranges: dict[str, dict[str, str]] = field(default_factory=dict)
+    input_mode: str = "locked_facts_and_frames"
+    video_inputs: tuple[dict[str, Any], ...] = ()
+
+
+def _read_json(path: Path, *, required: bool = True) -> dict[str, Any]:
+    if not path.is_file():
+        if required:
+            raise CompactEvaluationError(f"required frozen artifact is missing: {path}")
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CompactEvaluationError(f"invalid frozen JSON artifact: {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise CompactEvaluationError(f"frozen artifact root must be an object: {path}")
+    return value
+
+
+def _compact_fact_unit(unit: dict[str, Any]) -> dict[str, Any]:
+    """Keep only facts needed for a bounded judgment prompt.
+
+    Cache metadata, generated audit fields, and large internal diagnostics are
+    intentionally excluded so the comparison does not depend on one model's
+    full-analysis formatting.
+    """
+    fields = (
+        "id",
+        "time_range",
+        "information",
+        "voiceover",
+        "voiceover_zh",
+        "visual_fact",
+        "subtitle_fact",
+        "evidence_strength",
+        "functions",
+        "product_visible",
+        "trust_source_signals",
+        "trust_source_reference",
+    )
+    return {field: unit.get(field) for field in fields if field in unit}
+
+
+def _facts_for_role(run_dir: Path, role: str) -> dict[str, Any]:
+    source = _read_json(run_dir / f"video_facts_{role}.json")
+    units = source.get("evidence_units")
+    if not isinstance(units, list) or not units:
+        raise CompactEvaluationError(f"{role} has no frozen evidence_units")
+    compact_units = [item for item in units if isinstance(item, dict)]
+    if not compact_units:
+        raise CompactEvaluationError(f"{role} has no valid frozen evidence_units")
+    return {
+        "content_summary": str(source.get("content_summary") or ""),
+        "communication_strategy": str(source.get("communication_strategy") or ""),
+        "evidence_units": [_compact_fact_unit(item) for item in compact_units],
+    }
+
+
+def _stage_code(stage: str) -> str:
+    match = _STAGE_CODE_RE.match(str(stage or "").strip())
+    if not match:
+        raise CompactEvaluationError(f"invalid stage label: {stage!r}")
+    return match.group(1)
+
+
+def _allowed_evidence_ids(facts: dict[str, Any]) -> dict[str, set[str]]:
+    result = {stage.code: set() for stage in DEFAULT_STAGES}
+    for unit in facts.get("evidence_units", []):
+        if not isinstance(unit, dict):
+            continue
+        evidence_id = str(unit.get("id") or "").strip()
+        functions = unit.get("functions")
+        if not evidence_id or not isinstance(functions, list):
+            continue
+        for function in functions:
+            token = str(function or "").strip().upper()
+            match = re.match(r"^(S[1-6])(?:_|$)", token)
+            if match and match.group(1) in result:
+                result[match.group(1)].add(evidence_id)
+    return result
+
+
+def _stage_frame_inputs(run_dir: Path, role: str) -> list[dict[str, str]]:
+    manifest_path = run_dir / role / "frames" / "stage_frames.json"
+    # stage_frames.json is a list, while normal Flayr artifacts use object roots.
+    if manifest_path.is_file():
+        try:
+            value = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CompactEvaluationError(f"invalid stage frame manifest: {manifest_path}: {exc}") from exc
+    else:
+        value = []
+    if not isinstance(value, list):
+        raise CompactEvaluationError(f"stage frame manifest must be a list: {manifest_path}")
+
+    selected: list[dict[str, str]] = []
+    seen_paths: set[str] = set()
+    for stage in DEFAULT_STAGES:
+        entries = [
+            item
+            for item in value
+            if isinstance(item, dict) and str(item.get("stage") or "") == stage.name
+        ]
+        for item in entries[:2]:
+            raw_path = str(item.get("path") or "").strip()
+            path = Path(raw_path).expanduser()
+            if not path.is_file():
+                fallback = run_dir / role / "contact_sheets" / f"stage_{int(stage.code[1:]):02d}.jpg"
+                if fallback.is_file():
+                    path = fallback
+                else:
+                    raise CompactEvaluationError(f"frozen visual input is missing: {path}")
+            resolved = str(path.resolve())
+            if resolved in seen_paths:
+                continue
+            seen_paths.add(resolved)
+            selected.append(
+                {
+                    "role": role,
+                    "stage": stage.code,
+                    "label": f"{role} {stage.name} @ {item.get('timestamp_seconds', '')}s",
+                    "path": resolved,
+                    "sha256": _file_digest(path),
+                    "data_url": image_to_data_url(path, max_bytes=4 * 1024 * 1024),
+                }
+            )
+    return selected
+
+
+def _stable_digest(value: Any) -> str:
+    serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise CompactEvaluationError(f"cannot hash frozen visual input: {path}: {exc}") from exc
+    return digest.hexdigest()
+
+
+def _stage_time_ranges(run_dir: Path) -> dict[str, dict[str, str]]:
+    """Read already-produced stage windows for diagnostics only.
+
+    Stage windows are intentionally excluded from the model-input digest. They
+    are used after a response is produced to explain temporal mismatches, not
+    to change the locked prompt shared by the model cohort.
+    """
+    analysis = _read_json(run_dir / "analysis_result.json", required=False)
+    rows = analysis.get("stage_analysis")
+    if not isinstance(rows, list):
+        return {"creator": {}, "benchmark": {}}
+    result = {"creator": {}, "benchmark": {}}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            stage_code = _stage_code(str(row.get("stage") or row.get("stage_name") or ""))
+        except CompactEvaluationError:
+            continue
+        for role in ("creator", "benchmark"):
+            value = row.get(f"{role}_time_range")
+            if isinstance(value, str) and parse_time_range_seconds(value, None) is not None:
+                result[role][stage_code] = value
+    return result
+
+
+def _raw_video_cache_path(cache_dir: Path, role: str, source_sha256: str) -> Path:
+    encoding_digest = _stable_digest(RAW_VIDEO_ENCODING)[:16]
+    return cache_dir / f"{role}-{source_sha256[:16]}-{encoding_digest}.mp4"
+
+
+def _data_url_bytes(data_url: str) -> bytes:
+    prefix, separator, encoded = str(data_url).partition(",")
+    if separator != "," or not prefix.startswith("data:video/"):
+        raise CompactEvaluationError("raw video encoder returned an invalid data URL")
+    try:
+        return base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise CompactEvaluationError("raw video encoder returned invalid base64") from exc
+
+
+def _raw_video_inputs(run_dir: Path, *, cache_dir: Path | None = None) -> list[dict[str, Any]]:
+    """Prepare bounded data URLs, reusing persisted bytes when available."""
+    analysis = _read_json(run_dir / "analysis.json", required=False)
+    videos = analysis.get("videos")
+    if not isinstance(videos, dict):
+        raise CompactEvaluationError("raw video extraction requires analysis.json videos")
+    selected: list[dict[str, str]] = []
+    for role in ("benchmark", "creator"):
+        info = videos.get(role)
+        path = Path(str(info.get("path") or "")).expanduser() if isinstance(info, dict) else Path()
+        if not path.is_file():
+            raise CompactEvaluationError(f"raw video input is missing for {role}: {path}")
+        duration = None
+        if isinstance(info, dict):
+            try:
+                candidate = float(info.get("duration_seconds"))
+                if math.isfinite(candidate) and candidate > 0:
+                    duration = candidate
+            except (TypeError, ValueError):
+                pass
+        if duration is None:
+            duration = probe_duration_seconds(path)
+        if duration is None or not math.isfinite(duration) or duration <= 0:
+            raise CompactEvaluationError(f"raw video duration is unavailable for {role}: {path}")
+        source_sha256 = _file_digest(path)
+        cached_path = (
+            _raw_video_cache_path(cache_dir, role, source_sha256)
+            if cache_dir is not None
+            else None
+        )
+        if cached_path is not None and cached_path.is_file():
+            try:
+                data_url = encode_file_data_url(
+                    cached_path,
+                    max_bytes=RAW_VIDEO_ENCODING["max_data_bytes"],
+                    expected_kind="video",
+                )
+            except (OSError, ValueError, ResourceBudgetExceeded) as exc:
+                raise CompactEvaluationError(f"frozen raw-video cache is invalid: {cached_path}") from exc
+        else:
+            data_url = video_to_data_url(
+                path,
+                **RAW_VIDEO_ENCODING,
+            )
+            if data_url and cached_path is not None:
+                raw_bytes = _data_url_bytes(data_url)
+                if len(raw_bytes) >= RAW_VIDEO_ENCODING["max_data_bytes"]:
+                    raise CompactEvaluationError("raw video encoder returned data at or above the byte limit")
+                write_bytes(cached_path, raw_bytes)
+                data_url = encode_file_data_url(
+                    cached_path,
+                    max_bytes=RAW_VIDEO_ENCODING["max_data_bytes"],
+                    expected_kind="video",
+                )
+        if not data_url:
+            raise CompactEvaluationError(f"raw video input could not be bounded for {role}: {path}")
+        selected.append(
+            {
+                "role": role,
+                "label": f"{role} raw video",
+                "path": str(path.resolve()),
+                "sha256": source_sha256,
+                "data_url_sha256": hashlib.sha256(data_url.encode("utf-8")).hexdigest(),
+                "duration_seconds": round(duration, 3),
+                "data_url": data_url,
+            }
+        )
+    return selected
+
+
+def _load_frozen_bundle(
+    run_dir: Path,
+    *,
+    include_images: bool,
+    require_facts: bool,
+    require_videos: bool = False,
+    video_cache_dir: Path | None = None,
+) -> FrozenCompactBundle:
+    """Load one completed preprocessing run as a fixed cohort input."""
+    run_dir = run_dir.expanduser().resolve()
+    if not run_dir.is_dir():
+        raise CompactEvaluationError(f"run directory does not exist: {run_dir}")
+    foundation_record = _read_json(run_dir / "product_foundation.json")
+    if foundation_record.get("completion_status") not in {None, "completed"}:
+        raise CompactEvaluationError("product_foundation.json is not a completed artifact")
+    foundation = foundation_record.get("foundation")
+    if not isinstance(foundation, dict):
+        raise CompactEvaluationError("product_foundation.json has no structured foundation")
+    eligibility = _read_json(run_dir / "comparison_eligibility.json", required=False)
+    facts = {role: _facts_for_role(run_dir, role) for role in ("creator", "benchmark")} if require_facts else {}
+    allowed = {role: _allowed_evidence_ids(facts[role]) for role in facts}
+    visual_inputs: list[dict[str, str]] = []
+    if include_images:
+        for role in ("benchmark", "creator"):
+            visual_inputs.extend(_stage_frame_inputs(run_dir, role))
+        if not visual_inputs:
+            raise CompactEvaluationError("include_images was requested but no stage frames were found")
+    video_inputs = (
+        _raw_video_inputs(run_dir, cache_dir=video_cache_dir)
+        if require_videos
+        else []
+    )
+    if require_videos and not video_inputs:
+        raise CompactEvaluationError("raw video extraction requires creator and benchmark videos")
+
+    source_identity: dict[str, Any] = {
+        "input_mode": (
+            "raw_video_only"
+            if require_videos
+            else "locked_facts_and_frames"
+            if require_facts
+            else "visual_frames_only"
+        ),
+        "product_foundation": foundation,
+        "comparison_eligibility": eligibility,
+        "facts": facts,
+        "visual_inputs": [
+            {key: item[key] for key in ("role", "stage", "label", "path", "sha256")}
+            for item in visual_inputs
+        ],
+    }
+    if require_videos:
+        source_identity["video_inputs"] = [
+            {
+                key: item[key]
+                for key in ("role", "label", "path", "sha256", "data_url_sha256", "duration_seconds")
+            }
+            for item in video_inputs
+        ]
+        source_identity["raw_video_encoding"] = RAW_VIDEO_ENCODING
+    if require_videos:
+        experiment_boundary = (
+            "这是原始视频视觉事实抽取实验，不是完整 Flayr 生产分析。"
+            "只抽取原始视频明确支持的证据事实，不输出 severity、报告、improvements 或 derive 结果。"
+        )
+    elif require_facts:
+        experiment_boundary = (
+            "这是锁定事实包上的紧凑模型判断实验，不是完整 Flayr 生产分析。"
+            "不得补写未在事实包或附图中出现的证据；不输出报告、improvements 或 derive 结果。"
+        )
+    else:
+        experiment_boundary = (
+            "这是固定关键帧上的视觉事实抽取实验，不是原始视频端到端生产分析。"
+            "只抽取画面明确支持的证据事实，不输出 severity、报告、improvements 或 derive 结果。"
+        )
+    context = {
+        "product_foundation": foundation,
+        "comparison_eligibility": eligibility,
+        "stages": [
+            {"code": stage.code, "name": stage.name, "question": stage.core_question}
+            for stage in DEFAULT_STAGES
+        ],
+        "facts": facts,
+        "experiment_boundary": experiment_boundary,
+    }
+    return FrozenCompactBundle(
+        run_dir=run_dir,
+        context=context,
+        allowed_evidence_ids=allowed,
+        visual_inputs=tuple(visual_inputs),
+        source_digest=_stable_digest(source_identity),
+        stage_time_ranges=_stage_time_ranges(run_dir),
+        input_mode=(
+            "raw_video_only"
+            if require_videos
+            else "locked_facts_and_frames"
+            if require_facts
+            else "visual_frames_only"
+        ),
+        video_inputs=tuple(video_inputs),
+    )
+
+
+def load_frozen_compact_bundle(run_dir: Path, *, include_images: bool = True) -> FrozenCompactBundle:
+    """Load frozen facts and optional frames for the judgment variants."""
+    return _load_frozen_bundle(run_dir, include_images=include_images, require_facts=True)
+
+
+def load_frozen_visual_bundle(run_dir: Path, *, include_images: bool = True) -> FrozenCompactBundle:
+    """Load fixed frames without model-produced facts for extraction tests.
+
+    This is deliberately named ``visual`` rather than ``video``: the current
+    evaluator sends the same bounded stage contact sheets to every provider.
+    A true raw-video extraction experiment requires a separate, provider-tested
+    video input path and must not be silently conflated with this one.
+    """
+    return _load_frozen_bundle(run_dir, include_images=include_images, require_facts=False)
+
+
+def load_frozen_video_bundle(
+    run_dir: Path,
+    *,
+    cache_dir: Path | None = None,
+) -> FrozenCompactBundle:
+    """Load bounded original videos without facts or frame attachments.
+
+    When ``cache_dir`` is supplied, the first load persists the exact bounded
+    MP4 bytes and later processes reuse those bytes instead of re-encoding the
+    source video. This is required for strict cross-process controls.
+    """
+    return _load_frozen_bundle(
+        run_dir,
+        include_images=False,
+        require_facts=False,
+        require_videos=True,
+        video_cache_dir=cache_dir,
+    )
+
+
+def select_frozen_video_bundle(
+    bundle: FrozenCompactBundle,
+    roles: tuple[str, ...],
+) -> FrozenCompactBundle:
+    """Select or reorder already-encoded videos without reading or encoding them.
+
+    Control experiments must vary only the number and order of video blocks. The
+    returned bundle therefore reuses the exact ``data_url`` objects loaded into
+    ``bundle`` and changes only the input selection metadata and digest.
+    """
+    if bundle.input_mode != "raw_video_only":
+        raise CompactEvaluationError("video control selection requires a raw_video_only bundle")
+    requested = tuple(str(role).strip() for role in roles)
+    if not requested or any(role not in RAW_VIDEO_ROLES for role in requested):
+        raise CompactEvaluationError(f"video control roles must use {RAW_VIDEO_ROLES}")
+    if len(set(requested)) != len(requested):
+        raise CompactEvaluationError("video control roles must not contain duplicates")
+    by_role = {str(item.get("role")): item for item in bundle.video_inputs}
+    if set(by_role) != set(RAW_VIDEO_ROLES):
+        raise CompactEvaluationError("frozen raw-video bundle must contain benchmark and creator inputs")
+    selected = tuple(by_role[role] for role in requested)
+    context = dict(bundle.context)
+    context["raw_video_roles"] = list(requested)
+    context["raw_video_input_order"] = list(requested)
+    source_identity = {
+        "base_source_digest": bundle.source_digest,
+        "input_mode": "raw_video_only",
+        "raw_video_encoding": RAW_VIDEO_ENCODING,
+        "video_inputs": [
+            {
+                key: item[key]
+                for key in ("role", "label", "path", "sha256", "data_url_sha256", "duration_seconds")
+            }
+            for item in selected
+        ],
+    }
+    return replace(
+        bundle,
+        context=context,
+        source_digest=_stable_digest(source_identity),
+        video_inputs=selected,
+    )
+
+
+def _build_multimodal_payload(
+    model: str,
+    bundle: FrozenCompactBundle,
+    *,
+    system: str,
+    user_text: str,
+    output_budget: int,
+    output_budget_field: str,
+) -> dict[str, Any]:
+    """Build the common request envelope shared by every isolated variant."""
+    if output_budget < 1024 or output_budget > 16384:
+        raise CompactEvaluationError("compact output_budget must be between 1024 and 16384")
+    if output_budget_field not in {"max_tokens", "max_completion_tokens"}:
+        raise CompactEvaluationError("output_budget_field must be max_tokens or max_completion_tokens")
+    if bundle.visual_inputs or bundle.video_inputs:
+        content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
+        for item in bundle.video_inputs:
+            content.append({"type": "text", "text": f"原始视频：{item['label']}"})
+            content.append({"type": "video_url", "video_url": {"url": item["data_url"]}})
+        for item in bundle.visual_inputs:
+            content.append({"type": "text", "text": f"附图：{item['label']}"})
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": item["data_url"], "detail": "low"},
+                }
+            )
+        user_content: str | list[dict[str, Any]] = content
+    else:
+        user_content = user_text
+    return {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_content},
+        ],
+        "temperature": 0.0,
+        output_budget_field: output_budget,
+    }
+
+
+def build_compact_eval_payload(
+    model: str,
+    bundle: FrozenCompactBundle,
+    *,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+) -> dict[str, Any]:
+    """Build the same small response contract for every model under test."""
+    response_shape = {
+        "schema_version": COMPACT_EVAL_SCHEMA_VERSION,
+        "stage_judgments": [
+            {
+                "stage": "S1 Hook",
+                "severity": "small|medium|large",
+                "confidence": "high|medium|low",
+                "creator": {
+                    "observation_state": "none|partial|complete|uncertain",
+                    "evidence_ids": ["C1"],
+                    "reason": "一句不超过240字的事实依据",
+                },
+                "benchmark": {
+                    "observation_state": "none|partial|complete|uncertain",
+                    "evidence_ids": ["B1"],
+                    "reason": "一句不超过240字的事实依据",
+                },
+                "rationale": "一句不超过240字的阶段差距依据",
+            }
+        ] * 6,
+    }
+    system = (
+        "你是 Flayr 的紧凑模型判断器。只输出严格 JSON，不要 Markdown，不要解释。"
+        "这是模型横向能力实验，不是生产报告。只允许输出 response_shape 中的字段。"
+        "必须固定输出六个阶段，顺序为 S1 Hook、S2 产品引出、S3 使用过程、S4 效果呈现、S5 信任放大、S6 CTA。"
+        "severity 只能是 small、medium、large；不要使用模型之外的分数。"
+        "每侧 observation_state 只能是 none、partial、complete、uncertain。"
+        "evidence_ids 只能引用同侧、对应阶段事实清单中已经存在的 ID；没有明确证据时填空数组。"
+        "不能把标杆事实复制成达人事实，也不能用相邻阶段 ID 补足当前阶段。"
+        "不要输出 product foundation、improvements、建议话术、长篇摘要或任何额外字段。"
+        "若视觉证据与事实包无法确定，填 uncertain，不要猜测。"
+        f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
+    )
+    user_text = (
+        "请基于下面锁定的产品、阶段和视频事实完成六阶段比较。"
+        "附图是同一批固定关键帧，仅用于视觉核对；不能把未附图的画面当作已观察事实。\n\n"
+        + json.dumps(bundle.context, ensure_ascii=False, indent=2)
+    )
+    return _build_multimodal_payload(
+        model,
+        bundle,
+        system=system,
+        user_text=user_text,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+
+
+def build_severity_only_payload(
+    model: str,
+    bundle: FrozenCompactBundle,
+    *,
+    scaffold: bool = False,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+) -> dict[str, Any]:
+    """Build a judgment-only contract over the same frozen facts.
+
+    The base variant measures severity judgment without asking the model to
+    extract or cite facts. The scaffold variant adds a short audit rationale;
+    it is intentionally not chain-of-thought and is capped at one or two
+    sentences so its effect can be tested without changing the evidence input.
+    """
+    row: dict[str, Any] = {
+        "stage": "S1 Hook",
+    }
+    if scaffold:
+        row["decision_basis"] = "一到两句简短、可审计的判断依据"
+    row.update({"severity": "small|medium|large", "confidence": "high|medium|low"})
+    response_shape = {
+        "schema_version": COMPACT_EVAL_SCHEMA_VERSION,
+        "stage_judgments": [row] * 6,
+    }
+    system = (
+        "你是 Flayr 的严重度判断器。只输出严格 JSON，不要 Markdown，不要解释。"
+        "所有模型必须使用同一份锁定事实包和同一套输出合同；这是校准实验，不是生产分析。"
+        "不要重新抽取视觉事实，不要输出 evidence_ids、观察状态、报告、improvements 或 derive 结果。"
+        "必须固定输出六个阶段，顺序为 S1 Hook、S2 产品引出、S3 使用过程、S4 效果呈现、S5 信任放大、S6 CTA。"
+        "severity 只能是 small、medium、large；confidence 只能是 high、medium、low。"
+    )
+    if scaffold:
+        system += (
+            "每个阶段先填写 decision_basis，再给出 severity；decision_basis 只能是一到两句简短判断依据，"
+            f"长度不超过 {COMPACT_MAX_BASIS_CHARS} 字，不要写隐藏推理过程。"
+        )
+    else:
+        system += "只保留 stage、severity、confidence 三个阶段字段，不要添加任何理由字段。"
+    system += f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
+    user_text = (
+        "请仅根据下面已经校验并锁定的事实判断每个阶段的严重度。"
+        "不要因为事实包中缺少信息而自行补事实；信息不足时按你能支持的判断输出 confidence，不要改写事实包。\n\n"
+        + json.dumps(bundle.context, ensure_ascii=False, indent=2)
+    )
+    return _build_multimodal_payload(
+        model,
+        bundle,
+        system=system,
+        user_text=user_text,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+
+
+def _visual_extraction_roles(bundle: FrozenCompactBundle) -> tuple[str, ...]:
+    """Return the role order represented by a visual extraction input."""
+    if bundle.input_mode == "raw_video_only":
+        roles = tuple(str(item.get("role") or "").strip() for item in bundle.video_inputs)
+    else:
+        roles = ("creator", "benchmark")
+    if not roles or any(role not in RAW_VIDEO_ROLES for role in roles):
+        raise CompactEvaluationError("visual extraction input must contain creator and/or benchmark roles")
+    if len(set(roles)) != len(roles):
+        raise CompactEvaluationError("visual extraction input contains duplicate roles")
+    return roles
+
+
+def _visual_extraction_response_shape(roles: tuple[str, ...]) -> dict[str, Any]:
+    shape: dict[str, Any] = {"schema_version": COMPACT_EVAL_SCHEMA_VERSION}
+    for role in roles:
+        prefix = "C" if role == "creator" else "B"
+        shape[f"{role}_evidence_units"] = [
+            {
+                "id": f"{prefix}1",
+                "time_range": "0.0s - 1.0s",
+                "information": "画面明确支持的事实",
+                "functions": ["S1"],
+                "evidence_strength": "direct|explicit|inferred|absent",
+            }
+        ]
+    return shape
+
+
+def build_visual_extraction_payload(
+    model: str,
+    bundle: FrozenCompactBundle,
+    *,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+) -> dict[str, Any]:
+    """Build a visual-fact-only contract over raw video or fixed frames."""
+    raw_video = bundle.input_mode == "raw_video_only"
+    roles = _visual_extraction_roles(bundle)
+    response_shape = _visual_extraction_response_shape(roles)
+    role_text = "、".join(roles)
+    if len(roles) == 1:
+        role_instruction = (
+            f"本次只输入 {roles[0]} 视频，只允许输出 {roles[0]}_evidence_units；"
+            "不要输出另一个角色字段，也不要假设存在未输入的另一段视频。"
+        )
+        extraction_request = f"请只从输入的 {roles[0]} 原始视频中抽取可审计视觉事实。"
+    else:
+        role_instruction = (
+            "本次输入包含两个角色的视频，必须分别归属事实；"
+            "不能把一个视频的事实复制到另一个角色。"
+        )
+        extraction_request = "请从原始视频中分别抽取达人视频和标杆视频的可审计视觉事实。"
+    system = (
+        "你是 Flayr 的视觉事实抽取器。只输出严格 JSON，不要 Markdown，不要解释。"
+        "本实验只测视觉事实抽取能力，不测 severity 判断。"
+        f"只允许输出 {role_text} 对应的 evidence_units；每个已输入角色最多 {EXTRACTION_MAX_UNITS} 个证据单元。"
+        + role_instruction
+        + (
+            "只记录原始视频明确支持的事实；看不清或不能确认的内容不要猜，直接省略。"
+            if raw_video
+            else "只记录固定关键帧明确支持的事实；看不清或不能确认的内容不要猜，直接省略。"
+        )
+        + "id 必须分别从 C1、C2... 和 B1、B2... 顺序编号；functions 只能使用 S1 到 S6。"
+        + "evidence_strength 只能是 direct、explicit、inferred、absent；不要输出 severity、confidence、报告或 improvements。"
+        + f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
+    )
+    request_prefix = extraction_request if raw_video else extraction_request.replace("原始视频", "附图")
+    user_text = (
+        request_prefix
+        + (
+            "输入包含原始视频、产品基础信息和阶段目录，不包含任何已有 video_facts.\n\n"
+            if raw_video
+            else "输入只有固定关键帧、产品基础信息和阶段目录，不包含任何已有 video_facts.\n\n"
+        )
+        + json.dumps(bundle.context, ensure_ascii=False, indent=2)
+    )
+    return _build_multimodal_payload(
+        model,
+        bundle,
+        system=system,
+        user_text=user_text,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+
+
+def _validate_side(
+    value: Any,
+    *,
+    role: str,
+    stage_code: str,
+    allowed_ids: dict[str, set[str]],
+    path: str,
+) -> list[str]:
+    if not isinstance(value, dict):
+        return [f"{path} must be an object"]
+    expected = {"observation_state", "evidence_ids", "reason"}
+    errors: list[str] = []
+    extra = set(value) - expected
+    missing = expected - set(value)
+    if extra:
+        errors.append(f"{path} has unsupported fields: {sorted(extra)}")
+    if missing:
+        errors.append(f"{path} is missing fields: {sorted(missing)}")
+    state = value.get("observation_state")
+    if state not in COMPACT_STATES:
+        errors.append(f"{path}.observation_state is invalid")
+    evidence_ids = value.get("evidence_ids")
+    if not isinstance(evidence_ids, list) or any(not isinstance(item, str) or not item.strip() for item in evidence_ids):
+        errors.append(f"{path}.evidence_ids must be a list of non-empty strings")
+        evidence_ids = []
+    if len(evidence_ids) > COMPACT_MAX_EVIDENCE_IDS or len(set(evidence_ids)) != len(evidence_ids):
+        errors.append(f"{path}.evidence_ids has too many or duplicate IDs")
+    allowed = allowed_ids.get(role, {}).get(stage_code, set())
+    for evidence_id in evidence_ids:
+        if evidence_id not in allowed:
+            errors.append(f"{path}.evidence_ids contains {evidence_id!r} outside {role}/{stage_code}")
+    if state == "none" and evidence_ids:
+        errors.append(f"{path}: none state cannot cite evidence")
+    if state != "none" and not evidence_ids:
+        errors.append(f"{path}: non-none state requires evidence_ids")
+    reason = value.get("reason")
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > COMPACT_MAX_REASON_CHARS:
+        errors.append(f"{path}.reason must be a non-empty string <= {COMPACT_MAX_REASON_CHARS} chars")
+    return errors
+
+
+def validate_compact_result(result: Any, bundle: FrozenCompactBundle) -> list[str]:
+    """Return deterministic contract errors; never repair a compact result."""
+    if not isinstance(result, dict):
+        return ["result must be an object"]
+    errors: list[str] = []
+    if result.get("schema_version") != COMPACT_EVAL_SCHEMA_VERSION:
+        errors.append("schema_version mismatch")
+    expected_root = {"schema_version", "stage_judgments"}
+    extra_root = set(result) - expected_root
+    if extra_root:
+        errors.append(f"unsupported root fields: {sorted(extra_root)}")
+    judgments = result.get("stage_judgments")
+    expected_stages = [stage.name for stage in DEFAULT_STAGES]
+    if not isinstance(judgments, list) or len(judgments) != len(expected_stages):
+        return errors + ["stage_judgments must contain exactly six items"]
+    for index, (item, expected_stage) in enumerate(zip(judgments, expected_stages)):
+        path = f"stage_judgments[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{path} must be an object")
+            continue
+        expected_fields = {"stage", "severity", "confidence", "creator", "benchmark", "rationale"}
+        extra = set(item) - expected_fields
+        missing = expected_fields - set(item)
+        if extra:
+            errors.append(f"{path} has unsupported fields: {sorted(extra)}")
+        if missing:
+            errors.append(f"{path} is missing fields: {sorted(missing)}")
+        if item.get("stage") != expected_stage:
+            errors.append(f"{path}.stage must be {expected_stage!r}")
+        if item.get("severity") not in COMPACT_SEVERITIES:
+            errors.append(f"{path}.severity is invalid")
+        if item.get("confidence") not in COMPACT_CONFIDENCES:
+            errors.append(f"{path}.confidence is invalid")
+        rationale = item.get("rationale")
+        if not isinstance(rationale, str) or not rationale.strip() or len(rationale) > COMPACT_MAX_REASON_CHARS:
+            errors.append(f"{path}.rationale must be a non-empty string <= {COMPACT_MAX_REASON_CHARS} chars")
+        try:
+            stage_code = _stage_code(str(item.get("stage") or ""))
+        except CompactEvaluationError:
+            continue
+        errors.extend(_validate_side(item.get("creator"), role="creator", stage_code=stage_code, allowed_ids=bundle.allowed_evidence_ids, path=f"{path}.creator"))
+        errors.extend(_validate_side(item.get("benchmark"), role="benchmark", stage_code=stage_code, allowed_ids=bundle.allowed_evidence_ids, path=f"{path}.benchmark"))
+    return errors
+
+
+def validate_severity_only_result(result: Any, *, scaffold: bool = False) -> list[str]:
+    """Validate a judgment-only result without allowing hidden evidence input."""
+    if not isinstance(result, dict):
+        return ["result must be an object"]
+    errors: list[str] = []
+    expected_root = {"schema_version", "stage_judgments"}
+    if result.get("schema_version") != COMPACT_EVAL_SCHEMA_VERSION:
+        errors.append("schema_version mismatch")
+    extra_root = set(result) - expected_root
+    if extra_root:
+        errors.append(f"unsupported root fields: {sorted(extra_root)}")
+    judgments = result.get("stage_judgments")
+    expected_stages = [stage.name for stage in DEFAULT_STAGES]
+    if not isinstance(judgments, list) or len(judgments) != len(expected_stages):
+        return errors + ["stage_judgments must contain exactly six items"]
+    expected_fields = {"stage", "severity", "confidence"}
+    if scaffold:
+        expected_fields.add("decision_basis")
+    for index, (item, expected_stage) in enumerate(zip(judgments, expected_stages)):
+        path = f"stage_judgments[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{path} must be an object")
+            continue
+        extra = set(item) - expected_fields
+        missing = expected_fields - set(item)
+        if extra:
+            errors.append(f"{path} has unsupported fields: {sorted(extra)}")
+        if missing:
+            errors.append(f"{path} is missing fields: {sorted(missing)}")
+        if item.get("stage") != expected_stage:
+            errors.append(f"{path}.stage must be {expected_stage!r}")
+        if item.get("severity") not in COMPACT_SEVERITIES:
+            errors.append(f"{path}.severity is invalid")
+        if item.get("confidence") not in COMPACT_CONFIDENCES:
+            errors.append(f"{path}.confidence is invalid")
+        if scaffold:
+            basis = item.get("decision_basis")
+            if not isinstance(basis, str) or not basis.strip() or len(basis) > COMPACT_MAX_BASIS_CHARS:
+                errors.append(
+                    f"{path}.decision_basis must be a non-empty string <= {COMPACT_MAX_BASIS_CHARS} chars"
+                )
+    return errors
+
+
+def _validate_extraction_units(
+    value: Any,
+    *,
+    role: str,
+    source_duration_seconds: float | None = None,
+) -> list[str]:
+    if not isinstance(value, list):
+        return [f"{role}_evidence_units must be a list"]
+    errors: list[str] = []
+    if len(value) > EXTRACTION_MAX_UNITS:
+        errors.append(f"{role}_evidence_units contains more than {EXTRACTION_MAX_UNITS} units")
+    expected_prefix = "C" if role == "creator" else "B"
+    expected_fields = {"id", "time_range", "information", "functions", "evidence_strength"}
+    ids: set[str] = set()
+    for index, unit in enumerate(value):
+        path = f"{role}_evidence_units[{index}]"
+        if not isinstance(unit, dict):
+            errors.append(f"{path} must be an object")
+            continue
+        extra = set(unit) - expected_fields
+        missing = expected_fields - set(unit)
+        if extra:
+            errors.append(f"{path} has unsupported fields: {sorted(extra)}")
+        if missing:
+            errors.append(f"{path} is missing fields: {sorted(missing)}")
+        evidence_id = unit.get("id")
+        if not isinstance(evidence_id, str) or not re.fullmatch(rf"{expected_prefix}[1-9][0-9]*", evidence_id):
+            errors.append(f"{path}.id must match {expected_prefix}N")
+        elif evidence_id != f"{expected_prefix}{index + 1}":
+            errors.append(f"{path}.id must be sequential starting at {expected_prefix}1")
+        elif evidence_id in ids:
+            errors.append(f"{path}.id is duplicated")
+        else:
+            ids.add(evidence_id)
+        if parse_time_range_seconds(unit.get("time_range"), source_duration_seconds) is None:
+            errors.append(f"{path}.time_range is invalid or outside source duration")
+        information = unit.get("information")
+        if not isinstance(information, str) or not information.strip() or len(information) > EXTRACTION_MAX_INFORMATION_CHARS:
+            errors.append(
+                f"{path}.information must be a non-empty string <= {EXTRACTION_MAX_INFORMATION_CHARS} chars"
+            )
+        functions = unit.get("functions")
+        if not isinstance(functions, list) or not functions or any(
+            not isinstance(function, str) or not re.fullmatch(r"S[1-6]", function) for function in functions
+        ):
+            errors.append(f"{path}.functions must contain S1-S6 values")
+        if unit.get("evidence_strength") not in EVIDENCE_STATE_STRENGTHS:
+            errors.append(f"{path}.evidence_strength is invalid")
+    return errors
+
+
+def validate_visual_extraction_result(
+    result: Any,
+    *,
+    expected_roles: tuple[str, ...] = ("creator", "benchmark"),
+    source_durations: dict[str, float] | None = None,
+) -> list[str]:
+    """Validate visual extraction output; severity is intentionally forbidden."""
+    if not isinstance(result, dict):
+        return ["result must be an object"]
+    roles = tuple(str(role).strip() for role in expected_roles)
+    if not roles or any(role not in RAW_VIDEO_ROLES for role in roles) or len(set(roles)) != len(roles):
+        return ["expected_roles must contain unique creator and/or benchmark roles"]
+    errors: list[str] = []
+    expected_root = {"schema_version", *(f"{role}_evidence_units" for role in roles)}
+    if result.get("schema_version") != COMPACT_EVAL_SCHEMA_VERSION:
+        errors.append("schema_version mismatch")
+    extra_root = set(result) - expected_root
+    if extra_root:
+        errors.append(f"unsupported root fields: {sorted(extra_root)}")
+    source_durations = source_durations or {}
+    for role in roles:
+        errors.extend(
+            _validate_extraction_units(
+                result.get(f"{role}_evidence_units"),
+                role=role,
+                source_duration_seconds=source_durations.get(role),
+            )
+        )
+    return errors
+
+
+def _normalise_extraction_text(value: Any) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _extraction_unit_signature(unit: dict[str, Any]) -> tuple[Any, ...]:
+    parsed = parse_time_range_seconds(unit.get("time_range"), None)
+    time_signature: tuple[Any, ...]
+    if parsed is None:
+        time_signature = (str(unit.get("time_range") or "").strip(),)
+    else:
+        time_signature = tuple(round(float(value), 3) for value in parsed)
+    functions = tuple(sorted(str(value).strip().upper() for value in unit.get("functions", []) if str(value).strip()))
+    return (_normalise_extraction_text(unit.get("information")), time_signature, functions)
+
+
+def _extraction_information_signature(unit: dict[str, Any]) -> str:
+    return _normalise_extraction_text(unit.get("information"))
+
+
+def compare_visual_extraction_units(
+    left: list[dict[str, Any]],
+    right: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Compare two extracted unit lists without treating generated IDs as content."""
+    left_signatures = {_extraction_unit_signature(item) for item in left if isinstance(item, dict)}
+    right_signatures = {_extraction_unit_signature(item) for item in right if isinstance(item, dict)}
+    left_information = {_extraction_information_signature(item) for item in left if isinstance(item, dict)}
+    right_information = {_extraction_information_signature(item) for item in right if isinstance(item, dict)}
+    exact_intersection = left_signatures & right_signatures
+    information_intersection = left_information & right_information
+    signature_union = left_signatures | right_signatures
+    information_union = left_information | right_information
+    temporal_stage_matches = 0
+    used_right_indexes: set[int] = set()
+    candidates: list[tuple[float, int, int]] = []
+    for left_index, left_item in enumerate(left):
+        if not isinstance(left_item, dict):
+            continue
+        left_range = parse_time_range_seconds(left_item.get("time_range"), None)
+        left_functions = {
+            str(value).strip().upper()
+            for value in left_item.get("functions", [])
+            if isinstance(value, str)
+        }
+        if left_range is None:
+            continue
+        for right_index, right_item in enumerate(right):
+            if not isinstance(right_item, dict):
+                continue
+            right_range = parse_time_range_seconds(right_item.get("time_range"), None)
+            if right_range is None:
+                continue
+            right_functions = {
+                str(value).strip().upper()
+                for value in right_item.get("functions", [])
+                if isinstance(value, str)
+            }
+            if not left_functions.intersection(right_functions):
+                continue
+            overlap = max(0.0, min(left_range[1], right_range[1]) - max(left_range[0], right_range[0]))
+            shortest = min(left_range[1] - left_range[0], right_range[1] - right_range[0])
+            if overlap > 0 and shortest > 0:
+                candidates.append((overlap / shortest, left_index, right_index))
+    for score, _, right_index in sorted(candidates, reverse=True):
+        if score < 0.5 or right_index in used_right_indexes:
+            continue
+        used_right_indexes.add(right_index)
+        temporal_stage_matches += 1
+    return {
+        "left_count": len(left),
+        "right_count": len(right),
+        "exact_signature_matches": len(exact_intersection),
+        "exact_signature_jaccard": (
+            len(exact_intersection) / len(signature_union) if signature_union else 1.0
+        ),
+        "information_matches": len(information_intersection),
+        "information_jaccard": (
+            len(information_intersection) / len(information_union) if information_union else 1.0
+        ),
+        "temporal_stage_matches": temporal_stage_matches,
+        "temporal_stage_match_rate": (
+            temporal_stage_matches / min(len(left), len(right)) if min(len(left), len(right)) else 0.0
+        ),
+    }
+
+
+def _source_video_durations(run_dir: Path) -> dict[str, float]:
+    analysis = _read_json(run_dir / "analysis.json", required=False)
+    videos = analysis.get("videos")
+    if not isinstance(videos, dict):
+        return {}
+    durations: dict[str, float] = {}
+    for role in RAW_VIDEO_ROLES:
+        value = videos.get(role, {}).get("duration_seconds") if isinstance(videos.get(role), dict) else None
+        try:
+            duration = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(duration) and duration > 0:
+            durations[role] = duration
+    return durations
+
+
+def _bundle_video_durations(bundle: FrozenCompactBundle) -> dict[str, float]:
+    durations: dict[str, float] = {}
+    for item in bundle.video_inputs:
+        role = str(item.get("role") or "").strip()
+        try:
+            duration = float(item.get("duration_seconds"))
+        except (TypeError, ValueError):
+            continue
+        if role in RAW_VIDEO_ROLES and math.isfinite(duration) and duration > 0:
+            durations[role] = duration
+    return durations
+
+
+def normalize_visual_extraction_result(
+    result: dict[str, Any],
+    bundle: FrozenCompactBundle,
+) -> dict[str, Any]:
+    """Build a comparison view without changing the model-produced result."""
+    roles = _visual_extraction_roles(bundle)
+    durations = _source_video_durations(bundle.run_dir)
+    durations.update({role: value for role, value in _bundle_video_durations(bundle).items() if role not in durations})
+    by_role: dict[str, list[dict[str, Any]]] = {}
+    for role in roles:
+        normalized_units: list[dict[str, Any]] = []
+        units = result.get(f"{role}_evidence_units", [])
+        if not isinstance(units, list):
+            units = []
+        for unit in units:
+            if not isinstance(unit, dict):
+                continue
+            parsed = parse_time_range_seconds(unit.get("time_range"), durations.get(role))
+            normalized_units.append(
+                {
+                    "id": unit.get("id"),
+                    "time_range": unit.get("time_range"),
+                    "normalized_start_seconds": round(parsed[0], 3) if parsed is not None else None,
+                    "normalized_end_seconds": round(parsed[1], 3) if parsed is not None else None,
+                    "information": unit.get("information"),
+                    "functions": unit.get("functions"),
+                    "evidence_strength": unit.get("evidence_strength"),
+                }
+            )
+        by_role[role] = normalized_units
+    return {
+        "schema_version": 1,
+        "source_duration_seconds": durations,
+        "by_role": by_role,
+    }
+
+
+def summarize_visual_extraction_result(
+    result: dict[str, Any],
+    bundle: FrozenCompactBundle,
+) -> dict[str, Any]:
+    """Produce offline coverage and duplication metrics for one valid result."""
+    roles = _visual_extraction_roles(bundle)
+    durations = _source_video_durations(bundle.run_dir)
+    durations.update({role: value for role, value in _bundle_video_durations(bundle).items() if role not in durations})
+    by_role: dict[str, Any] = {}
+    for role in roles:
+        units = result.get(f"{role}_evidence_units", [])
+        if not isinstance(units, list):
+            units = []
+        ranges = [
+            parse_time_range_seconds(item.get("time_range"), None)
+            for item in units
+            if isinstance(item, dict)
+        ]
+        ranges = [item for item in ranges if item is not None]
+        first_start = min((item[0] for item in ranges), default=None)
+        last_end = max((item[1] for item in ranges), default=None)
+        duration = durations.get(role)
+        by_role[role] = {
+            "unit_count": len(units),
+            "max_units_hit": len(units) >= EXTRACTION_MAX_UNITS,
+            "first_start_seconds": first_start,
+            "last_end_seconds": last_end,
+            "source_duration_seconds": duration,
+            "upper_bound_coverage_ratio": (
+                last_end / duration if last_end is not None and duration and duration > 0 else None
+            ),
+            "stage_functions": sorted(
+                {
+                    function
+                    for item in units
+                    if isinstance(item, dict)
+                    for function in item.get("functions", [])
+                    if isinstance(function, str) and re.fullmatch(r"S[1-6]", function)
+                }
+            ),
+            "missing_stage_functions": sorted(
+                set(f"S{index}" for index in range(1, 7))
+                - {
+                    function
+                    for item in units
+                    if isinstance(item, dict)
+                    for function in item.get("functions", [])
+                    if isinstance(function, str) and re.fullmatch(r"S[1-6]", function)
+                }
+            ),
+            "s6_present": any(
+                isinstance(item, dict)
+                and any(function == "S6" for function in item.get("functions", []))
+                for item in units
+            ),
+            "evidence_strength_counts": {
+                strength: sum(item.get("evidence_strength") == strength for item in units if isinstance(item, dict))
+                for strength in ("direct", "explicit", "inferred", "absent")
+            },
+        }
+    summary: dict[str, Any] = {
+        "video_role_order": list(roles),
+        "by_role": by_role,
+    }
+    if set(roles) == set(RAW_VIDEO_ROLES):
+        creator_units = result.get("creator_evidence_units", [])
+        benchmark_units = result.get("benchmark_evidence_units", [])
+        duplicate = compare_visual_extraction_units(creator_units, benchmark_units)
+        denominator = min(len(creator_units), len(benchmark_units))
+        summary["cross_role_duplicate_rate"] = (
+            duplicate["exact_signature_matches"] / denominator if denominator else 0.0
+        )
+        summary["cross_role_information_duplicate_rate"] = (
+            duplicate["information_matches"] / denominator if denominator else 0.0
+        )
+        summary["cross_role_duplicate_comparison"] = duplicate
+    return summary
+
+
+def _range_relation(unit_range: Any, stage_range: Any) -> tuple[str, float | None]:
+    parsed_unit = parse_time_range_seconds(unit_range, None)
+    parsed_stage = parse_time_range_seconds(stage_range, None)
+    if parsed_unit is None or parsed_stage is None:
+        return "unknown", None
+    unit_start, unit_end = parsed_unit
+    stage_start, stage_end = parsed_stage
+    if min(unit_end, stage_end) > max(unit_start, stage_start):
+        return "overlap", 0.0
+    if math.isclose(unit_end, stage_start) or math.isclose(stage_end, unit_start):
+        return "touching_boundary", 0.0
+    if unit_end < stage_start:
+        return "before", stage_start - unit_end
+    if stage_end < unit_start:
+        return "after", unit_start - stage_end
+    return "unknown", None
+
+
+def diagnose_compact_evidence_references(
+    result: dict[str, Any],
+    bundle: FrozenCompactBundle,
+) -> dict[str, Any]:
+    """Explain evidence-reference errors without changing a model result.
+
+    The temporal decision uses the production ``evidence_overlaps_range``
+    primitive. The extra relation/distance fields only classify the diagnostic
+    output, so a boundary touch is distinguishable from a distant mismatch.
+    """
+    facts_by_role = {
+        role: {
+            str(unit.get("id")): unit
+            for unit in bundle.context.get("facts", {}).get(role, {}).get("evidence_units", [])
+            if isinstance(unit, dict) and str(unit.get("id") or "").strip()
+        }
+        for role in ("creator", "benchmark")
+    }
+    checks: list[dict[str, Any]] = []
+    for item in result.get("stage_judgments", []) if isinstance(result, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            stage_code = _stage_code(str(item.get("stage") or ""))
+        except CompactEvaluationError:
+            continue
+        for role in ("creator", "benchmark"):
+            side = item.get(role)
+            references = side.get("evidence_ids", []) if isinstance(side, dict) else []
+            if not isinstance(references, list):
+                continue
+            stage_range = bundle.stage_time_ranges.get(role, {}).get(stage_code)
+            for raw_id in references:
+                evidence_id = str(raw_id).strip()
+                unit = facts_by_role[role].get(evidence_id)
+                flags: list[str] = []
+                record: dict[str, Any] = {
+                    "role": role,
+                    "stage": stage_code,
+                    "evidence_id": evidence_id,
+                    "stage_time_range": stage_range,
+                }
+                if unit is None:
+                    flags.append("unknown_evidence_id")
+                    record.update({"status": "incomplete", "diagnostic_flags": flags})
+                    checks.append(record)
+                    continue
+                unit_range = unit.get("time_range")
+                function_tokens = {
+                    str(function).strip().upper().split("_", 1)[0]
+                    for function in unit.get("functions", [])
+                    if isinstance(function, str)
+                }
+                function_match = stage_code in function_tokens if function_tokens else None
+                overlap = None
+                if stage_range is not None:
+                    overlap = evidence_overlaps_range(unit, stage_range)
+                    if overlap is False:
+                        flags.append("evidence_temporal_mismatch")
+                if function_match is False:
+                    flags.append("stage_function_mismatch")
+                relation, distance = _range_relation(unit_range, stage_range)
+                record.update(
+                    {
+                        "evidence_time_range": unit_range,
+                        "temporal_overlap": overlap,
+                        "range_relation": relation,
+                        "distance_seconds": distance,
+                        "function_stage_match": function_match,
+                        "diagnostic_flags": flags,
+                        "status": "diagnostic_mismatch" if flags else "consistent",
+                    }
+                )
+                checks.append(record)
+    summary = {
+        "total_references": len(checks),
+        "consistent_references": sum(item["status"] == "consistent" for item in checks),
+        "unknown_evidence_ids": sum("unknown_evidence_id" in item.get("diagnostic_flags", []) for item in checks),
+        "temporal_mismatches": sum(
+            "evidence_temporal_mismatch" in item.get("diagnostic_flags", []) for item in checks
+        ),
+        "function_stage_mismatches": sum(
+            "stage_function_mismatch" in item.get("diagnostic_flags", []) for item in checks
+        ),
+        "touching_boundaries": sum(item.get("range_relation") == "touching_boundary" for item in checks),
+    }
+    return {"schema_version": 1, "summary": summary, "checks": checks}
+
+
+def load_gt_stages(gt_path: Path, sample_id: str) -> dict[str, str]:
+    data = _read_json(gt_path)
+    sample = data.get("samples", {}).get(sample_id) if isinstance(data.get("samples"), dict) else None
+    stages = sample.get("stages") if isinstance(sample, dict) else None
+    if not isinstance(stages, dict):
+        raise CompactEvaluationError(f"GT sample has no stage labels: {sample_id}")
+    return {str(key): str(value) for key, value in stages.items() if str(value) in COMPACT_SEVERITIES}
+
+
+def score_compact_result(result: dict[str, Any], gt_stages: dict[str, str]) -> dict[str, Any]:
+    rows = []
+    for item in result.get("stage_judgments", []):
+        code = _stage_code(str(item.get("stage") or ""))
+        gt = gt_stages.get(code)
+        if gt is None:
+            continue
+        prediction = item.get("severity")
+        rows.append({"stage": code, "prediction": prediction, "gt": gt, "correct": prediction == gt})
+    correct = sum(1 for row in rows if row["correct"])
+    return {
+        "labeled_stages": len(rows),
+        "correct_stages": correct,
+        "accuracy": correct / len(rows) if rows else None,
+        "rows": rows,
+    }
+
+
+def _run_isolated_evaluation(
+    *,
+    model: str,
+    bundle: FrozenCompactBundle,
+    output_dir: Path,
+    api_url: str,
+    api_key_args: Any,
+    payload: dict[str, Any],
+    validator: Any,
+    task_role: str,
+    evaluation_role: str,
+    variant: str,
+    success_filename: str,
+    failure_filename: str,
+    call_kind: str,
+    output_budget: int,
+    output_budget_field: str,
+    request_timeout_seconds: int,
+    gt_stages: dict[str, str] | None = None,
+    diagnostics: Any = None,
+) -> dict[str, Any]:
+    if evaluation_role not in EVALUATION_ROLES:
+        raise CompactEvaluationError(f"unsupported evaluation_role: {evaluation_role}")
+    output_dir = output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for stale_name in (
+        "compact_evaluation.json",
+        "compact_failure.json",
+        "severity_only_evaluation.json",
+        "severity_only_failure.json",
+        "severity_scaffold_evaluation.json",
+        "severity_scaffold_failure.json",
+        "visual_extraction_evaluation.json",
+        "visual_extraction_failure.json",
+        "raw_model_response.json",
+        ".compact-request.json",
+    ):
+        (output_dir / stale_name).unlink(missing_ok=True)
+    decision_scope = DECISION_SCOPE_BY_ROLE[evaluation_role]
+    metadata = {
+        "evaluation_role": evaluation_role,
+        "decision_scope": decision_scope,
+        "promotion_eligible": False,
+        "promotion_note": "isolated model evaluation is not a production-model selection decision",
+        "task_role": task_role,
+        "variant": variant,
+        "schema_version": COMPACT_EVAL_SCHEMA_VERSION,
+        "model": model,
+        "source_run": bundle.run_dir.name,
+        "source_digest": bundle.source_digest,
+        "input_mode": bundle.input_mode,
+        "output_budget_field": output_budget_field,
+        "output_budget": output_budget,
+        "request_retry_policy": {"outer_attempts": 1, "transport_retries": 0},
+        "request_timeout_seconds": request_timeout_seconds,
+        "image_count": len(bundle.visual_inputs),
+        "image_labels": [item["label"] for item in bundle.visual_inputs],
+        "video_count": len(bundle.video_inputs),
+        "video_labels": [item["label"] for item in bundle.video_inputs],
+        "video_role_order": [item["role"] for item in bundle.video_inputs],
+        "video_source_sha256": [item["sha256"] for item in bundle.video_inputs],
+        "video_data_url_sha256": [item["data_url_sha256"] for item in bundle.video_inputs],
+        "video_source_duration_seconds": [item["duration_seconds"] for item in bundle.video_inputs],
+    }
+    write_json(output_dir / "compact_request_metadata.json", metadata)
+    api_key = read_llm_api_key(api_key_args)
+    if not api_key:
+        raise CompactEvaluationError("LLM API key is unavailable")
+    limits = ResourceLimits(
+        max_total_wall_time=min(max(float(request_timeout_seconds) + 30.0, 60.0), 1800.0),
+        max_llm_calls=1,
+        max_total_uploaded_bytes=64 * 1024 * 1024,
+        max_download_bytes=32 * 1024 * 1024,
+        max_cost_estimate=1.0,
+    )
+    budget = ResourceBudget(limits)
+    token = budget.activate()
+    raw_path = output_dir / "raw_model_response.json"
+    try:
+        payload_path = output_dir / ".compact-request.json"
+        write_json(payload_path, payload)
+        raw_text = call_llm_api(
+            api_url,
+            api_key,
+            payload_path,
+            raw_path,
+            max_time_seconds=request_timeout_seconds,
+            low_speed_time_seconds=min(180, max(30, request_timeout_seconds)),
+            retries=0,
+            budget=budget,
+            call_kind=call_kind,
+            cleanup_raw=False,
+        )
+        response = json.loads(raw_text)
+        content = extract_chat_completion_text(response)
+        parsed = parse_json_text(content)
+        errors = validator(parsed)
+        if errors:
+            failure = {
+                "status": "contract_failed",
+                **metadata,
+                "errors": errors,
+                "candidate_result": parsed,
+                "resource_budget": budget.snapshot(),
+            }
+            if diagnostics is not None:
+                failure["evidence_diagnostics"] = diagnostics(parsed, bundle)
+            write_json(output_dir / failure_filename, failure)
+            return failure
+        result: dict[str, Any] = {
+            "status": "completed",
+            **metadata,
+            "result": parsed,
+            "resource_budget": budget.snapshot(),
+        }
+        if variant == "visual_extraction_on_raw_video":
+            result["normalized_evidence_units"] = normalize_visual_extraction_result(parsed, bundle)
+        if gt_stages is not None:
+            result["gt_score"] = score_compact_result(parsed, gt_stages)
+        if diagnostics is not None:
+            result["evidence_diagnostics"] = diagnostics(parsed, bundle)
+        write_json(output_dir / success_filename, result)
+        return result
+    except (OSError, json.JSONDecodeError, SystemExit, CompactEvaluationError, ResourceBudgetExceeded) as exc:
+        failure = {
+            "status": "request_failed",
+            **metadata,
+            "error": str(exc)[:1000],
+            "resource_budget": budget.snapshot(),
+        }
+        write_json(output_dir / failure_filename, failure)
+        return failure
+    finally:
+        budget.deactivate(token)
+
+
+def run_compact_evaluation(
+    *,
+    model: str,
+    bundle: FrozenCompactBundle,
+    output_dir: Path,
+    api_url: str,
+    api_key_args: Any,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+    request_timeout_seconds: int = 600,
+    gt_stages: dict[str, str] | None = None,
+    evaluation_role: str = "model_calibration",
+) -> dict[str, Any]:
+    """Run the original evidence-grounded compact contract in isolation."""
+    payload = build_compact_eval_payload(
+        model,
+        bundle,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+    return _run_isolated_evaluation(
+        model=model,
+        bundle=bundle,
+        output_dir=output_dir,
+        api_url=api_url,
+        api_key_args=api_key_args,
+        payload=payload,
+        validator=lambda value: validate_compact_result(value, bundle),
+        task_role=COMPACT_EVAL_ROLE,
+        evaluation_role=evaluation_role,
+        variant="evidence_grounded",
+        success_filename="compact_evaluation.json",
+        failure_filename="compact_failure.json",
+        call_kind="compact_eval",
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+        request_timeout_seconds=request_timeout_seconds,
+        gt_stages=gt_stages,
+        diagnostics=diagnose_compact_evidence_references,
+    )
+
+
+def run_severity_only_evaluation(
+    *,
+    model: str,
+    bundle: FrozenCompactBundle,
+    output_dir: Path,
+    api_url: str,
+    api_key_args: Any,
+    scaffold: bool = False,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+    request_timeout_seconds: int = 600,
+    gt_stages: dict[str, str] | None = None,
+    evaluation_role: str = "model_calibration",
+) -> dict[str, Any]:
+    """Run severity judgment on one shared, validated fact package."""
+    payload = build_severity_only_payload(
+        model,
+        bundle,
+        scaffold=scaffold,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+    return _run_isolated_evaluation(
+        model=model,
+        bundle=bundle,
+        output_dir=output_dir,
+        api_url=api_url,
+        api_key_args=api_key_args,
+        payload=payload,
+        validator=lambda value: validate_severity_only_result(value, scaffold=scaffold),
+        task_role=SEVERITY_ONLY_ROLE,
+        evaluation_role=evaluation_role,
+        variant="severity_only_scaffold" if scaffold else "severity_only",
+        success_filename="severity_scaffold_evaluation.json" if scaffold else "severity_only_evaluation.json",
+        failure_filename="severity_scaffold_failure.json" if scaffold else "severity_only_failure.json",
+        call_kind="compact_severity_eval",
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+        request_timeout_seconds=request_timeout_seconds,
+        gt_stages=gt_stages,
+    )
+
+
+def run_visual_extraction_evaluation(
+    *,
+    model: str,
+    bundle: FrozenCompactBundle,
+    output_dir: Path,
+    api_url: str,
+    api_key_args: Any,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+    request_timeout_seconds: int = 600,
+    evaluation_role: str = "model_calibration",
+) -> dict[str, Any]:
+    """Run visual fact extraction over fixed frames, without severity judgment."""
+    if bundle.input_mode != "raw_video_only":
+        raise CompactEvaluationError("visual extraction requires a raw_video_only bundle")
+    roles = _visual_extraction_roles(bundle)
+    source_durations = _bundle_video_durations(bundle)
+    if any(role not in source_durations for role in roles):
+        raise CompactEvaluationError("visual extraction requires a finite source duration for every video role")
+    payload = build_visual_extraction_payload(
+        model,
+        bundle,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+    return _run_isolated_evaluation(
+        model=model,
+        bundle=bundle,
+        output_dir=output_dir,
+        api_url=api_url,
+        api_key_args=api_key_args,
+        payload=payload,
+        validator=lambda value: validate_visual_extraction_result(
+            value,
+            expected_roles=roles,
+            source_durations=source_durations,
+        ),
+        task_role=VISUAL_EXTRACTION_ROLE,
+        evaluation_role=evaluation_role,
+        variant="visual_extraction_on_raw_video",
+        success_filename="visual_extraction_evaluation.json",
+        failure_filename="visual_extraction_failure.json",
+        call_kind="compact_extraction_eval",
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+        request_timeout_seconds=request_timeout_seconds,
+    )

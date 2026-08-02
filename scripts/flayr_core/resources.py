@@ -127,6 +127,10 @@ class ResourceBudget:
     def activate(self) -> contextvars.Token[ResourceBudget | None]:
         return _ACTIVE_BUDGET.set(self)
 
+    def deactivate(self, token: contextvars.Token[ResourceBudget | None]) -> None:
+        """Restore the budget that was active before this scoped run."""
+        _ACTIVE_BUDGET.reset(token)
+
     def elapsed_seconds(self) -> float:
         return max(0.0, time.monotonic() - self.started_at)
 
