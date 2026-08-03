@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from pathlib import Path
@@ -13,7 +14,14 @@ from .artifacts import (
     focus_frame_sort_key,
     numbered_frame_sort_key,
     parse_timestamp_seconds,
+    stage_time_ranges,
 )
+
+
+MAX_SUPPLEMENTAL_ANCHOR_FRAMES = 48
+MIN_ANCHOR_GAP_SECONDS = 0.35
+MAX_BASE_FPS = 2.0
+MAX_FOCUS_FRAMES_PER_ROLE = 20
 from .utils import run_command, write_json
 from .resources import (
     ResourceBudget,
@@ -56,6 +64,7 @@ def reserve_existing_media_artifacts(role_dir: Path, budget: ResourceBudget) -> 
     """Account for cached media so --reuse-preprocessing cannot bypass disk limits."""
     paths = [
         *role_dir.glob("frames/frame_*.jpg"),
+        *role_dir.glob("frames/anchors/*.jpg"),
         *role_dir.glob("focus_frames/*.jpg"),
     ]
     audio_path = role_dir / "audio.wav"
@@ -128,7 +137,22 @@ def extract_frames(
     except ValueError:
         result["errors"].append("duration unavailable or invalid: skipped frame extraction")
         return
-    expected_frames = max(1, int(math.ceil(duration)))
+    # Reserve roughly half of the run-level frame budget for this role and
+    # leave room for its first/last focus frames. Short videos therefore get
+    # up to 2fps; long videos degrade deterministically instead of exceeding
+    # the shared budget.
+    role_frame_ceiling = max(
+        1,
+        (
+            budget.limits.max_extracted_frames
+            - MAX_FOCUS_FRAMES_PER_ROLE * 2
+            - MAX_SUPPLEMENTAL_ANCHOR_FRAMES * 2
+        )
+        // 2,
+    )
+    base_fps = min(MAX_BASE_FPS, role_frame_ceiling / max(duration, 1.0))
+    base_fps = max(1.0 / max(duration, 1.0), base_fps)
+    expected_frames = max(1, int(math.ceil(duration * base_fps)))
     reserved_frames = 0
     if budget is not None:
         try:
@@ -146,7 +170,7 @@ def extract_frames(
         "-i",
         str(video_path),
         "-vf",
-        "fps=1,showinfo",
+        f"fps={base_fps:.3f},showinfo",
         "-t",
         f"{duration:.3f}",
         "-frames:v",
@@ -174,6 +198,7 @@ def extract_frames(
     if budget is not None and reserved_frames > len(frames):
         budget.release_frames(reserved_frames - len(frames))
     result["frame_count"] = len(frames)
+    result["base_frame_fps"] = round(base_fps, 3)
     frame_timestamps = _showinfo_timestamps(completed.stderr, len(frames))
     if any(timestamp is None for timestamp in frame_timestamps):
         result["errors"].append("frame timestamps unavailable or incomplete; frame evidence timestamps omitted")
@@ -281,6 +306,152 @@ def extract_focus_frames(
     result["focus_frame_manifest_path"] = str(focus_frames_dir / "manifest.json")
     result["focus_frames"] = manifest
     write_json(focus_frames_dir / "manifest.json", manifest)
+
+
+def extract_anchor_frames(
+    video_path: Path,
+    frames_dir: Path,
+    result: dict[str, Any],
+    budget: ResourceBudget | None = None,
+) -> None:
+    """Extract one accurate frame at structural boundaries missed by base sampling.
+
+    The base corpus remains bounded and deterministic.  This supplemental pass
+    is driven by shot cuts, OCR subtitle boundaries, and stage window edges so
+    a one-second sampler cannot silently turn a short CTA or text change into
+    an unavailable visual fact.
+    """
+    budget = budget or current_budget() or ResourceBudget()
+    duration = parse_timestamp_seconds(result.get("duration_seconds"))
+    if duration is None or duration <= 0 or not video_path.is_file():
+        return
+    anchor_dir = frames_dir / "anchors"
+    anchor_dir.mkdir(parents=True, exist_ok=True)
+    for stale in anchor_dir.glob("anchor_*.jpg"):
+        stale.unlink(missing_ok=True)
+
+    existing = [
+        parse_timestamp_seconds(item.get("timestamp_seconds"))
+        for item in result.get("frames", [])
+        if isinstance(item, dict)
+    ]
+    existing_times = [value for value in existing if value is not None]
+    anchors = _collect_anchor_times(result, duration)
+    filtered: list[tuple[float, str]] = []
+    for timestamp, reason in anchors:
+        if any(abs(timestamp - previous) < MIN_ANCHOR_GAP_SECONDS for previous in existing_times):
+            continue
+        if filtered and abs(timestamp - filtered[-1][0]) < MIN_ANCHOR_GAP_SECONDS:
+            filtered[-1] = (filtered[-1][0], f"{filtered[-1][1]}+{reason}")
+            continue
+        filtered.append((timestamp, reason))
+        if len(filtered) >= MAX_SUPPLEMENTAL_ANCHOR_FRAMES:
+            break
+
+    if not filtered:
+        result["analysis_anchor_frame_count"] = 0
+        return
+
+    manifest = [item for item in result.get("frames", []) if isinstance(item, dict)]
+    for index, (timestamp, reason) in enumerate(filtered, start=1):
+        if budget is not None:
+            try:
+                budget.reserve_frames(1)
+            except ResourceBudgetExceeded as exc:
+                result["errors"].append(f"supplemental anchor frame skipped: {exc}")
+                break
+        output = anchor_dir / f"anchor_{index:04d}.jpg"
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "info",
+            "-y",
+            "-i",
+            str(video_path),
+            "-ss",
+            f"{timestamp:.3f}",
+            "-frames:v",
+            "1",
+            "-vf",
+            "showinfo",
+            "-q:v",
+            "2",
+            "-fs",
+            str(max(1, budget.limits.max_local_artifact_bytes - budget.local_artifact_bytes)),
+            str(output),
+        ]
+        completed = run_command(command, budget=budget)
+        if completed.returncode != 0 or not output.is_file():
+            output.unlink(missing_ok=True)
+            if budget is not None:
+                budget.release_frames(1)
+            result["errors"].append(
+                f"supplemental anchor frame failed at {timestamp:.2f}s: {completed.stderr.strip()}"
+            )
+            continue
+        if not _reserve_artifacts([output], budget, result, "supplemental anchor frames"):
+            if budget is not None:
+                budget.release_frames(1)
+            continue
+        actual = _showinfo_timestamps(completed.stderr, 1)[0]
+        if actual is None or actual > duration + 0.05 or abs(actual - timestamp) > 0.5:
+            actual = timestamp
+        entry = {
+            "timestamp_seconds": round(actual, 3),
+            "requested_timestamp_seconds": round(timestamp, 3),
+            "path": str(output),
+            "filename": output.name,
+            "source": "structural_anchor",
+            "anchor_type": reason,
+        }
+        manifest.append(entry)
+
+    result["frames"] = sorted(manifest, key=lambda item: parse_timestamp_seconds(item.get("timestamp_seconds")) or 0.0)
+    result["frame_count"] = len(result["frames"])
+    result["analysis_anchor_frame_count"] = sum(
+        1 for item in result["frames"] if item.get("source") == "structural_anchor"
+    )
+    result["frame_manifest_path"] = str(frames_dir / "manifest.json")
+    write_json(frames_dir / "manifest.json", result["frames"])
+
+
+def _collect_anchor_times(result: dict[str, Any], duration: float) -> list[tuple[float, str]]:
+    """Collect deterministic anchor times in stable temporal order."""
+    anchors: dict[float, set[str]] = {}
+
+    def add(value: Any, reason: str) -> None:
+        timestamp = parse_timestamp_seconds(value)
+        if timestamp is None or not math.isfinite(timestamp) or timestamp <= 0 or timestamp >= duration:
+            return
+        anchors.setdefault(round(timestamp, 3), set()).add(reason)
+
+    for stage_name, _label, start, end in stage_time_ranges(duration):
+        add(start, "stage_boundary")
+        add(end, "stage_boundary")
+
+    for key, reason in (("shot_track_path", "scene_boundary"), ("subtitle_track_path", "subtitle_boundary")):
+        raw_path = str(result.get(key) or "").strip()
+        if not raw_path:
+            continue
+        try:
+            data = json.loads(Path(raw_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if key == "shot_track_path":
+            items = data.get("shots", []) if isinstance(data, dict) else []
+        else:
+            items = data.get("segments", []) if isinstance(data, dict) else []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            add(item.get("start_sec"), reason)
+            add(item.get("end_sec"), reason)
+
+    ordered: list[tuple[float, str]] = []
+    for timestamp in sorted(anchors):
+        ordered.append((timestamp, "+".join(sorted(anchors[timestamp]))))
+    return ordered
 
 
 def extract_audio(video_path: Path, audio_path: Path, result: dict[str, Any]) -> None:

@@ -11,8 +11,8 @@ from typing import Any
 
 from ..artifacts import (
     format_seconds,
+    get_analysis_frame_entries,
     get_focus_frame_entries,
-    get_frame_entries,
     parse_time_range_seconds,
     parse_timestamp_seconds,
     sample_evenly,
@@ -93,31 +93,75 @@ def get_timeline_view_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def get_llm_frame_candidates(info: dict[str, Any], limit: int) -> list[dict[str, Any]]:
-    """从一个视频的全片帧 + 加密 focus 帧中选候选帧。"""
+    """从 canonical analysis manifest 中选候选帧。
+
+    Anchor frames get first refusal so a small image budget cannot silently
+    replace scene/subtitle/CTA evidence with only evenly spaced frames.
+    """
     if limit <= 0:
         return []
-    focus_limit = 2 if limit >= 6 else 0
-    timeline_limit = max(1, limit - focus_limit)
-    timeline_entries = sample_evenly(get_frame_entries(info), timeline_limit)
-    focus_entries = sample_evenly(get_focus_frame_entries(info), focus_limit)
-    by_second: dict[float, dict[str, Any]] = {}
-    for entry in timeline_entries:
-        if not str(entry.get("path") or ""):
-            continue
-        timestamp = parse_timestamp_seconds(entry.get("timestamp_seconds"))
-        if timestamp is None:
-            continue
-        by_second.setdefault(round(timestamp, 1), entry)
-    for entry in focus_entries:
-        if not str(entry.get("path") or ""):
-            continue
-        timestamp = parse_timestamp_seconds(entry.get("timestamp_seconds"))
-        if timestamp is None:
-            continue
-        by_second[round(timestamp, 1)] = entry
+    entries = get_analysis_frame_entries(info)
+    if not entries:
+        return []
+    has_canonical_metadata = any(isinstance(entry.get("selection_reasons"), list) for entry in entries)
+    if not has_canonical_metadata:
+        # Compatibility for pre-v2 cached manifests.  New preprocessing writes
+        # selection provenance and therefore always follows the canonical path.
+        focus_limit = 2 if limit >= 6 else 0
+        timeline_entries = sample_evenly(entries, max(1, limit - focus_limit))
+        focus_entries = sample_evenly(get_focus_frame_entries(info), focus_limit)
+        return sample_evenly([*timeline_entries, *focus_entries], limit)
+
+    def reasons(entry: dict[str, Any]) -> list[str]:
+        value = entry.get("selection_reasons")
+        return [str(item) for item in value] if isinstance(value, list) else []
+
+    selected: list[dict[str, Any]] = []
+    used_paths: set[str] = set()
+
+    def add_group(group: list[dict[str, Any]], count: int) -> None:
+        if count <= 0:
+            return
+        available = [item for item in group if str(item.get("path") or "") not in used_paths]
+        for entry in sample_evenly(available, count):
+            path = str(entry.get("path") or "")
+            if path and path not in used_paths and len(selected) < limit:
+                selected.append(entry)
+                used_paths.add(path)
+
+    # Keep one explicit boundary/attention anchor from each high-value group,
+    # then use temporal coverage to fill the remaining budget.  Pure priority
+    # sorting can otherwise spend the entire image budget on early subtitles or
+    # several adjacent scene cuts and never show the middle/end of the video.
+    add_group([entry for entry in entries if "first_frame" in reasons(entry)], 1)
+    add_group([entry for entry in entries if "last_frame" in reasons(entry)], 1)
+    add_group([entry for entry in entries if "focus_hook" in reasons(entry)], 1)
+    add_group([entry for entry in entries if "focus_cta" in reasons(entry)], 1)
+    boundary_entries = [
+        entry
+        for entry in entries
+        if {"scene_boundary", "subtitle_boundary"}.intersection(reasons(entry))
+    ]
+    add_group(boundary_entries, min(2, max(0, limit - len(selected))))
+    change_entries = [
+        entry
+        for entry in entries
+        if {"local_change", "action_change", "global_change"}.intersection(reasons(entry))
+    ]
+    add_group(change_entries, min(2, max(0, limit - len(selected))))
+
+    if len(selected) < limit:
+        remaining = [entry for entry in entries if str(entry.get("path") or "") not in used_paths]
+        for entry in sample_evenly(remaining, limit - len(selected)):
+            path = str(entry.get("path") or "")
+            if path and path not in used_paths:
+                selected.append(entry)
+                used_paths.add(path)
     return sorted(
-        by_second.values(),
-        key=lambda item: parse_timestamp_seconds(item.get("timestamp_seconds")) or 0.0,
+        selected[:limit],
+        key=lambda item: parse_timestamp_seconds(item.get("timestamp_seconds"))
+        if parse_timestamp_seconds(item.get("timestamp_seconds")) is not None
+        else float("inf"),
     )
 
 

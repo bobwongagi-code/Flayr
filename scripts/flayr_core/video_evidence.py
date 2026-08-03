@@ -1,8 +1,4 @@
-"""Secondary video evidence artifacts for Flayr.
-
-These artifacts make the existing frames, audio, and transcript easier to audit.
-They do not change scoring directly.
-"""
+"""Video evidence artifacts and the canonical analysis-frame manifest."""
 
 from __future__ import annotations
 
@@ -22,27 +18,37 @@ except ImportError:  # pragma: no cover - optional artifact dependency
     ImageFont = None  # type: ignore[assignment]
 
 from .artifacts import (
+    build_stage_frame_manifest,
+    get_analysis_frame_entries,
     get_focus_frame_entries,
     get_frame_entries,
     get_stage_frame_entries,
     parse_timestamp_seconds,
     sample_evenly,
+    select_frames_for_time_range,
+    stage_time_ranges,
+)
+from .frame_selection import (
+    ACTION_CHANGE_THRESHOLD_PERCENT,
+    GLOBAL_CHANGE_THRESHOLD_PERCENT,
+    LOCAL_CHANGE_THRESHOLD_PERCENT,
+    MAX_DENSITY_GAP_SECONDS,
+    build_analysis_frame_manifest,
 )
 from .utils import write_json, write_text
 from .transcript import current_transcript_segments_path
 
-SIGNATURE_SIZE = 16
-DEDUP_THRESHOLD_PERCENT = 8.0
-DEDUP_WINDOW = 4
-
-
 def build_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]:
-    """Write dedup reports, contact sheets, transcript packs, and timeline views."""
+    """Build the canonical evidence manifest and its audit views."""
     result: dict[str, Any] = {
         "status": "completed",
         "errors": [],
         "frame_selection_report_path": None,
         "frame_selection_report_html_path": None,
+        "analysis_frame_manifest_path": None,
+        "analysis_frames": [],
+        "analysis_stage_frame_manifest_path": None,
+        "analysis_stage_frames": [],
         "contact_sheets_dir": None,
         "timeline_views_dir": None,
         "timeline_views": [],
@@ -50,6 +56,9 @@ def build_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> dict
         "transcript_pack_json_path": None,
         "audit_path": None,
     }
+    word_path = Path(str(info.get("transcript_words_path") or ""))
+    if word_path.is_file():
+        result["transcript_words_path"] = str(word_path)
 
     try:
         selection = build_frame_selection_report(role_dir, info)
@@ -75,7 +84,7 @@ def build_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> dict
     except Exception as exc:  # pragma: no cover
         result["errors"].append(f"timeline views failed: {exc}")
 
-    audit = audit_video_evidence(role_dir, result)
+    audit = audit_video_evidence(role_dir, result, info)
     result["audit_path"] = audit.get("path")
     if audit.get("warnings"):
         result["errors"].extend(audit["warnings"])
@@ -85,11 +94,17 @@ def build_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> dict
     return result
 
 
-def audit_video_evidence(role_dir: Path, result: dict[str, Any]) -> dict[str, Any]:
-    """Self-check generated evidence artifacts and write a small audit file."""
+def audit_video_evidence(
+    role_dir: Path,
+    result: dict[str, Any],
+    info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Self-check artifacts and the semantic integrity of selected evidence."""
     checks = [
         ("selection_report", result.get("frame_selection_report_path")),
         ("selection_report_html", result.get("frame_selection_report_html_path")),
+        ("analysis_frame_manifest", result.get("analysis_frame_manifest_path")),
+        ("analysis_stage_frame_manifest", result.get("analysis_stage_frame_manifest_path")),
     ]
     if result.get("transcript_pack_path"):
         checks.extend(
@@ -98,6 +113,8 @@ def audit_video_evidence(role_dir: Path, result: dict[str, Any]) -> dict[str, An
                 ("transcript_pack_json", result.get("transcript_pack_json_path")),
             ]
         )
+    if result.get("transcript_words_path"):
+        checks.append(("transcript_words", result.get("transcript_words_path")))
     views = result.get("timeline_views") if isinstance(result.get("timeline_views"), list) else []
     for item in views:
         if isinstance(item, dict):
@@ -115,10 +132,13 @@ def audit_video_evidence(role_dir: Path, result: dict[str, Any]) -> dict[str, An
             warnings.append(f"video evidence missing: {name}")
         audit_items.append({"name": name, "path": str(path) if raw_path else "", "exists": exists})
 
+    coverage = audit_analysis_frame_manifest(info or {}, result)
+    warnings.extend(coverage.get("warnings", []))
     audit = {
         "status": "pass" if not warnings else "warn",
         "warnings": warnings,
         "items": audit_items,
+        "coverage": coverage,
     }
     path = role_dir / "video_evidence_audit.json"
     write_json(path, audit)
@@ -126,91 +146,125 @@ def audit_video_evidence(role_dir: Path, result: dict[str, Any]) -> dict[str, An
     return audit
 
 
-def build_frame_selection_report(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]:
-    if Image is None:
-        return {}
-    frames = get_frame_entries(info)
-    if not frames:
-        return {}
-
-    kept_signatures: list[list[tuple[int, int, int]]] = []
-    decisions: list[dict[str, Any]] = []
-    kept_count = 0
+def audit_analysis_frame_manifest(info: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """Validate selected frame paths, time bounds, uniqueness, and coverage."""
+    duration = parse_timestamp_seconds(info.get("duration_seconds"))
+    frames = result.get("analysis_frames") if isinstance(result.get("analysis_frames"), list) else []
+    warnings: list[str] = []
+    paths: set[str] = set()
+    invalid_timestamps = 0
+    missing_paths = 0
+    timestamps: list[float] = []
+    reason_counts: dict[str, int] = {}
     for entry in frames:
-        path = Path(str(entry.get("path") or ""))
-        signature = image_signature(path)
-        if not signature:
-            decisions.append({**entry, "kept": False, "diff_percent": None, "reason": "unreadable"})
+        if not isinstance(entry, dict):
+            warnings.append("analysis frame manifest contains a non-object entry")
             continue
-
-        if not kept_signatures:
-            kept = True
-            diff_percent = 100.0
-            reason = "first_frame"
+        path = str(entry.get("path") or "")
+        if not path or not Path(path).is_file():
+            missing_paths += 1
+        if path in paths and path:
+            warnings.append(f"analysis frame manifest contains duplicate path: {path}")
+        if path:
+            paths.add(path)
+        timestamp = parse_timestamp_seconds(entry.get("timestamp_seconds"))
+        if timestamp is None or not math.isfinite(timestamp) or timestamp < 0:
+            invalid_timestamps += 1
         else:
-            recent = kept_signatures[-DEDUP_WINDOW:]
-            diffs = [pixel_diff_percent(signature, previous) for previous in recent]
-            diff_percent = min(diffs) if diffs else 100.0
-            kept = diff_percent >= DEDUP_THRESHOLD_PERCENT
-            reason = "visual_change" if kept else "near_duplicate"
+            timestamps.append(timestamp)
+            if duration is not None and timestamp > duration + 0.05:
+                warnings.append(f"analysis frame timestamp exceeds source duration: {timestamp:.2f}s > {duration:.2f}s")
+        reasons = entry.get("selection_reasons") if isinstance(entry.get("selection_reasons"), list) else []
+        for reason in reasons:
+            reason_counts[str(reason)] = reason_counts.get(str(reason), 0) + 1
 
-        if kept:
-            kept_signatures.append(signature)
-            kept_count += 1
-        decisions.append(
-            {
-                **entry,
-                "kept": kept,
-                "diff_percent": round(diff_percent, 2) if diff_percent is not None else None,
-                "reason": reason,
-            }
+    if missing_paths:
+        warnings.append(f"analysis frame manifest has {missing_paths} missing frame paths")
+    if invalid_timestamps:
+        warnings.append(f"analysis frame manifest has {invalid_timestamps} invalid timestamps")
+    timestamps.sort()
+    max_gap = max((right - left for left, right in zip(timestamps, timestamps[1:])), default=0.0)
+    if len(timestamps) > 1 and max_gap > MAX_DENSITY_GAP_SECONDS * 2.0:
+        warnings.append(
+            f"analysis frame manifest has a sparse gap of {max_gap:.2f}s; "
+            f"expected <= {MAX_DENSITY_GAP_SECONDS * 2.0:.2f}s"
         )
+    if len(frames) == 0:
+        warnings.append("analysis frame manifest is empty")
+
+    stage_frames = result.get("analysis_stage_frames") if isinstance(result.get("analysis_stage_frames"), list) else []
+    stage_counts: dict[str, int] = {}
+    for entry in stage_frames:
+        if isinstance(entry, dict):
+            stage = str(entry.get("stage") or "unknown")
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+
+    direct_stage_coverage: dict[str, int] = {}
+    if duration is not None:
+        for stage_name, _label, start, end in stage_time_ranges(duration):
+            count = sum(start <= timestamp <= end for timestamp in timestamps)
+            direct_stage_coverage[stage_name] = count
+            if count == 0 and end - start > 0.5:
+                warnings.append(f"analysis frame manifest has no direct coverage for {stage_name}")
+
+    return {
+        "status": "pass" if not warnings else "warn",
+        "frame_count": len(frames),
+        "stage_frame_count": len(stage_frames),
+        "max_timestamp_gap_seconds": round(max_gap, 3),
+        "reason_counts": reason_counts,
+        "stage_counts": stage_counts,
+        "direct_stage_coverage": direct_stage_coverage,
+        "warnings": warnings,
+    }
+
+
+def build_frame_selection_report(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]:
+    selection = build_analysis_frame_manifest(info)
+    frames = selection.get("frames") if isinstance(selection, dict) else []
+    decisions = selection.get("decisions") if isinstance(selection, dict) else []
+    if not isinstance(frames, list) or not frames:
+        return {}
+
+    kept_count = len(frames)
 
     report = {
         "strategy": {
-            "signature": f"{SIGNATURE_SIZE}x{SIGNATURE_SIZE} RGB pixel difference",
-            "threshold_percent": DEDUP_THRESHOLD_PERCENT,
-            "sliding_window": DEDUP_WINDOW,
-            "note": "Selection report is audit-only; frames are not deleted.",
+            "version": selection.get("strategy_version", "v2"),
+            "signals": ["global_rgb", "local_3x3_regions", "edge_motion_like", "scene_boundaries", "subtitle_boundaries"],
+            "global_threshold_percent": GLOBAL_CHANGE_THRESHOLD_PERCENT,
+            "local_threshold_percent": LOCAL_CHANGE_THRESHOLD_PERCENT,
+            "action_threshold_percent": ACTION_CHANGE_THRESHOLD_PERCENT,
+            "density_floor_seconds": MAX_DENSITY_GAP_SECONDS,
+            "note": "Canonical manifest controls visual inputs; original frames remain available for audit.",
         },
-        "frame_count": len(decisions),
+        "frame_count": len(decisions) if isinstance(decisions, list) else 0,
         "kept_count": kept_count,
-        "dropped_count": len(decisions) - kept_count,
-        "decisions": decisions,
+        "dropped_count": max(0, (len(decisions) if isinstance(decisions, list) else 0) - kept_count),
+        "anchor_count": selection.get("anchor_count", 0),
+        "decisions": decisions if isinstance(decisions, list) else [],
+        "selected_frames": frames,
     }
     frames_dir = Path(str(info.get("frames_dir") or role_dir / "frames"))
     json_path = frames_dir / "selection_report.json"
     html_path = frames_dir / "selection_report.html"
+    manifest_path = frames_dir / "analysis_manifest.json"
     write_json(json_path, report)
+    write_json(manifest_path, frames)
     write_selection_report_html(html_path, report)
+    analysis_stage_frames = build_stage_frame_manifest(frames, info.get("duration_seconds"))
+    stage_manifest_path = frames_dir / "analysis_stage_frames.json"
+    write_json(stage_manifest_path, analysis_stage_frames)
     return {
         "frame_selection_report_path": str(json_path),
         "frame_selection_report_html_path": str(html_path),
         "dedup_kept_frame_count": kept_count,
+        "analysis_frame_manifest_path": str(manifest_path),
+        "analysis_frames": frames,
+        "analysis_frame_count": len(frames),
+        "analysis_stage_frame_manifest_path": str(stage_manifest_path),
+        "analysis_stage_frames": analysis_stage_frames,
     }
-
-
-def image_signature(path: Path) -> list[tuple[int, int, int]]:
-    if not path.exists():
-        return []
-    with Image.open(path) as image:
-        small = image.convert("RGB").resize((SIGNATURE_SIZE, SIGNATURE_SIZE))
-        return list(small.getdata())
-
-
-def pixel_diff_percent(
-    current: list[tuple[int, int, int]],
-    previous: list[tuple[int, int, int]],
-    tolerance: int = 25,
-) -> float:
-    total = min(len(current), len(previous))
-    if total <= 0:
-        return 100.0
-    changed = 0
-    for left, right in zip(current[:total], previous[:total]):
-        if any(abs(left[index] - right[index]) > tolerance for index in range(3)):
-            changed += 1
-    return changed / total * 100
 
 
 def write_selection_report_html(path: Path, report: dict[str, Any]) -> None:
@@ -223,7 +277,9 @@ def write_selection_report_html(path: Path, report: dict[str, Any]) -> None:
             f"<td>{html.escape(str(item.get('timestamp_seconds', '')))}s</td>"
             f"<td><img src=\"{rel}\" alt=\"{rel}\"></td>"
             f"<td class=\"{status}\">{status}</td>"
-            f"<td>{html.escape(str(item.get('diff_percent')))}</td>"
+            f"<td>g={html.escape(str(item.get('global_diff_percent')))} / "
+            f"l={html.escape(str(item.get('local_diff_percent')))} / "
+            f"a={html.escape(str(item.get('action_diff_percent')))}</td>"
             f"<td>{html.escape(str(item.get('reason') or ''))}</td>"
             "</tr>"
         )
@@ -236,8 +292,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{border-bottom:1px solid #d8de
 img{{width:120px;border-radius:4px}}.keep{{color:#087f5b;font-weight:700}}.drop{{color:#c92a2a;font-weight:700}}
 </style>
 <h1>Frame selection report</h1>
-<p>Kept {report.get('kept_count')} / {report.get('frame_count')} frames. Audit-only; original frames remain available.</p>
-<table><thead><tr><th>Time</th><th>Frame</th><th>Decision</th><th>Diff %</th><th>Reason</th></tr></thead><tbody>
+<p>Selected {report.get('kept_count')} / {report.get('frame_count')} frames for analysis. Original frames remain available for audit.</p>
+<table><thead><tr><th>Time</th><th>Frame</th><th>Decision</th><th>Diff % (global/local/action)</th><th>Reason</th></tr></thead><tbody>
 {''.join(rows)}
 </tbody></table>
 """
@@ -397,10 +453,49 @@ def build_timeline_views(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]
     transcript = parse_srt_segments(transcript_path) if transcript_path else []
     written: list[dict[str, Any]] = []
     for label, start, end in ranges:
-        out_path = out_dir / f"{label}.jpg"
-        write_timeline_view(out_path, info, transcript, label, start, end)
-        written.append({"label": label, "path": str(out_path), "start_seconds": round(start, 2), "end_seconds": round(end, 2)})
+        view = build_timeline_view_for_range(role_dir, info, label, start, end, transcript=transcript)
+        if view:
+            written.append(view)
     return {"timeline_views_dir": str(out_dir), "timeline_views": written}
+
+
+def build_timeline_view_for_range(
+    role_dir: Path,
+    info: dict[str, Any],
+    label: str,
+    start: float,
+    end: float,
+    *,
+    transcript: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Render a filmstrip/waveform/transcript view for any requested window."""
+    if Image is None or ImageDraw is None:
+        return None
+    duration = parse_timestamp_seconds(info.get("duration_seconds"))
+    if duration is None or duration <= 0:
+        return None
+    try:
+        start_value = max(0.0, min(float(start), duration))
+        end_value = max(start_value, min(float(end), duration))
+    except (TypeError, ValueError):
+        return None
+    if end_value <= start_value:
+        end_value = min(duration, start_value + 0.5)
+    safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(label or "timeline")).strip("_.") or "timeline"
+    out_dir = role_dir / "timeline_views"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{safe_label}.jpg"
+    if transcript is None:
+        transcript_path = current_transcript_segments_path(info)
+        transcript = parse_srt_segments(transcript_path) if transcript_path else []
+    write_timeline_view(out_path, info, transcript, safe_label, start_value, end_value)
+    return {
+        "label": safe_label,
+        "path": str(out_path),
+        "start_seconds": round(start_value, 2),
+        "end_seconds": round(end_value, 2),
+        "selection_source": "analysis_frame_manifest",
+    }
 
 
 def write_timeline_view(
@@ -464,11 +559,19 @@ def frames_for_range(info: dict[str, Any], start: float, end: float, limit: int)
     if focus:
         return sample_evenly(focus, limit)
     full = [
-        entry for entry in get_frame_entries(info)
+        entry for entry in get_analysis_frame_entries(info)
         if (timestamp := parse_timestamp_seconds(entry.get("timestamp_seconds"))) is not None
         and start <= timestamp <= end
     ]
-    return sample_evenly(full, limit)
+    if full:
+        return sample_evenly(full, limit)
+    # A requested review window may fall between two sparse samples. Reuse the
+    # canonical range selector so the generated timeline still contains the
+    # nearest auditable frame instead of an empty filmstrip.
+    duration = parse_timestamp_seconds(info.get("duration_seconds"))
+    if duration is None:
+        return []
+    return select_frames_for_time_range(info, f"{start:.3f}s - {end:.3f}s", limit=limit)
 
 
 def draw_waveform(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], audio_path: Path, start: float, end: float) -> None:

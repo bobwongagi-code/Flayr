@@ -53,6 +53,7 @@ from flayr_core.translation import sync_chinese_translation, translate_transcrip
 from flayr_core.utils import write_json, write_text
 from flayr_core.video import (
     extract_audio,
+    extract_anchor_frames,
     extract_frames,
     probe_duration_seconds,
     reserve_existing_media_artifacts,
@@ -725,7 +726,7 @@ def build_preprocess_fingerprint(
             "no_ocr": bool(getattr(args, "no_ocr", False)),
             "dry_run": bool(getattr(args, "llm_dry_run", False)),
         },
-        "frame_strategy": "base-1fps-focus-2fps-shot-track-v1",
+        "frame_strategy": "base-adaptive-2fps-focus-2fps-canonical-analysis-manifest-v4-anchor-frames",
     }
 
 
@@ -764,6 +765,9 @@ def load_existing_video_result(
         if segment_path is None or _is_stale_placeholder(segment_path):
             return None
     elif info.get("transcript_segments_available") is True:
+        return None
+    words_value = str(info.get("transcript_words_path") or "").strip()
+    if words_value and _current_role_artifact(info, "transcript_words_path", role_dir) is None:
         return None
     audio_value = str(info.get("audio_path") or "").strip()
     if audio_value and not Path(audio_value).is_file():
@@ -974,14 +978,19 @@ def _process_video_generation(
         "focus_frame_count": 0,
         "focus_frame_manifest_path": None,
         "focus_frames": [],
+        "analysis_anchor_frame_count": 0,
         "stage_frame_manifest_path": None,
         "stage_frames": [],
+        "transcript_words_path": None,
+        "transcript_words_available": False,
         "video_evidence": {},
         "duration_seconds": None,
         "frame_strategy": {
-            "base": "1 fps across full video",
+            "base": "adaptive sampling up to 2 fps under the shared frame budget",
             "focus": "2 fps for first 5 seconds and final 5 seconds",
-            "stage": "representative frames for S1-S6 from full-video frames",
+            "structural_anchors": "accurate frames at stage, scene-cut, and subtitle boundaries",
+            "stage": "representative frames for S1-S6 from canonical analysis manifest",
+            "selection": "global + local + action signals with scene/subtitle/focus anchors",
         },
         "audio_path": None,
         "audio_quality": {},
@@ -1056,10 +1065,15 @@ def _process_video_generation(
     else:
         result["subtitle_track_status"] = ocr_disabled_reason
 
+    # The adaptive base corpus is bounded, not the final evidence corpus. Add
+    # accurate frames at structural boundaries discovered after extraction so
+    # short cuts and subtitle transitions are not forced onto the nearest
+    # sampled second.
+    extract_anchor_frames(video_path, frames_dir, result, budget=budget)
     result["speech_mode"] = classify_speech_mode(role_dir, result)
 
-    # 二级证据视图：去重审计、顺序联系表、packed transcript、timeline view。
-    # 这些 artifact 只用于复核和后续模型证据定位，不直接改变评分。
+    # 证据索引与视图：canonical analysis frames、去重审计、联系表、转写包、timeline view。
+    # 这些产物改变模型可见输入，但不直接改写业务评分。
     result["video_evidence"] = build_video_evidence_artifacts(role_dir, result)
     result["preprocess_fingerprint"] = build_preprocess_fingerprint(video_path, deps, args)
     result["preprocess_source_probe"] = _file_probe_from_stat(video_path.stat()) if video_path.is_file() else None
@@ -1088,7 +1102,21 @@ def ensure_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> Non
     transcript_ready = segment_path is None or Path(
         str(existing.get("transcript_pack_path") or "__missing_transcript_pack__")
     ).is_file()
-    if existing and timeline_dir.is_dir() and selection_report.is_file() and audit_path.is_file() and transcript_ready:
+    analysis_manifest = Path(
+        str(existing.get("analysis_frame_manifest_path") or role_dir / "frames" / "analysis_manifest.json")
+    )
+    analysis_stage_manifest = Path(
+        str(existing.get("analysis_stage_frame_manifest_path") or role_dir / "frames" / "analysis_stage_frames.json")
+    )
+    if (
+        existing
+        and timeline_dir.is_dir()
+        and selection_report.is_file()
+        and analysis_manifest.is_file()
+        and analysis_stage_manifest.is_file()
+        and audit_path.is_file()
+        and transcript_ready
+    ):
         return
     info["video_evidence"] = build_video_evidence_artifacts(role_dir, info)
     info["preprocess_artifacts"] = _build_preprocess_artifact_manifest(role_dir)

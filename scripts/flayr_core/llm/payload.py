@@ -25,12 +25,13 @@ from ..stage_ownership import (
 )
 from ..subtitle_track import render_subtitle_track_markdown
 from ..transcript import current_transcript_segments_path
-from ..video_evidence import parse_srt_segments
+from ..video_evidence import build_timeline_view_for_range, parse_srt_segments
 from ..resources import ResourceBudget
 from .api import (
     audio_to_mp3_data_url,
     can_analyze_native_audio,
     can_send_standalone_audio,
+    image_to_data_url,
     video_to_data_url,
 )
 from .media import build_evidence_sensory_inputs
@@ -483,6 +484,9 @@ def build_video_fact_payload(
             "",
             "## 带时间戳口播分段（口播时间归因的权威依据）",
             read_text_if_exists(current_transcript_segments_path(info) or Path("__missing_transcript_segments__")),
+            "",
+            "## 词级口播时间索引（可用时用于精确对齐；仍以原始 SRT 分段为完整依据）",
+            read_text_if_exists(Path(str(info.get("transcript_words_path") or "__missing_transcript_words__"))),
             "",
             "## 中文翻译",
             read_text_if_exists(role_dir / "transcript.zh.txt"),
@@ -1981,6 +1985,40 @@ def build_stage_review_video_inputs(
                 continue
             duration_value = end if duration_value is None else duration_value
             padded_end = min(duration_value, end + PHASE_C_WINDOW_PADDING_SECONDS)
+            artifact_dir = Path(str(info.get("work_dir") or "")).expanduser()
+            if not artifact_dir.is_dir():
+                continue
+            timeline_view = build_timeline_view_for_range(
+                artifact_dir,
+                info,
+                f"phase_c_{code}_{role}",
+                padded_start,
+                padded_end,
+            )
+            if timeline_view and Path(str(timeline_view.get("path") or "")).is_file():
+                evidence_views = analysis.setdefault("phase_c_evidence_views", [])
+                if isinstance(evidence_views, list):
+                    if not any(
+                        isinstance(item, dict)
+                        and item.get("path") == timeline_view.get("path")
+                        for item in evidence_views
+                    ):
+                        evidence_views.append({**timeline_view, "stage": code, "role": role})
+                content.append(
+                    {
+                        "type": "text",
+                        "text": (
+                            f"【Phase C 证据时间线｜{role}｜{code}｜"
+                            f"{format_seconds(padded_start)} - {format_seconds(padded_end)}】"
+                        ),
+                    }
+                )
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_to_data_url(Path(str(timeline_view["path"]))), "detail": "low"},
+                    }
+                )
             data_url = video_to_data_url(
                 video_path,
                 fps=PHASE_C_REVIEW_FPS,

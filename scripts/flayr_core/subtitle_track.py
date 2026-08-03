@@ -21,7 +21,13 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .artifacts import format_seconds, get_frame_entries, parse_timestamp_seconds, sample_evenly
+from .artifacts import (
+    format_seconds,
+    get_focus_frame_entries,
+    get_frame_entries,
+    parse_timestamp_seconds,
+    sample_evenly,
+)
 from .llm.api import call_llm_api, extract_chat_completion_text, image_to_data_url
 from .resources import ResourceBudget, ResourceBudgetExceeded, current_budget, finite_nonnegative
 from .utils import write_json
@@ -55,7 +61,7 @@ def build_subtitle_track(
     没有 api_key 或没有帧时返回 disabled 状态，由调用方决定是否跳过。
     """
     budget = budget or current_budget() or ResourceBudget()
-    frames = get_frame_entries(info)
+    frames = _merge_ocr_frame_entries(info)
     if not frames:
         return _empty_track("no_frames")
     if not api_key.strip():
@@ -111,12 +117,30 @@ def build_subtitle_track(
     return track
 
 
+def _merge_ocr_frame_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
+    """Use base and focus frames without sending duplicate images to OCR."""
+    merged: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for entry in [*get_frame_entries(info), *get_focus_frame_entries(info)]:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("path") or "")
+        if not path or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        merged.append(entry)
+    return sorted(
+        merged,
+        key=lambda entry: parse_timestamp_seconds(entry.get("timestamp_seconds")) or 0.0,
+    )
+
+
 def sample_frames_by_interval(
     frames: list[dict[str, Any]],
     duration: Any,
     interval_sec: float,
 ) -> list[dict[str, Any]]:
-    """按目标时间间隔稀疏取帧。帧已是 1fps，所以约等于每 interval_sec 取 1 帧。"""
+    """按目标时间间隔稀疏取帧；基础帧已按预算自适应抽取。"""
     if interval_sec <= 0:
         return frames
     if duration is None or str(duration).strip() == "":

@@ -20,8 +20,8 @@ from typing import Any
 
 from .artifacts import (
     format_seconds,
+    get_analysis_frame_entries,
     get_focus_frame_entries,
-    get_frame_entries,
     sample_evenly,
 )
 from .market import render_market_knowledge as render_market_context
@@ -172,7 +172,7 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
                 "",
                 render_focus_frame_markdown(info),
                 "",
-                "### 二级视频证据视图（复核用，不是评分字段）",
+                "### 视频证据索引与视图（用于主输入、阶段复核和审计；不直接改写评分字段）",
                 "",
                 render_video_evidence_markdown(role_dir, info),
                 "",
@@ -183,6 +183,10 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
                 "### 带时间戳口播分段",
                 "",
                 read_optional_text(current_transcript_segments_path(info) or Path("__missing_transcript_segments__")),
+                "",
+                "### 词级口播时间索引（如可用）",
+                "",
+                read_optional_text(Path(str(info.get("transcript_words_path") or "__missing_transcript_words__"))),
                 "",
                 "### 中文翻译",
                 "",
@@ -256,8 +260,8 @@ def render_focus_frame_markdown(info: dict[str, Any]) -> str:
 
 
 def render_timeline_frame_markdown(info: dict[str, Any]) -> str:
-    """全片 1fps 关键帧均匀采样 24 张的时间线。"""
-    entries = sample_evenly(get_frame_entries(info), 24)
+    """Canonical analysis-frame timeline, sampled for text context."""
+    entries = sample_evenly(get_analysis_frame_entries(info), 24)
     if not entries:
         return "（无）"
     lines = []
@@ -279,6 +283,8 @@ def render_video_evidence_markdown(role_dir: Path, info: dict[str, Any]) -> str:
         except (json.JSONDecodeError, OSError):
             dedup_count = "未知"
     lines = [
+        f"- 主分析帧 manifest：{evidence.get('analysis_frame_manifest_path') or role_dir / 'frames' / 'analysis_manifest.json'}",
+        f"- 主分析帧数量：{evidence.get('analysis_frame_count') or len(get_analysis_frame_entries(info))}",
         f"- 帧去重审计：{selection_report_path}",
         f"- 帧去重审计 HTML：{evidence.get('frame_selection_report_html_path') or role_dir / 'frames' / 'selection_report.html'}",
         f"- 去重后变化帧：{dedup_count if dedup_count is not None else '未知'} / 原始 {info.get('frame_count', 0)}",

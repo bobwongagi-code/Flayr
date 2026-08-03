@@ -15,6 +15,9 @@ MAX_TIME_SECONDS = 24 * 60 * 60.0
 
 
 def get_stage_frame_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
+    analysis_entries = _read_manifest_entries(info, "analysis_stage_frame_manifest_path", "analysis_stage_frames")
+    if analysis_entries:
+        return analysis_entries
     entries = info.get("stage_frames")
     if isinstance(entries, list) and entries:
         return [entry for entry in entries if isinstance(entry, dict)]
@@ -49,6 +52,44 @@ def get_frame_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
     if not directory or not directory.exists():
         return []
     return build_frame_manifest(sorted(directory.glob("frame_*.jpg"), key=numbered_frame_sort_key))
+
+
+def get_analysis_frame_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the canonical evidence frame set used by analysis consumers.
+
+    The raw frame manifest remains available through ``get_frame_entries`` for
+    provenance and compatibility.  New consumers must use this accessor so
+    scene, subtitle, local-change, and focus anchors are not bypassed.
+    """
+    entries = _read_manifest_entries(info, "analysis_frame_manifest_path", "analysis_frames")
+    return entries or get_frame_entries(info)
+
+
+def _read_manifest_entries(
+    info: dict[str, Any],
+    path_key: str,
+    entries_key: str,
+) -> list[dict[str, Any]]:
+    entries = info.get(entries_key)
+    if isinstance(entries, list) and entries:
+        return [entry for entry in entries if isinstance(entry, dict)]
+
+    evidence = info.get("video_evidence") if isinstance(info.get("video_evidence"), dict) else {}
+    nested_entries = evidence.get(entries_key)
+    if isinstance(nested_entries, list) and nested_entries:
+        return [entry for entry in nested_entries if isinstance(entry, dict)]
+
+    raw_path = str(info.get(path_key) or evidence.get(path_key) or "").strip()
+    if not raw_path:
+        return []
+    path = Path(raw_path)
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [entry for entry in data if isinstance(entry, dict)] if isinstance(data, list) else []
 
 
 def get_focus_frame_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
@@ -110,6 +151,7 @@ def build_frame_manifest(frames: list[Path], timestamps: list[Any] | None = None
 def build_stage_frame_manifest(
     frame_manifest: list[dict[str, Any]],
     duration_seconds: Any,
+    max_per_stage: int = 4,
 ) -> list[dict[str, Any]]:
     if not frame_manifest:
         return []
@@ -134,6 +176,7 @@ def build_stage_frame_manifest(
     ]
     if not timed_manifest:
         return []
+    max_per_stage = max(1, int(max_per_stage))
     ranges = stage_time_ranges(duration)
     stage_frames = []
     for stage_name, label, start, end in ranges:
@@ -147,9 +190,36 @@ def build_stage_frame_manifest(
                 timed_manifest,
                 key=lambda item: abs(parse_timestamp_seconds(item.get("timestamp_seconds")) - target),
             )[:1]
-        for item in sample_evenly(candidates, 2):
+        anchor_reasons = {
+            "scene_boundary",
+            "subtitle_boundary",
+            "focus_hook",
+            "focus_cta",
+            "structural_anchor",
+            "stage_boundary",
+            "local_change",
+            "action_change",
+            "global_change",
+        }
+        anchored = [
+            item
+            for item in candidates
+            if anchor_reasons.intersection(set(item.get("selection_reasons") or []))
+        ]
+        selected = sample_evenly(anchored, min(max_per_stage, max(1, max_per_stage // 2)))
+        selected_paths = {str(item.get("path") or "") for item in selected}
+        remaining = [item for item in candidates if str(item.get("path") or "") not in selected_paths]
+        selected.extend(sample_evenly(remaining, max_per_stage - len(selected)))
+        selected = sorted(
+            selected,
+            key=lambda item: parse_timestamp_seconds(item.get("timestamp_seconds"))
+            if parse_timestamp_seconds(item.get("timestamp_seconds")) is not None
+            else float("inf"),
+        )
+        for item in selected[:max_per_stage]:
             stage_frames.append(
                 {
+                    **item,
                     "stage": stage_name,
                     "label": label,
                     "timestamp_seconds": item.get("timestamp_seconds"),
@@ -170,7 +240,7 @@ def select_frame_for_time_range(info: dict[str, Any], time_range: str) -> dict[s
 
 
 def select_frame_near_timestamp(info: dict[str, Any], timestamp: Any) -> dict[str, Any] | None:
-    entries = get_frame_entries(info)
+    entries = get_analysis_frame_entries(info)
     if not entries:
         entries = get_stage_frame_entries(info) + get_focus_frame_entries(info)
     if not entries:
@@ -193,7 +263,7 @@ def select_frames_for_time_range(
     time_range: str,
     limit: int = 3,
 ) -> list[dict[str, Any]]:
-    entries = get_frame_entries(info)
+    entries = get_analysis_frame_entries(info)
     if not entries:
         entries = get_stage_frame_entries(info) + get_focus_frame_entries(info)
     if not entries:

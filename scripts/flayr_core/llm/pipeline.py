@@ -17,6 +17,7 @@ import copy
 import datetime as dt
 import hashlib
 import json
+import math
 import re
 import subprocess
 import tempfile
@@ -25,7 +26,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from ..artifacts import parse_time_range_seconds
+from ..artifacts import get_analysis_frame_entries, parse_time_range_seconds
 from ..evidence_states import stage_flag_allows_empty_evidence
 from ..multimodal import sanitize_audio_observations
 from ..utils import write_json, write_text
@@ -1206,6 +1207,7 @@ def maybe_refine_low_confidence_stages(
     for code in [
         *extract_low_confidence_stages(raw_result),
         *detect_low_confidence_stages(result),
+        *detect_visual_coverage_gap_stages(result, analysis),
         *[candidate.stage_id for candidate in legacy_critical_candidates.candidates],
     ]:
         if code not in candidates:
@@ -1343,6 +1345,61 @@ def detect_low_confidence_stages(result: dict[str, Any]) -> list[str]:
         if code not in ordered:
             ordered.append(code)
     return ordered[:2]
+
+
+def detect_visual_coverage_gap_stages(
+    result: dict[str, Any],
+    analysis: dict[str, Any],
+) -> list[str]:
+    """Find high-consequence stage windows with no canonical frame coverage.
+
+    This is deliberately independent of model evidence IDs.  A confident
+    Stage 1 omission cannot trigger a review through an evidence reference it
+    never produced, so the Phase C candidate set also inspects the actual
+    selected-frame manifest for both roles.
+    """
+    videos = analysis.get("videos") if isinstance(analysis.get("videos"), dict) else {}
+    if not videos:
+        return []
+    gaps: list[str] = []
+    for stage in result.get("stage_analysis", []):
+        if not isinstance(stage, dict):
+            continue
+        code = stage_code(stage.get("stage"))
+        severity = str(stage.get("severity") or "").strip().lower()
+        if not code or severity not in {"large", "medium"}:
+            continue
+        missing_role = False
+        for role in ("creator", "benchmark"):
+            info = videos.get(role) if isinstance(videos.get(role), dict) else {}
+            parsed = parse_time_range_seconds(
+                stage.get(f"{role}_time_range"),
+                info.get("duration_seconds"),
+            )
+            if parsed is None:
+                continue
+            start, end = parsed
+            entries = get_analysis_frame_entries(info)
+            covered = any(
+                (timestamp := _finite_timestamp(entry.get("timestamp_seconds"))) is not None
+                and start <= timestamp <= end
+                for entry in entries
+                if isinstance(entry, dict)
+            )
+            if not covered:
+                missing_role = True
+                break
+        if missing_role and code not in gaps:
+            gaps.append(code)
+    return gaps
+
+
+def _finite_timestamp(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
 
 
 def payload_has_video(payload: dict[str, Any]) -> bool:
