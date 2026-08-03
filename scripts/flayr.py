@@ -19,6 +19,13 @@ from typing import Any
 from flayr_core.audio_quality import analyze_audio_quality
 from flayr_core.analysis_model import ANALYSIS_RESULT_CONTRACT, placeholder_stages
 from flayr_core.bd_report import write_bd_report
+from flayr_core.asr import (
+    ASR_FAILURE_PLACEHOLDER,
+    DEFAULT_FUN_ASR_API_URL,
+    DEFAULT_FUN_ASR_MODEL,
+    read_asr_api_key,
+    run_online_asr,
+)
 from flayr_core.llm.api import can_analyze_native_audio, provider_capabilities, read_llm_api_key
 from flayr_core.llm.pipeline import (
     apply_finalized_analysis_result,
@@ -59,14 +66,14 @@ from flayr_core.video import (
     reserve_existing_media_artifacts,
 )
 from flayr_core.video_evidence import build_video_evidence_artifacts
-from flayr_core.whisper import run_whisper
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNS_DIR = ROOT / "runs"
-PREPROCESS_CACHE_SCHEMA_VERSION = 3
-PREPROCESS_PIPELINE_VERSION = "2026-07-18.1"
+PREPROCESS_CACHE_SCHEMA_VERSION = 4
+PREPROCESS_PIPELINE_VERSION = "2026-08-03.1-online-asr"
 PREPROCESS_ARTIFACT_SCHEMA_VERSION = 2
+ASR_AUDIO_PLACEHOLDER = "Online ASR unavailable because audio extraction failed."
 _RUN_ROLE_DIRS = frozenset({"benchmark", "creator"})
 _RUN_OUTPUT_FILES = frozenset(
     {
@@ -103,6 +110,38 @@ def _record_run_failure(run_dir: Path, reason: str) -> None:
         # The web worker performs the same recovery check after a child exits.
         # A CLI failure must never hide its original exception behind cleanup.
         pass
+
+
+def _transcription_issues(videos: dict[str, dict[str, Any]]) -> list[str]:
+    """Return stable, non-sensitive reasons for videos without completed ASR."""
+    issues: list[str] = []
+    for role, info in videos.items():
+        status = str(info.get("transcription_status") or "missing").strip().lower()
+        if status != "completed":
+            issues.append(f"{role}: online Fun-ASR transcription_status={status}")
+    return issues
+
+
+def _mark_analysis_degraded(run_dir: Path, analysis: dict[str, Any], reasons: list[str]) -> None:
+    """Publish an explicit degraded marker without claiming a completed run."""
+    existing = analysis.get("degraded_flags")
+    existing_items = existing if isinstance(existing, list) else []
+    flags = [str(item).strip() for item in existing_items if str(item).strip()]
+    for reason in reasons:
+        if reason not in flags:
+            flags.append(reason)
+    analysis["degraded_flags"] = flags
+    analysis["analysis_run_state"] = "degraded"
+    write_json(
+        run_dir / "degraded_manifest.json",
+        {
+            "analysis_run_state": "degraded",
+            "degraded_flags": flags,
+            "reason": "；".join(flags),
+            "stage_analysis": analysis.get("stage_analysis", []),
+            "improvements": analysis.get("improvements", []),
+        },
+    )
 
 
 def main() -> int:
@@ -148,6 +187,15 @@ def main() -> int:
         _record_run_failure(run_dir, f"分析初始化失败：{exc}")
         raise
     analysis_input_path = write_analysis_input(run_dir, analysis)
+    transcription_issues = _transcription_issues(videos)
+    if transcription_issues and args.mode != "scope" and not getattr(args, "allow_degraded", False):
+        analysis["degraded_flags"] = transcription_issues
+        write_json(run_dir / "analysis.json", analysis)
+        reason = "在线 Fun-ASR 未完成，当前模式不允许发布未完整转写的结果：" + "；".join(
+            transcription_issues
+        )
+        _record_run_failure(run_dir, reason)
+        raise SystemExit(reason)
     if args.mode == "scope":
         eligibility = run_comparison_scope_preflight(args, analysis, run_dir)
         analysis["resource_budget"] = budget.snapshot()
@@ -174,16 +222,13 @@ def main() -> int:
                 "compare/improve 需要完成的 LLM 分析，但当前 analysis_run_state=not_run。"
                 " 提供 --llm-model 跑分析，或加 --allow-degraded 在无分析时继续（severity 留空）。"
             )
-        analysis["analysis_run_state"] = "degraded"
-        write_json(
-            run_dir / "degraded_manifest.json",
-            {
-                "analysis_run_state": "degraded",
-                "reason": "LLM 分析未运行或未完成；severity/improvements 为占位，不可作为业务判断。",
-                "stage_analysis": analysis.get("stage_analysis", []),
-                "improvements": analysis.get("improvements", []),
-            },
+        _mark_analysis_degraded(
+            run_dir,
+            analysis,
+            ["LLM 分析未运行或未完成；severity/improvements 为占位，不可作为业务判断。"],
         )
+    if transcription_issues:
+        _mark_analysis_degraded(run_dir, analysis, transcription_issues)
     analysis["resource_budget"] = budget.snapshot()
     write_json(run_dir / "analysis.json", analysis)
     write_analysis_input(run_dir, analysis)
@@ -332,11 +377,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--skip-whisper",
-        action="store_true",
-        help="Skip transcription even when Whisper exists.",
-    )
-    parser.add_argument(
         "--reuse-preprocessing",
         action="store_true",
         help=(
@@ -345,21 +385,25 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--whisper-model",
-        type=Path,
-        default=None,
-        help="Model path for whisper-cli or whisper-cpp. Keep machine-specific model paths outside the repository.",
-    )
-    parser.add_argument(
-        "--whisper-model-th",
-        type=Path,
-        default=None,
-        help="Optional Thai Whisper model path. Keep machine-specific model paths outside the repository.",
-    )
-    parser.add_argument(
-        "--whisper-language",
+        "--asr-language",
+        dest="asr_language",
         default="auto",
-        help="Speech language passed to Whisper. Default: auto. Use zh, ms, th, id, en only when known.",
+        help="Speech language hint passed to online Fun-ASR. Default: auto.",
+    )
+    parser.add_argument(
+        "--asr-api-url",
+        default=DEFAULT_FUN_ASR_API_URL,
+        help="Online Fun-ASR endpoint. Defaults to the approved Beijing MaaS endpoint.",
+    )
+    parser.add_argument(
+        "--asr-model",
+        default=os.environ.get("FLAYR_ASR_MODEL", DEFAULT_FUN_ASR_MODEL),
+        help="Online ASR model. Default: fun-asr-realtime.",
+    )
+    parser.add_argument(
+        "--asr-api-key-env",
+        default="DASHSCOPE_API_KEY",
+        help="Environment variable for the Qwen/DashScope ASR key; only the same approved Qwen endpoint may provide the fallback.",
     )
     parser.add_argument(
         "--analysis-result-json",
@@ -398,9 +442,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-degraded",
         action="store_true",
         help=(
-            "Allow compare/improve to proceed without a completed LLM analysis. "
+            "Allow compare/improve to proceed without completed LLM or online ASR analysis. "
             "Without this flag, missing analysis exits non-zero. "
-            "When set, severity stays null and a degraded manifest is written."
+            "When set, the run is marked degraded and no success manifest is written."
         ),
     )
     parser.add_argument(
@@ -508,33 +552,16 @@ def _prepare_explicit_run_dir(run_dir: Path, *, reuse: bool) -> None:
 
 
 def check_dependencies(args: argparse.Namespace) -> dict[str, Any]:
-    whisper_command = first_available(("whisper", "whisper-cpp", "whisper-cli"))
-    whisper_model = validate_optional_file(args.whisper_model, "--whisper-model")
-    # 泰语模型软解析：文件缺失时存 None，由 run_whisper 回退到通用模型，不在启动期硬崩。
-    whisper_model_th = resolve_optional_model(args.whisper_model_th)
     return {
         "ffmpeg": shutil.which("ffmpeg"),
         "ffprobe": shutil.which("ffprobe"),
-        "whisper": whisper_command,
-        "whisper_model": str(whisper_model) if whisper_model else None,
-        "whisper_model_th": str(whisper_model_th) if whisper_model_th else None,
-        "whisper_language": args.whisper_language,
+        "asr": {
+            "provider": "dashscope",
+            "api_url": args.asr_api_url,
+            "model": args.asr_model,
+            "language": args.asr_language,
+        },
     }
-
-
-def resolve_optional_model(path: Path | None) -> Path | None:
-    """解析可选模型路径：存在则返回绝对路径，否则返回 None（用于优雅降级，不抛错）。"""
-    if not path:
-        return None
-    resolved = path.expanduser().resolve()
-    return resolved if resolved.is_file() else None
-
-
-def first_available(commands: tuple[str, ...]) -> str | None:
-    for command in commands:
-        if shutil.which(command):
-            return command
-    return None
 
 
 def validate_inputs(args: argparse.Namespace) -> dict[str, Path]:
@@ -707,11 +734,10 @@ def build_preprocess_fingerprint(
             "ffprobe": _binary_version(deps, "ffprobe"),
         },
         "transcription": {
-            "skip_whisper": bool(getattr(args, "skip_whisper", False)),
-            "requested_language": str(getattr(args, "whisper_language", "auto") or "auto"),
-            "command": _binary_version(deps, "whisper"),
-            "model": _file_metadata(deps.get("whisper_model")),
-            "thai_model": _file_metadata(deps.get("whisper_model_th")),
+            "backend": "fun-asr",
+            "api_url": str(getattr(args, "asr_api_url", "") or ""),
+            "model": str(getattr(args, "asr_model", DEFAULT_FUN_ASR_MODEL) or DEFAULT_FUN_ASR_MODEL),
+            "requested_language": str(getattr(args, "asr_language", "auto") or "auto"),
         },
         "translation": {
             "enabled": bool(getattr(args, "translate_with_llm", False)),
@@ -756,6 +782,8 @@ def load_existing_video_result(
     frames_dir = Path(str(info.get("frames_dir") or ""))
     transcript = Path(str(info.get("transcript_path") or ""))
     if not frames_dir.is_dir():
+        return None
+    if str(info.get("transcription_status") or "").strip().lower() != "completed":
         return None
     if not transcript.is_file() or _is_stale_placeholder(transcript):
         return None
@@ -864,7 +892,17 @@ def _is_stale_placeholder(path: Path) -> bool:
         return True
     if not text:
         return True
-    return text.startswith(("待转写", "待翻译", "待生成", "pending:"))
+    lowered = text.lower()
+    return lowered.startswith(
+        (
+            "待转写",
+            "待翻译",
+            "待生成",
+            "pending:",
+            ASR_FAILURE_PLACEHOLDER.lower(),
+            ASR_AUDIO_PLACEHOLDER.lower(),
+        )
+    )
 
 
 def _rewrite_generation_paths(value: Any, old_root: Path, new_root: Path) -> Any:
@@ -998,7 +1036,7 @@ def _process_video_generation(
         "transcript_segments_path": None,
         "transcript_segments_available": False,
         "transcription_status": "not_started",
-        "requested_language": args.whisper_language,
+        "requested_language": args.asr_language,
         "detected_language": None,
         "detected_language_confidence": None,
         "transcription_language": None,
@@ -1022,14 +1060,22 @@ def _process_video_generation(
         result["errors"].append("ffmpeg missing: skipped frame and audio extraction")
 
     transcript_path = role_dir / "transcript.txt"
-    if args.skip_whisper:
-        write_text(transcript_path, "Whisper skipped by --skip-whisper.\n")
-        result["transcription_status"] = "skipped"
-    elif deps["whisper"] and result["audio_path"]:
-        run_whisper(deps, Path(result["audio_path"]), role_dir, transcript_path, result)
+    if result["audio_path"]:
+        run_online_asr(
+            args.asr_api_url,
+            args.asr_model,
+            read_asr_api_key(args),
+            args.asr_language,
+            Path(result["audio_path"]),
+            role_dir,
+            transcript_path,
+            result,
+            budget=budget,
+        )
     else:
-        write_text(transcript_path, "Whisper unavailable or audio extraction failed.\n")
+        write_text(transcript_path, ASR_AUDIO_PLACEHOLDER + "\n")
         result["transcription_status"] = "placeholder"
+        result["errors"].append("online ASR skipped because audio extraction failed")
 
     result["transcript_path"] = str(transcript_path)
     sync_chinese_translation(role_dir, result)
@@ -1232,7 +1278,8 @@ def print_summary(
     print(f"Run directory: {run_dir}")
     print(f"Report: {report_path}")
     print(f"ffmpeg: {'ok' if deps['ffmpeg'] else 'missing'}")
-    print(f"whisper: {deps['whisper'] or 'missing'}")
+    asr = deps.get("asr") if isinstance(deps.get("asr"), dict) else {}
+    print(f"asr: {asr.get('model') or 'missing'} @ {asr.get('api_url') or 'unconfigured'}")
     for role, info in videos.items():
         print(
             f"{role}: frames={info['frame_count']} "
@@ -1252,7 +1299,8 @@ def print_scope_summary(
     print(f"comparable stages: {','.join(eligibility.get('comparable_stages') or []) or 'none'}")
     print(f"reason: {eligibility.get('reason') or '未提供'}")
     print(f"ffmpeg: {'ok' if deps['ffmpeg'] else 'missing'}")
-    print(f"whisper: {deps['whisper'] or 'missing'}")
+    asr = deps.get("asr") if isinstance(deps.get("asr"), dict) else {}
+    print(f"asr: {asr.get('model') or 'missing'} @ {asr.get('api_url') or 'unconfigured'}")
     for role, info in videos.items():
         print(
             f"{role}: frames={info['frame_count']} "

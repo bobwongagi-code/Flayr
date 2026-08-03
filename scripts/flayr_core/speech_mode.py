@@ -24,9 +24,8 @@ NON_SPEECH_LABELS = {
 PLACEHOLDER_TEXTS = {
     "（缺失）",
     "（空）",
-    "whisper skipped by --skip-whisper.",
-    "whisper unavailable or audio extraction failed.",
-    "whisper failed. fill transcript manually.",
+    "online asr unavailable because audio extraction failed.",
+    "online asr failed; no transcript is available.",
 }
 
 

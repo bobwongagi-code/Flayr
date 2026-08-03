@@ -70,6 +70,12 @@ RUNNER_OWNED_FLAGS = frozenset({
     "--llm-api-key-keychain-service",
     "--llm-api-key-keychain-account",
     "--translation-model",
+    # ASR endpoint, credential source, model, and language are runner-owned;
+    # an untrusted job must not change where audio or worker credentials go.
+    "--asr-api-url",
+    "--asr-api-key-env",
+    "--asr-model",
+    "--asr-language",
 })
 
 

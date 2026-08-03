@@ -17,7 +17,7 @@
 | `frames/`（全片 1fps） | ffmpeg | 必需 | 记录 `degraded`，独立产物继续；不生成虚假帧 |
 | `focus_frames/`（首尾 5s 各 2fps，Hook/CTA） | ffmpeg | 必需 | 同上 |
 | `audio.wav`（混音，**不分轨**——人声分离已评估不采纳） | ffmpeg | 必需 | 同上 |
-| `transcript.txt / .srt / .zh.txt` | 本地转写工具（可选） | 可选 | 记录状态，主流程只继续不依赖转写的部分 |
+| `transcript.txt / .srt / .zh.txt` | 北京 MaaS 在线 Fun-ASR | 必需（可显式降级） | 默认失败并返回非零；`--allow-degraded` 下继续但不得发布为 `completed` |
 | `shot_track.json`（自适应镜头边界） | ffmpeg 场景检测 | 默认开（零成本） | 状态标记，缺失显示占位 |
 | `subtitle_track.json`（OCR 权威字幕轨） | 视觉模型，auto 策略（有分析 key 即开） | 可选 | 状态标记，缺失显示占位 |
 | `_preprocess.json`（复用缓存） | flayr.py | 自动 | `--reuse-preprocessing` 仅在源视频内容和预处理配置指纹完全一致时命中；旧缓存或任一配置变化会重跑 |
@@ -26,7 +26,7 @@
 
 - **Step-0（产品合同）**：只吃运营产品信息与品类知识，先生成卖点分流计划和 `proof_contract`；
   `observable_dimension` 是 S4 单一主证明的硬边界，`consumer_outcome` 只负责自然语言表达结果。
-- **阶段一（事实）**：视频模型每视频一次，读取原生视频连续画面；口播语义以 Whisper 转写为准，产出 `video_facts_{role}.json` 的
+- **阶段一（事实）**：视频模型每视频一次，读取原生视频连续画面；口播语义以在线 Fun-ASR 转写为准，产出 `video_facts_{role}.json` 的
   `evidence_units[]`。事实一旦产出即**锁定**（阶段二/Phase C 不得增删改）。
 - **阶段二（判断）**：锁定 facts + analysis_input.md（产品信息/三层指引/结构库/QA/schema + 字幕轨/镜头轨）
   单次调用完成 S1-S6 对比、improvements、key_conclusions。
@@ -96,7 +96,8 @@ derive 的回归必须同时覆盖 resolver 的 max/min 交换律、clamp/confli
 
 ### 0.5 失败、降级与完成状态
 
-- 可选的转写、OCR、镜头轨或音频质检失败时，写入明确的阶段状态和 `degraded_reason`；独立产物可以继续，但缺失能力不得产生占位证据或真实严重度。
+- 在线 Fun-ASR 是 compare/improve 的语音证据依赖；失败时默认写入 `FAILED` 并返回非零。显式 `--allow-degraded` 才能继续，但必须写入 `degraded_reason`、不得发布成功清单，也不得把占位转写当成真实事实。
+- OCR、镜头轨或音频质检失败时，写入明确的阶段状态和 `degraded_reason`；独立产物可以继续，但缺失能力不得产生占位证据或真实严重度。
 - 已请求的 LLM 网络调用、响应解析、运行时 schema 或必需后处理失败时，任务状态为 `failed` 并返回非零；已有中间文件不能把任务发布为 `completed`。
 - `compare` / `improve` 没有完成的 LLM 分析时默认失败；只有显式 `--allow-degraded` 才能继续，并保持未知 severity 为空、写入降级清单。
 - 只有子进程成功、最终成功清单和必需产物完整性校验全部通过时，运行状态才是 `completed`。
@@ -267,7 +268,7 @@ scripts/
     ├── translation.py                # 本地语言转中文（调用 llm.api）
     ├── utils.py                      # 通用文件/进程 helper（read_optional_text、write_json 等）
     ├── video.py                      # ffmpeg/ffprobe、抽帧、音频、manifest 写入
-    └── whisper.py                    # Whisper 转写和语言检测
+    └── asr.py                        # 在线 Fun-ASR 转写和时间戳归一化
 ```
 
 ### 当前覆盖
@@ -277,7 +278,7 @@ scripts/
 | CLI / 依赖检测 / 校验 / 流程编排 | `flayr.py` | 已覆盖 |
 | 视频时长、抽帧、音频提取 | `video.py` | 已覆盖 |
 | frame/focus/stage manifest 读取和选帧 | `artifacts.py` | 已覆盖 |
-| Whisper 转写和语言检测 | `whisper.py` | 已覆盖 |
+| 在线 Fun-ASR 转写和时间戳归一化 | `asr.py` | 已覆盖 |
 | 中文翻译 | `translation.py` | 已覆盖 |
 | LLM 请求构造 / 调用 / schema 解析 | `llm/` 包（api / payload / parse / pipeline） | 已覆盖 |
 | 分析结果修补 / 校验 / 品类合规 | `postprocess/` 包 | 已覆盖 |
@@ -296,13 +297,13 @@ scripts/
 - 依赖检测。
 - 输入校验。
 - 创建 run directory。
-- 串联 video / whisper / translation / prompt / llm / report。
+- 串联 video / asr / translation / prompt / llm / report。
 - 装配 analysis dict、写出 `analysis.json` 和报告所需的证据产物。
 - 计算分析等级和结论边界，并随分析输入、结构化结果与报告输出；缺少产品策略时不阻止事实分析，但限制策略结论。
 
 约束：
 
-- 不直接承担 LLM、报告渲染、抽帧、Whisper、翻译、prompt 装配等核心实现。
+- 不直接承担 LLM、报告渲染、抽帧、在线 ASR、翻译、prompt 装配等核心实现。
 - 不写 `analysis_input.md`（已迁至 `prompt.py`），harness 只负责调用。
 - 保持命令入口稳定：`python3 scripts/flayr.py ...`。
 
@@ -354,12 +355,13 @@ scripts/
 - 不直接改变评分、severity 或报告结论。
 - 缺少可视化依赖时记录 `degraded`，不阻断不依赖该能力的主流程；已请求的 LLM/API/schema 失败仍必须阻断并返回非零。
 
-### 3.4 `whisper.py` — 语音转写
+### 3.4 `asr.py` — 在线语音转写
 
 职责：
 
-- 优先使用 Whisper 内置语言检测。
-- 适配 `whisper` / `whisper-cli` / `whisper-cpp`。
+- 通过批准的北京 MaaS Fun-ASR endpoint 发送本地音频 Data URI。
+- 保留 `transcript.txt`、`transcript.srt` 和 `transcript.words.json` 作为下游唯一转写接口。
+- 直接归一化句级与词级时间戳，不在本地运行 ASR 模型。
 - 输出本地语言 `transcript.txt`。
 - 输出短分段时间戳口播 `transcript.srt`，供阶段证据对齐使用。
 
@@ -423,7 +425,7 @@ scripts/
 关键约束：阶段一 facts 一旦锁定即"唯一事实源"，阶段二感官素材仅辅助评估声画质感，
 **不可新增或改写 facts**（冲突以 facts 为准，可标注"感知歧义"）；阶段二 temperature=0 保证可复现；
 Phase C 由模型低置信声明与确定性证据检查共同触发，最多回看 2 个阶段、最多 1 次，不做无限 agent loop；
-ffmpeg 不可用时阶段一降级为关键帧。支持独立音频输入且通过能力验证的兼容服务可直接观察音轨；不支持原生音频的服务当前按”连续画面 + Whisper 转录 + 本地音频质检”运行，不得脑补语气、BGM或音效。
+ffmpeg 不可用时阶段一降级为关键帧。支持独立音频输入且通过能力验证的兼容服务可直接观察音轨；不支持原生音频的服务当前按“连续画面 + 在线 Fun-ASR 转录 + 本地音频质检”运行，不得脑补语气、BGM或音效。
 音频采用两层合同：本地确定性硬质检可进入报告；语气、BGM、音效的细微商业贡献只作观察，永不进入执行分或 severity。
 
 职责：
@@ -525,7 +527,7 @@ ffmpeg 不可用时阶段一降级为关键帧。支持独立音频输入且通�
 flayr.py
   ├─ video.py
   │   └─ 写 frames/audio/manifests
-  ├─ whisper.py
+  ├─ asr.py
   │   └─ 写 transcript.txt
   ├─ translation.py
   │   └─ 通过 llm.api 调模型，写 transcript.zh.txt

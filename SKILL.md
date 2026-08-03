@@ -24,8 +24,7 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/Flayr/scripts/flayr.py" improve \
   --benchmark-video "/path/to/benchmark.mp4" \
   --creator-video "/path/to/creator.mp4" \
   --product-name "Product name" \
-  --product-price "39" \
-  --whisper-model "/path/to/ggml-large-v3-turbo-q5_0.bin"
+  --product-price "39"
 ```
 
 When working from this repository directly, use:
@@ -38,14 +37,14 @@ python3 scripts/flayr.py improve \
 
 ## Workflow
 
-`scripts/flayr.py` is the skill harness: it owns CLI parsing, run-directory setup, orchestration, and output wiring. Core responsibilities live under `scripts/flayr_core/`: video evidence extraction, optional transcription/translation, LLM analysis, and report rendering.
+`scripts/flayr.py` is the skill harness: it owns CLI parsing, run-directory setup, orchestration, and output wiring. Core responsibilities live under `scripts/flayr_core/`: video evidence extraction, online transcription/translation, LLM analysis, and report rendering.
 
 1. Confirm the requested mode and local video paths.
-2. Run dependency checks for `ffmpeg` and a Whisper command.
+2. Run dependency checks for `ffmpeg`, `ffprobe`, and the approved online Fun-ASR endpoint configuration.
 3. Extract one frame per second and a WAV audio file for each input video.
 4. Extract denser 2 fps focus frames for the first 5 seconds and final 5 seconds, and write `focus_frames/manifest.json` with timestamps.
    Also write `frames/manifest.json` and `frames/stage_frames.json` so S1-S6 diagnosis has full-funnel visual evidence.
-5. Transcribe speech in the detected local language when Whisper is available, and keep a Chinese translation beside it.
+5. Transcribe speech in the detected local language through the approved Beijing MaaS Fun-ASR endpoint, and keep a Chinese translation beside it.
    Use `--translate-with-llm` when the Chinese translation should be generated automatically.
 6. Classify `speech_mode`: `spoken`, `subtitle_driven`, `visual_driven`, or `music_driven`.
    Use `transcript_packed` / `transcript.srt` as the primary spine only for `spoken` videos. For no-speech videos, use OCR subtitles, visual changes, timeline views, shot tracks, and audio rhythm instead.
@@ -100,19 +99,17 @@ The script checks dependencies but does not install them automatically.
 Expected tools:
 
 - `ffmpeg`: frame/audio evidence extraction
-- `whisper`, `whisper-cpp`, or `whisper-cli`: speech transcription
+- Online Beijing MaaS Fun-ASR access: speech transcription and word-level timestamps
 
-If optional dependencies are missing, record an explicit `degraded` status and continue only for outputs that do not require them. A requested LLM call, response parse, or schema failure is blocking and must return nonzero. Compare/improve without completed LLM analysis also fails by default; use `--allow-degraded` only when that state is intentional.
-
-For `whisper-cli` or `whisper-cpp`, pass `--whisper-model` when the default `models/ggml-base.en.bin` is not available.
+If optional dependencies are missing, record an explicit `degraded` status and continue only for outputs that do not require them. Online Fun-ASR is required for compare/improve speech evidence: an ASR failure is blocking by default and returns nonzero. A requested LLM call, response parse, or schema failure is also blocking. Compare/improve without completed LLM or ASR analysis may continue only with `--allow-degraded`; the run must remain degraded and cannot publish a success manifest.
 
 For Flayr model analysis, use a configured OpenAI-compatible vision-language model and endpoint supplied by the runtime environment. Do not put credentials, personal Keychain names, or private machine paths in a committed job manifest.
 
 Subtitle OCR runs in `--ocr-mode auto` by default and reuses the configured visual model. Disable it with `--no-ocr` for fast local debugging. OCR improves on-screen subtitle grounding and is low cost, but it adds per-frame API latency.
 
-Default to `--whisper-language auto`. Southeast Asia commerce videos often use Malay, Thai, Indonesian, or English local口播, so do not force Chinese unless the user explicitly says the video is Chinese.
+Use `--asr-language auto` by default. Southeast Asia commerce videos often use Malay, Thai, Indonesian, or English local口播, so do not force Chinese unless the user explicitly says the video is Chinese. The endpoint, model, and key environment variable can be overridden with `--asr-api-url`, `--asr-model`, and `--asr-api-key-env`.
 
-When generating `transcript.zh.txt`, follow `references/commerce-translation-guidelines.md`. The Chinese translation must be commerce-aware: correct likely Whisper mistakes from product context, preserve product facts, and translate purchase calls such as `beg kuning` / `back kuning` as `黄色购物车`.
+When generating `transcript.zh.txt`, follow `references/commerce-translation-guidelines.md`. The Chinese translation must be commerce-aware: correct likely online ASR mistakes from product context, preserve product facts, and translate purchase calls such as `beg kuning` / `back kuning` as `黄色购物车`.
 For model analysis, require evidence: every stage and improvement should cite time range, visual evidence, or spoken evidence. The HTML report should expose key frames, not just text.
 Do not treat the S1-S6 reference times as fixed cuts. The model must first understand the full video, then write the actual `time_range` for each stage. The HTML report should match benchmark and creator frames to those actual ranges and show the frames inside the stage comparison.
 

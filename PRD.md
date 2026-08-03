@@ -118,7 +118,7 @@ Step 6 · 输出交互式分析报告（HTML）
   │     → 输出 audio.wav
   │     → 用于本地音频质检和阶段证据对齐
   │
-  └── whisper 语音转文字
+  └── 在线 Fun-ASR 语音转文字
         → 默认自动检测口播语言，适配马来语、泰语、印尼语、英语等东南亚本地语言
         → 输出本地语言逐句文案 transcript.txt
         → 同时输出电商语境中文翻译 transcript.zh.txt，方便中国运营团队阅读
@@ -135,11 +135,11 @@ Step 6 · 输出交互式分析报告（HTML）
 
 **有效口播判断约束**：
 - 不得用英文式空格分词或 word count 判断是否存在有效口播
-- 泰语、中文、日语、高棉语、老挝语、缅甸语等语言可能没有空格，Whisper 输出可能是一长串文本
-- 判断口播是否有效时，优先使用 `transcript.strip()`、Unicode 字符数、Whisper segment 数量、音频非静音段等信号
+- 泰语、中文、日语、高棉语、老挝语、缅甸语等语言可能没有空格，在线 ASR 输出可能是一长串文本
+- 判断口播是否有效时，优先使用 `transcript.strip()`、Unicode 字符数、在线 ASR segment 数量、音频非静音段等信号
 - 只有在转写为空、segment 为空且音频无有效人声时，才进入"无口播/画面推断文案"分支
 
-**依赖**：ffmpeg、whisper（skill 首次运行时检测，未安装则引导安装）
+**依赖**：ffmpeg、ffprobe、在线 Fun-ASR endpoint 和 Qwen/DashScope key
 
 ---
 
@@ -303,7 +303,7 @@ Flayr/
 | 工具 | 用途 | 安装方式 |
 |------|------|---------|
 | ffmpeg | 视频帧提取、音频提取和证据片段处理 | `brew install ffmpeg` |
-| whisper | 自动检测口播语言并转文字，获取带时间戳的文案 | `pip install openai-whisper` 或 `brew install whisper-cpp` |
+| 在线 Fun-ASR | 自动检测口播语言并转文字，获取句级和词级时间戳 | 北京 MaaS endpoint + Qwen/DashScope key |
 
 Skill 首次运行时检测依赖是否就绪，缺少则给出安装指引。
 
@@ -362,7 +362,7 @@ Skill 首次运行时检测依赖是否就绪，缺少则给出安装指引。
 **目标**：能完成"输入两个视频 → 输出可复核分析报告"的完整流程
 
 - [ ] 搭建 SKILL.md 主指令
-- [ ] 实现 Step 1 视频解析（ffmpeg + whisper）
+- [ ] 实现 Step 1 视频解析（ffmpeg + 在线 Fun-ASR）
 - [ ] 实现 Step 2 拆解分析（基于最佳带货模板框架）
 - [ ] 实现 Step 3 对比诊断
 - [ ] 实现 Step 4 提升点筛选

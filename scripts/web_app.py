@@ -1391,9 +1391,15 @@ class JobStore:
             )
         if os.environ.get("FLAYR_ALLOW_DEGRADED", "").strip().lower() in {"1", "true", "yes"}:
             command.append("--allow-degraded")
-        whisper_model = os.environ.get("FLAYR_WHISPER_MODEL", "").strip()
-        if whisper_model:
-            command.extend(["--whisper-model", whisper_model])
+        asr_url = os.environ.get("FLAYR_ASR_API_URL", "").strip()
+        if asr_url:
+            command.extend(["--asr-api-url", asr_url])
+        asr_model = os.environ.get("FLAYR_ASR_MODEL", "").strip()
+        if asr_model:
+            command.extend(["--asr-model", asr_model])
+        asr_key_env = os.environ.get("FLAYR_ASR_API_KEY_ENV", "").strip()
+        if asr_key_env:
+            command.extend(["--asr-api-key-env", asr_key_env])
         return command
 
     def _finish(self, job_id: str, returncode: int) -> None:

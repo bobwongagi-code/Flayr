@@ -2105,7 +2105,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     visual = tmp_dir / "visual"
     visual.mkdir()
-    (visual / "transcript.txt").write_text("Whisper unavailable or audio extraction failed.", encoding="utf-8")
+    (visual / "transcript.txt").write_text("Online ASR unavailable because audio extraction failed.", encoding="utf-8")
     check(
         "speech_mode visual_driven",
         classify_speech_mode(visual, {"transcription_status": "placeholder"})["mode"] == "visual_driven",
@@ -2151,8 +2151,10 @@ with tempfile.TemporaryDirectory() as tmp:
     transcript_path = role_dir / "transcript.txt"
     transcript_path.write_text("cached transcript", encoding="utf-8")
     cache_args = SimpleNamespace(
-        skip_whisper=False,
-        whisper_language="auto",
+        asr_language="auto",
+        asr_api_url="https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+        asr_model="fun-asr-realtime",
+        asr_api_key_env="DASHSCOPE_API_KEY",
         translate_with_llm=False,
         translation_model="",
         llm_model="",
@@ -2164,13 +2166,23 @@ with tempfile.TemporaryDirectory() as tmp:
         no_ocr=False,
         llm_dry_run=True,
     )
-    cache_deps = {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "whisper": "whisper-cli", "whisper_model": None, "whisper_model_th": None}
+    cache_deps = {
+        "ffmpeg": "ffmpeg",
+        "ffprobe": "ffprobe",
+        "asr": {
+            "provider": "dashscope",
+            "api_url": cache_args.asr_api_url,
+            "model": cache_args.asr_model,
+            "language": cache_args.asr_language,
+        },
+    }
     fingerprint = build_preprocess_fingerprint(video_path, cache_deps, cache_args)
     (role_dir / "_preprocess.json").write_text(
         json.dumps(
             {
                 "frames_dir": str(frames_dir),
                 "transcript_path": str(transcript_path),
+                "transcription_status": "completed",
                 "preprocess_fingerprint": fingerprint,
                 "preprocess_completed": True,
                 "preprocess_artifacts": _build_preprocess_artifact_manifest(role_dir),
@@ -2182,7 +2194,7 @@ with tempfile.TemporaryDirectory() as tmp:
     video_path.write_bytes(b"changed-video")
     changed_fingerprint = build_preprocess_fingerprint(video_path, cache_deps, cache_args)
     check("预处理缓存：视频内容变化拒绝复用", load_existing_video_result(role_dir, changed_fingerprint) is None)
-    cache_args.whisper_language = "th"
+    cache_args.asr_language = "th"
     config_fingerprint = build_preprocess_fingerprint(video_path, cache_deps, cache_args)
     check("预处理缓存：转写配置变化拒绝复用", load_existing_video_result(role_dir, config_fingerprint) is None)
 

@@ -15,7 +15,7 @@ from flayr_core.artifacts import build_stage_frame_manifest, select_frames_for_t
 from flayr_core.frame_selection import build_analysis_frame_manifest  # noqa: E402
 from flayr_core.llm.media import get_llm_frame_candidates  # noqa: E402
 from flayr_core.subtitle_track import _merge_ocr_frame_entries  # noqa: E402
-from flayr_core.whisper import extract_word_timestamps  # noqa: E402
+from flayr_core.asr import extract_word_timestamps  # noqa: E402
 
 
 class VideoEvidenceSelectionTests(unittest.TestCase):
@@ -112,20 +112,23 @@ class VideoEvidenceSelectionTests(unittest.TestCase):
         entries = _merge_ocr_frame_entries(info)
         self.assertEqual([item["path"] for item in entries], ["/base-0.jpg", "/shared.jpg", "/focus-cta.jpg"])
 
-    def test_whisper_full_json_is_normalized_to_word_seconds(self) -> None:
+    def test_online_asr_response_is_normalized_to_word_seconds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "transcript.json"
             path.write_text(
                 json.dumps(
                     {
-                        "transcription": [
-                            {
-                                "tokens": [
-                                    {"text": " hello", "offsets": {"from": 1200, "to": 1800}, "p": 0.91},
-                                    {"text": " world", "offsets": {"from": 1800, "to": 2400}, "p": 0.88},
-                                ]
+                        "output": {
+                            "sentence": {
+                                "begin_time": 1200,
+                                "end_time": 2400,
+                                "text": "hello world",
+                                "words": [
+                                    {"text": "hello", "begin_time": 1200, "end_time": 1800},
+                                    {"text": "world", "begin_time": 1800, "end_time": 2400},
+                                ],
                             }
-                        ]
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -133,8 +136,8 @@ class VideoEvidenceSelectionTests(unittest.TestCase):
             self.assertEqual(
                 extract_word_timestamps(path),
                 [
-                    {"start_seconds": 1.2, "end_seconds": 1.8, "text": "hello", "probability": 0.91},
-                    {"start_seconds": 1.8, "end_seconds": 2.4, "text": "world", "probability": 0.88},
+                    {"start_seconds": 1.2, "end_seconds": 1.8, "text": "hello"},
+                    {"start_seconds": 1.8, "end_seconds": 2.4, "text": "world"},
                 ],
             )
 

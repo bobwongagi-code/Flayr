@@ -108,6 +108,19 @@ def build_success_manifest(
         artifacts[relative] = _artifact_metadata(candidate)
     if not _has_complete_field_sources(run_dir / "final_derived_result.json"):
         raise ValueError("final_derived_result.json must contain complete field source coverage")
+    videos = analysis.get("videos")
+    if isinstance(videos, dict) and videos:
+        incomplete_transcription = [
+            str(role)
+            for role, info in videos.items()
+            if not isinstance(info, dict)
+            or str(info.get("transcription_status") or "").strip().lower() != "completed"
+        ]
+        if incomplete_transcription:
+            raise ValueError(
+                "completed success manifest requires completed online ASR for: "
+                + ", ".join(incomplete_transcription)
+            )
     report_metadata = extract_variant_report_metadata(run_dir, required_artifacts)
     return {
         "schema_version": SUCCESS_MANIFEST_SCHEMA_VERSION,

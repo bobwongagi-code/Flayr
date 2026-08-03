@@ -388,7 +388,7 @@ def build_video_fact_payload(
     native_audio = can_analyze_native_audio(api_url, model)
 
     # 只有已验证可直接感知音轨的 provider 才走含音轨的原生视频；其余端点
-    # 使用本地 Whisper/时间戳 + 画面帧，避免把未声明的音频模态送入请求。
+    # 使用在线 ASR 的转写/时间戳 + 画面帧，避免把未声明的音频模态送入请求。
     video_path = Path(str(info.get("path") or ""))
     video_data_url = (
         video_to_data_url(video_path, budget=budget)

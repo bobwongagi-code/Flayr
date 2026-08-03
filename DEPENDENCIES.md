@@ -6,7 +6,9 @@ Flayr's Python runtime uses only the standard library. Media processing uses
 these environment tools:
 
 - `ffmpeg` and `ffprobe`: required for media probing, frame extraction and audio extraction.
-- `whisper`, `whisper-cpp` or `whisper-cli`: optional local transcription.
+- Online Fun-ASR access through the configured Beijing MaaS endpoint and the
+  Qwen/DashScope API key. `curl` is used for the HTTPS request; no local ASR
+  executable or model file is required.
 
 The actual executable paths and reported versions are recorded in each run's
 preprocessing fingerprint. A missing optional tool produces an explicit

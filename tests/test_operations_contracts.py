@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -19,6 +20,27 @@ from scripts.flayr_core.run_state import COMPLETED, FAILED, initialize_run_state
 
 
 class OperationsContractTests(unittest.TestCase):
+    def test_asr_failure_can_only_publish_degraded_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            initialize_run_state(run_dir, job_id="job-1")
+            analysis = {
+                "analysis_run_state": "completed",
+                "stage_analysis": [],
+                "improvements": [],
+            }
+            issues = flayr._transcription_issues(
+                {
+                    "benchmark": {"transcription_status": "completed"},
+                    "creator": {"transcription_status": "failed"},
+                }
+            )
+            self.assertEqual(issues, ["creator: online Fun-ASR transcription_status=failed"])
+            flayr._mark_analysis_degraded(run_dir, analysis, issues)
+            self.assertEqual(analysis["analysis_run_state"], "degraded")
+            manifest = json.loads((run_dir / "degraded_manifest.json").read_text(encoding="utf-8"))
+            self.assertIn("creator: online Fun-ASR transcription_status=failed", manifest["reason"])
+
     def test_nonempty_explicit_output_dir_requires_explicit_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp) / "run"

@@ -15,7 +15,7 @@ The goal is not literal translation. The goal is to recover what the creator is 
 1. Translate by meaning, not word by word.
 2. Read the full transcript before translating individual lines.
 3. Use product context from the transcript, file name, and frames when available.
-4. If Whisper output contains obvious speech-recognition errors, correct them from commerce context.
+4. If online ASR output contains obvious speech-recognition errors, correct them from commerce context.
 5. Do not invent brands, prices, discounts, stock, product effects, ingredients, or parameters.
 6. Keep short sentence rhythm. Do not merge many short creator lines into one long paragraph.
 7. Keep the tone conversational and suitable for subtitle reading.
@@ -38,7 +38,7 @@ The final purchase call-to-action is conversion-critical. Do not translate these
 
 ## Malay / Indonesian Speech Recognition Traps
 
-| Whisper text may show | Intended meaning |
+| ASR text may show | Intended meaning |
 |---|---|
 | Bruce / brus | 刷头 |
 | nozzle | 吸嘴 |

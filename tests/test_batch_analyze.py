@@ -75,6 +75,14 @@ class BatchAnalyzeValidationTests(unittest.TestCase):
                     runs_dir,
                     1,
                 )
+            for flag in (
+                "--asr-api-url=https://attacker.invalid",
+                "--asr-api-key-env=WORKER_SECRET",
+                "--asr-model=untrusted-model",
+                "--asr-language=xx",
+            ):
+                with self.subTest(flag=flag), self.assertRaisesRegex(ValueError, "不得覆盖 runner 参数"):
+                    validate_spec({"common_args": [flag], "jobs": [self._job()]}, runs_dir, 1)
 
     def test_rejects_non_positive_concurrency(self) -> None:
         with self.assertRaisesRegex(ValueError, "concurrency"):
@@ -268,12 +276,32 @@ class BatchAnalyzeValidationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             inputs = {"creator_video": creator, "benchmark_video": benchmark}
-            analysis = {"analysis_run_state": "completed", "mode": "improve"}
+            analysis = {
+                "analysis_run_state": "completed",
+                "mode": "improve",
+                "videos": {
+                    "creator": {"transcription_status": "completed"},
+                    "benchmark": {"transcription_status": "completed"},
+                },
+            }
             with self.assertRaises(FileNotFoundError):
                 write_success_manifest(out, inputs, analysis)
 
             (out / "bd_report.html").write_text(self._audience_report("bd-internal-v2"), encoding="utf-8")
             (out / "creator_report.html").write_text(self._audience_report("creator-v2"), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "completed online ASR"):
+                write_success_manifest(
+                    out,
+                    inputs,
+                    {
+                        **analysis,
+                        "videos": {
+                            "creator": {"transcription_status": "failed"},
+                            "benchmark": {"transcription_status": "completed"},
+                        },
+                    },
+                    {"mode": "improve"},
+                )
             write_success_manifest(out, inputs, analysis, {"mode": "improve"})
             self.assertTrue(validate_success_manifest(out, inputs))
             manifest = json.loads((out / "_SUCCESS.json").read_text(encoding="utf-8"))

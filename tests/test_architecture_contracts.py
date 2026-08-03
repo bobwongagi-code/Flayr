@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import flayr
-from flayr_core import report as report_module, subtitle_track, translation, utils, video, whisper
+from flayr_core import asr, report as report_module, subtitle_track, translation, utils, video
 from flayr_core.report import (
     ReportAssetContext,
     executive_summary,
@@ -3576,6 +3576,7 @@ class ArchitectureContractTests(unittest.TestCase):
                         "transcript_path": str(transcript),
                         "transcript_segments_path": str(transcript_segments),
                         "transcript_segments_available": True,
+                        "transcription_status": "completed",
                         "preprocess_fingerprint": fingerprint,
                         "preprocess_completed": True,
                         "preprocess_artifacts": flayr._build_preprocess_artifact_manifest(role_dir),
@@ -3585,13 +3586,24 @@ class ArchitectureContractTests(unittest.TestCase):
             )
             self.assertIsNotNone(flayr.load_existing_video_result(role_dir, fingerprint))
 
+            cached_info = json.loads((role_dir / "_preprocess.json").read_text(encoding="utf-8"))
+            cached_info["transcription_status"] = "failed"
+            (role_dir / "_preprocess.json").write_text(json.dumps(cached_info), encoding="utf-8")
+            self.assertIsNone(flayr.load_existing_video_result(role_dir, fingerprint))
+
+            cached_info["transcription_status"] = "completed"
+            transcript.write_text("Online ASR failed; no transcript is available.\n", encoding="utf-8")
+            cached_info["preprocess_artifacts"] = flayr._build_preprocess_artifact_manifest(role_dir)
+            (role_dir / "_preprocess.json").write_text(json.dumps(cached_info), encoding="utf-8")
+            self.assertIsNone(flayr.load_existing_video_result(role_dir, fingerprint))
+
             transcript.write_text("mutated transcript", encoding="utf-8")
             self.assertIsNone(flayr.load_existing_video_result(role_dir, fingerprint))
 
             video.write_bytes(b"changed-video")
             self.assertIsNone(flayr.load_existing_video_result(role_dir, flayr.build_preprocess_fingerprint(video, deps, args)))
 
-            args.whisper_language = "th"
+            args.asr_language = "th"
             self.assertIsNone(flayr.load_existing_video_result(role_dir, flayr.build_preprocess_fingerprint(video, deps, args)))
 
     def test_secondary_evidence_rebuild_refreshes_preprocess_manifest(self) -> None:
@@ -3651,9 +3663,12 @@ class ArchitectureContractTests(unittest.TestCase):
             deps = {
                 "ffmpeg": None,
                 "ffprobe": None,
-                "whisper": None,
-                "whisper_model": None,
-                "whisper_model_th": None,
+                "asr": {
+                    "provider": "dashscope",
+                    "api_url": args.asr_api_url,
+                    "model": args.asr_model,
+                    "language": args.asr_language,
+                },
             }
             result = flayr.process_video("creator", source, run_dir, deps, args)
             self.assertEqual(result["transcript_segments_path"], None)
@@ -3661,44 +3676,87 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertTrue((role_dir / "_preprocess.json").is_file())
             self.assertEqual(list(run_dir.glob(".creator.generation-*")), [])
 
-    def test_whisper_backend_switch_clears_previous_segments(self) -> None:
+    def test_online_asr_clears_previous_segments_and_publishes_words(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             role_dir = Path(tmp)
             audio = role_dir / "audio.wav"
             audio.write_bytes(b"audio")
             transcript = role_dir / "transcript.txt"
-            deps = {
-                "whisper": "whisper-cli",
-                "whisper_model": None,
-                "whisper_model_th": None,
-                "whisper_language": "en",
+            (role_dir / "transcript.srt").write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nstale segment\n",
+                encoding="utf-8",
+            )
+            (role_dir / "transcript.words.json").write_text("stale", encoding="utf-8")
+            response = {
+                "output": {
+                    "sentence": {
+                        "begin_time": 100,
+                        "end_time": 900,
+                        "text": "new transcript",
+                        "words": [{"text": "new", "begin_time": 100, "end_time": 500}],
+                    }
+                }
             }
-
-            def first_backend(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                (role_dir / "transcript.txt").write_text("old transcript", encoding="utf-8")
-                (role_dir / "transcript.srt").write_text(
-                    "1\n00:00:00,000 --> 00:00:01,000\nold segment\n",
-                    encoding="utf-8",
+            with mock.patch.object(asr, "audio_to_mp3_data_url", return_value="data:audio/mpeg;base64,AA=="), mock.patch.object(
+                asr, "_call_asr_endpoint", return_value=response
+            ):
+                result = {"errors": []}
+                asr.run_online_asr(
+                    "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+                    "fun-asr-realtime",
+                    "test-key",
+                    "en",
+                    audio,
+                    role_dir,
+                    transcript,
+                    result,
                 )
-                return subprocess.CompletedProcess(command, 0, "", "")
+            self.assertEqual(result["transcription_status"], "completed")
+            self.assertTrue(result["transcript_segments_available"])
+            self.assertTrue(result["transcript_words_available"])
+            self.assertEqual(transcript.read_text(encoding="utf-8").strip(), "new transcript")
+            self.assertIn("new transcript", (role_dir / "transcript.srt").read_text(encoding="utf-8"))
 
-            with mock.patch.object(whisper, "run_command", side_effect=first_backend):
-                first = {}
-                whisper.run_whisper(deps, audio, role_dir, transcript, first)
-            self.assertTrue(first["transcript_segments_available"])
+    def test_online_asr_does_not_reuse_unrelated_llm_key(self) -> None:
+        args = SimpleNamespace(
+            asr_api_key_env="FLAYR_TEST_MISSING_ASR_KEY",
+            llm_api_url="https://api.openai.com/v1/chat/completions",
+            llm_api_key_env="OPENAI_API_KEY",
+            llm_api_key_keychain_service="",
+            llm_api_key_keychain_account="",
+        )
+        with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "openai-key"}, clear=False), mock.patch.object(
+            asr, "read_llm_api_key", return_value="openai-key"
+        ):
+            self.assertEqual(asr.read_asr_api_key(args), "")
 
-            deps["whisper"] = "whisper"
+    def test_online_asr_payload_matches_realtime_and_flash_contracts(self) -> None:
+        realtime = asr._build_asr_payload("fun-asr-realtime", "data:audio/mp3;base64,AA==", "auto")
+        realtime_content = realtime["input"]["messages"][0]["content"][0]
+        self.assertEqual(realtime_content, {"audio": "data:audio/mp3;base64,AA=="})
+        self.assertNotIn("language_hints", realtime["parameters"])
 
-            def second_backend(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                (role_dir / "audio.txt").write_text("new transcript", encoding="utf-8")
-                return subprocess.CompletedProcess(command, 0, "", "")
+        flash = asr._build_asr_payload("fun-asr-flash-2026-06-15", "data:audio/mp3;base64,AA==", "ms")
+        flash_content = flash["input"]["messages"][0]["content"][0]
+        self.assertEqual(
+            flash_content,
+            {
+                "type": "input_audio",
+                "input_audio": {"data": "data:audio/mp3;base64,AA=="},
+            },
+        )
+        self.assertEqual(flash["parameters"]["language_hints"], ["ms"])
 
-            with mock.patch.object(whisper, "run_command", side_effect=second_backend):
-                second = {}
-                whisper.run_whisper(deps, audio, role_dir, transcript, second)
-            self.assertFalse(second["transcript_segments_available"])
-            self.assertIsNone(second["transcript_segments_path"])
-            self.assertFalse((role_dir / "transcript.srt").exists())
+    def test_online_asr_can_fallback_to_same_qwen_endpoint_key(self) -> None:
+        args = SimpleNamespace(
+            asr_api_key_env="FLAYR_TEST_MISSING_ASR_KEY",
+            llm_api_url="https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/v1/chat/completions",
+            llm_api_key_env="QWEN_API_KEY",
+            llm_api_key_keychain_service="",
+            llm_api_key_keychain_account="",
+        )
+        with mock.patch.object(asr, "read_llm_api_key", return_value="qwen-key"):
+            self.assertEqual(asr.read_asr_api_key(args), "qwen-key")
 
     def test_default_run_dir_is_unique(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(flayr, "DEFAULT_RUNS_DIR", Path(tmp)):
@@ -3785,14 +3843,27 @@ class ArchitectureContractTests(unittest.TestCase):
     @staticmethod
     def _cache_args() -> SimpleNamespace:
         return SimpleNamespace(
-            skip_whisper=False, whisper_language="auto", translate_with_llm=False,
+            asr_language="auto",
+            asr_api_url="https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+            asr_model="fun-asr-realtime",
+            asr_api_key_env="DASHSCOPE_API_KEY",
+            translate_with_llm=False,
             translation_model="", llm_model="", llm_api_url="", product_name="", product_notes="",
             ocr_mode="off", with_ocr=False, no_ocr=False, llm_dry_run=True,
         )
 
     @staticmethod
     def _cache_deps() -> dict[str, object]:
-        return {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "whisper": "whisper-cli", "whisper_model": None, "whisper_model_th": None}
+        return {
+            "ffmpeg": "ffmpeg",
+            "ffprobe": "ffprobe",
+            "asr": {
+                "provider": "dashscope",
+                "api_url": "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+                "model": "fun-asr-realtime",
+                "language": "auto",
+            },
+        }
 
 if __name__ == "__main__":
     unittest.main()

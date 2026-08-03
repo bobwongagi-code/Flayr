@@ -10,8 +10,8 @@ Flayr 接收一条**爆款参考视频**和一条**达人视频**，结合连续
 
 | 能力 | 说明 |
 |------|------|
-| 视频转写 | Whisper 本地转写，支持东南亚语言（马来语/泰语/印尼语）自动识别，提供权威口播时间戳 |
-| 视频理解 | 多模态视觉模型读取连续画面；口播语义来自 Whisper，音轨由本地技术质检补充 |
+| 视频转写 | 北京 MaaS Fun-ASR 在线转写，支持东南亚语言（马来语/泰语/印尼语）自动识别，提供句级与词级口播时间戳 |
+| 视频理解 | 多模态视觉模型读取连续画面；口播语义来自在线 Fun-ASR，音轨由本地技术质检补充 |
 | 音频边界 | 音量、静音和峰值风险是可复核硬质检；语气/BGM/音效只作观察，不进入差距等级 |
 | 结构化分析 | 对照 Chimera 6 槽位结构库（S1-S6），逐段对比达人与爆款差距 |
 | 改进建议 | 按 GMV 杠杆排序的提升点，含话术、画面和执行建议 |
@@ -59,7 +59,7 @@ Flayr/
 │   ├── manage_validation_cohort.py # 冻结/校验/消费 blind cohort（不调模型）
 │   ├── verify_analysis_contracts.py # S1-S6 与跨模块契约门
 │   └── flayr_core/               # 核心模块包
-│       ├── video.py whisper.py   # 转写 + 抽帧 + 抽音频
+│       ├── video.py asr.py       # 在线转写 + 抽帧 + 抽音频
 │       ├── translation.py        # 转写翻译
 │       ├── prompt.py             # analysis_input.md 装配
 │       ├── artifacts.py          # 帧/时间区间选取
@@ -104,7 +104,7 @@ Flayr/
 ```bash
 # Python 3.11+
 # ffmpeg, ffprobe（视频重编码 + 抽帧 + 抽音频）
-# whisper-cli (whisper.cpp) + 模型文件
+# 在线 Fun-ASR 使用 curl 调用；ffmpeg 负责提取/压缩音频
 # 可选报告增强：python3 -m pip install -r requirements-dev.lock
 ```
 
@@ -118,11 +118,10 @@ python3 scripts/flayr.py \
   --benchmark-video 爆款.mp4 \
   --creator-video 达人.mp4 \
   --product-name "儿童牙膏" \
-  --whisper-model /path/to/ggml-large-v3-turbo-q5_0.bin \
   --llm-model qwen3.6-plus \
   --llm-api-url https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions \
   --max-total-wall-time 3600 \
-  --llm-api-key-env FLAYR_LLM_API_KEY \
+  --llm-api-key-env DASHSCOPE_API_KEY \
   improve
 ```
 
@@ -138,11 +137,13 @@ python3 scripts/flayr.py \
 | `--max-total-wall-time` | 单次运行总墙钟上限；默认 1800 秒，慢模型验证可显式提高，例如 3600 秒 |
 | `--llm-api-key-keychain-service` | macOS Keychain 服务名（或用 `--llm-api-key-env` 走环境变量） |
 | `--llm-include-images` | 默认启用：完整 Step-0 + 单视频事实抽取 + omni 对比链；`--no-llm-include-images` 仅保留给旧文本路径兼容调试 |
-| `--whisper-model` | Whisper 模型文件路径 |
-| `--skip-whisper` | 跳过转写（用于调试） |
+| `--asr-api-url` | 在线 Fun-ASR endpoint；默认使用北京 MaaS 地址 |
+| `--asr-model` | 在线 ASR 模型；默认 `fun-asr-realtime` |
+| `--asr-language` | ASR 语言提示；默认 `auto` |
+| `--asr-api-key-env` | 在线 ASR 使用的 key 环境变量；默认 `DASHSCOPE_API_KEY` |
 | `--ocr-mode auto/on/off` | 字幕 OCR 轨。默认 `auto`：复用分析模型的视觉能力和 key；`off` 可关闭 |
 
-> 注：可选预处理或本地增强依赖不可用时，系统会在运行状态中记录 `degraded` 及原因，并继续生成不依赖该能力的产物；不会伪造缺失的证据。已请求的 LLM 调用、响应解析或 schema 校验失败时，任务返回非零，不会发布为完成状态。
+> 注：在线 Fun-ASR 是 compare/improve 的语音证据依赖；调用失败时默认返回非零，不会发布为完成状态。只有显式使用 `--allow-degraded` 才会继续生成降级报告，并写入 `degraded` 状态；不会伪造缺失的转写或证据。
 
 ---
 
@@ -151,7 +152,7 @@ python3 scripts/flayr.py \
 ```
 视频输入
   ↓
-[1] 转写 + 抽帧 + 抽音频（Whisper + ffmpeg）
+[1] 在线转写 + 抽帧 + 抽音频（Fun-ASR + ffmpeg）
   ↓
 [2] 翻译（可选，LLM）
   ↓
