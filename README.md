@@ -183,9 +183,10 @@ python3 scripts/flayr.py \
 | `video_facts_{benchmark,creator}.json` | 阶段一单视频事实清单 |
 | `transcript.txt` / `.srt` / `.zh.txt` | 转写与翻译 |
 | `frames/` `focus_frames/` | 抽取的关键帧 |
-| `frames/selection_report.*` | 全片帧去重审计，记录每帧 keep/drop 原因 |
-| `contact_sheets/` | Hook、CTA、S1-S6 的顺序联系表 |
-| `timeline_views/` | Hook、CTA 的帧序列 + 波形 + 口播证据图 |
+| `frames/analysis_manifest.json` / `analysis_stage_frames.json` | 由镜头、字幕、变化点和词级 ASR 边界共同生成的 canonical 模型输入帧集 |
+| `frames/selection_report.*` | 全片帧去重审计，记录每帧 keep/drop 原因；不替代 canonical manifest |
+| `contact_sheets/` | canonical Hook、CTA、S1-S6 的顺序联系表 |
+| `timeline_views/` | canonical Hook、CTA 的帧序列 + 波形 + 口播证据图，并记录帧来源 |
 | `transcript_packed.*` | 带时间戳的紧凑口播索引 |
 | `video_evidence_audit.json` | 二级证据视图自检结果 |
 
@@ -218,7 +219,7 @@ python3 scripts/manage_validation_cohort.py freeze \
 ## 七、设计原则
 
 1. **全模态主导**：判断环节必须能看画面、听声音，不退化成读文字摘要
-2. **关注变化点**：高密度连续帧交给模型自己找变化点，而非人工均匀抽帧替它决定看哪
+2. **关注变化点**：预算内自适应基础帧叠加镜头、字幕、局部变化和词级口播边界，模型消费统一的 canonical manifest
 3. **事实与判断分离**：阶段一锁定事实防串供，阶段二在事实基线上做感官判断
 4. **按证据形态切换主骨架**：有口播用口播时间线，无口播则切到字幕/OCR、画面变化、镜头轨和音频节奏
 5. **状态明确**：可选依赖缺失记录 `degraded`；已请求的 API、模型输出或 schema 失败返回非零；没有完成模型分析时，对比/改进默认失败，只有显式 `--allow-degraded` 才能继续

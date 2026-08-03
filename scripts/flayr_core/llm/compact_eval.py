@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from ..artifacts import parse_time_range_seconds
+from ..artifacts import get_stage_frame_entries, parse_time_range_seconds
 from ..evidence_states import EVIDENCE_STATE_STRENGTHS
 from ..postprocess.utils import evidence_overlaps_range
 from ..resources import ResourceBudget, ResourceBudgetExceeded, ResourceLimits, encode_file_data_url
@@ -33,6 +33,7 @@ COMPACT_EVAL_SCHEMA_VERSION = 1
 COMPACT_EVAL_ROLE = "compact_judgment_on_locked_facts"
 SEVERITY_ONLY_ROLE = "severity_judgment_on_locked_facts"
 VISUAL_EXTRACTION_ROLE = "visual_fact_extraction_on_locked_frames"
+MODEL_INDEPENDENT_ROLE = "model_independent_comparison_on_model_facts"
 EVALUATION_ROLES = frozenset({"model_calibration", "mechanism_regression", "blind_validation"})
 DECISION_SCOPE_BY_ROLE = {
     "model_calibration": "calibration_only",
@@ -43,6 +44,8 @@ COMPACT_OUTPUT_BUDGET = 8192
 COMPACT_MAX_REASON_CHARS = 240
 COMPACT_MAX_BASIS_CHARS = 320
 COMPACT_MAX_EVIDENCE_IDS = 4
+MODEL_INDEPENDENT_WINNERS = frozenset({"benchmark", "creator", "tie", "uncertain"})
+MODEL_INDEPENDENT_GAPS = frozenset({"small", "medium", "large", "uncertain"})
 EXTRACTION_MAX_UNITS = 12
 EXTRACTION_MAX_INFORMATION_CHARS = 240
 RAW_VIDEO_ENCODING = {
@@ -155,15 +158,19 @@ def _allowed_evidence_ids(facts: dict[str, Any]) -> dict[str, set[str]]:
 
 
 def _stage_frame_inputs(run_dir: Path, role: str) -> list[dict[str, str]]:
-    manifest_path = run_dir / role / "frames" / "stage_frames.json"
-    # stage_frames.json is a list, while normal Flayr artifacts use object roots.
-    if manifest_path.is_file():
+    role_dir = run_dir / role
+    preprocess_path = role_dir / "_preprocess.json"
+    if preprocess_path.is_file():
         try:
-            value = json.loads(manifest_path.read_text(encoding="utf-8"))
+            info = json.loads(preprocess_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise CompactEvaluationError(f"invalid stage frame manifest: {manifest_path}: {exc}") from exc
+            raise CompactEvaluationError(f"invalid preprocess manifest: {preprocess_path}: {exc}") from exc
     else:
-        value = []
+        info = {"stage_frame_manifest_path": str(role_dir / "frames" / "stage_frames.json")}
+    value = get_stage_frame_entries(info)
+    manifest_path = Path(
+        str(info.get("analysis_stage_frame_manifest_path") or role_dir / "frames" / "analysis_stage_frames.json")
+    )
     if not isinstance(value, list):
         raise CompactEvaluationError(f"stage frame manifest must be a list: {manifest_path}")
 
@@ -175,9 +182,9 @@ def _stage_frame_inputs(run_dir: Path, role: str) -> list[dict[str, str]]:
             for item in value
             if isinstance(item, dict) and str(item.get("stage") or "") == stage.name
         ]
-        for item in entries[:2]:
+        for item in entries[:4]:
             raw_path = str(item.get("path") or "").strip()
-            path = Path(raw_path).expanduser()
+            path = _resolve_frozen_visual_path(raw_path, run_dir)
             if not path.is_file():
                 fallback = run_dir / role / "contact_sheets" / f"stage_{int(stage.code[1:]):02d}.jpg"
                 if fallback.is_file():
@@ -199,6 +206,19 @@ def _stage_frame_inputs(run_dir: Path, role: str) -> list[dict[str, str]]:
                 }
             )
     return selected
+
+
+def _resolve_frozen_visual_path(raw_path: str, run_dir: Path) -> Path:
+    """Keep frozen visual inputs inside the evaluation run directory."""
+    candidate = Path(str(raw_path or "")).expanduser()
+    if not candidate.is_absolute():
+        candidate = run_dir / candidate
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(run_dir.expanduser().resolve())
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise CompactEvaluationError(f"frozen visual input escapes run directory: {raw_path}") from exc
+    return resolved
 
 
 def _stable_digest(value: Any) -> str:
@@ -608,6 +628,110 @@ def build_compact_eval_payload(
     )
 
 
+def build_model_independent_payload(
+    model: str,
+    bundle: FrozenCompactBundle,
+    *,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+) -> dict[str, Any]:
+    """Build the frozen protocol's model-independent comparison contract."""
+    response_shape = {
+        "schema_version": COMPACT_EVAL_SCHEMA_VERSION,
+        "overall": {
+            "winner": "benchmark|creator|tie|uncertain",
+            "gap": "small|medium|large|uncertain",
+            "confidence": "high|medium|low",
+            "reason": "一句不超过320字的整体判断依据",
+        },
+        "stage_judgments": [
+            {
+                "stage": "S1 Hook",
+                "severity": "small|medium|large",
+                "confidence": "high|medium|low",
+                "creator": {
+                    "observation_state": "none|partial|complete|uncertain",
+                    "evidence_ids": ["C1"],
+                    "reason": "一句不超过240字的事实依据",
+                },
+                "benchmark": {
+                    "observation_state": "none|partial|complete|uncertain",
+                    "evidence_ids": ["B1"],
+                    "reason": "一句不超过240字的事实依据",
+                },
+                "rationale": "一句不超过240字的阶段差距依据",
+            }
+        ] * 6,
+    }
+    system = (
+        "你是 Flayr 的模型独立比较判断器。只输出严格 JSON，不要 Markdown，不要解释。"
+        "这是与人工初始判断并行的独立判断层，不得读取或假设存在任何 human_initial、GT 或其他模型结果。"
+        "输入事实来自本模型此前完成的视觉事实抽取，事实包已经锁定；本次不得新增、改写或删除事实。"
+        "必须输出 overall 和六个阶段，阶段顺序固定为 S1 Hook、S2 产品引出、S3 使用过程、S4 效果呈现、S5 信任放大、S6 CTA。"
+        "overall.winner 只能是 benchmark、creator、tie、uncertain；overall.gap 只能是 small、medium、large、uncertain。"
+        "severity 表示达人相对标杆在该阶段的差距，只能是 small、medium、large；没有实质差距也必须用 small，绝对不要把 none 当作 severity；无法确定时仍使用 small/medium/large 并把 confidence 设为 low，在依据中说明不确定性。"
+        "每侧 observation_state 只能是 none、partial、complete、uncertain。"
+        "evidence_ids 只能引用同侧、对应阶段事实清单中已经存在的 ID；没有明确证据时填空数组。"
+        "不能把标杆事实复制成达人事实，也不能用相邻阶段 ID 补足当前阶段。"
+        "每条 reason 和 rationale 都必须是可核对的事实依据，不要输出隐藏推理过程、报告、improvements、derive 结果或任何额外字段。输出前检查所有 evidence_ids 的阶段归属，并确保整个 JSON 最后以一个完整的右花括号结束。"
+        f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
+    )
+    user_text = (
+        "请独立完成一份整体比较和六阶段判断。只使用下面已经锁定的产品、阶段和本模型视觉事实；"
+        "这份输出将与人工初始判断分层对齐，不能根据人工结论反向调整。\n\n"
+        + json.dumps(bundle.context, ensure_ascii=False, indent=2)
+    )
+    return _build_multimodal_payload(
+        model,
+        bundle,
+        system=system,
+        user_text=user_text,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+
+
+def validate_model_independent_result(result: Any, bundle: FrozenCompactBundle) -> list[str]:
+    """Validate the independent comparison contract without semantic repair."""
+    if not isinstance(result, dict):
+        return ["result must be an object"]
+    errors: list[str] = []
+    expected_root = {"schema_version", "overall", "stage_judgments"}
+    if result.get("schema_version") != COMPACT_EVAL_SCHEMA_VERSION:
+        errors.append("schema_version mismatch")
+    extra_root = set(result) - expected_root
+    if extra_root:
+        errors.append(f"unsupported root fields: {sorted(extra_root)}")
+
+    overall = result.get("overall")
+    if not isinstance(overall, dict):
+        errors.append("overall must be an object")
+    else:
+        expected_overall = {"winner", "gap", "confidence", "reason"}
+        extra = set(overall) - expected_overall
+        missing = expected_overall - set(overall)
+        if extra:
+            errors.append(f"overall has unsupported fields: {sorted(extra)}")
+        if missing:
+            errors.append(f"overall is missing fields: {sorted(missing)}")
+        if overall.get("winner") not in MODEL_INDEPENDENT_WINNERS:
+            errors.append("overall.winner is invalid")
+        if overall.get("gap") not in MODEL_INDEPENDENT_GAPS:
+            errors.append("overall.gap is invalid")
+        if overall.get("confidence") not in COMPACT_CONFIDENCES:
+            errors.append("overall.confidence is invalid")
+        reason = overall.get("reason")
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > COMPACT_MAX_BASIS_CHARS:
+            errors.append(f"overall.reason must be a non-empty string <= {COMPACT_MAX_BASIS_CHARS} chars")
+
+    stage_result = {
+        "schema_version": result.get("schema_version"),
+        "stage_judgments": result.get("stage_judgments"),
+    }
+    errors.extend(validate_compact_result(stage_result, bundle))
+    return errors
+
+
 def build_severity_only_payload(
     model: str,
     bundle: FrozenCompactBundle,
@@ -960,6 +1084,70 @@ def validate_visual_extraction_result(
             )
         )
     return errors
+
+
+def build_model_owned_fact_bundle(
+    base_bundle: FrozenCompactBundle,
+    extraction_result: dict[str, Any],
+    *,
+    extraction_artifact: str = "",
+) -> FrozenCompactBundle:
+    """Create a judgment-only bundle from one model's validated extraction.
+
+    This is the second layer of the frozen human/model protocol. The model
+    receives its own already-produced visual facts as locked input, so the
+    judgment call cannot silently replace extraction and judgment with one
+    opaque answer. Human GT is deliberately absent from this bundle.
+    """
+    if not isinstance(extraction_result, dict):
+        raise CompactEvaluationError("model-owned extraction result must be an object")
+    source_durations = _bundle_video_durations(base_bundle)
+    extraction_errors = validate_visual_extraction_result(
+        extraction_result,
+        expected_roles=RAW_VIDEO_ROLES,
+        source_durations=source_durations,
+    )
+    if extraction_errors:
+        raise CompactEvaluationError(
+            "model-owned extraction is not valid: " + "; ".join(extraction_errors[:8])
+        )
+
+    facts: dict[str, dict[str, Any]] = {}
+    for role in RAW_VIDEO_ROLES:
+        units = extraction_result.get(f"{role}_evidence_units")
+        facts[role] = {
+            "content_summary": "",
+            "communication_strategy": "",
+            "evidence_units": [_compact_fact_unit(item) for item in units if isinstance(item, dict)],
+        }
+    allowed = {role: _allowed_evidence_ids(facts[role]) for role in facts}
+    context = dict(base_bundle.context)
+    context["facts"] = facts
+    context["experiment_boundary"] = (
+        "这是模型独立判断层实验。输入事实来自同一模型此前完成的 raw_video_only 抽取，"
+        "事实包已经锁定；本次只判断整体比较和六阶段差距，不读取人工初始判断，不输出生产报告或 derive 结果。"
+    )
+    context["model_owned_fact_provenance"] = {
+        "source_artifact": extraction_artifact,
+        "source_digest": base_bundle.source_digest,
+        "human_initial_loaded": False,
+        "gt_loaded": False,
+    }
+    source_identity = {
+        "base_source_digest": base_bundle.source_digest,
+        "input_mode": "model_owned_locked_facts",
+        "facts": facts,
+        "extraction_artifact": extraction_artifact,
+    }
+    return replace(
+        base_bundle,
+        context=context,
+        allowed_evidence_ids=allowed,
+        source_digest=_stable_digest(source_identity),
+        input_mode="model_owned_locked_facts",
+        visual_inputs=(),
+        video_inputs=(),
+    )
 
 
 def _normalise_extraction_text(value: Any) -> str:
@@ -1502,6 +1690,47 @@ def run_compact_evaluation(
         output_budget_field=output_budget_field,
         request_timeout_seconds=request_timeout_seconds,
         gt_stages=gt_stages,
+        diagnostics=diagnose_compact_evidence_references,
+    )
+
+
+def run_model_independent_evaluation(
+    *,
+    model: str,
+    bundle: FrozenCompactBundle,
+    output_dir: Path,
+    api_url: str,
+    api_key_args: Any,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+    request_timeout_seconds: int = 600,
+    evaluation_role: str = "model_calibration",
+) -> dict[str, Any]:
+    """Run the frozen protocol's model-independent judgment layer."""
+    payload = build_model_independent_payload(
+        model,
+        bundle,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+    return _run_isolated_evaluation(
+        model=model,
+        bundle=bundle,
+        output_dir=output_dir,
+        api_url=api_url,
+        api_key_args=api_key_args,
+        payload=payload,
+        validator=lambda value: validate_model_independent_result(value, bundle),
+        task_role=MODEL_INDEPENDENT_ROLE,
+        evaluation_role=evaluation_role,
+        variant="model_independent",
+        success_filename="model_independent_evaluation.json",
+        failure_filename="model_independent_failure.json",
+        call_kind="model_independent_judgment",
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+        request_timeout_seconds=request_timeout_seconds,
+        gt_stages=None,
         diagnostics=diagnose_compact_evidence_references,
     )
 

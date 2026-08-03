@@ -11,6 +11,8 @@ from unittest.mock import patch
 from scripts.flayr_core.llm import compact_eval
 from scripts.flayr_core.llm.compact_eval import (
     COMPACT_EVAL_SCHEMA_VERSION,
+    build_model_independent_payload,
+    build_model_owned_fact_bundle,
     build_compact_eval_payload,
     build_severity_only_payload,
     build_visual_extraction_payload,
@@ -24,6 +26,7 @@ from scripts.flayr_core.llm.compact_eval import (
     select_frozen_video_bundle,
     summarize_visual_extraction_result,
     validate_compact_result,
+    validate_model_independent_result,
     validate_severity_only_result,
     validate_visual_extraction_result,
 )
@@ -160,6 +163,37 @@ def _extraction_result() -> dict:
     }
 
 
+def _model_independent_result() -> dict:
+    return {
+        "schema_version": COMPACT_EVAL_SCHEMA_VERSION,
+        "overall": {
+            "winner": "benchmark",
+            "gap": "small",
+            "confidence": "medium",
+            "reason": "标杆在当前锁定事实中展示更完整。",
+        },
+        "stage_judgments": [
+            {
+                "stage": stage,
+                "severity": "small",
+                "confidence": "medium",
+                "creator": {
+                    "observation_state": "partial" if index == 1 else "none",
+                    "evidence_ids": ["C1"] if index == 1 else [],
+                    "reason": "当前事实支持该状态。",
+                },
+                "benchmark": {
+                    "observation_state": "partial" if index == 1 else "none",
+                    "evidence_ids": ["B1"] if index == 1 else [],
+                    "reason": "当前事实支持该状态。",
+                },
+                "rationale": "标杆在该阶段的证据更完整。",
+            }
+            for index, stage in enumerate(STAGES, 1)
+        ],
+    }
+
+
 class CompactEvalContractTests(unittest.TestCase):
     def test_valid_result_is_accepted_and_scored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -226,6 +260,33 @@ class CompactEvalContractTests(unittest.TestCase):
             system = payload["messages"][0]["content"]
             self.assertIn("不要重新抽取视觉事实", system)
             self.assertIn("只保留 stage、severity、confidence", system)
+
+    def test_model_independent_contract_keeps_overall_and_stage_layers_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base_bundle = load_frozen_visual_bundle(_write_bundle(Path(tmp)), include_images=False)
+            bundle = build_model_owned_fact_bundle(base_bundle, _extraction_result(), extraction_artifact="facts.json")
+            result = _model_independent_result()
+            self.assertEqual(validate_model_independent_result(result, bundle), [])
+            payload = build_model_independent_payload(
+                "qwen3.6-plus",
+                bundle,
+                output_budget=4096,
+                output_budget_field="max_completion_tokens",
+            )
+            self.assertEqual(payload["max_completion_tokens"], 4096)
+            self.assertIn("overall", payload["messages"][0]["content"])
+            self.assertIn("human_initial", payload["messages"][0]["content"])
+            self.assertEqual(bundle.input_mode, "model_owned_locked_facts")
+            self.assertFalse(bundle.context["model_owned_fact_provenance"]["human_initial_loaded"])
+
+    def test_model_independent_contract_rejects_invalid_winner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base_bundle = load_frozen_visual_bundle(_write_bundle(Path(tmp)), include_images=False)
+            bundle = build_model_owned_fact_bundle(base_bundle, _extraction_result())
+            result = _model_independent_result()
+            result["overall"]["winner"] = "most_convincing"
+            errors = validate_model_independent_result(result, bundle)
+            self.assertIn("overall.winner is invalid", errors)
 
     def test_visual_extraction_contract_forbids_severity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

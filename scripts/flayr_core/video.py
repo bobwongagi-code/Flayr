@@ -14,6 +14,7 @@ from .artifacts import (
     focus_frame_sort_key,
     numbered_frame_sort_key,
     parse_timestamp_seconds,
+    resolve_artifact_path,
     stage_time_ranges,
 )
 
@@ -434,8 +435,11 @@ def _collect_anchor_times(result: dict[str, Any], duration: float) -> list[tuple
         raw_path = str(result.get(key) or "").strip()
         if not raw_path:
             continue
+        path = resolve_artifact_path(result, raw_path, require_file=True)
+        if path is None:
+            continue
         try:
-            data = json.loads(Path(raw_path).read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
         if key == "shot_track_path":

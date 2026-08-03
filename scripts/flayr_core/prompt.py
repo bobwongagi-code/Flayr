@@ -22,6 +22,7 @@ from .artifacts import (
     format_seconds,
     get_analysis_frame_entries,
     get_focus_frame_entries,
+    resolve_artifact_path,
     sample_evenly,
 )
 from .market import render_market_knowledge as render_market_context
@@ -186,7 +187,15 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
                 "",
                 "### 词级口播时间索引（如可用）",
                 "",
-                read_optional_text(Path(str(info.get("transcript_words_path") or "__missing_transcript_words__"))),
+                read_optional_text(
+                    resolve_artifact_path(
+                        info,
+                        info.get("transcript_words_path"),
+                        require_file=True,
+                        require_root=True,
+                    )
+                    or Path("__missing_transcript_words__")
+                ),
                 "",
                 "### 中文翻译",
                 "",
@@ -274,7 +283,12 @@ def render_timeline_frame_markdown(info: dict[str, Any]) -> str:
 
 def render_video_evidence_markdown(role_dir: Path, info: dict[str, Any]) -> str:
     evidence = info.get("video_evidence") if isinstance(info.get("video_evidence"), dict) else {}
-    selection_report_path = Path(str(evidence.get("frame_selection_report_path") or role_dir / "frames" / "selection_report.json"))
+    selection_report_path = resolve_artifact_path(
+        {"work_dir": str(role_dir)},
+        evidence.get("frame_selection_report_path") or role_dir / "frames" / "selection_report.json",
+        require_file=True,
+        require_root=True,
+    ) or role_dir / "frames" / "selection_report.json"
     dedup_count = evidence.get("dedup_kept_frame_count")
     if dedup_count is None and selection_report_path.is_file():
         try:

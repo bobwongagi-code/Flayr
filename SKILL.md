@@ -41,15 +41,15 @@ python3 scripts/flayr.py improve \
 
 1. Confirm the requested mode and local video paths.
 2. Run dependency checks for `ffmpeg`, `ffprobe`, and the approved online Fun-ASR endpoint configuration.
-3. Extract one frame per second and a WAV audio file for each input video.
+3. Extract a bounded adaptive base frame set (up to 2 fps under the shared frame budget) and a WAV audio file for each input video.
 4. Extract denser 2 fps focus frames for the first 5 seconds and final 5 seconds, and write `focus_frames/manifest.json` with timestamps.
-   Also write `frames/manifest.json` and `frames/stage_frames.json` so S1-S6 diagnosis has full-funnel visual evidence.
+   Also write `frames/manifest.json` and `frames/stage_frames.json` so S1-S6 diagnosis has full-funnel visual evidence. Scene, subtitle, local-change, action-change, and bounded word-level speech anchors are then merged into the canonical `frames/analysis_manifest.json` and `analysis_stage_frames.json` consumed by model inputs and downstream views.
 5. Transcribe speech in the detected local language through the approved Beijing MaaS Fun-ASR endpoint, and keep a Chinese translation beside it.
    Use `--translate-with-llm` when the Chinese translation should be generated automatically.
 6. Classify `speech_mode`: `spoken`, `subtitle_driven`, `visual_driven`, or `music_driven`.
    Use `transcript_packed` / `transcript.srt` as the primary spine only for `spoken` videos. For no-speech videos, use OCR subtitles, visual changes, timeline views, shot tracks, and audio rhythm instead.
 7. Generate secondary evidence artifacts from those assets: `frames/selection_report.*`, `contact_sheets/`, `timeline_views/`, `transcript_packed.*`, and `video_evidence_audit.json`.
-   These artifacts are audit aids, not direct scoring inputs. Stage1 visual payloads should prefer Hook/CTA timeline views before raw frames when available.
+   The canonical analysis manifests are the only visual input source; selection reports, contact sheets, and timelines are audit views of that same set. Stage1 visual payloads should prefer Hook/CTA timeline views before canonical frames when available.
 8. Generate `analysis_input.md` for large-model diagnosis.
 9. If `--llm-model` is provided, call the configured OpenAI-compatible chat endpoint to generate `analysis_result.json`.
    Use `--llm-include-images` when the model should inspect Hook/CTA focus frames directly; keep `--llm-image-limit` modest, such as 8 to 12 images.
@@ -105,7 +105,7 @@ If optional dependencies are missing, record an explicit `degraded` status and c
 
 For Flayr model analysis, use a configured OpenAI-compatible vision-language model and endpoint supplied by the runtime environment. Do not put credentials, personal Keychain names, or private machine paths in a committed job manifest.
 
-Subtitle OCR runs in `--ocr-mode auto` by default and reuses the configured visual model. Disable it with `--no-ocr` for fast local debugging. OCR improves on-screen subtitle grounding and is low cost, but it adds per-frame API latency.
+Subtitle OCR runs in `--ocr-mode auto` by default and reuses the configured visual model. It samples within the OCR budget while forcing first/last and shot-boundary frames, so short subtitles at cuts are not governed only by the 2.5-second interval. Disable it with `--no-ocr` for fast local debugging. OCR improves on-screen subtitle grounding and adds per-frame API latency.
 
 Use `--asr-language auto` by default. Southeast Asia commerce videos often use Malay, Thai, Indonesian, or English local口播, so do not force Chinese unless the user explicitly says the video is Chinese. The endpoint, model, and key environment variable can be overridden with `--asr-api-url`, `--asr-model`, and `--asr-api-key-env`.
 

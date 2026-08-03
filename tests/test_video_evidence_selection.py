@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -11,11 +12,20 @@ from PIL import Image, ImageDraw
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from flayr_core.artifacts import build_stage_frame_manifest, select_frames_for_time_range  # noqa: E402
+from flayr_core.artifacts import (  # noqa: E402
+    build_stage_frame_manifest,
+    get_frame_entries,
+    select_frames_for_time_range,
+)
 from flayr_core.frame_selection import build_analysis_frame_manifest  # noqa: E402
 from flayr_core.llm.media import get_llm_frame_candidates  # noqa: E402
 from flayr_core.subtitle_track import _merge_ocr_frame_entries  # noqa: E402
 from flayr_core.asr import extract_word_timestamps  # noqa: E402
+from flayr_core.video_evidence import (  # noqa: E402
+    build_timeline_view_for_range,
+    build_video_evidence_artifacts,
+    write_selection_report_html,
+)
 
 
 class VideoEvidenceSelectionTests(unittest.TestCase):
@@ -69,6 +79,145 @@ class VideoEvidenceSelectionTests(unittest.TestCase):
                 any("local_change" in reasons for reasons in reasons_by_time.values()),
                 reasons_by_time,
             )
+
+    def test_manifest_rejects_paths_outside_role_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inside = root / "frames" / "inside.jpg"
+            inside.parent.mkdir()
+            inside.write_bytes(b"inside")
+            outside = root.parent / f"{root.name}-outside.jpg"
+            outside.write_bytes(b"outside")
+            try:
+                entries = get_frame_entries(
+                    {
+                        "work_dir": str(root),
+                        "frames": [
+                            {"path": str(inside), "timestamp_seconds": 0},
+                            {"path": str(outside), "timestamp_seconds": 1},
+                        ],
+                    }
+                )
+                self.assertEqual([item["path"] for item in entries], [str(inside.resolve())])
+            finally:
+                outside.unlink(missing_ok=True)
+
+    def test_word_timestamps_promote_speech_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames_dir = root / "frames"
+            frames_dir.mkdir()
+            paths = [self._write_frame(frames_dir, f"frame_{index:04d}.jpg", (index * 20, 40, 40)) for index in range(6)]
+            words_path = root / "transcript.words.json"
+            words_path.write_text(
+                json.dumps(
+                    {
+                        "words": [
+                            {"start_seconds": 1.0, "end_seconds": 1.2, "text": "first"},
+                            {"start_seconds": 4.0, "end_seconds": 4.2, "text": "last"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            selection = build_analysis_frame_manifest(
+                {
+                    "work_dir": str(root),
+                    "duration_seconds": 5.0,
+                    "frames": [
+                        {"timestamp_seconds": index, "path": str(path), "filename": path.name}
+                        for index, path in enumerate(paths)
+                    ],
+                    "transcript_words_path": str(words_path),
+                }
+            )
+            reasons_by_time = {
+                item.get("timestamp_seconds"): set(item.get("selection_reasons", []))
+                for item in selection["frames"]
+            }
+            self.assertIn("speech_boundary", reasons_by_time.get(1, set()))
+            self.assertIn("speech_boundary", reasons_by_time.get(4, set()))
+
+    def test_selection_report_uses_path_relative_to_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report_path = root / "reports" / "selection.html"
+            write_selection_report_html(
+                report_path,
+                {
+                    "frame_count": 1,
+                    "kept_count": 1,
+                    "decisions": [{"path": str(root / "frames" / "frame.jpg"), "filename": "frame.jpg", "kept": True}],
+                },
+            )
+            self.assertIn('../frames/frame.jpg', report_path.read_text(encoding="utf-8"))
+
+    def test_timeline_view_records_canonical_frame_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames_dir = root / "frames"
+            focus_dir = root / "focus_frames"
+            frames_dir.mkdir()
+            focus_dir.mkdir()
+            canonical = self._write_frame(frames_dir, "canonical.jpg", (20, 30, 40))
+            focus = self._write_frame(focus_dir, "hook_001.jpg", (80, 90, 100))
+            view = build_timeline_view_for_range(
+                root,
+                {
+                    "work_dir": str(root),
+                    "duration_seconds": 5.0,
+                    "analysis_frames": [{"path": str(canonical), "timestamp_seconds": 1.0}],
+                    "focus_frames": [{"path": str(focus), "timestamp_seconds": 1.0, "label": "hook"}],
+                },
+                "hook",
+                0.0,
+                3.0,
+            )
+            self.assertIsNotNone(view)
+            self.assertEqual(view["frame_paths"], [str(canonical.resolve())])
+
+    def test_first_build_passes_canonical_manifest_to_all_downstream_views(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical = root / "frames" / "selected.jpg"
+            canonical.parent.mkdir()
+            canonical.write_bytes(b"selected")
+            selection = {
+                "analysis_frames": [{"path": str(canonical), "timestamp_seconds": 1.0}],
+                "analysis_stage_frames": [{"path": str(canonical), "timestamp_seconds": 1.0, "stage": "S1"}],
+            }
+            captured: list[dict] = []
+
+            def capture(_role_dir: Path, view_info: dict) -> dict:
+                captured.append(view_info)
+                return {}
+
+            with (
+                mock.patch("flayr_core.video_evidence.build_frame_selection_report", return_value=selection),
+                mock.patch("flayr_core.video_evidence.build_contact_sheets", side_effect=capture),
+                mock.patch("flayr_core.video_evidence.build_transcript_pack", side_effect=capture),
+                mock.patch("flayr_core.video_evidence.build_timeline_views", side_effect=capture),
+                mock.patch(
+                    "flayr_core.video_evidence.audit_video_evidence",
+                    return_value={"path": str(root / "audit.json"), "warnings": []},
+                ),
+            ):
+                build_video_evidence_artifacts(
+                    root,
+                    {
+                        "work_dir": str(root),
+                        "frames": [{"path": str(root / "raw.jpg"), "timestamp_seconds": 1.0}],
+                    },
+                )
+
+            self.assertEqual(len(captured), 3)
+            for view_info in captured:
+                self.assertEqual(view_info["analysis_frames"], selection["analysis_frames"])
+                self.assertEqual(view_info["analysis_stage_frames"], selection["analysis_stage_frames"])
+                self.assertEqual(
+                    view_info["video_evidence"]["analysis_frames"],
+                    selection["analysis_frames"],
+                )
 
     def test_llm_candidates_consume_canonical_manifest_before_raw_frames(self) -> None:
         info = {

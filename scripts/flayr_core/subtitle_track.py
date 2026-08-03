@@ -26,6 +26,7 @@ from .artifacts import (
     get_focus_frame_entries,
     get_frame_entries,
     parse_timestamp_seconds,
+    resolve_artifact_path,
     sample_evenly,
 )
 from .llm.api import call_llm_api, extract_chat_completion_text, image_to_data_url
@@ -39,6 +40,7 @@ SAMPLE_INTERVAL_SEC = 2.5
 OCR_API_URL = ""
 OCR_REQUEST_MAX_TIME_SECONDS = 90
 OCR_REQUEST_LOW_SPEED_TIME_SECONDS = 45
+MAX_OCR_ANCHOR_FRAMES = 24
 # 只取短视频内容字幕，避免把平台 UI、水印和包装字混进权威字幕轨。
 OCR_INSTRUCTION = (
     "只输出画面中用于视频内容表达的屏幕字幕原文，每行一条。"
@@ -118,17 +120,51 @@ def build_subtitle_track(
 
 
 def _merge_ocr_frame_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
-    """Use base and focus frames without sending duplicate images to OCR."""
+    """Use base/focus frames plus scene-boundary anchors without duplicates."""
     merged: list[dict[str, Any]] = []
-    seen_paths: set[str] = set()
+    by_path: dict[str, dict[str, Any]] = {}
     for entry in [*get_frame_entries(info), *get_focus_frame_entries(info)]:
         if not isinstance(entry, dict):
             continue
         path = str(entry.get("path") or "")
-        if not path or path in seen_paths:
+        if not path or path in by_path:
             continue
-        seen_paths.add(path)
-        merged.append(entry)
+        by_path[path] = dict(entry)
+
+    timed = [
+        entry for entry in by_path.values()
+        if parse_timestamp_seconds(entry.get("timestamp_seconds")) is not None
+    ]
+    if timed:
+        sorted_timed = sorted(timed, key=lambda entry: float(parse_timestamp_seconds(entry["timestamp_seconds"]) or 0.0))
+        for entry in (sorted_timed[0], sorted_timed[-1]):
+            entry["ocr_anchor"] = "edge"
+
+    raw_shot_path = str(info.get("shot_track_path") or "").strip()
+    if not raw_shot_path and isinstance(info.get("video_evidence"), dict):
+        raw_shot_path = str(info["video_evidence"].get("shot_track_path") or "").strip()
+    shot_path = resolve_artifact_path(info, raw_shot_path, require_file=True)
+    if shot_path is not None:
+        try:
+            shot_track = json.loads(shot_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            shot_track = None
+        for shot in shot_track.get("shots", []) if isinstance(shot_track, dict) else []:
+            if not isinstance(shot, dict):
+                continue
+            for key in ("start_sec", "end_sec"):
+                target = parse_timestamp_seconds(shot.get(key))
+                if target is None or not timed:
+                    continue
+                nearest = min(
+                    timed,
+                    key=lambda entry: abs(
+                        float(parse_timestamp_seconds(entry.get("timestamp_seconds")) or 0.0) - target
+                    ),
+                )
+                nearest["ocr_anchor"] = "scene_boundary"
+
+    merged = list(by_path.values())
     return sorted(
         merged,
         key=lambda entry: parse_timestamp_seconds(entry.get("timestamp_seconds")) or 0.0,
@@ -153,11 +189,28 @@ def sample_frames_by_interval(
     if dur is None:
         # 没有时长信息时才允许按帧数估算；非法时长不能伪装成缺失。
         target = max(1, round(len(frames) / max(1.0, interval_sec)))
-        return sample_evenly(frames, target)
+        return _sample_with_anchors(frames, target)
     if dur <= 0:
         return []
     target = max(1, int(dur // interval_sec) + 1)
-    return sample_evenly(frames, target)
+    return _sample_with_anchors(frames, target)
+
+
+def _sample_with_anchors(frames: list[dict[str, Any]], target: int) -> list[dict[str, Any]]:
+    """Keep structural OCR anchors, then fill the remaining interval budget."""
+    if target <= 0 or not frames:
+        return []
+    anchors = [entry for entry in frames if entry.get("ocr_anchor")]
+    anchors = sample_evenly(anchors, min(target, MAX_OCR_ANCHOR_FRAMES))
+    used = {str(entry.get("path") or "") for entry in anchors}
+    remaining = [entry for entry in frames if str(entry.get("path") or "") not in used]
+    selected = [*anchors, *sample_evenly(remaining, max(0, target - len(anchors)))]
+    return sorted(
+        selected,
+        key=lambda entry: parse_timestamp_seconds(entry.get("timestamp_seconds"))
+        if parse_timestamp_seconds(entry.get("timestamp_seconds")) is not None
+        else float("inf"),
+    )
 
 
 def ocr_frame_with_retry(

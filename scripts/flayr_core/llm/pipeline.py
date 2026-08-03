@@ -1208,6 +1208,7 @@ def maybe_refine_low_confidence_stages(
         *extract_low_confidence_stages(raw_result),
         *detect_low_confidence_stages(result),
         *detect_visual_coverage_gap_stages(result, analysis),
+        *detect_unreferenced_visual_event_stages(result, analysis),
         *[candidate.stage_id for candidate in legacy_critical_candidates.candidates],
     ]:
         if code not in candidates:
@@ -1392,6 +1393,82 @@ def detect_visual_coverage_gap_stages(
         if missing_role and code not in gaps:
             gaps.append(code)
     return gaps
+
+
+def detect_unreferenced_visual_event_stages(
+    result: dict[str, Any],
+    analysis: dict[str, Any],
+) -> list[str]:
+    """Find high-consequence stages whose visual events are not cited.
+
+    This catches a confident omission even when Stage 1 produced no matching
+    evidence ID.  It only creates a Phase C candidate; the locked evidence
+    contract still prevents Phase C from inventing a new fact.
+    """
+    videos = analysis.get("videos") if isinstance(analysis.get("videos"), dict) else {}
+    video_understanding = result.get("video_understanding")
+    if not isinstance(video_understanding, dict):
+        video_understanding = {}
+    units_by_role = {
+        role: {
+            str(unit.get("id")): unit
+            for unit in (video_understanding.get(role, {}).get("evidence_units", []) or [])
+            if isinstance(unit, dict) and unit.get("id")
+        }
+        for role in ("creator", "benchmark")
+    }
+    event_reasons = {
+        "scene_boundary",
+        "subtitle_boundary",
+        "speech_boundary",
+        "local_change",
+        "action_change",
+        "global_change",
+        "focus_hook",
+        "focus_cta",
+    }
+    candidates: list[str] = []
+    for stage in result.get("stage_analysis", []):
+        if not isinstance(stage, dict):
+            continue
+        code = stage_code(stage.get("stage"))
+        severity = str(stage.get("severity") or "").strip().lower()
+        if not code or severity not in {"large", "medium"}:
+            continue
+        stage_needs_review = False
+        for role in ("creator", "benchmark"):
+            info = videos.get(role) if isinstance(videos.get(role), dict) else {}
+            parsed = parse_time_range_seconds(stage.get(f"{role}_time_range"), info.get("duration_seconds"))
+            if parsed is None:
+                continue
+            start, end = parsed
+            entries = [
+                entry
+                for entry in get_analysis_frame_entries(info)
+                if isinstance(entry, dict)
+                and (timestamp := _finite_timestamp(entry.get("timestamp_seconds"))) is not None
+                and start <= timestamp <= end
+                and event_reasons.intersection({str(item) for item in entry.get("selection_reasons", [])})
+            ]
+            if not entries:
+                continue
+            referenced_ids = {str(value) for value in stage.get(f"{role}_evidence_ids", [])}
+            referenced_units = [
+                unit for unit_id, unit in units_by_role[role].items() if unit_id in referenced_ids
+            ]
+            for entry in entries:
+                timestamp = _finite_timestamp(entry.get("timestamp_seconds"))
+                if timestamp is None:
+                    continue
+                point = f"{timestamp:.3f}s - {timestamp + 0.001:.3f}s"
+                if not any(evidence_overlaps_range(unit, point) for unit in referenced_units):
+                    stage_needs_review = True
+                    break
+            if stage_needs_review:
+                break
+        if stage_needs_review and code not in candidates:
+            candidates.append(code)
+    return candidates
 
 
 def _finite_timestamp(value: Any) -> float | None:

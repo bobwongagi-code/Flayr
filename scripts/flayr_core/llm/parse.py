@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ..artifacts import format_seconds, parse_time_range_seconds
+from ..artifacts import format_seconds, parse_time_range_seconds, resolve_artifact_path
 from ..evidence_states import (
     EVIDENCE_STATE_STRENGTHS,
     S3_USAGE_EVIDENCE_STATES,
@@ -1671,8 +1671,9 @@ def is_effective_voiceover(value: Any) -> bool:
 
 
 def read_transcript_text(info: dict[str, Any]) -> str:
-    path = Path(str(info.get("transcript_path") or Path(str(info.get("work_dir") or "")) / "transcript.txt"))
-    return path.read_text(encoding="utf-8", errors="ignore") if path.is_file() else ""
+    raw = info.get("transcript_path") or Path(str(info.get("work_dir") or "")) / "transcript.txt"
+    path = resolve_artifact_path(info, raw, require_file=True, require_root=bool(info.get("work_dir")))
+    return path.read_text(encoding="utf-8", errors="ignore") if path is not None else ""
 
 
 def normalized_transcript_text(value: str) -> str:

@@ -14,7 +14,12 @@ import math
 from pathlib import Path
 from typing import Any
 
-from .artifacts import get_focus_frame_entries, get_frame_entries, parse_timestamp_seconds
+from .artifacts import (
+    get_focus_frame_entries,
+    get_frame_entries,
+    parse_timestamp_seconds,
+    resolve_artifact_path,
+)
 
 try:
     from PIL import Image
@@ -29,6 +34,8 @@ GLOBAL_CHANGE_THRESHOLD_PERCENT = 8.0
 LOCAL_CHANGE_THRESHOLD_PERCENT = 5.0
 ACTION_CHANGE_THRESHOLD_PERCENT = 8.0
 MAX_DENSITY_GAP_SECONDS = 2.0
+WORD_ANCHOR_GAP_SECONDS = 0.8
+MAX_WORD_ANCHOR_GROUPS = 24
 
 
 def build_analysis_frame_manifest(info: dict[str, Any]) -> dict[str, Any]:
@@ -193,6 +200,7 @@ def _primary_reason(reasons: set[str], fallback: str) -> str:
     priority = (
         "scene_boundary",
         "subtitle_boundary",
+        "speech_boundary",
         "structural_anchor",
         "stage_boundary",
         "focus_hook",
@@ -218,6 +226,7 @@ def _anchor_reasons(entry: dict[str, Any]) -> set[str]:
         if str(reason) in {
             "scene_boundary",
             "subtitle_boundary",
+            "speech_boundary",
             "structural_anchor",
             "stage_boundary",
             "focus_hook",
@@ -264,6 +273,7 @@ def _load_anchor_times(info: dict[str, Any], duration: float | None) -> list[tup
                 timestamp = _bounded_time(segment.get(key), duration)
                 if timestamp is not None:
                     anchors.append((timestamp, "subtitle_boundary"))
+    anchors.extend(_load_word_anchor_times(info, duration))
     return anchors
 
 
@@ -282,13 +292,77 @@ def _load_json_path(info: dict[str, Any], key: str) -> Any:
         raw = str(info["video_evidence"].get(key) or "").strip()
     if not raw:
         return None
-    path = Path(raw)
-    if not path.is_file():
+    path = resolve_artifact_path(info, raw, require_file=True)
+    if path is None:
         return None
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _load_word_anchor_times(info: dict[str, Any], duration: float | None) -> list[tuple[float, str]]:
+    """Turn bounded word timings into a small set of speech-boundary anchors.
+
+    Word-level ASR is much denser than the visual frame budget.  We therefore
+    group adjacent words and retain only phrase starts/ends, preventing one
+    anchor per word from flooding the model input while still exposing short
+    spoken cues that sentence-level SRT boundaries can hide.
+    """
+    raw = str(info.get("transcript_words_path") or "").strip()
+    if not raw and isinstance(info.get("video_evidence"), dict):
+        raw = str(info["video_evidence"].get("transcript_words_path") or "").strip()
+    path = resolve_artifact_path(info, raw, require_file=True)
+    if path is None:
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    values = payload.get("words") if isinstance(payload, dict) else payload
+    if not isinstance(values, list):
+        return []
+
+    words: list[tuple[float, float]] = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        start = _bounded_time(value.get("start_seconds"), duration)
+        end = _bounded_time(value.get("end_seconds"), duration)
+        if start is None or end is None or end < start:
+            continue
+        words.append((start, end))
+    words.sort()
+    if not words:
+        return []
+
+    groups: list[tuple[float, float]] = []
+    group_start, group_end = words[0]
+    for start, end in words[1:]:
+        if start - group_end > WORD_ANCHOR_GAP_SECONDS:
+            groups.append((group_start, group_end))
+            group_start, group_end = start, end
+        else:
+            group_end = max(group_end, end)
+    groups.append((group_start, group_end))
+
+    if len(groups) > MAX_WORD_ANCHOR_GROUPS:
+        groups = [groups[index] for index in _even_indexes(len(groups), MAX_WORD_ANCHOR_GROUPS)]
+    anchors: list[tuple[float, str]] = []
+    for start, end in groups:
+        anchors.append((start, "speech_boundary"))
+        if end > start:
+            anchors.append((end, "speech_boundary"))
+    return anchors
+
+
+def _even_indexes(length: int, limit: int) -> list[int]:
+    if limit <= 0 or length <= 0:
+        return []
+    if length <= limit:
+        return list(range(length))
+    step = (length - 1) / (limit - 1) if limit > 1 else 0.0
+    return [round(index * step) for index in range(limit)]
 
 
 def _image_features(path: Path) -> dict[str, Any] | None:

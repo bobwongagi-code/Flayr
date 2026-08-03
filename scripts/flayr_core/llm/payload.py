@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ..artifacts import format_seconds, parse_time_range_seconds, parse_timestamp_seconds
+from ..artifacts import format_seconds, parse_time_range_seconds, parse_timestamp_seconds, resolve_artifact_path
 from ..proposition_contract import build_product_proposition_contract
 from ..market import render_market_knowledge
 from ..multimodal import multimodal_output_example, render_multimodal_prompt_contract
@@ -76,8 +76,8 @@ def read_text_if_exists(path: Path) -> str:
 def _video_evidence_path(info: dict[str, Any], key: str) -> Path:
     evidence = info.get("video_evidence") if isinstance(info.get("video_evidence"), dict) else {}
     raw = str(evidence.get(key) or "").strip()
-    path = Path(raw) if raw else Path(f"__missing_{key}__")
-    return path if path.is_file() else Path(f"__missing_{key}__")
+    path = resolve_artifact_path(info, raw, require_file=True)
+    return path if path is not None else Path(f"__missing_{key}__")
 
 
 def read_track_markdown(track_path: Path, renderer: Any, disabled_hint: str) -> str:
@@ -384,6 +384,12 @@ def build_video_fact_payload(
     info = analysis.get("videos", {}).get(role, {})
     code = "B" if role == "benchmark" else "C"
     role_dir = Path(str(info.get("work_dir") or ""))
+    transcript_words_path = resolve_artifact_path(
+        info,
+        info.get("transcript_words_path"),
+        require_file=True,
+        require_root=bool(str(info.get("work_dir") or "").strip()),
+    )
     mode_prompt = speech_mode_prompt(info.get("speech_mode") if isinstance(info.get("speech_mode"), dict) else {})
     native_audio = can_analyze_native_audio(api_url, model)
 
@@ -486,7 +492,7 @@ def build_video_fact_payload(
             read_text_if_exists(current_transcript_segments_path(info) or Path("__missing_transcript_segments__")),
             "",
             "## 词级口播时间索引（可用时用于精确对齐；仍以原始 SRT 分段为完整依据）",
-            read_text_if_exists(Path(str(info.get("transcript_words_path") or "__missing_transcript_words__"))),
+            read_text_if_exists(transcript_words_path or Path("__missing_transcript_words__")),
             "",
             "## 中文翻译",
             read_text_if_exists(role_dir / "transcript.zh.txt"),
@@ -1995,7 +2001,13 @@ def build_stage_review_video_inputs(
                 padded_start,
                 padded_end,
             )
-            if timeline_view and Path(str(timeline_view.get("path") or "")).is_file():
+            timeline_path = resolve_artifact_path(
+                info,
+                timeline_view.get("path") if isinstance(timeline_view, dict) else "",
+                require_file=True,
+                require_root=True,
+            )
+            if timeline_view and timeline_path is not None:
                 evidence_views = analysis.setdefault("phase_c_evidence_views", [])
                 if isinstance(evidence_views, list):
                     if not any(
@@ -2016,7 +2028,7 @@ def build_stage_review_video_inputs(
                 content.append(
                     {
                         "type": "image_url",
-                        "image_url": {"url": image_to_data_url(Path(str(timeline_view["path"]))), "detail": "low"},
+                        "image_url": {"url": image_to_data_url(timeline_path), "detail": "low"},
                     }
                 )
             data_url = video_to_data_url(

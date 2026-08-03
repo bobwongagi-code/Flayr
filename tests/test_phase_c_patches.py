@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -507,3 +508,44 @@ class PhaseCPatchTests(unittest.TestCase):
         text = payload["messages"][1]["content"][0]["text"]
         self.assertIn('"effect_evidence_state": "none|result_only|verified|uncertain"', text)
         self.assertIn("两侧都必须输出 effect_evidence_state", text)
+
+    def test_phase_c_detects_unreferenced_visual_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = {
+                "stage_analysis": [
+                    {
+                        "stage": "S3 使用过程",
+                        "severity": "medium",
+                        "creator_time_range": "0s - 2s",
+                        "benchmark_time_range": "0s - 2s",
+                        "creator_evidence_ids": ["C1"],
+                        "benchmark_evidence_ids": ["B1"],
+                    }
+                ],
+                "video_understanding": {
+                    "creator": {"evidence_units": [{"id": "C1", "time_range": "0s - 0.5s"}]},
+                    "benchmark": {"evidence_units": [{"id": "B1", "time_range": "0s - 2s"}]},
+                },
+            }
+            analysis = {
+                "videos": {
+                    "creator": {
+                        "work_dir": str(root),
+                        "duration_seconds": 2.0,
+                        "analysis_frames": [
+                            {
+                                "path": str(root / "creator.jpg"),
+                                "timestamp_seconds": 1.5,
+                                "selection_reasons": ["speech_boundary"],
+                            }
+                        ],
+                    },
+                    "benchmark": {
+                        "work_dir": str(root),
+                        "duration_seconds": 2.0,
+                        "analysis_frames": [],
+                    },
+                }
+            }
+            self.assertEqual(pipeline.detect_unreferenced_visual_event_stages(result, analysis), ["S3"])

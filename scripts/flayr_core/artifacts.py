@@ -14,21 +14,76 @@ from .stage_catalog import fallback_artifact_ranges
 MAX_TIME_SECONDS = 24 * 60 * 60.0
 
 
+def resolve_artifact_path(
+    info: dict[str, Any],
+    raw_path: Any,
+    *,
+    require_file: bool = False,
+    require_root: bool = False,
+) -> Path | None:
+    """Resolve a recorded artifact without allowing a role-directory escape.
+
+    Production manifests carry ``work_dir``.  We keep the no-root fallback for
+    small in-memory compatibility fixtures, but every real run is constrained
+    to that role directory and symlink resolution is performed before the
+    containment check.
+    """
+    raw = str(raw_path or "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    root_raw = str(info.get("work_dir") or "").strip()
+    root = Path(root_raw).expanduser().resolve() if root_raw else None
+    if root is None and require_root:
+        return None
+    if root is not None and not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if root is not None:
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            return None
+    if require_file and not resolved.is_file():
+        return None
+    return resolved
+
+
+def _safe_entries(info: dict[str, Any], entries: Any) -> list[dict[str, Any]]:
+    if not isinstance(entries, list):
+        return []
+    safe: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        path = resolve_artifact_path(info, entry.get("path"))
+        if path is None:
+            continue
+        safe.append({**entry, "path": str(path)})
+    return safe
+
+
 def get_stage_frame_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
     analysis_entries = _read_manifest_entries(info, "analysis_stage_frame_manifest_path", "analysis_stage_frames")
     if analysis_entries:
         return analysis_entries
     entries = info.get("stage_frames")
     if isinstance(entries, list) and entries:
-        return [entry for entry in entries if isinstance(entry, dict)]
+        return _safe_entries(info, entries)
 
     manifest_path = info.get("stage_frame_manifest_path")
     if manifest_path:
-        manifest = Path(manifest_path)
-        if manifest.exists():
-            data = json.loads(manifest.read_text(encoding="utf-8"))
+        manifest = resolve_artifact_path(info, manifest_path, require_file=True)
+        if manifest is not None:
+            try:
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                data = None
             if isinstance(data, list):
-                return [entry for entry in data if isinstance(entry, dict)]
+                return _safe_entries(info, data)
 
     frame_entries = get_frame_entries(info)
     return build_stage_frame_manifest(frame_entries, info.get("duration_seconds"))
@@ -37,21 +92,27 @@ def get_stage_frame_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
 def get_frame_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
     entries = info.get("frames")
     if isinstance(entries, list) and entries:
-        return [entry for entry in entries if isinstance(entry, dict)]
+        return _safe_entries(info, entries)
 
     manifest_path = info.get("frame_manifest_path")
     if manifest_path:
-        manifest = Path(manifest_path)
-        if manifest.exists():
-            data = json.loads(manifest.read_text(encoding="utf-8"))
+        manifest = resolve_artifact_path(info, manifest_path, require_file=True)
+        if manifest is not None:
+            try:
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                data = None
             if isinstance(data, list):
-                return [entry for entry in data if isinstance(entry, dict)]
+                return _safe_entries(info, data)
 
     frames_dir = info.get("frames_dir")
-    directory = Path(frames_dir) if frames_dir else None
+    directory = resolve_artifact_path(info, frames_dir) if frames_dir else None
     if not directory or not directory.exists():
         return []
-    return build_frame_manifest(sorted(directory.glob("frame_*.jpg"), key=numbered_frame_sort_key))
+    return _safe_entries(
+        info,
+        build_frame_manifest(sorted(directory.glob("frame_*.jpg"), key=numbered_frame_sort_key)),
+    )
 
 
 def get_analysis_frame_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
@@ -72,41 +133,44 @@ def _read_manifest_entries(
 ) -> list[dict[str, Any]]:
     entries = info.get(entries_key)
     if isinstance(entries, list) and entries:
-        return [entry for entry in entries if isinstance(entry, dict)]
+        return _safe_entries(info, entries)
 
     evidence = info.get("video_evidence") if isinstance(info.get("video_evidence"), dict) else {}
     nested_entries = evidence.get(entries_key)
     if isinstance(nested_entries, list) and nested_entries:
-        return [entry for entry in nested_entries if isinstance(entry, dict)]
+        return _safe_entries(info, nested_entries)
 
     raw_path = str(info.get(path_key) or evidence.get(path_key) or "").strip()
     if not raw_path:
         return []
-    path = Path(raw_path)
-    if not path.is_file():
+    path = resolve_artifact_path(info, raw_path, require_file=True)
+    if path is None:
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
-    return [entry for entry in data if isinstance(entry, dict)] if isinstance(data, list) else []
+    return _safe_entries(info, data) if isinstance(data, list) else []
 
 
 def get_focus_frame_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
     entries = info.get("focus_frames")
     if isinstance(entries, list) and entries:
-        return [entry for entry in entries if isinstance(entry, dict)]
+        return _safe_entries(info, entries)
 
     manifest_path = info.get("focus_frame_manifest_path")
     if manifest_path:
-        manifest = Path(manifest_path)
-        if manifest.exists():
-            data = json.loads(manifest.read_text(encoding="utf-8"))
+        manifest = resolve_artifact_path(info, manifest_path, require_file=True)
+        if manifest is not None:
+            try:
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                data = None
             if isinstance(data, list):
-                return [entry for entry in data if isinstance(entry, dict)]
+                return _safe_entries(info, data)
 
     focus_dir = info.get("focus_frames_dir")
-    frames_dir = Path(focus_dir) if focus_dir else None
+    frames_dir = resolve_artifact_path(info, focus_dir) if focus_dir else None
     if not frames_dir or not frames_dir.exists():
         return []
 
@@ -127,7 +191,7 @@ def get_focus_frame_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
                 "filename": frame.name,
             }
         )
-    return entries
+    return _safe_entries(info, entries)
 
 
 def build_frame_manifest(frames: list[Path], timestamps: list[Any] | None = None) -> list[dict[str, Any]]:
@@ -193,6 +257,7 @@ def build_stage_frame_manifest(
         anchor_reasons = {
             "scene_boundary",
             "subtitle_boundary",
+            "speech_boundary",
             "focus_hook",
             "focus_cta",
             "structural_anchor",

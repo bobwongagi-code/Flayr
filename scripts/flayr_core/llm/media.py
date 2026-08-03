@@ -15,6 +15,7 @@ from ..artifacts import (
     get_focus_frame_entries,
     parse_time_range_seconds,
     parse_timestamp_seconds,
+    resolve_artifact_path,
     sample_evenly,
     select_frames_for_time_range,
 )
@@ -30,8 +31,8 @@ def select_role_visual_inputs(info: dict[str, Any], role: str, image_limit: int)
     """为单视频事实抽取选关键帧，最多 image_limit 张。"""
     selected: list[dict[str, str]] = []
     for entry in get_llm_visual_candidates(info, image_limit):
-        frame = Path(str(entry.get("path", "")))
-        if not frame.exists():
+        frame = resolve_artifact_path(info, entry.get("path"), require_file=True, require_root=True)
+        if frame is None:
             continue
         timestamp = format_seconds(entry.get("timestamp_seconds")) if entry.get("timestamp_seconds") is not None else ""
         marker = f" @ {timestamp}" if timestamp else ""
@@ -70,11 +71,12 @@ def get_timeline_view_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
             if not isinstance(item, dict):
                 continue
             path = str(item.get("path") or "")
-            if path:
+            safe_path = resolve_artifact_path(info, path, require_file=True, require_root=True)
+            if safe_path is not None:
                 entries.append(
                     {
                         "label": f"{item.get('label') or 'timeline'} timeline",
-                        "path": path,
+                        "path": str(safe_path),
                         "timestamp_seconds": None,
                     }
                 )
@@ -87,8 +89,9 @@ def get_timeline_view_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     for label in ("hook", "cta"):
         path = timeline_dir / f"{label}.jpg"
-        if path.is_file():
-            entries.append({"label": f"{label} timeline", "path": str(path), "timestamp_seconds": None})
+        safe_path = resolve_artifact_path(info, path, require_file=True, require_root=True)
+        if safe_path is not None:
+            entries.append({"label": f"{label} timeline", "path": str(safe_path), "timestamp_seconds": None})
     return entries
 
 
@@ -140,7 +143,7 @@ def get_llm_frame_candidates(info: dict[str, Any], limit: int) -> list[dict[str,
     boundary_entries = [
         entry
         for entry in entries
-        if {"scene_boundary", "subtitle_boundary"}.intersection(reasons(entry))
+        if {"scene_boundary", "subtitle_boundary", "speech_boundary"}.intersection(reasons(entry))
     ]
     add_group(boundary_entries, min(2, max(0, limit - len(selected))))
     change_entries = [
@@ -193,8 +196,8 @@ def build_evidence_sensory_inputs(
             label = f"{role} {uid} @ {clipped_range}"
             frames = select_frames_for_time_range(info, clipped_range, limit=frames_per_unit)
             for fr in frames:
-                frame_path = Path(str(fr.get("path") or ""))
-                if not frame_path.is_file():
+                frame_path = resolve_artifact_path(info, fr.get("path"), require_file=True, require_root=True)
+                if frame_path is None:
                     continue
                 content.append({"type": "text", "text": f"【{label}｜画面帧】"})
                 content.append(

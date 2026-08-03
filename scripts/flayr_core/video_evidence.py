@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import math
+import os
 import re
 import wave
 from pathlib import Path
@@ -24,6 +25,7 @@ from .artifacts import (
     get_frame_entries,
     get_stage_frame_entries,
     parse_timestamp_seconds,
+    resolve_artifact_path,
     sample_evenly,
     select_frames_for_time_range,
     stage_time_ranges,
@@ -56,8 +58,8 @@ def build_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> dict
         "transcript_pack_json_path": None,
         "audit_path": None,
     }
-    word_path = Path(str(info.get("transcript_words_path") or ""))
-    if word_path.is_file():
+    word_path = resolve_artifact_path(info, info.get("transcript_words_path"), require_file=True)
+    if word_path is not None:
         result["transcript_words_path"] = str(word_path)
 
     try:
@@ -66,20 +68,27 @@ def build_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> dict
     except Exception as exc:  # pragma: no cover - artifact generation should not break analysis
         result["errors"].append(f"frame selection report failed: {exc}")
 
+    # Downstream views must consume the same canonical manifest that the model
+    # receives on the first generation, not the pre-selection raw metadata.
+    view_info = dict(info)
+    view_info.update(result)
+    previous_evidence = info.get("video_evidence") if isinstance(info.get("video_evidence"), dict) else {}
+    view_info["video_evidence"] = {**previous_evidence, **result}
+
     try:
-        contact_sheets = build_contact_sheets(role_dir, info)
+        contact_sheets = build_contact_sheets(role_dir, view_info)
         result.update(contact_sheets)
     except Exception as exc:  # pragma: no cover
         result["errors"].append(f"contact sheets failed: {exc}")
 
     try:
-        transcript_pack = build_transcript_pack(role_dir, info)
+        transcript_pack = build_transcript_pack(role_dir, view_info)
         result.update(transcript_pack)
     except Exception as exc:  # pragma: no cover
         result["errors"].append(f"transcript pack failed: {exc}")
 
     try:
-        timeline_views = build_timeline_views(role_dir, info)
+        timeline_views = build_timeline_views(role_dir, view_info)
         result.update(timeline_views)
     except Exception as exc:  # pragma: no cover
         result["errors"].append(f"timeline views failed: {exc}")
@@ -134,6 +143,26 @@ def audit_video_evidence(
 
     coverage = audit_analysis_frame_manifest(info or {}, result)
     warnings.extend(coverage.get("warnings", []))
+    canonical_paths = {
+        str(entry.get("path") or "")
+        for entry in result.get("analysis_frames", [])
+        if isinstance(entry, dict) and str(entry.get("path") or "")
+    }
+    for item in views:
+        if not isinstance(item, dict):
+            continue
+        frame_paths = item.get("frame_paths")
+        if not isinstance(frame_paths, list):
+            warnings.append(f"timeline view missing frame provenance: {item.get('label') or 'unknown'}")
+            continue
+        if item.get("selection_source") != "analysis_frame_manifest":
+            warnings.append(f"timeline view did not use canonical manifest: {item.get('label') or 'unknown'}")
+        outside = [str(path) for path in frame_paths if str(path) not in canonical_paths]
+        if outside:
+            warnings.append(
+                f"timeline view uses frames outside canonical manifest: "
+                f"{item.get('label') or 'unknown'}: {', '.join(outside[:3])}"
+            )
     audit = {
         "status": "pass" if not warnings else "warn",
         "warnings": warnings,
@@ -163,6 +192,10 @@ def audit_analysis_frame_manifest(info: dict[str, Any], result: dict[str, Any]) 
         path = str(entry.get("path") or "")
         if not path or not Path(path).is_file():
             missing_paths += 1
+        if path and str(info.get("work_dir") or "").strip() and resolve_artifact_path(
+            info, path, require_root=True
+        ) is None:
+            warnings.append(f"analysis frame path escapes role directory: {path}")
         if path in paths and path:
             warnings.append(f"analysis frame manifest contains duplicate path: {path}")
         if path:
@@ -198,6 +231,9 @@ def audit_analysis_frame_manifest(info: dict[str, Any], result: dict[str, Any]) 
         if isinstance(entry, dict):
             stage = str(entry.get("stage") or "unknown")
             stage_counts[stage] = stage_counts.get(stage, 0) + 1
+            path = str(entry.get("path") or "")
+            if path and path not in paths:
+                warnings.append(f"analysis stage frame is outside canonical manifest: {path}")
 
     direct_stage_coverage: dict[str, int] = {}
     if duration is not None:
@@ -231,7 +267,14 @@ def build_frame_selection_report(role_dir: Path, info: dict[str, Any]) -> dict[s
     report = {
         "strategy": {
             "version": selection.get("strategy_version", "v2"),
-            "signals": ["global_rgb", "local_3x3_regions", "edge_motion_like", "scene_boundaries", "subtitle_boundaries"],
+            "signals": [
+                "global_rgb",
+                "local_3x3_regions",
+                "edge_motion_like",
+                "scene_boundaries",
+                "subtitle_boundaries",
+                "speech_boundaries",
+            ],
             "global_threshold_percent": GLOBAL_CHANGE_THRESHOLD_PERCENT,
             "local_threshold_percent": LOCAL_CHANGE_THRESHOLD_PERCENT,
             "action_threshold_percent": ACTION_CHANGE_THRESHOLD_PERCENT,
@@ -270,7 +313,12 @@ def build_frame_selection_report(role_dir: Path, info: dict[str, Any]) -> dict[s
 def write_selection_report_html(path: Path, report: dict[str, Any]) -> None:
     rows = []
     for item in report.get("decisions", []):
-        rel = html.escape(str(item.get("filename") or ""))
+        raw_frame = str(item.get("path") or "").strip()
+        try:
+            rel = os.path.relpath(raw_frame, path.parent) if raw_frame else str(item.get("filename") or "")
+        except (TypeError, ValueError):
+            rel = str(item.get("filename") or "")
+        rel = html.escape(rel.replace(os.sep, "/"))
         status = "keep" if item.get("kept") else "drop"
         rows.append(
             "<tr>"
@@ -488,13 +536,17 @@ def build_timeline_view_for_range(
     if transcript is None:
         transcript_path = current_transcript_segments_path(info)
         transcript = parse_srt_segments(transcript_path) if transcript_path else []
-    write_timeline_view(out_path, info, transcript, safe_label, start_value, end_value)
+    frames = frames_for_range(info, start_value, end_value, limit=8)
+    write_timeline_view(out_path, info, transcript, safe_label, start_value, end_value, frames=frames)
+    selection_source = "analysis_frame_manifest" if get_analysis_frame_entries(info) else "compatibility_manifest"
     return {
         "label": safe_label,
         "path": str(out_path),
         "start_seconds": round(start_value, 2),
         "end_seconds": round(end_value, 2),
-        "selection_source": "analysis_frame_manifest",
+        "selection_source": selection_source,
+        "frame_count": len(frames),
+        "frame_paths": [str(item.get("path") or "") for item in frames if str(item.get("path") or "")],
     }
 
 
@@ -505,6 +557,8 @@ def write_timeline_view(
     label: str,
     start: float,
     end: float,
+    *,
+    frames: list[dict[str, Any]] | None = None,
 ) -> None:
     width = 1280
     height = 760
@@ -515,7 +569,7 @@ def write_timeline_view(
     small_font = load_font(16)
     draw.text((30, 24), f"{label.upper()} timeline {start:.1f}s-{end:.1f}s", fill="#0f172a", font=title_font)
 
-    frames = frames_for_range(info, start, end, limit=8)
+    frames = frames if frames is not None else frames_for_range(info, start, end, limit=8)
     cell_width = 150
     cell_height = 260
     x0 = 30
@@ -551,13 +605,6 @@ def write_timeline_view(
 
 
 def frames_for_range(info: dict[str, Any], start: float, end: float, limit: int) -> list[dict[str, Any]]:
-    focus = [
-        entry for entry in get_focus_frame_entries(info)
-        if (timestamp := parse_timestamp_seconds(entry.get("timestamp_seconds"))) is not None
-        and start <= timestamp <= end
-    ]
-    if focus:
-        return sample_evenly(focus, limit)
     full = [
         entry for entry in get_analysis_frame_entries(info)
         if (timestamp := parse_timestamp_seconds(entry.get("timestamp_seconds"))) is not None
@@ -565,6 +612,13 @@ def frames_for_range(info: dict[str, Any], start: float, end: float, limit: int)
     ]
     if full:
         return sample_evenly(full, limit)
+    focus = [
+        entry for entry in get_focus_frame_entries(info)
+        if (timestamp := parse_timestamp_seconds(entry.get("timestamp_seconds"))) is not None
+        and start <= timestamp <= end
+    ]
+    if focus:
+        return sample_evenly(focus, limit)
     # A requested review window may fall between two sparse samples. Reuse the
     # canonical range selector so the generated timeline still contains the
     # nearest auditable frame instead of an empty filmstrip.

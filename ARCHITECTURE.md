@@ -14,7 +14,7 @@
 
 | 产物 | 生成者 | 可选 | 失败降级 |
 |---|---|---|---|
-| `frames/`（全片 1fps） | ffmpeg | 必需 | 记录 `degraded`，独立产物继续；不生成虚假帧 |
+| `frames/`（预算内自适应，最高约 2fps） | ffmpeg | 必需 | 记录 `degraded`，独立产物继续；不生成虚假帧 |
 | `focus_frames/`（首尾 5s 各 2fps，Hook/CTA） | ffmpeg | 必需 | 同上 |
 | `audio.wav`（混音，**不分轨**——人声分离已评估不采纳） | ffmpeg | 必需 | 同上 |
 | `transcript.txt / .srt / .zh.txt` | 北京 MaaS 在线 Fun-ASR | 必需（可显式降级） | 默认失败并返回非零；`--allow-degraded` 下继续但不得发布为 `completed` |
@@ -30,7 +30,7 @@
   `evidence_units[]`。事实一旦产出即**锁定**（阶段二/Phase C 不得增删改）。
 - **阶段二（判断）**：锁定 facts + analysis_input.md（产品信息/三层指引/结构库/QA/schema + 字幕轨/镜头轨）
   单次调用完成 S1-S6 对比、improvements、key_conclusions。
-- **Phase C（回看）**：模型自报 ∪ 代码确定性检测（占位证据/visual_only + medium/large），≤2 阶段、
+- **Phase C（回看）**：模型自报 ∪ 代码确定性检测（占位证据/visual_only、canonical 覆盖缺口、未被引用的高信号视觉事件 + medium/large），≤2 阶段、
   仅一次；切对应阶段原生片段（含音轨）后只接受受限的事实与证据引用补丁，再重跑后处理链。规范见 0.7。
 - **后处理链**：validate（阻断→repair 重试）/ repair（确定性修补）/ qa_warnings（软警告）。
 - **最终建议收敛**：确定性 severity 与可选 S4 视觉复核全部完成后，若仍有 `large` 阶段未被
@@ -312,7 +312,7 @@ scripts/
 职责：
 
 - 用 `ffprobe` 读取视频时长。
-- 用 `ffmpeg` 抽取全片 1fps 帧。
+- 用 `ffmpeg` 在共享预算内抽取自适应基础帧（最高约 2fps）。
 - 抽取 Hook/CTA 加密帧。
 - 生成 `frames/manifest.json`、`frames/stage_frames.json`、`focus_frames/manifest.json`。
 - 提取 `audio.wav`。
@@ -340,10 +340,10 @@ scripts/
 
 职责：
 
-- 基于已有 `frames/`、`focus_frames/`、`audio.wav`、`transcript.srt` 生成复核用 artifact。
-- 写出 `frames/selection_report.json` 和 `.html`，记录滑动窗口视觉去重的 keep/drop 原因。
+- 基于已有 `frames/`、`focus_frames/`、`audio.wav`、`transcript.srt` 和词级 ASR 边界生成复核用 artifact。
+- 写出 canonical `frames/analysis_manifest.json`、`analysis_stage_frames.json`，以及 `selection_report.json` 和 `.html`；后者记录滑动窗口视觉去重的 keep/drop 原因。
 - 写出 `contact_sheets/`，把 Hook、CTA、阶段代表帧按时间顺序压成联系表。
-- 写出 `timeline_views/`，把帧序列、波形、口播时间戳放在同一张图中。
+- 写出 `timeline_views/`，把 canonical 帧序列、波形、口播时间戳放在同一张图中，并记录所用帧路径以便审计。
 - 写出 `transcript_packed.md/json`，作为紧凑的时间戳口播索引。
 - 写出 `video_evidence_audit.json`，自检关键证据视图是否真实落盘。
 - `prompt.py` 在 `analysis_input.md` 中展示这些证据索引。

@@ -18,6 +18,7 @@ from typing import Any
 
 from flayr_core.audio_quality import analyze_audio_quality
 from flayr_core.analysis_model import ANALYSIS_RESULT_CONTRACT, placeholder_stages
+from flayr_core.artifacts import resolve_artifact_path
 from flayr_core.bd_report import write_bd_report
 from flayr_core.asr import (
     ASR_FAILURE_PLACEHOLDER,
@@ -779,8 +780,16 @@ def load_existing_video_result(
         return None
     if not _preprocess_artifacts_match(role_dir, info.get("preprocess_artifacts")):
         return None
-    frames_dir = Path(str(info.get("frames_dir") or ""))
-    transcript = Path(str(info.get("transcript_path") or ""))
+    role_root = {"work_dir": str(role_dir)}
+    frames_dir = resolve_artifact_path(role_root, info.get("frames_dir"), require_root=True)
+    transcript = resolve_artifact_path(
+        role_root,
+        info.get("transcript_path"),
+        require_file=True,
+        require_root=True,
+    )
+    if frames_dir is None or transcript is None:
+        return None
     if not frames_dir.is_dir():
         return None
     if str(info.get("transcription_status") or "").strip().lower() != "completed":
@@ -798,7 +807,12 @@ def load_existing_video_result(
     if words_value and _current_role_artifact(info, "transcript_words_path", role_dir) is None:
         return None
     audio_value = str(info.get("audio_path") or "").strip()
-    if audio_value and not Path(audio_value).is_file():
+    if audio_value and resolve_artifact_path(
+        role_root,
+        audio_value,
+        require_file=True,
+        require_root=True,
+    ) is None:
         return None
     return info
 
@@ -808,13 +822,12 @@ def _current_role_artifact(info: dict[str, Any], key: str, role_dir: Path) -> Pa
     raw = str(info.get(key) or "").strip()
     if not raw:
         return None
-    candidate = Path(raw).expanduser()
-    root = role_dir.expanduser().resolve()
-    try:
-        candidate.resolve().relative_to(root)
-    except ValueError:
-        return None
-    return candidate if candidate.is_file() else None
+    return resolve_artifact_path(
+        {"work_dir": str(role_dir)},
+        raw,
+        require_file=True,
+        require_root=True,
+    )
 
 
 def _preprocess_artifact_metadata(path: Path, *, include_sha256: bool = True) -> dict[str, Any]:
@@ -1133,34 +1146,67 @@ def _process_video_generation(
 
 def ensure_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> None:
     """Ensure reused preprocessing also has secondary evidence artifacts."""
+    role_root = {"work_dir": str(role_dir)}
     if not isinstance(info.get("audio_quality"), dict) or not info.get("audio_quality"):
+        audio_path = resolve_artifact_path(
+            role_root,
+            info.get("audio_path"),
+            require_file=True,
+            require_root=True,
+        )
         info["audio_quality"] = analyze_audio_quality(
-            Path(str(info["audio_path"])) if info.get("audio_path") else None,
+            audio_path,
             info.get("duration_seconds"),
         )
     if not isinstance(info.get("speech_mode"), dict) or not info.get("speech_mode", {}).get("mode"):
         info["speech_mode"] = classify_speech_mode(role_dir, info)
     existing = info.get("video_evidence") if isinstance(info.get("video_evidence"), dict) else {}
-    timeline_dir = Path(str(existing.get("timeline_views_dir") or role_dir / "timeline_views"))
-    selection_report = Path(str(existing.get("frame_selection_report_path") or role_dir / "frames" / "selection_report.json"))
-    audit_path = Path(str(existing.get("audit_path") or role_dir / "video_evidence_audit.json"))
-    segment_path = _current_role_artifact(info, "transcript_segments_path", role_dir)
-    transcript_ready = segment_path is None or Path(
-        str(existing.get("transcript_pack_path") or "__missing_transcript_pack__")
-    ).is_file()
-    analysis_manifest = Path(
-        str(existing.get("analysis_frame_manifest_path") or role_dir / "frames" / "analysis_manifest.json")
+    timeline_dir = resolve_artifact_path(
+        role_root,
+        existing.get("timeline_views_dir") or role_dir / "timeline_views",
+        require_root=True,
+    ) or role_dir / "timeline_views"
+    selection_report = resolve_artifact_path(
+        role_root,
+        existing.get("frame_selection_report_path") or role_dir / "frames" / "selection_report.json",
+        require_file=True,
+        require_root=True,
     )
-    analysis_stage_manifest = Path(
-        str(existing.get("analysis_stage_frame_manifest_path") or role_dir / "frames" / "analysis_stage_frames.json")
+    audit_path = resolve_artifact_path(
+        role_root,
+        existing.get("audit_path") or role_dir / "video_evidence_audit.json",
+        require_file=True,
+        require_root=True,
+    )
+    segment_path = _current_role_artifact(info, "transcript_segments_path", role_dir)
+    transcript_pack = resolve_artifact_path(
+        role_root,
+        existing.get("transcript_pack_path"),
+        require_file=True,
+        require_root=True,
+    )
+    transcript_ready = not str(info.get("transcript_segments_path") or "").strip() or (
+        segment_path is not None and transcript_pack is not None
+    )
+    analysis_manifest = resolve_artifact_path(
+        role_root,
+        existing.get("analysis_frame_manifest_path") or role_dir / "frames" / "analysis_manifest.json",
+        require_file=True,
+        require_root=True,
+    )
+    analysis_stage_manifest = resolve_artifact_path(
+        role_root,
+        existing.get("analysis_stage_frame_manifest_path") or role_dir / "frames" / "analysis_stage_frames.json",
+        require_file=True,
+        require_root=True,
     )
     if (
         existing
         and timeline_dir.is_dir()
-        and selection_report.is_file()
-        and analysis_manifest.is_file()
-        and analysis_stage_manifest.is_file()
-        and audit_path.is_file()
+        and selection_report is not None
+        and analysis_manifest is not None
+        and analysis_stage_manifest is not None
+        and audit_path is not None
         and transcript_ready
     ):
         return
