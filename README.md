@@ -138,7 +138,7 @@ python3 scripts/flayr.py \
 | `--llm-api-key-keychain-service` | macOS Keychain 服务名（或用 `--llm-api-key-env` 走环境变量） |
 | `--llm-include-images` | 默认启用：完整 Step-0 + 单视频事实抽取 + omni 对比链；`--no-llm-include-images` 仅保留给旧文本路径兼容调试 |
 | `--asr-api-url` | 在线 Fun-ASR endpoint；默认使用北京 MaaS 地址 |
-| `--asr-model` | 在线 ASR 模型；默认 `fun-asr-realtime` |
+| `--asr-model` | 在线 ASR 模型；默认 `fun-asr-flash-2026-06-15` |
 | `--asr-language` | ASR 语言提示；默认 `auto` |
 | `--asr-api-key-env` | 在线 ASR 使用的 key 环境变量；默认 `DASHSCOPE_API_KEY` |
 | `--ocr-mode auto/on/off` | 字幕 OCR 轨。默认 `auto`：复用分析模型的视觉能力和 key；`off` 可关闭 |

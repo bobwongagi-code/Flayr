@@ -24,7 +24,7 @@ DEFAULT_FUN_ASR_API_URL = (
     "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/"
     "api/v1/services/aigc/multimodal-generation/generation"
 )
-DEFAULT_FUN_ASR_MODEL = "fun-asr-realtime"
+DEFAULT_FUN_ASR_MODEL = "fun-asr-flash-2026-06-15"
 ASR_FAILURE_PLACEHOLDER = "Online ASR failed; no transcript is available."
 ASR_REQUEST_TIMEOUT_SECONDS = 900
 ASR_MAX_RESPONSE_BYTES = 16 * 1024 * 1024

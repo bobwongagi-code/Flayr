@@ -107,7 +107,7 @@ For Flayr model analysis, use a configured OpenAI-compatible vision-language mod
 
 Subtitle OCR runs in `--ocr-mode auto` by default and reuses the configured visual model. It samples within the OCR budget while forcing first/last and shot-boundary frames, so short subtitles at cuts are not governed only by the 2.5-second interval. Disable it with `--no-ocr` for fast local debugging. OCR improves on-screen subtitle grounding and adds per-frame API latency.
 
-Use `--asr-language auto` by default. Southeast Asia commerce videos often use Malay, Thai, Indonesian, or English local口播, so do not force Chinese unless the user explicitly says the video is Chinese. The endpoint, model, and key environment variable can be overridden with `--asr-api-url`, `--asr-model`, and `--asr-api-key-env`.
+Use `--asr-language auto` by default. Southeast Asia commerce videos often use Malay, Thai, Indonesian, or English local口播, so do not force Chinese unless the user explicitly says the video is Chinese. The default model is `fun-asr-flash-2026-06-15`; the endpoint, model, and key environment variable can be overridden with `--asr-api-url`, `--asr-model`, and `--asr-api-key-env`.
 
 When generating `transcript.zh.txt`, follow `references/commerce-translation-guidelines.md`. The Chinese translation must be commerce-aware: correct likely online ASR mistakes from product context, preserve product facts, and translate purchase calls such as `beg kuning` / `back kuning` as `黄色购物车`.
 For model analysis, require evidence: every stage and improvement should cite time range, visual evidence, or spoken evidence. The HTML report should expose key frames, not just text.

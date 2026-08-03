@@ -399,7 +399,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--asr-model",
         default=os.environ.get("FLAYR_ASR_MODEL", DEFAULT_FUN_ASR_MODEL),
-        help="Online ASR model. Default: fun-asr-realtime.",
+        help="Online ASR model. Default: fun-asr-flash-2026-06-15.",
     )
     parser.add_argument(
         "--asr-api-key-env",

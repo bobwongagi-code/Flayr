@@ -2153,7 +2153,7 @@ with tempfile.TemporaryDirectory() as tmp:
     cache_args = SimpleNamespace(
         asr_language="auto",
         asr_api_url="https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
-        asr_model="fun-asr-realtime",
+        asr_model="fun-asr-flash-2026-06-15",
         asr_api_key_env="DASHSCOPE_API_KEY",
         translate_with_llm=False,
         translation_model="",

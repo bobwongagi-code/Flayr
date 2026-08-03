@@ -41,6 +41,9 @@ OCR_API_URL = ""
 OCR_REQUEST_MAX_TIME_SECONDS = 90
 OCR_REQUEST_LOW_SPEED_TIME_SECONDS = 45
 MAX_OCR_ANCHOR_FRAMES = 24
+# Qwen vision endpoints reject images below this tokenized pixel budget.
+OCR_MIN_PIXELS = 65536
+OCR_MAX_PIXELS = 1003520
 # 只取短视频内容字幕，避免把平台 UI、水印和包装字混进权威字幕轨。
 OCR_INSTRUCTION = (
     "只输出画面中用于视频内容表达的屏幕字幕原文，每行一条。"
@@ -264,8 +267,8 @@ def build_ocr_payload(frame_path: Path, model: str) -> dict[str, Any]:
                     {
                         "type": "image_url",
                         "image_url": {"url": image_to_data_url(frame_path)},
-                        "min_pixels": 3136,
-                        "max_pixels": 1003520,
+                        "min_pixels": OCR_MIN_PIXELS,
+                        "max_pixels": OCR_MAX_PIXELS,
                     },
                     {"type": "text", "text": OCR_INSTRUCTION},
                 ],

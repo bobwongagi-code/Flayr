@@ -1461,6 +1461,18 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertEqual(call.call_args.kwargs["low_speed_time_seconds"], 45)
             self.assertEqual(call.call_args.kwargs["retries"], 0)
 
+    def test_ocr_payload_uses_provider_minimum_image_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            frame = Path(tmp) / "frame.jpg"
+            frame.write_bytes(b"\xff\xd8\xff" + b"not-a-real-jpeg")
+            with mock.patch.object(
+                subtitle_track, "image_to_data_url", return_value="data:image/jpeg;base64,AA=="
+            ):
+                payload = subtitle_track.build_ocr_payload(frame, "qwen3-vl-plus")
+            image = payload["messages"][0]["content"][0]
+            self.assertEqual(image["min_pixels"], 65536)
+            self.assertEqual(image["max_pixels"], 1003520)
+
     def test_dashscope_qwen_capabilities_are_explicit_and_budget_is_provider_independent(self) -> None:
         url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
         capabilities = llm_api.provider_capabilities(url, "qwen3-omni-flash")
@@ -1477,6 +1489,7 @@ class ArchitectureContractTests(unittest.TestCase):
     def test_cli_exposes_an_explicit_run_wall_time_budget(self) -> None:
         default_args = flayr.build_parser().parse_args(["compare"])
         self.assertEqual(default_args.max_total_wall_time, 1800.0)
+        self.assertEqual(default_args.asr_model, "fun-asr-flash-2026-06-15")
         extended_args = flayr.build_parser().parse_args(["compare", "--max-total-wall-time", "3600"])
         self.assertEqual(extended_args.max_total_wall_time, 3600.0)
 
@@ -3703,7 +3716,7 @@ class ArchitectureContractTests(unittest.TestCase):
                 result = {"errors": []}
                 asr.run_online_asr(
                     "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
-                    "fun-asr-realtime",
+                    "fun-asr-flash-2026-06-15",
                     "test-key",
                     "en",
                     audio,
@@ -3845,7 +3858,7 @@ class ArchitectureContractTests(unittest.TestCase):
         return SimpleNamespace(
             asr_language="auto",
             asr_api_url="https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
-            asr_model="fun-asr-realtime",
+            asr_model="fun-asr-flash-2026-06-15",
             asr_api_key_env="DASHSCOPE_API_KEY",
             translate_with_llm=False,
             translation_model="", llm_model="", llm_api_url="", product_name="", product_notes="",
@@ -3860,7 +3873,7 @@ class ArchitectureContractTests(unittest.TestCase):
             "asr": {
                 "provider": "dashscope",
                 "api_url": "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
-                "model": "fun-asr-realtime",
+                "model": "fun-asr-flash-2026-06-15",
                 "language": "auto",
             },
         }
