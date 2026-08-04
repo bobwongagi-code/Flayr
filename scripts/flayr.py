@@ -918,16 +918,59 @@ def _is_stale_placeholder(path: Path) -> bool:
     )
 
 
+def _generation_path_variants(root: Path) -> set[str]:
+    variants = {str(root.absolute())}
+    try:
+        variants.add(str(root.resolve()))
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return variants
+
+
 def _rewrite_generation_paths(value: Any, old_root: Path, new_root: Path) -> Any:
-    old = str(old_root.resolve())
+    old_variants = sorted(_generation_path_variants(old_root), key=len, reverse=True)
     new = str(new_root.resolve())
     if isinstance(value, dict):
         return {key: _rewrite_generation_paths(item, old_root, new_root) for key, item in value.items()}
     if isinstance(value, list):
         return [_rewrite_generation_paths(item, old_root, new_root) for item in value]
-    if isinstance(value, str) and (value == old or value.startswith(old + "/")):
-        return new + value[len(old):]
+    if isinstance(value, str):
+        for old in old_variants:
+            if value == old or value.startswith(old + "/"):
+                return new + value[len(old):]
     return value
+
+
+def _rewrite_generation_json_artifacts(
+    root: Path,
+    old_root: Path,
+    new_root: Path,
+) -> None:
+    """Rewrite staging paths embedded in generated JSON artifacts.
+
+    The role result contains paths as well, but several secondary manifests
+    are written independently during preprocessing. They must be rewritten
+    before the staging directory is published, otherwise the published
+    artifacts retain references to a directory that is about to disappear.
+    """
+    old_variants = _generation_path_variants(old_root)
+    for path in sorted(root.rglob("*.json")):
+        if path.name == "_preprocess.json":
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise OSError(f"cannot read generated JSON artifact: {path}") from exc
+        if not any(old in text for old in old_variants):
+            continue
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"generated JSON artifact contains a staging path but is invalid: {path}") from exc
+        rewritten = _rewrite_generation_paths(value, old_root, new_root)
+        write_json(path, rewritten)
+        if any(old in path.read_text(encoding="utf-8") for old in old_variants):
+            raise ValueError(f"staging path remains in generated JSON artifact: {path}")
 
 
 def _promote_preprocess_generation(
@@ -936,6 +979,11 @@ def _promote_preprocess_generation(
     result: dict[str, Any],
 ) -> dict[str, Any]:
     """Publish a complete generation while keeping old artifacts out of the build."""
+    published = _rewrite_generation_paths(result, staging_dir, role_dir)
+    if not isinstance(published, dict):
+        raise TypeError("preprocess generation result must be a mapping")
+    _rewrite_generation_json_artifacts(staging_dir, staging_dir, role_dir)
+
     backup_dir = role_dir.parent / f".{role_dir.name}.previous-{uuid.uuid4().hex}"
     if role_dir.exists():
         role_dir.replace(backup_dir)
@@ -947,9 +995,9 @@ def _promote_preprocess_generation(
         raise
     if backup_dir.exists():
         shutil.rmtree(backup_dir, ignore_errors=True)
-    published = _rewrite_generation_paths(result, staging_dir, role_dir)
-    if not isinstance(published, dict):
-        raise TypeError("preprocess generation result must be a mapping")
+    # Rewriting JSON artifacts changes their bytes, so the manifest must be
+    # rebuilt after publication instead of carrying staging-time hashes.
+    published["preprocess_artifacts"] = _build_preprocess_artifact_manifest(role_dir)
     write_json(role_dir / "_preprocess.json", published)
     return published
 

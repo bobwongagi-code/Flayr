@@ -3689,6 +3689,58 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertTrue((role_dir / "_preprocess.json").is_file())
             self.assertEqual(list(run_dir.glob(".creator.generation-*")), [])
 
+    def test_preprocess_promotion_rewrites_nested_json_paths_and_refreshes_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            staging = root / ".creator.generation-staging"
+            role_dir = root / "creator"
+            nested = staging / "frames"
+            nested.mkdir(parents=True)
+            frame = nested / "frame_0001.jpg"
+            frame.write_bytes(b"frame")
+            nested_manifest = nested / "manifest.json"
+            nested_manifest.write_text(
+                json.dumps({"path": str(frame), "nested": [{"path": str(frame)}]}),
+                encoding="utf-8",
+            )
+            result = {
+                "work_dir": str(staging),
+                "frames_dir": str(nested),
+                "frame_manifest_path": str(nested_manifest),
+                "preprocess_artifacts": flayr._build_preprocess_artifact_manifest(staging),
+            }
+
+            published = flayr._promote_preprocess_generation(staging, role_dir, result)
+
+            final_frame = role_dir / "frames" / "frame_0001.jpg"
+            final_manifest = role_dir / "frames" / "manifest.json"
+            self.assertEqual(published["work_dir"], str(role_dir.resolve()))
+            self.assertEqual(published["frame_manifest_path"], str(final_manifest.resolve()))
+            self.assertEqual(json.loads(final_manifest.read_text(encoding="utf-8"))["path"], str(final_frame.resolve()))
+            final_manifest_text = final_manifest.read_text(encoding="utf-8")
+            self.assertNotIn(str(staging.absolute()), final_manifest_text)
+            self.assertNotIn(str(staging.resolve()), final_manifest_text)
+            self.assertTrue(flayr._preprocess_artifacts_match(role_dir, published["preprocess_artifacts"]))
+
+    def test_anchor_times_leave_seek_margin_at_video_end(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shot_track = root / "shot_track.json"
+            shot_track.write_text(
+                json.dumps({"shots": [{"start_sec": 0.0, "end_sec": 9.99}]}),
+                encoding="utf-8",
+            )
+            anchors = video._collect_anchor_times(
+                {
+                    "duration_seconds": 10.0,
+                    "shot_track_path": str(shot_track),
+                },
+                10.0,
+            )
+            times = [timestamp for timestamp, _reason in anchors]
+            self.assertIn(9.9, times)
+            self.assertLessEqual(max(times), 9.9)
+
     def test_online_asr_clears_previous_segments_and_publishes_words(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             role_dir = Path(tmp)

@@ -21,6 +21,7 @@ from .artifacts import (
 
 MAX_SUPPLEMENTAL_ANCHOR_FRAMES = 48
 MIN_ANCHOR_GAP_SECONDS = 0.35
+END_ANCHOR_SAFETY_SECONDS = 0.1
 MAX_BASE_FPS = 2.0
 MAX_FOCUS_FRAMES_PER_ROLE = 20
 from .utils import run_command, write_json
@@ -423,7 +424,15 @@ def _collect_anchor_times(result: dict[str, Any], duration: float) -> list[tuple
 
     def add(value: Any, reason: str) -> None:
         timestamp = parse_timestamp_seconds(value)
-        if timestamp is None or not math.isfinite(timestamp) or timestamp <= 0 or timestamp >= duration:
+        if timestamp is None or not math.isfinite(timestamp) or timestamp <= 0:
+            return
+        if timestamp > duration + END_ANCHOR_SAFETY_SECONDS:
+            return
+        # A timestamp at the container's reported duration can be valid in
+        # metadata but still have no decodable frame. Keep the anchor close to
+        # the end while leaving a small seek margin for ffmpeg.
+        timestamp = min(timestamp, max(0.0, duration - END_ANCHOR_SAFETY_SECONDS))
+        if timestamp <= 0:
             return
         anchors.setdefault(round(timestamp, 3), set()).add(reason)
 
