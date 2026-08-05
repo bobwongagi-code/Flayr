@@ -1219,6 +1219,26 @@ check("S1 hook boundary leak 自动压 landing=false",
 
 with tempfile.TemporaryDirectory() as td:
     role_dir = Path(td)
+    (role_dir / "transcript.words.json").write_text(
+        json.dumps(
+            {
+                "words": [
+                    {
+                        "start_seconds": 0.0,
+                        "end_seconds": 3.5,
+                        "text": "反差句：本来没期待但结果超预期",
+                    },
+                    {
+                        "start_seconds": 6.8,
+                        "end_seconds": 10.0,
+                        "text": "脸很油，能拯救我们的就是这个产品",
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     (role_dir / "transcript.srt").write_text(
         "1\n00:00:00,000 --> 00:00:06,800\n反差句：本来没期待但结果超预期\n\n"
         "2\n00:00:06,800 --> 00:00:14,360\n脸很油，能拯救我们的就是这个产品\n",
@@ -1272,7 +1292,15 @@ with tempfile.TemporaryDirectory() as td:
     }
     repair_s1_hook_boundaries(
         _boundary_result,
-        {"videos": {"creator": {"work_dir": str(role_dir), "transcript_segments_path": str(role_dir / "transcript.srt")}}},
+        {
+            "videos": {
+                "creator": {
+                    "work_dir": str(role_dir),
+                    "transcript_segments_path": str(role_dir / "transcript.srt"),
+                    "transcript_words_path": str(role_dir / "transcript.words.json"),
+                }
+            }
+        },
     )
     _fixed = _boundary_result["stage_analysis"][0]["creator_hook"]
     check("S1 边界候选后处理：10.4s 收回 6.8s 且 leak 压 landing=false",
