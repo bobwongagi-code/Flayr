@@ -28,16 +28,41 @@ from flayr_core.llm.compact_eval import (  # noqa: E402
     COMPACT_OUTPUT_BUDGET,
     CompactEvaluationError,
     EVALUATION_ROLES,
+    MODEL_INDEPENDENT_SCHEMA_VERSION,
+    contract_limits_for_variant,
     build_model_owned_fact_bundle,
+    frozen_raw_video_source_identity,
     load_frozen_visual_bundle,
     run_model_independent_evaluation,
 )
 from flayr_core.utils import write_json  # noqa: E402
+from flayr_core.report_metadata import current_code_commit  # noqa: E402
 
 
 def _safe_component(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value).strip())
     return cleaned.strip("._") or "unnamed"
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _clear_judgment_outputs(output_dir: Path) -> None:
+    """Remove stale outputs before writing a new judgment attempt."""
+    for name in (
+        "model_independent_evaluation.json",
+        "model_independent_failure.json",
+        "model_independent_blocked.json",
+        "model_independent_input_metadata.json",
+        "raw_model_response.json",
+        ".compact-request.json",
+    ):
+        (output_dir / name).unlink(missing_ok=True)
 
 
 def _read_manifest(path: Path) -> list[dict[str, str]]:
@@ -83,12 +108,16 @@ def _read_extraction(path: Path) -> tuple[dict[str, Any] | None, dict[str, Any]]
             "artifact": str(path),
             "error": str(record.get("error") or record.get("errors") or "no completed result")[:1000],
         }
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = _sha256(path)
     return record["result"], {
         "status": "completed",
         "artifact": str(path),
         "artifact_sha256": digest,
         "source_digest": record.get("source_digest"),
+        "source_run": record.get("source_run"),
+        "schema_version": record.get("schema_version"),
+        "video_role_order": record.get("video_role_order"),
+        "video_source_sha256": record.get("video_source_sha256"),
         "source_model": record.get("model"),
     }
 
@@ -144,7 +173,13 @@ def main() -> int:
             "raw_extraction_root": str(raw_root),
             "output_budget": args.output_budget,
             "output_budget_field": args.output_budget_field,
+            "judgment_schema_version": MODEL_INDEPENDENT_SCHEMA_VERSION,
+            "contract_limits": {
+                **contract_limits_for_variant("model_independent"),
+                "output_budget": args.output_budget,
+            },
             "api_endpoint_identity": args.api_url,
+            "source_commit": current_code_commit(),
         },
     )
 
@@ -153,10 +188,11 @@ def main() -> int:
         llm_api_key_keychain_service=args.keychain_service,
         llm_api_key_keychain_account=args.keychain_account,
     )
-    preflight: list[tuple[dict[str, str], Any]] = []
+    preflight: list[tuple[dict[str, str], Any, dict[str, Any]]] = []
     for sample in manifest:
         base_bundle = load_frozen_visual_bundle(Path(sample["run_dir"]), include_images=False)
-        preflight.append((sample, base_bundle))
+        source_identity = frozen_raw_video_source_identity(Path(sample["run_dir"]))
+        preflight.append((sample, base_bundle, source_identity))
 
     summary: dict[str, Any] = {
         "schema_version": 1,
@@ -167,9 +203,15 @@ def main() -> int:
         "human_initial_loaded": False,
         "gt_loaded": False,
         "models": list(args.models),
+        "source_commit": current_code_commit(),
+        "judgment_schema_version": MODEL_INDEPENDENT_SCHEMA_VERSION,
+        "contract_limits": {
+            **contract_limits_for_variant("model_independent"),
+            "output_budget": args.output_budget,
+        },
         "samples": [],
     }
-    for sample, base_bundle in preflight:
+    for sample, base_bundle, source_identity in preflight:
         sample_record: dict[str, Any] = {
             "sample_id": sample["sample_id"],
             "run_dir": sample["run_dir"],
@@ -181,6 +223,7 @@ def main() -> int:
             extraction_result, extraction_meta = _read_extraction(extraction_path)
             output_dir = output_root / _safe_component(sample["sample_id"]) / _safe_component(model)
             output_dir.mkdir(parents=True, exist_ok=True)
+            _clear_judgment_outputs(output_dir)
             write_json(
                 output_dir / "model_independent_input_metadata.json",
                 {
@@ -191,8 +234,41 @@ def main() -> int:
                     "gt_loaded": False,
                     "source_extraction": extraction_meta,
                     "base_source_digest": base_bundle.source_digest,
+                    "expected_source_run": Path(sample["run_dir"]).name,
+                    "expected_video_role_order": source_identity["video_role_order"],
+                    "expected_video_source_sha256": source_identity["video_source_sha256"],
                 },
             )
+            expected_source_run = Path(sample["run_dir"]).name
+            actual_video_identity = {
+                "video_role_order": extraction_meta.get("video_role_order"),
+                "video_source_sha256": extraction_meta.get("video_source_sha256"),
+            }
+            if extraction_result is not None and (
+                extraction_meta.get("source_run") != expected_source_run
+                or actual_video_identity != source_identity
+            ):
+                mismatch = {
+                    "status": "blocked_source_identity_mismatch",
+                    "sample_id": sample["sample_id"],
+                    "model": model,
+                    "human_initial_loaded": False,
+                    "gt_loaded": False,
+                    "expected_source_run": expected_source_run,
+                    "actual_source_run": extraction_meta.get("source_run"),
+                    "expected_video_identity": source_identity,
+                    "actual_video_identity": actual_video_identity,
+                    "source_extraction": extraction_meta,
+                }
+                write_json(output_dir / "model_independent_blocked.json", mismatch)
+                sample_record["results"].append(
+                    {
+                        "model": model,
+                        "status": mismatch["status"],
+                        "source_extraction_status": extraction_meta.get("status"),
+                    }
+                )
+                continue
             if extraction_result is None:
                 blocked = {
                     "status": "blocked_upstream_extraction",
@@ -259,12 +335,12 @@ def main() -> int:
         summary["samples"].append(sample_record)
     write_json(output_root / "cohort_summary.json", summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-    return 0 if all(
-        item["status"] == "completed"
+    statuses = [
+        item["status"]
         for sample in summary["samples"]
         for item in sample["results"]
-        if item["status"] != "blocked_upstream_extraction"
-    ) else 2
+    ]
+    return 0 if statuses and all(status == "completed" for status in statuses) else 2
 
 
 if __name__ == "__main__":

@@ -11,16 +11,20 @@ from unittest.mock import patch
 from scripts.flayr_core.llm import compact_eval
 from scripts.flayr_core.llm.compact_eval import (
     COMPACT_EVAL_SCHEMA_VERSION,
+    MODEL_INDEPENDENT_SCHEMA_VERSION,
+    VISUAL_EXTRACTION_SCHEMA_VERSION,
     build_model_independent_payload,
     build_model_owned_fact_bundle,
     build_compact_eval_payload,
     build_severity_only_payload,
     build_visual_extraction_payload,
     compare_visual_extraction_units,
+    contract_limits_for_variant,
     diagnose_compact_evidence_references,
     load_frozen_compact_bundle,
     load_frozen_video_bundle,
     load_frozen_visual_bundle,
+    load_gt_stage_labels,
     normalize_visual_extraction_result,
     score_compact_result,
     select_frozen_video_bundle,
@@ -141,7 +145,7 @@ def _severity_result(*, scaffold: bool = False) -> dict:
 
 def _extraction_result() -> dict:
     return {
-        "schema_version": COMPACT_EVAL_SCHEMA_VERSION,
+        "schema_version": VISUAL_EXTRACTION_SCHEMA_VERSION,
         "creator_evidence_units": [
             {
                 "id": "C1",
@@ -149,6 +153,14 @@ def _extraction_result() -> dict:
                 "information": "画面中明确出现产品。",
                 "functions": ["S1"],
                 "evidence_strength": "direct",
+                "fact_quality": {
+                    "subject": "correct",
+                    "visibility": "clear",
+                    "composition": "central",
+                    "completion": "complete",
+                    "proof": "not_applicable",
+                    "causal_link": "not_applicable",
+                },
             }
         ],
         "benchmark_evidence_units": [
@@ -158,6 +170,14 @@ def _extraction_result() -> dict:
                 "information": "标杆画面中明确出现产品。",
                 "functions": ["S1"],
                 "evidence_strength": "explicit",
+                "fact_quality": {
+                    "subject": "correct",
+                    "visibility": "clear",
+                    "composition": "central",
+                    "completion": "complete",
+                    "proof": "not_applicable",
+                    "causal_link": "not_applicable",
+                },
             }
         ],
     }
@@ -165,7 +185,7 @@ def _extraction_result() -> dict:
 
 def _model_independent_result() -> dict:
     return {
-        "schema_version": COMPACT_EVAL_SCHEMA_VERSION,
+        "schema_version": MODEL_INDEPENDENT_SCHEMA_VERSION,
         "overall": {
             "winner": "benchmark",
             "gap": "small",
@@ -175,7 +195,8 @@ def _model_independent_result() -> dict:
         "stage_judgments": [
             {
                 "stage": stage,
-                "severity": "small",
+                "relation": "benchmark_better",
+                "gap_magnitude": "small",
                 "confidence": "medium",
                 "creator": {
                     "observation_state": "partial" if index == 1 else "none",
@@ -195,6 +216,26 @@ def _model_independent_result() -> dict:
 
 
 class CompactEvalContractTests(unittest.TestCase):
+    def test_contract_limits_describe_each_variant_without_hidden_fields(self) -> None:
+        self.assertEqual(
+            contract_limits_for_variant("model_independent")["max_overall_reason_chars"],
+            320,
+        )
+        self.assertEqual(
+            contract_limits_for_variant("severity_only_scaffold")["max_decision_basis_chars"],
+            320,
+        )
+        self.assertNotIn("max_stage_evidence_ids", contract_limits_for_variant("severity_only_scaffold"))
+        self.assertEqual(
+            contract_limits_for_variant("visual_extraction_on_raw_video")["max_evidence_units_per_role"],
+            12,
+        )
+        self.assertEqual(contract_limits_for_variant("model_independent")["stage_count"], 6)
+        self.assertEqual(
+            contract_limits_for_variant("severity_only_scaffold")["stage_count"],
+            6,
+        )
+
     def test_valid_result_is_accepted_and_scored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bundle = load_frozen_compact_bundle(_write_bundle(Path(tmp)), include_images=False)
@@ -203,6 +244,7 @@ class CompactEvalContractTests(unittest.TestCase):
             score = score_compact_result(result, {f"S{i}": "small" for i in range(1, 7)})
             self.assertEqual(score["correct_stages"], 6)
             self.assertEqual(score["accuracy"], 1.0)
+            self.assertFalse(score["denominator"]["exclusion_metadata_available"])
 
     def test_unknown_evidence_id_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -232,6 +274,7 @@ class CompactEvalContractTests(unittest.TestCase):
             self.assertEqual(payload["temperature"], 0.0)
             self.assertIn("六个阶段", payload["messages"][0]["content"])
             self.assertIn("不要输出", payload["messages"][0]["content"])
+            self.assertIn("每侧每阶段最多引用 4 个 evidence_ids", payload["messages"][0]["content"])
 
     def test_visual_content_is_part_of_frozen_source_digest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -276,6 +319,9 @@ class CompactEvalContractTests(unittest.TestCase):
             self.assertEqual(payload["max_completion_tokens"], 4096)
             self.assertIn("overall", payload["messages"][0]["content"])
             self.assertIn("human_initial", payload["messages"][0]["content"])
+            self.assertIn("relation", payload["messages"][0]["content"])
+            self.assertIn("gap_magnitude", payload["messages"][0]["content"])
+            self.assertIn("relation=tie 时 gap_magnitude 必须是 none 或 uncertain", payload["messages"][0]["content"])
             self.assertEqual(bundle.input_mode, "model_owned_locked_facts")
             self.assertFalse(bundle.context["model_owned_fact_provenance"]["human_initial_loaded"])
 
@@ -288,6 +334,16 @@ class CompactEvalContractTests(unittest.TestCase):
             errors = validate_model_independent_result(result, bundle)
             self.assertIn("overall.winner is invalid", errors)
 
+    def test_model_independent_contract_rejects_contradictory_axes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base_bundle = load_frozen_visual_bundle(_write_bundle(Path(tmp)), include_images=False)
+            bundle = build_model_owned_fact_bundle(base_bundle, _extraction_result())
+            result = _model_independent_result()
+            result["stage_judgments"][0]["relation"] = "tie"
+            result["stage_judgments"][0]["gap_magnitude"] = "large"
+            errors = validate_model_independent_result(result, bundle)
+            self.assertTrue(any("relation=tie is incompatible" in error for error in errors))
+
     def test_visual_extraction_contract_forbids_severity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run = _write_bundle(Path(tmp))
@@ -299,6 +355,47 @@ class CompactEvalContractTests(unittest.TestCase):
             invalid = _extraction_result()
             invalid["creator_evidence_units"][0]["severity"] = "large"
             self.assertTrue(any("unsupported fields" in error for error in validate_visual_extraction_result(invalid)))
+
+    def test_visual_extraction_requires_fact_quality_axes(self) -> None:
+        invalid = _extraction_result()
+        invalid["creator_evidence_units"][0].pop("fact_quality")
+        errors = validate_visual_extraction_result(invalid)
+        self.assertTrue(any("fact_quality" in error for error in errors))
+
+    def test_stage_evidence_limit_is_explicit_and_has_stable_error_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = load_frozen_compact_bundle(_write_bundle(Path(tmp)), include_images=False)
+            result = _result()
+            result["stage_judgments"][0]["creator"]["evidence_ids"] = ["C1", "C1", "C1", "C1", "C1"]
+            errors = validate_compact_result(result, bundle)
+            self.assertTrue(any("exceeds max_stage_evidence_ids=4" in error for error in errors))
+            self.assertTrue(any("contains duplicate IDs" in error for error in errors))
+
+    def test_gt_loader_keeps_none_na_and_direction_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gt.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "samples": {
+                            "sample": {
+                                "human_gap": {"S1": "none", "S2": "not_applicable", "S3": "large"},
+                                "stage_relations": {"S1": "tie", "S3": "benchmark_better"},
+                                "stage_label_statuses": {
+                                    "S2": {"status": "not_applicable", "reason": "not used"}
+                                },
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            labels = load_gt_stage_labels(path, "sample")
+            self.assertEqual(labels["S1"]["gap_magnitude"], "none")
+            self.assertEqual(labels["S1"]["relation"], "tie")
+            self.assertEqual(labels["S2"]["status"], "not_applicable")
+            self.assertEqual(labels["S3"]["status"], "labeled")
+            self.assertEqual(labels["S4"]["status"], "missing")
 
     def test_visual_extraction_prompt_uses_contract_unit_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -416,7 +513,7 @@ class CompactEvalContractTests(unittest.TestCase):
 
     def test_single_video_contract_rejects_unselected_role(self) -> None:
         single = {
-            "schema_version": COMPACT_EVAL_SCHEMA_VERSION,
+            "schema_version": VISUAL_EXTRACTION_SCHEMA_VERSION,
             "creator_evidence_units": _extraction_result()["creator_evidence_units"],
         }
         self.assertEqual(validate_visual_extraction_result(single, expected_roles=("creator",)), [])

@@ -34,6 +34,7 @@ from flayr_core.llm.compact_eval import (  # noqa: E402
     COMPACT_OUTPUT_BUDGET,
     CompactEvaluationError,
     EVALUATION_ROLES,
+    contract_limits_for_variant,
     load_frozen_compact_bundle,
     load_frozen_video_bundle,
     load_gt_stages,
@@ -42,6 +43,7 @@ from flayr_core.llm.compact_eval import (  # noqa: E402
     run_visual_extraction_evaluation,
 )
 from flayr_core.utils import write_json  # noqa: E402
+from flayr_core.report_metadata import current_code_commit  # noqa: E402
 
 
 def _safe_component(value: str) -> str:
@@ -182,6 +184,13 @@ def main() -> int:
             "blind_validation": "blind_validation_only",
         }[args.evaluation_role],
         "models": list(args.models),
+        "source_commit": current_code_commit(),
+        "contract_limits": {
+            **contract_limits_for_variant(
+                "visual_extraction" if args.variant == "visual_extraction" else args.variant
+            ),
+            "output_budget": args.output_budget,
+        },
         "samples": [],
     }
     for sample, bundle, gt_stages in preflight:
