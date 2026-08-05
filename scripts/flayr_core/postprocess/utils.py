@@ -19,7 +19,11 @@ from ..artifacts import (
     parse_timestamp_seconds,
 )
 from ..llm.parse import is_effective_voiceover
-from ..transcript import current_transcript_segments_path
+from ..transcript import (
+    current_transcript_segments_path,
+    parse_srt_segments,
+    parse_srt_timestamp as _parse_transcript_srt_timestamp,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -30,39 +34,19 @@ def read_srt_segments(info: dict[str, Any]) -> list[dict[str, Any]]:
     path = current_transcript_segments_path(info)
     if path is None:
         return []
-    blocks = re.split(r"\n\s*\n", path.read_text(encoding="utf-8", errors="ignore").strip())
-    segments: list[dict[str, Any]] = []
-    for block in blocks:
-        lines = [line.strip() for line in block.splitlines() if line.strip()]
-        time_line = next((line for line in lines if "-->" in line), "")
-        if not time_line:
-            continue
-        start_text, end_text = [item.strip() for item in time_line.split("-->", 1)]
-        start = parse_srt_timestamp(start_text)
-        end = parse_srt_timestamp(end_text)
-        if start is None or end is None or end < start:
-            continue
-        text_lines = lines[lines.index(time_line) + 1 :]
-        if not text_lines:
-            continue
-        segments.append(
-            {
-                "start": start,
-                "end": end,
-                "text": " ".join(text_lines),
-            }
-        )
-    return segments
-
-
-_SRT_TIMESTAMP_RE = re.compile(r"^\d+:\d{2}:\d{2}(?:[.,]\d+)?$")
+    return [
+        {
+            "start": segment["start_seconds"],
+            "end": segment["end_seconds"],
+            "text": segment["text"],
+        }
+        for segment in parse_srt_segments(path)
+    ]
 
 
 def parse_srt_timestamp(value: str) -> float | None:
-    normalized = str(value or "").strip()
-    if not _SRT_TIMESTAMP_RE.fullmatch(normalized):
-        return None
-    return parse_timestamp_seconds(normalized.replace(",", "."))
+    """Compatibility export; parsing is centralized in transcript.py."""
+    return _parse_transcript_srt_timestamp(value)
 
 
 # ---------------------------------------------------------------------------

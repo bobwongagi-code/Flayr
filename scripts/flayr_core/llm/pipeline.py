@@ -98,7 +98,7 @@ from ..postprocess.validate import (
 
 
 # 修改 build_video_fact_payload 的语义合同后必须递增，避免旧 facts 与新判断规则混用。
-VIDEO_FACT_CACHE_SCHEMA_VERSION = 8
+VIDEO_FACT_CACHE_SCHEMA_VERSION = 9
 PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION = 2
 CACHE_RECORD_SCHEMA_VERSION = 1
 _REPO_ROOT = Path(__file__).resolve().parents[3]

@@ -340,13 +340,13 @@ scripts/
 
 职责：
 
-- 基于已有 `frames/`、`focus_frames/`、`audio.wav`、`transcript.srt` 和词级 ASR 边界生成复核用 artifact。
+- 基于已有 `frames/`、`focus_frames/`、`audio.wav`、`transcript.srt` 和词级 ASR 边界生成复核用 artifact；原始 SRT 只作审计，窗口消费使用 `transcript_windowed`。
 - 写出 canonical `frames/analysis_manifest.json`、`analysis_stage_frames.json`，以及 `selection_report.json` 和 `.html`；后者记录滑动窗口视觉去重的 keep/drop 原因。
 - 写出 `contact_sheets/`，把 Hook、CTA、阶段代表帧按时间顺序压成联系表。
 - 写出 `timeline_views/`，把 canonical 帧序列、波形、口播时间戳放在同一张图中，并记录所用帧路径以便审计。
 - 写出 `transcript_packed.md/json`，作为紧凑的时间戳口播索引。
 - 写出 `video_evidence_audit.json`，自检关键证据视图是否真实落盘。
-- `prompt.py` 在 `analysis_input.md` 中展示这些证据索引。
+- `prompt.py` 在 `analysis_input.md` 中展示这些证据索引；原始转写只保留路径，不把全文发送给阶段 2/比较模型。
 - `llm/payload.py` 在单视频事实抽取时优先附加 Hook/CTA timeline view，再补原始帧。
 
 约束：
@@ -363,13 +363,13 @@ scripts/
 - 保留 `transcript.txt`、`transcript.srt` 和 `transcript.words.json` 作为下游唯一转写接口。
 - 直接归一化句级与词级时间戳，不在本地运行 ASR 模型。
 - 输出本地语言 `transcript.txt`。
-- 输出短分段时间戳口播 `transcript.srt`，供阶段证据对齐使用。
+- 输出短分段时间戳口播 `transcript.srt`，供审计和兼容读取；有词级时间戳时另生成 `transcript_windowed.md/json`，阶段证据对齐以窗口安全版本为准。
 
 约束：
 
 - 不用英文式空格分词判断是否有有效口播。
 - 东南亚语言如泰语、马来语、印尼语必须保留本地语言转写。
-- 涉及口播归属到具体阶段时，以 `transcript.srt` 的时间范围为准，不根据文案相似度跨段引用。
+- 涉及口播归属到具体阶段时，有词级时间戳则以 `transcript_windowed` 的窗口为准；没有词级时间戳只能标记时间粒度不足，不能用粗粒度 `transcript.srt` 整段推断精确边界。
 
 ### 3.4b `speech_mode.py` — 证据组织模式
 
@@ -411,21 +411,21 @@ scripts/
 | `llm/json_codec.py` | LLM JSON fence、尾逗号和未转义引号的容错解析；不承载 schema 或业务规则。 |
 | `llm/product_profile.py` | Step-0 产品地基、短视频证明计划与 S4 证明合同的归一化；不反向依赖 `parse.py`。 |
 | `llm/parse.py` | 阶段 Flag 和最终结果 schema normalize；保留 `parse_json_text`、产品地基函数等兼容导出。含 `STAGES`、`is_effective_voiceover` 等被 `postprocess` 复用的基础接口。 |
-| `llm/payload.py` | `build_*_payload` 系列。阶段一 `build_video_fact_payload`（原生视频直传）；阶段二 `build_llm_comparison_payload` + `build_evidence_sensory_inputs`（每条 evidence 配带原声短视频或关键帧+切片音频）；Phase C `build_stage_review_payload`（低置信阶段原生视频切片）。 |
+| `llm/payload.py` | `build_*_payload` 系列。阶段一 `build_video_fact_payload`（按 provider 能力选择原生视频或 canonical 帧/窗口转写）；阶段二 `build_llm_comparison_payload` + `build_evidence_sensory_inputs`（每条 evidence 配带原声短视频或关键帧+切片音频）；Phase C `build_stage_review_payload`（低置信阶段原生视频切片）。 |
 | `llm/pipeline.py` | 主入口：`merge_analysis_result` / `parse_and_validate_llm_result` / `run_large_model_analysis` / `run_video_fact_extraction`。所有外部结果先经过同一个 `finalize_analysis_result` 收口，再通过 `AnalysisResult` 唯一投影写回 analysis；第一遍成功后最多触发一次 Phase C 回看。完成收口时在运行目录保留 `raw_model_response.json`、`validated_normalized_result.json`、`final_derived_result.json` 和 `postprocess_change_log.json`，用于区分模型原文、规范化结果与确定性后处理。 |
 
 **两阶段架构（全模态主导）**：
 
 | 阶段 | 函数 | 输入 | 产出 | 意图 |
 |------|------|------|------|------|
-| 一：事实抽取 | `run_video_fact_extraction` → `build_video_fact_payload` | 原生视频（fps=3+音轨），benchmark/creator 各一次 | 锁定的 `evidence_units`（唯一事实源） | omni 自定位变化点，像人一样看连续画面+听声音 |
+| 一：事实抽取 | `run_video_fact_extraction` → `build_video_fact_payload` | 已验证原生能力的 provider 使用原生视频；北京 MaaS Qwen 等 transcript-only provider 使用 canonical 帧/时间线图 + 窗口安全转写，benchmark/creator 各一次 | 锁定的 `evidence_units`（唯一事实源） | 在 provider 能力边界内定位变化点；不把静态页面输入误称为原生视频理解 |
 | 二：对比判断 | `build_llm_comparison_payload` → `build_evidence_sensory_inputs` | facts 文字 + 每条 evidence 的带原声视频片段 | severity / key_conclusions / 改进 | 判断环节重获感官，按 S1-S6 功能阶段横向对比 |
 | C：低置信回看 | `maybe_refine_low_confidence_stages` → `build_stage_review_payload` | 第一遍声明的 low_confidence_stages + 对应阶段原生视频片段 | 仅替换对应 `stage_analysis` | 解决代表帧信息不足导致的边界阶段漂移，硬限制 1 次 |
 
 关键约束：阶段一 facts 一旦锁定即"唯一事实源"，阶段二感官素材仅辅助评估声画质感，
 **不可新增或改写 facts**（冲突以 facts 为准，可标注"感知歧义"）；阶段二 temperature=0 保证可复现；
 Phase C 由模型低置信声明与确定性证据检查共同触发，最多回看 2 个阶段、最多 1 次，不做无限 agent loop；
-ffmpeg 不可用时阶段一降级为关键帧。支持独立音频输入且通过能力验证的兼容服务可直接观察音轨；不支持原生音频的服务当前按“连续画面 + 在线 Fun-ASR 转录 + 本地音频质检”运行，不得脑补语气、BGM或音效。
+ffmpeg 不可用时阶段一降级为关键帧。通过能力验证、可直接观察原生音轨的 provider 才接收原生视频；北京 MaaS Qwen 等 transcript-only 服务当前按“canonical 关键帧/时间线 + 在线 Fun-ASR 转录 + 本地音频质检”运行，不得把页面化证据误称为连续原生视频，也不得脑补语气、BGM 或音效。
 音频采用两层合同：本地确定性硬质检可进入报告；语气、BGM、音效的细微商业贡献只作观察，永不进入执行分或 severity。
 
 职责：

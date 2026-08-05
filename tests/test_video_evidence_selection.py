@@ -22,11 +22,14 @@ from flayr_core.llm.media import get_llm_frame_candidates  # noqa: E402
 from flayr_core.subtitle_track import _merge_ocr_frame_entries  # noqa: E402
 from flayr_core.asr import extract_word_timestamps  # noqa: E402
 from flayr_core.video_evidence import (  # noqa: E402
+    build_transcript_pack,
     build_timeline_view_for_range,
     build_video_evidence_artifacts,
     select_timeline_transcript,
     write_selection_report_html,
 )
+from flayr_core.postprocess.repair_stages import infer_s1_boundary_candidate  # noqa: E402
+from flayr_core.postprocess.validate import validate_transcript_attribution  # noqa: E402
 
 
 class VideoEvidenceSelectionTests(unittest.TestCase):
@@ -191,6 +194,165 @@ class VideoEvidenceSelectionTests(unittest.TestCase):
         self.assertEqual(selected["word_count"], 1)
         self.assertIn("hook", selected["display_lines"][0])
         self.assertNotIn("full video transcript", selected["display_lines"][0])
+
+    def test_transcript_pack_publishes_raw_and_window_safe_views(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            srt_path = root / "transcript.srt"
+            srt_path.write_text(
+                "1\n00:00:00,120 --> 00:00:50,740\nfull video transcript\n",
+                encoding="utf-8",
+            )
+            words_path = root / "transcript.words.json"
+            words_path.write_text(
+                json.dumps(
+                    {
+                        "words": [
+                            {"start_seconds": 0.12, "end_seconds": 0.4, "text": "hook"},
+                            {"start_seconds": 0.4, "end_seconds": 0.8, "text": "problem"},
+                            {"start_seconds": 7.0, "end_seconds": 7.3, "text": "later"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = build_transcript_pack(
+                root,
+                {
+                    "work_dir": str(root),
+                    "transcript_segments_path": str(srt_path),
+                    "transcript_words_path": str(words_path),
+                },
+            )
+            self.assertTrue(Path(result["transcript_pack_path"]).is_file())
+            windowed = Path(result["transcript_windowed_path"])
+            self.assertTrue(windowed.is_file())
+            self.assertIn("hook", windowed.read_text(encoding="utf-8"))
+            self.assertNotIn("full video transcript", windowed.read_text(encoding="utf-8"))
+
+    def test_transcript_pack_builds_window_safe_view_without_srt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            words_path = root / "transcript.words.json"
+            words_path.write_text(
+                json.dumps(
+                    {
+                        "words": [
+                            {"start_seconds": 0.2, "end_seconds": 0.6, "text": "only words"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = build_transcript_pack(
+                root,
+                {
+                    "work_dir": str(root),
+                    "transcript_words_path": str(words_path),
+                },
+            )
+            self.assertNotIn("transcript_pack_path", result)
+            self.assertTrue(Path(result["transcript_windowed_path"]).is_file())
+
+    def test_s1_boundary_repair_uses_word_windows_when_srt_is_one_segment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            srt_path = root / "transcript.srt"
+            srt_path.write_text(
+                "1\n00:00:00,120 --> 00:00:50,740\nfull video transcript\n",
+                encoding="utf-8",
+            )
+            words_path = root / "transcript.words.json"
+            words_path.write_text(
+                json.dumps(
+                    {
+                        "words": [
+                            {"start_seconds": 0.12, "end_seconds": 0.4, "text": "皮肤问题"},
+                            {"start_seconds": 0.4, "end_seconds": 3.5, "text": "继续看"},
+                            {"start_seconds": 4.0, "end_seconds": 4.8, "text": "推荐使用这个"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            candidate = infer_s1_boundary_candidate(
+                "benchmark",
+                {"video_understanding": {"benchmark": {"evidence_units": []}}},
+                {
+                    "videos": {
+                        "benchmark": {
+                            "work_dir": str(root),
+                            "transcript_segments_path": str(srt_path),
+                            "transcript_words_path": str(words_path),
+                        }
+                    }
+                },
+            )
+            self.assertIsNotNone(candidate)
+            self.assertEqual(candidate["seconds"], 4.0)
+            self.assertEqual(candidate["source"], "transcript_window")
+
+    def test_stage_quote_cannot_use_full_transcript_for_narrow_word_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transcript_text = "hook text followed by later product explanation"
+            transcript_path = root / "transcript.txt"
+            transcript_path.write_text(transcript_text, encoding="utf-8")
+            words_path = root / "transcript.words.json"
+            words_path.write_text(
+                json.dumps(
+                    {
+                        "words": [
+                            {"start_seconds": 0.12, "end_seconds": 0.8, "text": "hook text"},
+                            {"start_seconds": 7.0, "end_seconds": 8.0, "text": "later product explanation"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            info = {
+                "work_dir": str(root),
+                "transcript_path": str(transcript_path),
+                "transcript_words_path": str(words_path),
+            }
+            result = {
+                "video_understanding": {
+                    "benchmark": {
+                        "evidence_units": [
+                            {
+                                "id": "B1",
+                                "voiceover": transcript_text,
+                                "time_range": "0.12s - 50.74s",
+                            }
+                        ]
+                    },
+                    "creator": {
+                        "evidence_units": [
+                            {
+                                "id": "C1",
+                                "voiceover": transcript_text,
+                                "time_range": "0.12s - 50.74s",
+                            }
+                        ]
+                    },
+                },
+                "stage_analysis": [
+                    {
+                        "stage": "S1 Hook",
+                        "benchmark_time_range": "0.0s - 6.0s",
+                        "creator_time_range": "0.0s - 6.0s",
+                        "benchmark_evidence_ids": ["B1"],
+                        "creator_evidence_ids": ["C1"],
+                        "benchmark_quote": transcript_text,
+                        "creator_quote": transcript_text,
+                    }
+                ],
+            }
+            with self.assertRaisesRegex(SystemExit, "超出阶段时间窗口"):
+                validate_transcript_attribution(
+                    result,
+                    {"videos": {"benchmark": info, "creator": info}},
+                )
 
     def test_timeline_transcript_hides_coarse_full_video_segment(self) -> None:
         selected = select_timeline_transcript(

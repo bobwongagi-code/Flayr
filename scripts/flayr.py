@@ -66,7 +66,10 @@ from flayr_core.video import (
     probe_duration_seconds,
     reserve_existing_media_artifacts,
 )
-from flayr_core.video_evidence import build_video_evidence_artifacts
+from flayr_core.video_evidence import (
+    TRANSCRIPT_WINDOW_CONTRACT_VERSION,
+    build_video_evidence_artifacts,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1233,6 +1236,9 @@ def ensure_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> Non
         require_file=True,
         require_root=True,
     )
+    transcript_window_contract_ready = (
+        existing.get("transcript_window_contract_version") == TRANSCRIPT_WINDOW_CONTRACT_VERSION
+    )
     transcript_ready = not str(info.get("transcript_segments_path") or "").strip() or (
         segment_path is not None and transcript_pack is not None
     )
@@ -1256,6 +1262,7 @@ def ensure_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> Non
         and analysis_stage_manifest is not None
         and audit_path is not None
         and transcript_ready
+        and transcript_window_contract_ready
     ):
         return
     info["video_evidence"] = build_video_evidence_artifacts(role_dir, info)

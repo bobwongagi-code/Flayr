@@ -30,7 +30,7 @@ from .shot_track import render_shot_track_markdown
 from .speech_mode import speech_mode_prompt
 from .stage_ownership import CERTIFICATION_OWNERSHIP_PROMPT, apply_certification_ownership_policy
 from .subtitle_track import render_subtitle_track_markdown
-from .transcript import current_transcript_segments_path
+from .transcript import current_transcript_segments_path, current_transcript_words_path, transcript_timing_contract
 from .utils import read_optional_text, write_text
 
 
@@ -114,9 +114,9 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
         "3. 再将 evidence_units 归入 S1-S6。每段必须输出 structure_library_full.md 官方 module_id、module_fit、task_completion、gap_type、voice_performance；不得自创模块。",
         "4. 有有效口播时，阶段核心信息以口播实际传递的信息为主，再匹配支持它的画面；无有效口播时，以画面和字幕为核心。每个阶段写 evidence_ids、visual_evidence 与 support_status。",
         "3a. 阶段引用的 evidence_unit 时间必须与该阶段时间相交；若某阶段没有独立内容，也应建立该时段的“未发现对应内容”事实单元，不能挪用其他阶段证据。",
-        "3b. `transcript.srt` 的时间戳是口播归因的权威依据；口播句不在阶段时间内时，必须调整阶段边界或停止引用该口播。",
+        "3b. 在阶段2/比较模型输入中，原始 transcript.srt、transcript.txt 和词级索引只保留在本地审计产物，不进入模型；窗口内口播归因只能使用窗口安全口播时间线。阶段1单视频事实抽取可使用无时间的完整转写作语义参考，但没有词级时间戳时仍必须标记时间粒度不足，不得伪造精确归因。",
         f"4. 同一关键信息只能归属于一个主要阶段。{CERTIFICATION_OWNERSHIP_PROMPT}",
-        "5. 每个阶段从原始转写中摘录对应本地语言口播到 benchmark_quote/creator_quote，并附中文翻译；无明确口播则留空；不得将画面未显示的信息写成画面证据。",
+        "5. 每个阶段从窗口安全口播时间线中摘录对应本地语言口播到 benchmark_quote/creator_quote，并附中文翻译；无明确口播或时间粒度不足则留空；不得将画面未显示的信息写成画面证据。",
         "6. 提升点输出 GMV 杠杆最高的 1-5 条，按优先级排序，不按阶段顺序凑数；CTA 与 Hook 的重大差距优先；必须具体到时间段、画面、话术或节奏。",
         "7. 每个提升点输出 base_frame_suitability。达人全片确有可改造真实基底时写 usable 与 best_base_frame_time；没有目标所需的人物/产品/场景时写 no_suitable_frame，时间留空并要求补拍/补素材。",
         "8. 每个提升点输出 benchmark_evidence_ids 与 base_frame_evidence_id。标杆参考只能引用所属阶段证据；基底理由只能描述对应达人证据中真实可见的素材，不能把无口播画面写成主播表达。",
@@ -177,29 +177,11 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
                 "",
                 render_video_evidence_markdown(role_dir, info),
                 "",
-                "### 本地语言转写",
+                "### 模型消费口播输入",
                 "",
-                read_optional_text(role_dir / "transcript.txt"),
-                "",
-                "### 带时间戳口播分段",
-                "",
-                read_optional_text(current_transcript_segments_path(info) or Path("__missing_transcript_segments__")),
-                "",
-                "### 词级口播时间索引（如可用）",
-                "",
-                read_optional_text(
-                    resolve_artifact_path(
-                        info,
-                        info.get("transcript_words_path"),
-                        require_file=True,
-                        require_root=True,
-                    )
-                    or Path("__missing_transcript_words__")
-                ),
-                "",
-                "### 中文翻译",
-                "",
-                read_optional_text(role_dir / "transcript.zh.txt"),
+                "模型只消费上方的视频证据索引中的窗口安全口播时间线；完整转写和原始时间索引不随本请求发送。",
+                f"- 原始转写审计产物：{role_dir / 'transcript.txt'}；{current_transcript_segments_path(info) or role_dir / 'transcript.srt'}",
+                f"- 原始词级时间索引审计产物：{current_transcript_words_path(info) or role_dir / 'transcript.words.json'}",
                 "",
                 "### 权威字幕轨（OCR 识别，卖点/价格/年龄段叠字以此为准，胜过画面认字）",
                 "",
@@ -306,6 +288,13 @@ def render_video_evidence_markdown(role_dir: Path, info: dict[str, Any]) -> str:
         f"- 时间线证据图目录：{evidence.get('timeline_views_dir') or role_dir / 'timeline_views'}",
         f"- 证据视图自检：{evidence.get('audit_path') or role_dir / 'video_evidence_audit.json'}",
     ]
+    timing = transcript_timing_contract(info)
+    lines.extend(
+        [
+            f"- 口播时间精度：{timing['precision']}（词数 {timing['word_count']}，SRT 分段 {timing['segment_count']}）",
+            "- 窗口归因规则：有词级时间戳时只使用窗口安全口播时间线；没有词级时间戳时，跨窗口 SRT 分段只能标记为时间粒度不足，不能整段归因。",
+        ]
+    )
     views = evidence.get("timeline_views") if isinstance(evidence, dict) else None
     if isinstance(views, list) and views:
         lines.append("- 时间线证据图：")
@@ -318,7 +307,18 @@ def render_video_evidence_markdown(role_dir: Path, info: dict[str, Any]) -> str:
             path = item.get("path") or ""
             lines.append(f"  - {label}: {start}s-{end}s {path}")
     packed = evidence.get("transcript_pack_path") if isinstance(evidence, dict) else None
-    packed_path = Path(str(packed or "__missing_transcript_pack__"))
-    lines.extend(["", "#### 紧凑口播索引", ""])
-    lines.append(read_optional_text(packed_path))
+    segments_path = current_transcript_segments_path(info) or role_dir / "transcript.srt"
+    words_path = current_transcript_words_path(info) or role_dir / "transcript.words.json"
+    lines.extend(
+        [
+            "",
+            "#### 原始口播审计产物（不发送模型）",
+            f"- 原始分段索引：{packed or segments_path}",
+            f"- 原始词级索引：{words_path}",
+        ]
+    )
+    windowed = evidence.get("transcript_windowed_path") if isinstance(evidence, dict) else None
+    windowed_path = Path(str(windowed or "__missing_transcript_windowed__"))
+    lines.extend(["", "#### 窗口安全口播时间线（消费）", ""])
+    lines.append(read_optional_text(windowed_path))
     return "\n".join(str(line) for line in lines)

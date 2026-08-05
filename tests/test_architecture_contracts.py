@@ -3447,6 +3447,76 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertNotIn("只归入 S2", repair_text)
         self.assertNotIn("产品名/卖点/认证", review_text)
 
+    def test_comparison_input_excludes_raw_transcript_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            role_dir = root / "creator"
+            role_dir.mkdir()
+            (role_dir / "video.mp4").write_bytes(b"video")
+            (role_dir / "transcript.txt").write_text("RAW_FULL_TRANSCRIPT", encoding="utf-8")
+            (role_dir / "transcript.srt").write_text(
+                "1\n00:00:00,000 --> 00:00:20,000\nRAW_SRT_TRANSCRIPT\n",
+                encoding="utf-8",
+            )
+            (role_dir / "transcript.words.json").write_text(
+                '{"text":"RAW_WORD_INDEX"}', encoding="utf-8"
+            )
+            windowed = role_dir / "transcript_windowed.md"
+            windowed.write_text("[0.0-2.0] SAFE_WINDOW_TRANSCRIPT", encoding="utf-8")
+            raw_pack = role_dir / "transcript_packed.md"
+            raw_pack.write_text("RAW_PACK_TRANSCRIPT", encoding="utf-8")
+            analysis = {
+                "analysis_scope": {
+                    "label": "视频证据分析",
+                    "missing_context": [],
+                    "boundary": "仅按视频事实判断",
+                },
+                "product": {
+                    "name": "测试品",
+                    "category": "测试品类",
+                    "price": "",
+                    "target_market": "auto",
+                    "core_selling_points": [],
+                    "target_user": "",
+                    "purchase_motivation": "",
+                    "creator_profile": "",
+                    "notes": "",
+                },
+                "videos": {
+                    "creator": {
+                        "path": str(role_dir / "video.mp4"),
+                        "work_dir": str(role_dir),
+                        "duration_seconds": 20.0,
+                        "detected_language": "zh",
+                        "frames_dir": str(role_dir / "frames"),
+                        "focus_frames_dir": str(role_dir / "focus_frames"),
+                        "frame_count": 0,
+                        "focus_frame_count": 0,
+                        "video_evidence": {
+                            "transcript_pack_path": str(raw_pack),
+                            "transcript_windowed_path": str(windowed),
+                        },
+                    }
+                },
+            }
+
+            text = write_analysis_input(root, analysis).read_text(encoding="utf-8")
+            payload_text = json.dumps(
+                build_llm_comparison_payload("test", text, {}, {"videos": {}}),
+                ensure_ascii=False,
+            )
+
+        self.assertIn("SAFE_WINDOW_TRANSCRIPT", text)
+        self.assertIn("不随本请求发送", text)
+        for marker in (
+            "RAW_FULL_TRANSCRIPT",
+            "RAW_SRT_TRANSCRIPT",
+            "RAW_WORD_INDEX",
+            "RAW_PACK_TRANSCRIPT",
+        ):
+            self.assertNotIn(marker, text)
+            self.assertNotIn(marker, payload_text)
+
     def test_multimodal_contract_reaches_all_analysis_prompts(self) -> None:
         comparison = build_llm_comparison_payload("test", "input", {}, {"videos": {}})
         repair = build_llm_repair_payload("test", "{}", "error", "input")

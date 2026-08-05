@@ -42,7 +42,7 @@ def classify_speech_mode(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]
     if effective_speech:
         return {
             "mode": "spoken",
-            "primary_evidence": ["transcript_packed", "transcript_srt", "timeline_views", "visual_frames"],
+            "primary_evidence": ["transcript_windowed", "transcript_srt", "timeline_views", "visual_frames"],
             "reason": f"有效口播存在；SRT segments={srt_segments}。",
             "has_effective_speech": True,
             "srt_segment_count": srt_segments,
@@ -128,7 +128,7 @@ def speech_mode_prompt(mode_info: dict[str, Any]) -> str:
     if mode == "spoken":
         return (
             common +
-            "有有效口播时，以 transcript_packed/transcript.srt 为口播骨架，画面、OCR、波形用于校验声画是否对齐。"
+            "有有效口播时，以 transcript_windowed（词级时间线）为窗口归因骨架，以原始 transcript.srt 做逐字审计；画面、OCR、波形用于校验声画是否对齐。"
         )
     if mode == "subtitle_driven":
         return (

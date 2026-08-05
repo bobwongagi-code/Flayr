@@ -16,6 +16,7 @@ from typing import Any
 from ..artifacts import format_seconds, parse_time_range_seconds, parse_timestamp_seconds
 from ..evidence_states import S1_HOOK_FLOOR_FIELDS, hard_fact_fingerprint
 from ..stage_catalog import stage_tuples
+from ..transcript import read_timed_transcript_segments
 
 STAGES = stage_tuples()
 
@@ -28,7 +29,6 @@ from .utils import (
     ensure_evidence_unit,
     find_evidence_unit,
     first_unmapped_overlapping_unit,
-    read_srt_segments,
 )
 
 
@@ -131,7 +131,7 @@ ANCHOR_ALIASES = {
 # region align ---------------------------------------------------------------
 
 def repair_s1_hook_boundaries(result: dict[str, Any], analysis: dict[str, Any]) -> None:
-    """用 SRT/facts 候选边界收敛 S1 Hook，避免模型等到产品亮相才把 S2 切出来。"""
+    """用窗口安全口播时间线/facts 候选边界收敛 S1 Hook，避免 S2 泄漏进 S1。"""
     s1 = next((stage for stage in result.get("stage_analysis", []) if str(stage.get("stage", "")).startswith("S1")), None)
     if not isinstance(s1, dict):
         return
@@ -287,8 +287,27 @@ def evidence_text(unit: dict[str, Any]) -> str:
     )
 
 
+def _repair_timed_transcript_segments(info: dict[str, Any]) -> list[dict[str, Any]]:
+    """Use only word-derived windows for repair; raw SRT remains audit-only."""
+    segments = [
+        segment
+        for segment in read_timed_transcript_segments(info)
+        if isinstance(segment, dict) and segment.get("precision") == "word_window"
+    ]
+    return [
+        {
+            **segment,
+            "start": float(segment.get("start", segment.get("start_seconds", 0.0))),
+            "end": float(segment.get("end", segment.get("end_seconds", 0.0))),
+        }
+        for segment in segments
+        if isinstance(segment, dict)
+    ]
+
+
 def infer_s1_boundary_candidate(role: str, result: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any] | None:
-    segments = read_srt_segments((analysis.get("videos") or {}).get(role, {}) if isinstance(analysis.get("videos"), dict) else {})
+    info = (analysis.get("videos") or {}).get(role, {}) if isinstance(analysis.get("videos"), dict) else {}
+    segments = _repair_timed_transcript_segments(info)
     if len(segments) >= 2:
         first = segments[0]
         second = segments[1]
@@ -309,9 +328,9 @@ def infer_s1_boundary_candidate(role: str, result: dict[str, Any], analysis: dic
                 return {
                     "seconds": round(start, 2),
                     "cue": cue,
-                    "source": "srt",
+                    "source": "transcript_window",
                     "reason": (
-                        f"SRT 第一句 {first.get('start', 0):.2f}-{first.get('end', 0):.2f}s 更像 S1 留人；"
+                        f"口播时间线第一段 {first.get('start', 0):.2f}-{first.get('end', 0):.2f}s 更像 S1 留人；"
                         f"第二句从 {start:.2f}s 出现“{cue}”类 S2 承接信号。"
                     ),
                 }
@@ -441,7 +460,7 @@ def align_clear_commerce_evidence(result: dict[str, Any]) -> None:
 
 
 def align_timed_cta_from_transcript(result: dict[str, Any], analysis: dict[str, Any]) -> None:
-    """以 SRT 时间戳识别尾段购买指令，覆盖模型可能错位的 CTA 时间。"""
+    """以窗口安全口播时间线识别尾段购买指令，覆盖模型可能错位的 CTA 时间。"""
     stages = result.get("stage_analysis", [])
     if len(stages) < 6:
         return
@@ -451,7 +470,7 @@ def align_timed_cta_from_transcript(result: dict[str, Any], analysis: dict[str, 
         duration = parse_timestamp_seconds(info.get("duration_seconds"))
         if duration is None or duration <= 0:
             continue
-        segments = read_srt_segments(info)
+        segments = _repair_timed_transcript_segments(info)
         candidates = [
             segment
             for segment in segments
@@ -469,7 +488,7 @@ def align_timed_cta_from_transcript(result: dict[str, Any], analysis: dict[str, 
                 break
         time_range = f"{format_seconds(selected[0]['start'])} - {format_seconds(selected[-1]['end'])}"
         quote = " ".join(segment["text"] for segment in selected).strip()
-        unit_id = f"{code}_CTA_SRT"
+        unit_id = f"{code}_CTA_TRANSCRIPT"
         unit = {
             "id": unit_id,
             "time_range": time_range,

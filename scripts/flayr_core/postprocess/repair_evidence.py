@@ -39,7 +39,6 @@ from .utils import (
     evidence_unit_at_time,
     nearest_evidence_unit,
     nearest_product_evidence_unit,
-    read_srt_segments,
     referenced_spoken_unit,
 )
 

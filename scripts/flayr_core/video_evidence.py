@@ -38,7 +38,17 @@ from .frame_selection import (
     build_analysis_frame_manifest,
 )
 from .utils import write_json, write_text
-from .transcript import current_transcript_segments_path
+from .transcript import (
+    current_transcript_segments_path,
+    group_transcript_words,
+    load_transcript_words,
+    parse_srt_segments,
+    parse_srt_time_range,
+    parse_srt_timestamp,
+    parse_transcript_words,
+)
+
+TRANSCRIPT_WINDOW_CONTRACT_VERSION = 1
 
 def build_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]:
     """Build the canonical evidence manifest and its audit views."""
@@ -56,6 +66,9 @@ def build_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> dict
         "timeline_views": [],
         "transcript_pack_path": None,
         "transcript_pack_json_path": None,
+        "transcript_windowed_path": None,
+        "transcript_windowed_json_path": None,
+        "transcript_window_contract_version": TRANSCRIPT_WINDOW_CONTRACT_VERSION,
         "audit_path": None,
     }
     word_path = resolve_artifact_path(info, info.get("transcript_words_path"), require_file=True)
@@ -120,6 +133,13 @@ def audit_video_evidence(
             [
                 ("transcript_pack", result.get("transcript_pack_path")),
                 ("transcript_pack_json", result.get("transcript_pack_json_path")),
+            ]
+        )
+    if result.get("transcript_windowed_path"):
+        checks.extend(
+            [
+                ("transcript_windowed", result.get("transcript_windowed_path")),
+                ("transcript_windowed_json", result.get("transcript_windowed_json_path")),
             ]
         )
     if result.get("transcript_words_path"):
@@ -428,107 +448,45 @@ def fit_image(image: Image.Image, width: int, height: int) -> Image.Image:
 
 def build_transcript_pack(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]:
     srt_path = current_transcript_segments_path(info)
-    if srt_path is None:
-        return {}
-    segments = parse_srt_segments(srt_path)
-    if not segments:
-        return {}
-
-    json_path = role_dir / "transcript_packed.json"
-    md_path = role_dir / "transcript_packed.md"
-    write_json(json_path, segments)
-    lines = ["# Packed transcript", ""]
-    for segment in segments:
-        lines.append(
-            f"[{segment['start_seconds']:06.2f}-{segment['end_seconds']:06.2f}] {segment['text']}"
-        )
-    write_text(md_path, "\n".join(lines) + "\n")
-    return {
-        "transcript_pack_path": str(md_path),
-        "transcript_pack_json_path": str(json_path),
-        "transcript_segment_count": len(segments),
-    }
-
-
-def parse_srt_segments(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    text = path.read_text(encoding="utf-8", errors="ignore")
-    blocks = re.split(r"\n\s*\n", text.strip())
-    segments: list[dict[str, Any]] = []
-    for block in blocks:
-        lines = [line.strip() for line in block.splitlines() if line.strip()]
-        time_line_index = next((idx for idx, line in enumerate(lines) if "-->" in line), None)
-        if time_line_index is None:
-            continue
-        start, end = parse_srt_time_range(lines[time_line_index])
-        if start is None or end is None:
-            continue
-        spoken = " ".join(lines[time_line_index + 1:]).strip()
-        if not spoken:
-            continue
-        segments.append({"start_seconds": round(start, 2), "end_seconds": round(end, 2), "text": spoken})
-    return segments
-
-
-def parse_srt_time_range(line: str) -> tuple[float | None, float | None]:
-    parts = line.split("-->")
-    if len(parts) != 2:
-        return None, None
-    start = parse_srt_timestamp(parts[0])
-    end = parse_srt_timestamp(parts[1])
-    if start is None or end is None or end < start:
-        return None, None
-    return start, end
-
-
-def parse_srt_timestamp(value: str) -> float | None:
-    normalized = str(value or "").strip()
-    if not re.fullmatch(r"\d+:\d{2}:\d{2}(?:[.,]\d+)?", normalized):
-        return None
-    return parse_timestamp_seconds(normalized.replace(",", "."))
-
-
-def parse_transcript_words(path: Path) -> list[dict[str, Any]]:
-    """Read the normalized word-level ASR artifact used by timeline views."""
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    if not isinstance(payload, dict) or not isinstance(payload.get("words"), list):
-        return []
-
-    words: list[dict[str, Any]] = []
-    for item in payload["words"]:
-        if not isinstance(item, dict):
-            continue
-        start = parse_timestamp_seconds(item.get("start_seconds"))
-        end = parse_timestamp_seconds(item.get("end_seconds"))
-        text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip()
-        if start is None or end is None or end < start or not text:
-            continue
-        words.append(
+    segments = parse_srt_segments(srt_path) if srt_path is not None else []
+    result: dict[str, Any] = {}
+    if segments:
+        json_path = role_dir / "transcript_packed.json"
+        md_path = role_dir / "transcript_packed.md"
+        write_json(json_path, segments)
+        lines = ["# Raw segment transcript (audit view)", ""]
+        for segment in segments:
+            lines.append(
+                f"[{segment['start_seconds']:06.2f}-{segment['end_seconds']:06.2f}] {segment['text']}"
+            )
+        write_text(md_path, "\n".join(lines) + "\n")
+        result.update(
             {
-                "start_seconds": round(start, 3),
-                "end_seconds": round(end, 3),
-                "text": text,
+                "transcript_pack_path": str(md_path),
+                "transcript_pack_json_path": str(json_path),
+                "transcript_segment_count": len(segments),
             }
         )
-    return sorted(words, key=lambda item: (item["start_seconds"], item["end_seconds"]))
-
-
-def load_transcript_words(info: dict[str, Any]) -> list[dict[str, Any]]:
-    """Resolve and read the current-generation word timestamp artifact."""
-    raw_path = str(info.get("transcript_words_path") or "").strip()
-    if not raw_path:
-        return []
-    path = resolve_artifact_path(
-        info,
-        raw_path,
-        require_file=True,
-        require_root=bool(str(info.get("work_dir") or "").strip()),
-    )
-    return parse_transcript_words(path) if path is not None else []
+    words = load_transcript_words(info)
+    if words:
+        windowed = group_transcript_words(words)
+        windowed_json_path = role_dir / "transcript_windowed.json"
+        windowed_md_path = role_dir / "transcript_windowed.md"
+        write_json(windowed_json_path, windowed)
+        windowed_lines = ["# Window-safe transcript timeline", ""]
+        for window in windowed:
+            windowed_lines.append(
+                f"[{window['start_seconds']:06.2f}-{window['end_seconds']:06.2f}] {window['text']}"
+            )
+        write_text(windowed_md_path, "\n".join(windowed_lines) + "\n")
+        result.update(
+            {
+                "transcript_windowed_path": str(windowed_md_path),
+                "transcript_windowed_json_path": str(windowed_json_path),
+                "transcript_window_count": len(windowed),
+            }
+        )
+    return result
 
 
 def select_timeline_transcript(

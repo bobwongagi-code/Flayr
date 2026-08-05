@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -95,6 +96,16 @@ class LlmApiContractTests(unittest.TestCase):
             frame = root / "frame.jpg"
             video.write_bytes(b"mp4")
             frame.write_bytes(b"jpeg")
+            (root / "transcript.srt").write_text(
+                "1\n00:00:00,000 --> 00:00:02,000\nRAW_SRT_FACT_PAYLOAD\n",
+                encoding="utf-8",
+            )
+            (root / "transcript.words.json").write_text(
+                '{"text":"RAW_WORD_FACT_PAYLOAD"}', encoding="utf-8"
+            )
+            (root / "transcript_windowed.md").write_text(
+                "[0.0-1.0] SAFE_FACT_WINDOW", encoding="utf-8"
+            )
             analysis = {
                 "product": {"name": "测试产品"},
                 "videos": {
@@ -102,6 +113,9 @@ class LlmApiContractTests(unittest.TestCase):
                         "path": str(video),
                         "work_dir": str(root),
                         "duration_seconds": 2.0,
+                        "video_evidence": {
+                            "transcript_windowed_path": str(root / "transcript_windowed.md"),
+                        },
                     }
                 },
             }
@@ -121,6 +135,10 @@ class LlmApiContractTests(unittest.TestCase):
             self.assertNotIn("video_url", types)
             self.assertNotIn("input_audio", types)
             self.assertIn("image_url", types)
+            payload_text = json.dumps(payload, ensure_ascii=False)
+            self.assertIn("SAFE_FACT_WINDOW", payload_text)
+            self.assertNotIn("RAW_SRT_FACT_PAYLOAD", payload_text)
+            self.assertNotIn("RAW_WORD_FACT_PAYLOAD", payload_text)
             video_encoder.assert_not_called()
 
     def test_unknown_provider_is_conservative(self) -> None:

@@ -37,6 +37,7 @@ from ..multimodal import (
 )
 from ..stage_ownership import CERTIFICATION_OWNER_STAGE, contains_certification, is_certification_owner_stage
 from ..structure_modules import official_module_ids
+from ..transcript import load_transcript_words
 from .utils import evidence_overlaps_range
 
 
@@ -1081,24 +1082,101 @@ def append_qa_warnings(result: dict[str, Any], warnings: list[str]) -> None:
 
 
 def validate_transcript_attribution(result: dict[str, Any], analysis: dict[str, Any]) -> None:
-    """禁止 benchmark 的 evidence_unit 引用 creator 的口播原文，反之亦然。"""
+    """校验口播来源，并禁止跨阶段整段转写借交集冒充窗口内证据。"""
     transcript_text = {
         role: normalized_transcript_text(read_transcript_text(info))
         for role, info in analysis.get("videos", {}).items()
         if role in {"benchmark", "creator"}
     }
-    if not transcript_text.get("benchmark") or not transcript_text.get("creator"):
-        return
-    for role, other_role in (("benchmark", "creator"), ("creator", "benchmark")):
+    if transcript_text.get("benchmark") and transcript_text.get("creator"):
+        for role, other_role in (("benchmark", "creator"), ("creator", "benchmark")):
+            units = result.get("video_understanding", {}).get(role, {}).get("evidence_units", [])
+            for unit in units:
+                quote = normalized_transcript_text(str(unit.get("voiceover") or "")) if isinstance(unit, dict) else ""
+                if len(quote) < 12 or quote in transcript_text[role]:
+                    continue
+                if quote in transcript_text[other_role]:
+                    raise SystemExit(
+                        f"{role} 证据 {unit.get('id')} 的口播实际来自 {other_role} 转写，禁止跨视频串证据。"
+                    )
+
+    timing_warnings: list[str] = []
+    for role in ("benchmark", "creator"):
+        info = analysis.get("videos", {}).get(role, {}) if isinstance(analysis.get("videos"), dict) else {}
+        words = load_transcript_words(info if isinstance(info, dict) else {})
+        full_text = transcript_text.get(role, "")
+        if not words:
+            timing_warnings.extend(_coarse_transcript_window_warnings(result, role, info))
+            continue
+        for index, stage in enumerate(result.get("stage_analysis", []), start=1):
+            stage_range = parse_time_range_seconds(stage.get(f"{role}_time_range"), None)
+            if stage_range is None:
+                continue
+            window_start, window_end = stage_range
+            window_text = normalized_transcript_text(
+                " ".join(
+                    str(word.get("text") or "")
+                    for word in words
+                    if float(word.get("end_seconds", 0.0)) > window_start
+                    and float(word.get("start_seconds", 0.0)) < window_end
+                )
+            )
+            if not window_text:
+                continue
+            references = {str(value) for value in stage.get(f"{role}_evidence_ids", [])}
+            units = result.get("video_understanding", {}).get(role, {}).get("evidence_units", [])
+            referenced_units = [
+                unit
+                for unit in units
+                if isinstance(unit, dict) and str(unit.get("id")) in references
+            ]
+            quotes = [
+                str(unit.get("voiceover") or "")
+                for unit in referenced_units
+            ]
+            quotes.append(str(stage.get(f"{role}_quote") or ""))
+            for quote in quotes:
+                normalized_quote = normalized_transcript_text(quote)
+                if len(normalized_quote) < 8 or normalized_quote not in full_text:
+                    continue
+                if normalized_quote not in window_text:
+                    raise SystemExit(
+                        f"S{index} 的 {role} 口播引用超出阶段时间窗口；"
+                        "不能用跨窗口整段 transcript.srt 文本仅凭时间交集归因。"
+                    )
+    append_qa_warnings(result, timing_warnings)
+
+
+def _coarse_transcript_window_warnings(
+    result: dict[str, Any],
+    role: str,
+    info: dict[str, Any],
+) -> list[str]:
+    """Warn when legacy segment timestamps cannot prove a partial-window quote."""
+    warnings: list[str] = []
+    if not isinstance(info, dict):
+        return warnings
+    for index, stage in enumerate(result.get("stage_analysis", []), start=1):
+        stage_range = parse_time_range_seconds(stage.get(f"{role}_time_range"), None)
+        if stage_range is None:
+            continue
+        stage_start, stage_end = stage_range
+        references = {str(value) for value in stage.get(f"{role}_evidence_ids", [])}
         units = result.get("video_understanding", {}).get(role, {}).get("evidence_units", [])
         for unit in units:
-            quote = normalized_transcript_text(str(unit.get("voiceover") or "")) if isinstance(unit, dict) else ""
-            if len(quote) < 12 or quote in transcript_text[role]:
+            if not isinstance(unit, dict) or str(unit.get("id")) not in references:
                 continue
-            if quote in transcript_text[other_role]:
-                raise SystemExit(
-                    f"{role} 证据 {unit.get('id')} 的口播实际来自 {other_role} 转写，禁止跨视频串证据。"
+            unit_range = parse_time_range_seconds(unit.get("time_range"), None)
+            if unit_range is None or not str(unit.get("voiceover") or "").strip():
+                continue
+            unit_start, unit_end = unit_range
+            if unit_start < stage_start or unit_end > stage_end:
+                warnings.append(
+                    f"[TIMING] S{index} {role} 口播引用跨越阶段窗口，但没有词级时间戳；"
+                    "该引用的局部归因需要人工复核。"
                 )
+                break
+    return warnings
 
 
 def validate_stage_ownership(result: dict[str, Any]) -> None:

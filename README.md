@@ -26,7 +26,8 @@ Flayr 用**两阶段 pipeline + 一次性回看**，而非一次性看完整视�
 ```
 阶段一：单视频事实抽取（fact extraction）
   对达人、标杆各跑一次 omni 调用：
-  原生视频（ffmpeg 重编码 fps=3 + 降分辨率，含音轨）→ 让模型自定位变化点
+  已验证具备原生音视频能力的 provider：原生视频（ffmpeg 重编码 fps=3 + 降分辨率，含音轨）→ 让模型自定位变化点
+  北京 MaaS Qwen 等 transcript-only provider：canonical 关键帧/时间线 + 窗口安全转写 → 让模型自定位变化点
   → 产出带时间戳的 evidence_units（画面/口播/字幕/音频事实）
   facts 一旦锁定即为"唯一事实源"（防止达人/标杆串证据）
 
@@ -156,7 +157,7 @@ python3 scripts/flayr.py \
   ↓
 [2] 翻译（可选，LLM）
   ↓
-[3] 阶段一：单视频事实抽取（omni 原生视频，各跑一次）
+[3] 阶段一：单视频事实抽取（按 provider 能力选择原生视频或 canonical 关键帧/时间线，各跑一次）
   ↓
 [4] 阶段二：对比判断（facts + 关键帧 + 切片音频）
   ↓

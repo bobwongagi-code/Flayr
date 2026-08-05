@@ -24,8 +24,11 @@ from ..stage_ownership import (
     apply_certification_ownership_policy,
 )
 from ..subtitle_track import render_subtitle_track_markdown
-from ..transcript import current_transcript_segments_path
-from ..video_evidence import build_timeline_view_for_range, parse_srt_segments
+from ..transcript import (
+    read_timed_transcript_segments,
+    transcript_timing_contract,
+)
+from ..video_evidence import build_timeline_view_for_range
 from ..resources import ResourceBudget
 from .api import (
     audio_to_mp3_data_url,
@@ -384,12 +387,6 @@ def build_video_fact_payload(
     info = analysis.get("videos", {}).get(role, {})
     code = "B" if role == "benchmark" else "C"
     role_dir = Path(str(info.get("work_dir") or ""))
-    transcript_words_path = resolve_artifact_path(
-        info,
-        info.get("transcript_words_path"),
-        require_file=True,
-        require_root=bool(str(info.get("work_dir") or "").strip()),
-    )
     mode_prompt = speech_mode_prompt(info.get("speech_mode") if isinstance(info.get("speech_mode"), dict) else {})
     native_audio = can_analyze_native_audio(api_url, model)
 
@@ -482,17 +479,14 @@ def build_video_fact_payload(
             "## 结构库事件目录（逐项核对，不是阶段评分）\n"
             "先自由观察，再对每项写 present=true/false；present=true 必须绑定 evidence_units 中的真实 id，false 必须无 evidence_ids。\n"
             + event_catalog_text,
-            "## 本地语言转写",
+            "## 本地语言转写（语义参考；不提供精确窗口边界）",
             read_text_if_exists(role_dir / "transcript.txt"),
             "",
-            "## 紧凑口播索引（先按这个理解口播顺序；逐字引用仍以 transcript.srt 为准）",
-            read_text_if_exists(_video_evidence_path(info, "transcript_pack_path")),
-            "",
-            "## 带时间戳口播分段（口播时间归因的权威依据）",
-            read_text_if_exists(current_transcript_segments_path(info) or Path("__missing_transcript_segments__")),
-            "",
-            "## 词级口播时间索引（可用时用于精确对齐；仍以原始 SRT 分段为完整依据）",
-            read_text_if_exists(transcript_words_path or Path("__missing_transcript_words__")),
+            "## 口播时间精度合同",
+            json.dumps(transcript_timing_contract(info), ensure_ascii=False),
+            "窗口内口播归因只能使用窗口安全口播时间线；没有词级时间戳时，跨窗口口播必须标记时间粒度不足，不得伪造精确归因。原始 transcript.srt 和词级索引不进入模型请求，只保留在本地审计产物。",
+            "## 窗口安全口播时间线（阶段归因首选）",
+            read_text_if_exists(_video_evidence_path(info, "transcript_windowed_path")),
             "",
             "## 中文翻译",
             read_text_if_exists(role_dir / "transcript.zh.txt"),
@@ -569,7 +563,7 @@ def build_video_fact_payload(
                             "id": f"{code}1",
                             "time_range": "0.0s - 3.0s",
                             "information": "该变化点实际传递的信息，不做 S1-S6 阶段推断。",
-                            "voiceover": "只能摘录本视频 transcript.srt 中真实出现的原句；没有则留空。",
+                            "voiceover": "只能摘录本视频提供的窗口安全口播时间线中真实出现的原句；没有或时间粒度不足则留空。",
                             "voiceover_zh": "中文翻译；没有则留空。",
                             "visual_fact": "该时刻画面中实际可见的事实：主体、动作、表情变化、字幕叠字、特效。",
                             "subtitle_fact": "可读字幕；没有则留空。",
@@ -679,7 +673,7 @@ def build_video_fact_payload(
         "每条还要标 functions（list，多选）：这段画面支撑哪些带货功能，枚举 S1_hook/S2_intro/S3_usage/S4_effect/S5_trust/S6_cta，"
         "按信息功能判断、信道无关（口播/字幕/画面/特效综合看，无口播也能判），一段可同时支撑多个"
         "（手在操作+效果出来 → [S3_usage,S4_effect]）；这是描述这段在带货结构里干什么、不是评价好坏，没有对应功能就不标；"
-        "voiceover 必须逐字来自当前视频 transcript.srt，画面看不清的时段在 visual_fact 写画面证据不足待复核；"
+        "voiceover 必须逐字来自当前视频提供的窗口安全口播时间线；time_range 必须与对应窗口一致，不能用跨窗口整段转写冒充局部口播。画面看不清的时段在 visual_fact 写画面证据不足待复核；"
         "视频级商业门控只需要你补充纯观察事实，不做优劣结论："
         "selling_point_observations 列出实际占据主要画面或口播的卖点，visual_share 与 speech_share 分开估算且各自在 0-1；"
         "variant_* 只区分同品 SKU/色号/包装变体，不把完全不同产品硬并成变体。single_focus 表示一个变体主导，"
@@ -951,12 +945,12 @@ S2_START_CUES = [
 
 
 def build_s1_boundary_hint_block(analysis: dict[str, Any] | None, facts: dict[str, Any]) -> str:
-    """用 SRT 句段给 Stage2 一个 S1/S2 边界候选，避免粗 evidence 单元把 Hook 和产品引出焊死。"""
+    """用窗口安全口播时间线给 Stage2 一个 S1/S2 边界候选。"""
     if not analysis:
         return ""
     videos = analysis.get("videos") if isinstance(analysis.get("videos"), dict) else {}
     lines = [
-        "## S1/S2 边界候选（代码从 transcript.srt + facts 提取，仅辅助裁边界）",
+        "## S1/S2 边界候选（代码从窗口安全口播时间线 + facts 提取，仅辅助裁边界）",
         "按 structure_library_full.md：S1 是抢夺注意力，S2 是从 Hook 自然过渡到产品。",
         "若候选处下一句已经开始承接/揭晓/否定转正/第三方推荐，即使产品实物或产品名还没出现，也优先视为 S2 起点。",
     ]
@@ -965,20 +959,25 @@ def build_s1_boundary_hint_block(analysis: dict[str, Any] | None, facts: dict[st
         info = videos.get(role) if isinstance(videos, dict) else None
         if not isinstance(info, dict):
             continue
-        role_dir = Path(str(info.get("work_dir") or ""))
-        transcript_path = current_transcript_segments_path(info)
-        segments = parse_srt_segments(transcript_path)[:4] if transcript_path else []
-        if not segments:
-            continue
-        candidate = infer_s1_boundary_candidate(role, segments, facts)
         lines.append("")
         lines.append(f"- {role}:")
+        segments = [
+            segment
+            for segment in read_timed_transcript_segments(info)
+            if isinstance(segment, dict) and segment.get("precision") == "word_window"
+        ][:6]
+        if not segments:
+            lines.append("  - 无词级时间线；原始 SRT 仅作审计，S1/S2 边界不自动推断。")
+            lines.append("  - 请根据画面、字幕、facts 和人工复核确定边界。")
+            wrote_any = True
+            continue
+        candidate = infer_s1_boundary_candidate(role, segments, facts)
         if candidate:
             lines.append(f"  - candidate_hook_boundary_seconds: {candidate['seconds']:.2f}")
             lines.append(f"  - candidate_reason: {candidate['reason']}")
         else:
-            lines.append("  - candidate_hook_boundary_seconds: 未自动识别；仍按下方 SRT 句段自行按功能裁边界。")
-        lines.append("  - early_srt:")
+            lines.append("  - candidate_hook_boundary_seconds: 未自动识别；仍按下方窗口安全口播时间线自行按功能裁边界。")
+        lines.append("  - early_window_safe_transcript:")
         for segment in segments:
             lines.append(
                 f"    [{segment['start_seconds']:.2f}-{segment['end_seconds']:.2f}] {segment['text']}"
@@ -1009,7 +1008,7 @@ def infer_s1_boundary_candidate(
         return {
             "seconds": start,
             "reason": (
-                f"SRT 第一句 {first['start_seconds']:.2f}-{first['end_seconds']:.2f}s 更像 S1 留人；"
+                f"词级口播时间线第一段 {first['start_seconds']:.2f}-{first['end_seconds']:.2f}s 更像 S1 留人；"
                 f"第二句从 {start:.2f}s 开始出现“{cue}”类承接/解决方案信号，按 S2-A/S2-B/S2-C/S2-D 功能可能已进入 S2。"
             ),
         }
@@ -2139,7 +2138,7 @@ def build_llm_payload(
                     "每个阶段必须引用 video_understanding 中的 evidence_ids，并写 visual_evidence 和 support_status："
                     "口播与画面共同支持为 supported；口播提及但画面不能验证为 voice_only；仅画面/字幕承载信息为 visual_only；两者矛盾为 conflict。"
                     "阶段引用的事实时间必须与该阶段时间相交；若某阶段确实不存在独立内容，仍应建立该时间段的 evidence_unit，明确说明未发现对应口播或画面，而不是借用其他阶段事实。"
-                    "输入中如提供 transcript.srt，其时间戳是口播归因的权威依据；口播不在阶段时间内时必须调整阶段边界或不得引用。"
+                    "模型输入不包含原始 transcript.srt 或原始词级索引；口播窗口归因只能使用窗口安全口播时间线。没有词级时间戳时必须标记时间粒度不足或调整阶段边界。"
                     "不得写某张画面展示了认证、成分或效果，除非附带关键帧中实际可见。"
                     "只可把请求中实际附带的关键帧视为已观察画面；未被附图覆盖的时段不得臆造镜头内容，应写为画面证据不足待复核。"
                     "同一关键信息只归入一个最主要阶段，禁止在多个阶段重复作为表现依据。"
@@ -2235,7 +2234,7 @@ def build_llm_repair_payload(
                     "只能引用对应侧、时间与该阶段 time_range 相交的已锁定 evidence_unit；嵌套 flag 的 evidence_ids 必须是该阶段主 evidence_ids 的子集。"
                     "相邻阶段的事实不能为了支撑语义跨阶段借用，也不得移动阶段时间范围；如果相邻事实更符合语义，必须按当前阶段窗口内事实重判，不能引用相邻阶段 ID。"
                     "尤其 S4 不得把 S5 的用户评论、认证或反馈引用成效果证据；S4 窗口只有使用、成分或静态展示时，按该窗口事实判断，不得借邻段结果补足。"
-                    "提供了 transcript.srt 时，以其时间戳重新校对口播对应阶段；"
+                    "以窗口安全口播时间线校对口播对应阶段；不得用未随请求发送的原始转写整段补阶段；"
                     + CERTIFICATION_OWNERSHIP_PROMPT
                     + "一条事实只归属一个主要阶段；口播提及但画面不可见时标记 voice_only。"
                     + render_multimodal_prompt_contract(native_audio)
