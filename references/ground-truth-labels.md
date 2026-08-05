@@ -22,7 +22,8 @@
 ### GT 状态约定
 
 `ground-truth-labels.json` 的 `stage_label_statuses` 将 `na` 明确记录为
-`not_applicable` 并附原因；它表示阶段不适用，**不是**漏标。当前历史标签中：
+`not_applicable` 并附原因；它表示阶段不适用，**不是**漏标。新 blind 的权威阶段标签是
+`human_gap` + `stage_relations`，`stages` 只能作为兼容投影。当前历史标签中：
 `colorblu-c0/S5`、`colorblu-c1/S5`、`colorkey-lip-c0/S5` 不涉及独立信任放大；
 `carslan-powder-c1/S6` 双方没有可比较的独立 CTA。未来 blind 标签若出现 `na`，必须同样写入
 状态和原因，否则 cohort 锁定会拒绝该样本。

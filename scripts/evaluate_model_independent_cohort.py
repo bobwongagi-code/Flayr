@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -29,11 +30,13 @@ from flayr_core.llm.compact_eval import (  # noqa: E402
     CompactEvaluationError,
     EVALUATION_ROLES,
     MODEL_INDEPENDENT_SCHEMA_VERSION,
+    VISUAL_EXTRACTION_SCHEMA_VERSION,
     contract_limits_for_variant,
     build_model_owned_fact_bundle,
     frozen_raw_video_source_identity,
     load_frozen_visual_bundle,
     run_model_independent_evaluation,
+    validate_visual_extraction_result,
 )
 from flayr_core.utils import write_json  # noqa: E402
 from flayr_core.report_metadata import current_code_commit  # noqa: E402
@@ -107,6 +110,80 @@ def _read_extraction(path: Path) -> tuple[dict[str, Any] | None, dict[str, Any]]
             "status": str(record.get("status") or "invalid"),
             "artifact": str(path),
             "error": str(record.get("error") or record.get("errors") or "no completed result")[:1000],
+        }
+    if (
+        record.get("schema_version") != VISUAL_EXTRACTION_SCHEMA_VERSION
+        or record["result"].get("schema_version") != VISUAL_EXTRACTION_SCHEMA_VERSION
+    ):
+        return None, {
+            "status": "incompatible_schema",
+            "artifact": str(path),
+            "schema_version": record.get("schema_version"),
+            "result_schema_version": record["result"].get("schema_version"),
+            "expected_schema_version": VISUAL_EXTRACTION_SCHEMA_VERSION,
+            "source_digest": record.get("source_digest"),
+            "source_run": record.get("source_run"),
+            "video_role_order": record.get("video_role_order"),
+            "video_source_sha256": record.get("video_source_sha256"),
+            "source_model": record.get("model"),
+        }
+    roles = record.get("video_role_order")
+    durations = record.get("video_source_duration_seconds")
+    metadata_errors: list[str] = []
+    if (
+        not isinstance(roles, list)
+        or len(roles) != 2
+        or any(not isinstance(role, str) for role in roles)
+        or set(roles) != {"creator", "benchmark"}
+    ):
+        metadata_errors.append("video_role_order must contain creator and benchmark exactly once")
+    if not isinstance(durations, list) or len(durations) != 2:
+        metadata_errors.append("video_source_duration_seconds must contain two durations")
+    source_durations: dict[str, float] = {}
+    if not metadata_errors and isinstance(roles, list) and isinstance(durations, list):
+        for role, raw_duration in zip(roles, durations):
+            try:
+                duration = float(raw_duration)
+            except (TypeError, ValueError):
+                metadata_errors.append(f"invalid duration for {role}")
+                continue
+            if not math.isfinite(duration) or duration <= 0:
+                metadata_errors.append(f"duration for {role} must be finite and positive")
+            else:
+                source_durations[str(role)] = duration
+    if metadata_errors:
+        return None, {
+            "status": "invalid_contract",
+            "artifact": str(path),
+            "schema_version": record.get("schema_version"),
+            "result_schema_version": record["result"].get("schema_version"),
+            "expected_schema_version": VISUAL_EXTRACTION_SCHEMA_VERSION,
+            "contract_errors": metadata_errors[:20],
+            "source_digest": record.get("source_digest"),
+            "source_run": record.get("source_run"),
+            "video_role_order": roles,
+            "video_source_duration_seconds": durations,
+            "video_source_sha256": record.get("video_source_sha256"),
+            "source_model": record.get("model"),
+        }
+    contract_errors = validate_visual_extraction_result(
+        record["result"],
+        expected_roles=("creator", "benchmark"),
+        source_durations=source_durations,
+    )
+    if contract_errors:
+        return None, {
+            "status": "invalid_contract",
+            "artifact": str(path),
+            "schema_version": record.get("schema_version"),
+            "result_schema_version": record["result"].get("schema_version"),
+            "expected_schema_version": VISUAL_EXTRACTION_SCHEMA_VERSION,
+            "contract_errors": contract_errors[:20],
+            "source_digest": record.get("source_digest"),
+            "source_run": record.get("source_run"),
+            "video_role_order": record.get("video_role_order"),
+            "video_source_sha256": record.get("video_source_sha256"),
+            "source_model": record.get("model"),
         }
     digest = _sha256(path)
     return record["result"], {

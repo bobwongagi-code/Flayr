@@ -42,7 +42,7 @@ class ValidationCohortTest(unittest.TestCase):
         }
 
     def _label(self) -> dict:
-        stages = {f"S{index}": "small" for index in range(1, 7)}
+        stages = {f"S{index}": "none" for index in range(1, 7)}
         events = [
             {
                 "id": f"{stage.lower()}_decision",
@@ -58,7 +58,7 @@ class ValidationCohortTest(unittest.TestCase):
             stage: {
                 "creator_execution": 1.0,
                 "benchmark_execution": 1.0,
-                "relation": "matched",
+                "relation": "tie",
                 "decision_event_ids": [f"{stage.lower()}_decision"],
                 "reason": "双方执行相当",
                 "confidence": "high",
@@ -67,6 +67,8 @@ class ValidationCohortTest(unittest.TestCase):
         }
         return {
             "partition": "blind",
+            "human_gap": {stage: "none" for stage in stages},
+            "stage_relations": {stage: "tie" for stage in stages},
             "stages": stages,
             "stage_oracles": oracles,
             "key_events": events,
@@ -93,6 +95,7 @@ class ValidationCohortTest(unittest.TestCase):
     def test_blind_na_requires_explicit_not_applicable_reason(self) -> None:
         label = self._label()
         label["stages"]["S5"] = "na"
+        label["human_gap"]["S5"] = "not_applicable"
         label["stage_oracles"].pop("S5")
         errors = validate_blind_sample_contract("sample", label, {"group": "blind"})
         self.assertTrue(any("not_applicable" in error for error in errors))
@@ -101,6 +104,46 @@ class ValidationCohortTest(unittest.TestCase):
         }
         self.assertEqual(validate_blind_sample_contract("sample", label, {"group": "blind"}), [])
         self.assertEqual(stage_label_status(label, "S5"), ("not_applicable", "此视频不涉及独立信任放大。"))
+
+    def test_blind_contract_rejects_noncanonical_axes_and_bad_event_range(self) -> None:
+        label = self._label()
+        label.pop("human_gap")
+        label["key_events"][0]["time_range"] = [3.0, 1.0]
+        errors = validate_blind_sample_contract("sample", label, {"group": "blind"})
+        self.assertTrue(any("human_gap" in error for error in errors))
+        self.assertTrue(any("start<end" in error for error in errors))
+
+    def test_legacy_lock_contract_remains_readable(self) -> None:
+        label = self._label()
+        label.pop("human_gap")
+        label.pop("stage_relations")
+        label.pop("stage_label_statuses", None)
+        label.pop("decision_gt")
+        for oracle in label["stage_oracles"].values():
+            oracle["relation"] = "matched"
+        self.assertEqual(
+            validate_blind_sample_contract(
+                "sample",
+                label,
+                {"group": "blind"},
+                require_canonical=False,
+            ),
+            [],
+        )
+        errors = validate_blind_sample_contract("sample", label, {"group": "blind"})
+        self.assertTrue(any("human_gap" in error for error in errors))
+
+    def test_canonical_projection_and_oracle_drift_is_rejected(self) -> None:
+        label = self._label()
+        label["stages"]["S1"] = "small"
+        label["stage_oracles"]["S2"]["relation"] = "benchmark_better"
+        errors = validate_blind_sample_contract("sample", label, {"group": "blind"})
+        self.assertTrue(any("兼容投影与 human_gap" in error for error in errors))
+        self.assertTrue(any("stage_relations 与 stage_oracles.relation" in error for error in errors))
+        label["stages"]["S1"] = "none"
+        label["decision_gt"]["top_root_causes"][0]["evidence_event_ids"] = []
+        errors = validate_blind_sample_contract("sample", label, {"group": "blind"})
+        self.assertTrue(any("evidence_event_ids 不能为空" in error for error in errors))
 
     def test_lock_detects_drift_and_can_be_spent(self) -> None:
         repo = Path(__file__).resolve().parents[1]

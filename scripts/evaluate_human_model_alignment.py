@@ -257,7 +257,9 @@ def score_judgment(
         if relation in SCORABLE_RELATIONS:
             if predicted_relation in SCORABLE_RELATIONS:
                 denominator["scored_relation_cells"] += 1
-            relation_correct = predicted_relation == relation
+                relation_correct = predicted_relation == relation
+            else:
+                relation_correct = None
         else:
             relation_correct = None
         if prediction.get("legacy_severity_only") and gap == "none":
@@ -270,8 +272,6 @@ def score_judgment(
             error_class = "direction_error"
         elif not gap_correct:
             error_class = "magnitude_error"
-        elif relation in SCORABLE_RELATIONS and prediction.get("relation") not in SCORABLE_RELATIONS:
-            error_class = "direction_unavailable"
         else:
             error_class = "aligned"
         rows.append(
@@ -293,9 +293,18 @@ def score_judgment(
     scored_gap = [
         row
         for row in rows
-        if row.get("status") == "labeled" and row.get("predicted_gap_magnitude") in SCORABLE_GAPS
+        if row.get("status") == "labeled"
+        and row.get("gt_gap_magnitude") in SCORABLE_GAPS
+        and row.get("predicted_gap_magnitude") in SCORABLE_GAPS
     ]
     scored_relation = [row for row in rows if row.get("relation_correct") is not None]
+    exact_rows = [
+        row
+        for row in rows
+        if row.get("relation_correct") is not None
+        and row.get("gt_gap_magnitude") in SCORABLE_GAPS
+        and row.get("predicted_gap_magnitude") in SCORABLE_GAPS
+    ]
     return {
         "artifact_status": artifact_status,
         "denominator": denominator,
@@ -311,9 +320,9 @@ def score_judgment(
                 else None
             ),
             "exact_direction_and_gap_accuracy": (
-                sum(row.get("gap_correct") is True and row.get("relation_correct") is True for row in scored_relation)
-                / len(scored_relation)
-                if scored_relation
+                sum(row.get("gap_correct") is True and row.get("relation_correct") is True for row in exact_rows)
+                / len(exact_rows)
+                if exact_rows
                 else None
             ),
             "error_class_counts": {
@@ -352,6 +361,23 @@ def _event_matches_unit(
     return bool(stage in functions and unit_range is not None and event_range is not None and _overlaps(unit_range, event_range))
 
 
+def _event_terms_match_unit(event: dict[str, Any], unit: dict[str, Any]) -> bool:
+    """Apply an absent-event forbidden-term guard to a candidate unit.
+
+    terms_any is a semantic hint for negative checks: a same-stage unit in the
+    same time window is not automatically a false positive when it is about a
+    different fact. Legacy events without terms keep broad overlap behavior.
+    """
+    terms = event.get("terms_any")
+    if not isinstance(terms, list):
+        return True
+    normalized_terms = [str(term).strip().casefold() for term in terms if str(term).strip()]
+    if not normalized_terms:
+        return True
+    searchable = str(unit.get("information") or "").casefold()
+    return any(term in searchable for term in normalized_terms)
+
+
 def _quality_counts(units: list[dict[str, Any]], fields: tuple[str, ...]) -> dict[str, dict[str, int]]:
     result: dict[str, dict[str, int]] = {}
     for field in fields:
@@ -383,9 +409,12 @@ def score_extraction(
     }
     matched_event_indexes: set[int] = set()
     matched_unit_keys: set[tuple[str, int]] = set()
+    absent_false_positive_unit_keys: set[tuple[str, int]] = set()
     event_rows: list[dict[str, Any]] = []
+    invalid_event_count = 0
     for index, event in enumerate(events):
         if not isinstance(event, dict):
+            invalid_event_count += 1
             continue
         role = str(event.get("role") or "").strip().lower()
         candidates = units_by_role.get(role, [])
@@ -398,17 +427,31 @@ def score_extraction(
                 source_duration_seconds=(source_durations or {}).get(role),
             )
         ]
-        matched = bool(matching)
-        if matched:
+        expected_state = str(event.get("expected_state") or "present").strip().lower()
+        if expected_state == "absent":
+            matching = [
+                (unit_index, unit)
+                for unit_index, unit in matching
+                if _event_terms_match_unit(event, unit)
+            ]
+        evidence_found = bool(matching)
+        # A present event is recalled when evidence exists. An absent event is
+        # satisfied only when no model unit claims the forbidden event.
+        matched = evidence_found if expected_state == "present" else not evidence_found
+        if expected_state == "present" and evidence_found:
             matched_event_indexes.add(index)
             unit_index, _ = matching[0]
             matched_unit_keys.add((role, unit_index))
+        elif expected_state == "absent":
+            absent_false_positive_unit_keys.update((role, unit_index) for unit_index, _ in matching)
         event_rows.append(
             {
                 "event_index": index,
                 "event_id": event.get("id"),
                 "role": role,
                 "stage": str(event.get("stage") or ""),
+                "expected_state": expected_state,
+                "evidence_found": evidence_found,
                 "matched": matched,
                 "matching_unit_ids": [unit.get("id") for _, unit in matching],
             }
@@ -421,12 +464,25 @@ def score_extraction(
     ]
     precision_denominator = len(valid_units)
     precision_numerator = len(matched_unit_keys)
-    recall_denominator = len(events)
+    present_event_rows = [row for row in event_rows if row.get("expected_state") == "present"]
+    absent_event_rows = [row for row in event_rows if row.get("expected_state") == "absent"]
+    recall_denominator = len(present_event_rows)
     recall_numerator = len(matched_event_indexes)
+    absence_denominator = len(absent_event_rows)
+    absence_respected = sum(row.get("matched") is True for row in absent_event_rows)
     artifact_completed = artifact_status == "completed"
     stage_metrics: dict[str, Any] = {}
     for stage_code in STAGE_CODES:
-        stage_events = [row for row in event_rows if str(row.get("stage") or "").upper().startswith(stage_code)]
+        stage_events = [
+            row
+            for row in present_event_rows
+            if str(row.get("stage") or "").upper().startswith(stage_code)
+        ]
+        stage_absence_events = [
+            row
+            for row in absent_event_rows
+            if str(row.get("stage") or "").upper().startswith(stage_code)
+        ]
         stage_units = [
             unit
             for role, units in units_by_role.items()
@@ -441,6 +497,10 @@ def score_extraction(
             "required_event_count": len(stage_events),
             "scored_event_count": len(stage_events) if artifact_completed else 0,
             "matched_event_count": sum(row["matched"] for row in stage_events) if artifact_completed else 0,
+            "absence_check_count": len(stage_absence_events) if artifact_completed else 0,
+            "absence_respected_count": (
+                sum(row["matched"] for row in stage_absence_events) if artifact_completed else 0
+            ),
             "recall": (
                 sum(row["matched"] for row in stage_events) / len(stage_events)
                 if stage_events and artifact_completed
@@ -461,7 +521,14 @@ def score_extraction(
         "artifact_status": artifact_status,
         "matching_method": "role + stage function + positive time-range overlap; semantic truth requires human review",
         "denominator": {
-            "required_key_events": recall_denominator,
+            "required_key_events": len(events),
+            "present_key_events": recall_denominator,
+            "invalid_key_events": invalid_event_count,
+            "absence_checks": absence_denominator if artifact_completed else 0,
+            "absence_respected": absence_respected if artifact_completed else 0,
+            "absence_false_positive_units": (
+                len(absent_false_positive_unit_keys) if artifact_completed else 0
+            ),
             "scored_key_events": recall_denominator if artifact_completed else 0,
             "matched_key_events": recall_numerator if artifact_completed else 0,
             "valid_model_units": precision_denominator if artifact_completed else 0,
@@ -479,6 +546,11 @@ def score_extraction(
             "temporal_stage_precision_proxy": (
                 precision_numerator / precision_denominator
                 if recall_denominator and precision_denominator and artifact_completed
+                else None
+            ),
+            "absence_respected_rate": (
+                absence_respected / absence_denominator
+                if absence_denominator and artifact_completed
                 else None
             ),
             "fact_quality_coverage": (
@@ -550,13 +622,26 @@ def aggregate_model(records: list[dict[str, Any]], model: str) -> dict[str, Any]
         row
         for score in judgment_rows
         for row in score["rows"]
-        if row.get("status") == "labeled" and row.get("predicted_gap_magnitude") in SCORABLE_GAPS
+        if row.get("status") == "labeled"
+        and row.get("gt_gap_magnitude") in SCORABLE_GAPS
+        and row.get("predicted_gap_magnitude") in SCORABLE_GAPS
     ]
-    relation_rows = [row for row in gap_rows if row.get("relation_correct") is not None]
+    relation_rows = [
+        row
+        for score in judgment_rows
+        for row in score["rows"]
+        if row.get("relation_correct") is not None
+    ]
+    exact_rows = [row for row in gap_rows if row.get("relation_correct") is not None]
     extraction_denominator = {
         key: sum(int(score["denominator"][key]) for score in extraction_rows)
         for key in (
             "required_key_events",
+            "present_key_events",
+            "invalid_key_events",
+            "absence_checks",
+            "absence_respected",
+            "absence_false_positive_units",
             "scored_key_events",
             "matched_key_events",
             "valid_model_units",
@@ -568,6 +653,8 @@ def aggregate_model(records: list[dict[str, Any]], model: str) -> dict[str, Any]
     for stage_code in STAGE_CODES:
         stage_scores = [score["stage_metrics"][stage_code] for score in extraction_rows]
         events = sum(score["required_event_count"] for score in stage_scores)
+        absence_checks = sum(score["absence_check_count"] for score in stage_scores)
+        absence_respected = sum(score["absence_respected_count"] for score in stage_scores)
         scored_events = sum(score["scored_event_count"] for score in stage_scores)
         matched = sum(score["matched_event_count"] for score in stage_scores)
         units = sum(score["unit_count"] for score in stage_scores)
@@ -579,6 +666,11 @@ def aggregate_model(records: list[dict[str, Any]], model: str) -> dict[str, Any]
             "scored_event_count": scored_events,
             "matched_event_count": matched,
             "recall_proxy": matched / scored_events if scored_events else None,
+            "absence_check_count": absence_checks,
+            "absence_respected_count": absence_respected,
+            "absence_respected_rate": (
+                absence_respected / absence_checks if absence_checks else None
+            ),
             "unit_count": units,
             "quality_coverage": quality_coverage_numerator / units if units else 0.0,
         }
@@ -590,9 +682,9 @@ def aggregate_model(records: list[dict[str, Any]], model: str) -> dict[str, Any]
             "gap_accuracy": sum(row.get("gap_correct") is True for row in gap_rows) / len(gap_rows) if gap_rows else None,
             "relation_accuracy": sum(row.get("relation_correct") is True for row in relation_rows) / len(relation_rows) if relation_rows else None,
             "exact_direction_and_gap_accuracy": (
-                sum(row.get("gap_correct") is True and row.get("relation_correct") is True for row in relation_rows)
-                / len(relation_rows)
-                if relation_rows
+                sum(row.get("gap_correct") is True and row.get("relation_correct") is True for row in exact_rows)
+                / len(exact_rows)
+                if exact_rows
                 else None
             ),
             "error_class_counts": {
@@ -610,6 +702,11 @@ def aggregate_model(records: list[dict[str, Any]], model: str) -> dict[str, Any]
             "temporal_stage_precision_proxy": (
                 extraction_denominator["model_units_matching_key_events"] / extraction_denominator["valid_model_units"]
                 if extraction_denominator["scored_key_events"] and extraction_denominator["valid_model_units"]
+                else None
+            ),
+            "absence_respected_rate": (
+                extraction_denominator["absence_respected"] / extraction_denominator["absence_checks"]
+                if extraction_denominator["absence_checks"]
                 else None
             ),
             "stage_metrics": stage_metrics,

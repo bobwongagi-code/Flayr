@@ -7,10 +7,10 @@
       "medium",
       "large"
     ],
-    "purpose": "人工裁决的机器可读副本，只用于评测，不参与分析或 severity 推导。stages 仅记录达人相对标杆的不足程度；stage_relations 记录比较方向但暂不参与准确率。na 表示该阶段不适用，不计入准确率。",
+    "purpose": "人工裁决的机器可读副本，只用于评测，不参与分析或 severity 推导。历史 stages 仅记录达人相对标杆的不足程度；新 blind 以 human_gap + stage_relations 为权威轴。na/not_applicable 表示该阶段不适用，不计入准确率。",
     "holdout_policy": "已被用于规则讨论的样本标记为 seen_validation，不得再称为盲测。",
     "blind_policy": "blind 标签必须由人工在规则冻结后、模型结果打开前录入；对应 validation-inputs 样本 group 必须为 blind，且视频内容不得复用历史开发样本。结果一旦打开或用于修改规则，该 cohort 必须降级为 seen_validation。",
-    "oracle_policy": "新 blind 的每个有效阶段必须提供 stage_oracles；每条决策关键事实用 key_events 锚定；decision_gt.top_root_causes 用 reference_id 记录人工 Top-N 根因。旧 calibration/seen_validation 允许逐步补标。"
+    "oracle_policy": "新 blind 的每个有效阶段必须提供 human_gap、stage_relations 和 stage_oracles；not_applicable/uncertain 必须显式写入 stage_label_statuses 并说明原因；每条决策关键事实用 key_events 锚定；decision_gt.top_root_causes 用 reference_id 记录人工 Top-N 根因。旧 calibration/seen_validation 允许逐步补标。"
   },
   "samples": {
     "are_xie": {

@@ -35,6 +35,7 @@ from flayr_core.validation_cohort import (
 SEVERITIES = ("small", "medium", "large")
 SEVERITY_RANK = {value: index for index, value in enumerate(SEVERITIES)}
 NOT_APPLICABLE = "na"
+HUMAN_GAP_VALUES = frozenset({"none", "small", "medium", "large", "uncertain", NOT_APPLICABLE})
 STAGE_SEVERITY_SCOPE = "stage_severity"
 WHOLE_VIDEO_OBSERVATION_SCOPE = "whole_video_observation"
 WHOLE_VIDEO_VERDICTS = {"viable", "not_viable"}
@@ -124,7 +125,26 @@ def normalize_severity(value: Any) -> str | None:
 def normalize_ground_truth(value: Any) -> str | None:
     """GT 允许 na；它表示该阶段不适用，不进入准确率统计。"""
     normalized = str(value or "").strip().lower()
+    if normalized == "not_applicable":
+        normalized = NOT_APPLICABLE
     return normalized if normalized in {*SEVERITIES, NOT_APPLICABLE} else None
+
+
+def normalize_human_gap(value: Any) -> str | None:
+    """Normalize the canonical blind GT axis without making it a severity."""
+    normalized = str(value or "").strip().lower()
+    if normalized == "not_applicable":
+        normalized = NOT_APPLICABLE
+    return normalized if normalized in HUMAN_GAP_VALUES else None
+
+
+def ground_truth_gap_values(label: dict[str, Any]) -> dict[str, Any]:
+    """Use canonical human_gap for new labels and stages for legacy labels."""
+    human_gap = label.get("human_gap")
+    if isinstance(human_gap, dict):
+        return human_gap
+    stages = label.get("stages")
+    return stages if isinstance(stages, dict) else {}
 
 
 def severity_diagnostics(expected: str, final: str, stage: dict[str, Any]) -> dict[str, Any]:
@@ -205,7 +225,7 @@ def eligible_stages(
         == WHOLE_VIDEO_OBSERVATION_SCOPE
     ):
         return set(), WHOLE_VIDEO_OBSERVATION_SCOPE
-    labels = label.get("stages") if isinstance(label.get("stages"), dict) else {}
+    labels = ground_truth_gap_values(label)
     eligible = {
         stage
         for stage, severity in labels.items()
@@ -581,7 +601,14 @@ def _execution_relation(creator: Any, benchmark: Any) -> str | None:
         return "creator_better"
     if float(creator) < float(benchmark):
         return "benchmark_better"
-    return "matched"
+    return "tie"
+
+
+def _normalize_oracle_relation(value: Any) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if normalized == "matched":
+        return "tie"
+    return normalized if normalized in {"creator_better", "benchmark_better", "tie", "uncertain"} else None
 
 
 def _effective_execution(stage: dict[str, Any], role: str) -> Any:
@@ -620,7 +647,7 @@ def _stage_oracle_audit(labels: dict[str, Any], run_paths: dict[str, Path]) -> d
             continue
         result = read_json(path)
         stages = _result_stage_map(result)
-        expected_stages = label.get("stages") if isinstance(label.get("stages"), dict) else {}
+        expected_stages = ground_truth_gap_values(label)
         for current_stage, oracle in sorted(oracles.items()):
             if current_stage not in FLAG_SUFFIXES or not isinstance(oracle, dict):
                 continue
@@ -656,9 +683,9 @@ def _stage_oracle_audit(labels: dict[str, Any], run_paths: dict[str, Path]) -> d
                 "expected_benchmark_execution": expected_benchmark,
                 "actual_benchmark_execution": actual_benchmark,
                 "execution_match": execution_match,
-                "expected_relation": oracle.get("relation"),
+                "expected_relation": _normalize_oracle_relation(oracle.get("relation")),
                 "actual_relation": _execution_relation(actual_creator, actual_benchmark),
-                "relation_match": oracle.get("relation") == _execution_relation(actual_creator, actual_benchmark),
+                "relation_match": _normalize_oracle_relation(oracle.get("relation")) == _execution_relation(actual_creator, actual_benchmark),
                 "expected_severity": expected_severity,
                 "final_severity": normalize_severity(stage.get("severity")),
                 "derive_replay_status": replay_status,
@@ -720,7 +747,7 @@ def _phase_c_audit(labels: dict[str, Any], run_paths: dict[str, Path]) -> dict[s
             }
         for current_stage in review.get("requested_stages") or []:
             snapshot = stage_snapshots.get(str(current_stage).upper())
-            expected = normalize_ground_truth((label.get("stages") or {}).get(current_stage))
+            expected = normalize_ground_truth(ground_truth_gap_values(label).get(current_stage))
             before_severity = normalize_severity(((snapshot or {}).get("before") or {}).get("resolution", {}).get("severity"))
             after_severity = normalize_severity(((snapshot or {}).get("after") or {}).get("resolution", {}).get("severity"))
             if review.get("applied") is not True:
@@ -1000,11 +1027,11 @@ def blind_contract_violations(labels: dict[str, Any], manifest: dict[str, Any]) 
             if not str(label.get("overall_reason") or "").strip():
                 violations.append(f"blind {sample_id} 缺少 overall_reason")
             continue
-        stages = label.get("stages") if isinstance(label.get("stages"), dict) else {}
+        stages = ground_truth_gap_values(label)
         missing_stages = [
             stage
             for stage in ("S1", "S2", "S3", "S4", "S5", "S6")
-            if normalize_ground_truth(stages.get(stage)) is None
+            if normalize_human_gap(stages.get(stage)) is None
         ]
         if missing_stages:
             violations.append(f"blind {sample_id} 缺少 GT：{','.join(missing_stages)}")
@@ -1272,7 +1299,7 @@ def evaluate(
             missing_runs.append({"sample_id": sample_id, "path": str(path), "reason": "missing_stage_analysis"})
             continue
         by_id = {stage_id(stage.get("stage")): stage for stage in stages if isinstance(stage, dict) and stage_id(stage.get("stage"))}
-        expected_stages = label.get("stages") if isinstance(label.get("stages"), dict) else {}
+        expected_stages = ground_truth_gap_values(label)
         for current_stage in sorted(allowed):
             stage = by_id.get(current_stage)
             expected = normalize_severity(expected_stages.get(current_stage))

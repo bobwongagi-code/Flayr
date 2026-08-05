@@ -195,7 +195,7 @@ python3 scripts/flayr.py \
 
 ### 分层 GT 验证
 
-新 blind 样本必须先完成人工 `key_events`、`stage_oracles` 和 `decision_gt`，再冻结 cohort：
+新 blind 样本必须先完成人工 `human_gap`、`stage_relations`、`key_events`、`stage_oracles` 和 `decision_gt`，再冻结 cohort。旧 `stages` 只能作为兼容投影：
 
 ```bash
 python3 scripts/manage_validation_cohort.py freeze \

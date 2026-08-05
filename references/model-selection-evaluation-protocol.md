@@ -62,6 +62,25 @@
   -> 只进入离线 evaluator，不进入任何模型 prompt
 ```
 
+### Blind GT 合同
+
+新 blind cohort 的阶段标签必须以 `human_gap` 和 `stage_relations` 为权威来源；旧的
+`stages` 只能作为兼容投影，不能作为 blind 评分输入。每个有效阶段同时记录：
+
+```text
+human_gap       = none | small | medium | large | uncertain | not_applicable
+stage_relations = benchmark_better | creator_better | tie | uncertain
+```
+
+`not_applicable` 和 `uncertain` 必须在 `stage_label_statuses` 中显式标记并说明原因。
+如果同时保留兼容字段 `stages` 或 `relations`，它们必须分别与 `human_gap` 和
+`stage_relations` 一致；`stage_oracles.relation` 也必须与阶段方向一致。每个
+`top_root_causes` 必须至少引用一条 `key_event`。
+可评分的 `none` 只能与 `tie/uncertain` 组合；非 `none` 的差距不能与 `tie` 组合。
+每个有效阶段还必须有单侧执行 oracle、决策事件引用和理由。事件时间范围必须是有限、
+非负且 `start < end` 的秒数区间；`expected_state=absent` 的事件必须带有 `terms_any`，
+用于统计模型是否错误地声称该事实存在。
+
 ### 阶段标签
 
 新评估使用两个独立轴：
@@ -94,7 +113,7 @@ S3 重点看 `subject`、`visibility`、`composition`、`completion`；S4 重点
 
 - `gap_accuracy`：只在 GT 为有效 `none/small/medium/large`、模型有可解析 gap 的格子计算。
 - `relation_accuracy`：只在 GT 提供合法 relation、模型提供合法 relation 的格子计算。
-- `exact_direction_and_gap_accuracy`：方向和大小同时正确。
+- `exact_direction_and_gap_accuracy`：只在两个轴都可评分的格子中计算方向和大小同时正确。
 - `direction_error`：方向错、大小对。
 - `magnitude_error`：大小错、方向对或 GT 未提供方向。
 - `direction_and_magnitude_error`：两个轴都错。
@@ -111,6 +130,9 @@ S3 重点看 `subject`、`visibility`、`composition`、`completion`；S4 重点
 
 - `temporal_stage_recall_proxy`
 - `temporal_stage_precision_proxy`
+
+`expected_state=present` 的事件进入召回分母；`expected_state=absent` 的事件单独进入
+`absence_respected_rate`，不会被当成“待召回事实”。
 
 它们只能说明阶段/时间覆盖，不能证明文本语义真实。真正的语义精确率仍需人工复核。工具同时输出每阶段事实质量覆盖率及 S3/S4 的字段分布。
 

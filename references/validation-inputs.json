@@ -34,10 +34,27 @@
         "S5",
         "S6"
       ],
-      "severity_values": [
-        "small",
-        "medium",
-        "large"
+      "canonical_axes": {
+        "human_gap_values": [
+          "none",
+          "small",
+          "medium",
+          "large",
+          "uncertain",
+          "not_applicable"
+        ],
+        "stage_relation_values": [
+          "benchmark_better",
+          "creator_better",
+          "tie",
+          "uncertain"
+        ]
+      },
+      "legacy_projection": "stages may be retained for compatibility, but blind scoring must use human_gap and stage_relations",
+      "stage_label_statuses": [
+        "labeled",
+        "not_applicable",
+        "uncertain"
       ],
       "stage_oracles": [
         "creator_execution",

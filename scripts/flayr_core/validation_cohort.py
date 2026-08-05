@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import subprocess
 from datetime import datetime, timezone
@@ -29,10 +30,12 @@ LOCK_SCHEMA_VERSION = 2
 LEGACY_LOCK_SCHEMA_VERSION = 1
 LOCK_STATUSES = {"frozen", "spent"}
 EXECUTION_VALUES = {0.0, 0.5, 1.0, 2.0}
-RELATIONS = {"creator_better", "matched", "benchmark_better"}
+RELATIONS = {"creator_better", "tie", "benchmark_better", "uncertain"}
+LEGACY_RELATIONS = {"matched"}
+GAP_MAGNITUDES = {"none", "small", "medium", "large", "uncertain", "not_applicable"}
 CONFIDENCE_VALUES = {"low", "medium", "high"}
 STAGES = tuple(f"S{index}" for index in range(1, 7))
-STAGE_LABEL_STATUSES = {"labeled", "not_applicable", "missing"}
+STAGE_LABEL_STATUSES = {"labeled", "not_applicable", "uncertain", "missing"}
 SOURCE_CONTRACT_FILES = (
     "ARCHITECTURE.md",
     "structure_library_full.md",
@@ -105,19 +108,70 @@ def stage_label_status(label: dict[str, Any], stage: str) -> tuple[str, str]:
     entry = statuses.get(stage)
     if isinstance(entry, dict):
         return str(entry.get("status") or "").strip(), str(entry.get("reason") or "").strip()
-    stages = label.get("stages") if isinstance(label.get("stages"), dict) else {}
-    severity = str(stages.get(stage) or "").strip().lower()
-    if severity == "na":
+    gap_values, _ = _stage_gap_values(label)
+    gap = str(gap_values.get(stage) or "").strip().lower()
+    if gap in {"na", "not_applicable"}:
         return "not_applicable_legacy", ""
-    if severity in {"small", "medium", "large"}:
+    if gap == "uncertain":
+        return "uncertain_legacy", ""
+    if gap in {"none", "small", "medium", "large"}:
         return "labeled", ""
     return "missing", ""
+
+
+def _finite_time_range(value: Any) -> bool:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return False
+    try:
+        start = float(value[0])
+        end = float(value[1])
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(start) and math.isfinite(end) and start >= 0 and end > start
+
+
+def _stage_gap_values(label: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Return canonical human_gap values and whether the new axis is present."""
+    human_gap = label.get("human_gap")
+    if isinstance(human_gap, dict):
+        return human_gap, True
+    stages = label.get("stages")
+    return stages if isinstance(stages, dict) else {}, False
+
+
+def _normalize_gap_value(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return "not_applicable" if normalized == "na" else normalized
+
+
+def _stage_relations(label: dict[str, Any]) -> dict[str, Any]:
+    relations = label.get("stage_relations")
+    if not isinstance(relations, dict):
+        relations = label.get("relations")
+    return relations if isinstance(relations, dict) else {}
+
+
+def _valid_relation(value: Any, *, allow_legacy: bool) -> bool:
+    normalized = str(value or "").strip().lower()
+    return normalized in RELATIONS or (allow_legacy and normalized in LEGACY_RELATIONS)
+
+
+def _relation_gap_compatible(relation: str, gap: str) -> bool:
+    if relation == "uncertain" or gap == "uncertain":
+        return True
+    if gap == "none":
+        return relation == "tie"
+    if relation == "tie":
+        return False
+    return relation in {"creator_better", "benchmark_better"}
 
 
 def validate_blind_sample_contract(
     sample_id: str,
     label: dict[str, Any],
     sample: dict[str, Any] | None,
+    *,
+    require_canonical: bool = True,
 ) -> list[str]:
     """校验新 blind 样本具备分层诊断所需的人工 GT。"""
     errors: list[str] = []
@@ -131,10 +185,33 @@ def validate_blind_sample_contract(
             errors.append(f"{sample_id}: whole_video_observation 缺 overall_verdict/overall_reason")
         return errors
 
-    stages = label.get("stages") if isinstance(label.get("stages"), dict) else {}
+    gap_values, has_canonical_gap = _stage_gap_values(label)
+    relations = _stage_relations(label)
+    legacy_contract = not has_canonical_gap and not require_canonical
+    if not has_canonical_gap and require_canonical:
+        errors.append(f"{sample_id}: blind GT 必须提供 human_gap；stages 只能作为 legacy 投影")
+    if not isinstance(label.get("stage_relations"), dict) and require_canonical:
+        errors.append(f"{sample_id}: blind GT 必须提供 stage_relations")
+    legacy_stages = label.get("stages")
+    if has_canonical_gap and isinstance(legacy_stages, dict):
+        for stage in STAGES:
+            canonical = _normalize_gap_value(gap_values.get(stage))
+            projection = _normalize_gap_value(legacy_stages.get(stage))
+            if canonical and projection and canonical != projection:
+                errors.append(f"{sample_id}: {stage} 的 stages 兼容投影与 human_gap 不一致")
+    canonical_relations = label.get("stage_relations")
+    legacy_relations = label.get("relations")
+    if isinstance(canonical_relations, dict) and isinstance(legacy_relations, dict):
+        for stage in STAGES:
+            canonical = str(canonical_relations.get(stage) or "").strip().lower()
+            projection = str(legacy_relations.get(stage) or "").strip().lower()
+            if canonical and projection and canonical != projection:
+                errors.append(f"{sample_id}: {stage} 的 relations 兼容投影与 stage_relations 不一致")
     oracles = label.get("stage_oracles") if isinstance(label.get("stage_oracles"), dict) else {}
     events = label.get("key_events") if isinstance(label.get("key_events"), list) else []
-    event_ids = [str(event.get("id") or "") for event in events if isinstance(event, dict)]
+    event_ids = [str(event.get("id") or "").strip() for event in events if isinstance(event, dict)]
+    if not events and require_canonical:
+        errors.append(f"{sample_id}: blind GT 必须提供非空 key_events")
     if len(event_ids) != len(set(event_ids)) or any(not value for value in event_ids):
         errors.append(f"{sample_id}: key_events id 不能为空或重复")
     for index, event in enumerate(events, start=1):
@@ -144,27 +221,47 @@ def validate_blind_sample_contract(
         if event.get("role") not in {"creator", "benchmark"} or event.get("stage") not in STAGES:
             errors.append(f"{sample_id}: key_events[{index}] 缺有效 role/stage")
         time_range = event.get("time_range")
-        if not isinstance(time_range, list) or len(time_range) != 2:
-            errors.append(f"{sample_id}: key_events[{index}].time_range 必须是 [start,end]")
+        if not _finite_time_range(time_range):
+            errors.append(f"{sample_id}: key_events[{index}].time_range 必须是有限、非负且 start<end 的 [start,end]")
         expected_state = str(event.get("expected_state") or "present")
         if expected_state not in {"present", "absent"}:
             errors.append(f"{sample_id}: key_events[{index}].expected_state 非法")
-        if expected_state == "absent" and not event.get("terms_any"):
+        terms_any = event.get("terms_any")
+        if expected_state == "absent" and (
+            not isinstance(terms_any, list)
+            or not any(str(value).strip() for value in terms_any)
+        ):
             errors.append(f"{sample_id}: key_events[{index}] 缺失事件必须提供 terms_any")
 
     for stage in STAGES:
-        severity = str(stages.get(stage) or "").lower()
-        if severity not in {"small", "medium", "large", "na"}:
-            errors.append(f"{sample_id}: {stage} 缺有效 severity")
+        gap = str(gap_values.get(stage) or "").strip().lower()
+        normalized_gap = _normalize_gap_value(gap)
+        allowed_gaps = GAP_MAGNITUDES | ({"na"} if legacy_contract else set())
+        if gap not in allowed_gaps:
+            errors.append(f"{sample_id}: {stage} 缺有效 human_gap")
             continue
         status, reason = stage_label_status(label, stage)
-        if status not in STAGE_LABEL_STATUSES:
+        allowed_statuses = STAGE_LABEL_STATUSES | ({"not_applicable_legacy", "uncertain_legacy"} if legacy_contract else set())
+        if status not in allowed_statuses:
             errors.append(f"{sample_id}: {stage} stage_label_status 非法")
-        if severity == "na" and (status != "not_applicable" or not reason):
-            errors.append(f"{sample_id}: {stage}=na 必须标记 not_applicable 并说明原因")
-        if severity in {"small", "medium", "large"} and status != "labeled":
-            errors.append(f"{sample_id}: {stage} 有 severity 时 stage_label_status 必须为 labeled")
-        if severity == "na":
+        if normalized_gap == "not_applicable" and require_canonical and (status != "not_applicable" or not reason):
+            errors.append(f"{sample_id}: {stage}=not_applicable 必须标记 not_applicable 并说明原因")
+        if normalized_gap == "uncertain" and require_canonical and (status != "uncertain" or not reason):
+            errors.append(f"{sample_id}: {stage}=uncertain 必须标记 uncertain 并说明原因")
+        if normalized_gap in {"none", "small", "medium", "large"} and status != "labeled":
+            errors.append(f"{sample_id}: {stage} 有可评分 human_gap 时 stage_label_status 必须为 labeled")
+        relation = str(relations.get(stage) or "").strip().lower()
+        if normalized_gap == "not_applicable":
+            if relation and not _valid_relation(relation, allow_legacy=legacy_contract):
+                errors.append(f"{sample_id}: {stage}.stage_relations 非法")
+            continue
+        if require_canonical and not _valid_relation(relation, allow_legacy=False):
+            errors.append(f"{sample_id}: {stage}.stage_relations 非法")
+        elif relation and not _valid_relation(relation, allow_legacy=legacy_contract):
+            errors.append(f"{sample_id}: {stage}.stage_relations 非法")
+        elif relation and normalized_gap in {"none", "small", "medium", "large"} and not _relation_gap_compatible(relation, normalized_gap):
+            errors.append(f"{sample_id}: {stage} relation 与 human_gap 组合矛盾")
+        if normalized_gap == "uncertain":
             continue
         oracle = oracles.get(stage)
         if not isinstance(oracle, dict):
@@ -174,8 +271,13 @@ def validate_blind_sample_contract(
             value = oracle.get(f"{role}_execution")
             if not isinstance(value, (int, float)) or float(value) not in EXECUTION_VALUES:
                 errors.append(f"{sample_id}: {stage}.{role}_execution 必须是 0/0.5/1/2")
-        if oracle.get("relation") not in RELATIONS:
+        oracle_relation = str(oracle.get("relation") or "").strip().lower()
+        if oracle_relation == "matched":
+            oracle_relation = "tie"
+        if not _valid_relation(oracle.get("relation"), allow_legacy=legacy_contract):
             errors.append(f"{sample_id}: {stage}.relation 非法")
+        elif relation in RELATIONS and oracle_relation in RELATIONS and relation != oracle_relation:
+            errors.append(f"{sample_id}: {stage} stage_relations 与 stage_oracles.relation 不一致")
         if oracle.get("confidence") not in CONFIDENCE_VALUES:
             errors.append(f"{sample_id}: {stage}.confidence 非法")
         if not str(oracle.get("reason") or "").strip():
@@ -184,10 +286,15 @@ def validate_blind_sample_contract(
         if not isinstance(decision_ids, list) or not decision_ids:
             errors.append(f"{sample_id}: {stage}.decision_event_ids 必须是非空数组")
         else:
-            unknown = sorted(set(str(value) for value in decision_ids) - set(event_ids))
+            normalized_ids = [str(value).strip() for value in decision_ids]
+            if any(not value for value in normalized_ids) or len(normalized_ids) != len(set(normalized_ids)):
+                errors.append(f"{sample_id}: {stage}.decision_event_ids 不能为空或重复")
+            unknown = sorted(set(normalized_ids) - set(event_ids))
             if unknown:
                 errors.append(f"{sample_id}: {stage} 引用未知 key_event：{','.join(unknown)}")
 
+    if not require_canonical and not isinstance(label.get("decision_gt"), dict):
+        return errors
     decision_gt = label.get("decision_gt") if isinstance(label.get("decision_gt"), dict) else {}
     roots = decision_gt.get("top_root_causes") if isinstance(decision_gt.get("top_root_causes"), list) else []
     if not roots:
@@ -207,6 +314,8 @@ def validate_blind_sample_contract(
         evidence_ids = root.get("evidence_event_ids")
         if not isinstance(evidence_ids, list):
             errors.append(f"{sample_id}: top_root_causes[{index}].evidence_event_ids 必须是数组")
+        elif require_canonical and not evidence_ids:
+            errors.append(f"{sample_id}: top_root_causes[{index}].evidence_event_ids 不能为空")
         elif set(str(value) for value in evidence_ids) - set(event_ids):
             errors.append(f"{sample_id}: top_root_causes[{index}] 引用未知 key_event")
     if priorities and sorted(priorities) != list(range(1, len(priorities) + 1)):
@@ -666,7 +775,14 @@ def verify_cohort_lock(lock: dict[str, Any]) -> list[str]:
             if str(manifest_sample.get("target_market") or "") != str(sample.get("target_market") or ""):
                 errors.append(f"{sample_id}: target_market 已漂移")
         if isinstance(label, dict) and isinstance(manifest_sample, dict):
-            errors.extend(validate_blind_sample_contract(sample_id, label, manifest_sample))
+            errors.extend(
+                validate_blind_sample_contract(
+                    sample_id,
+                    label,
+                    manifest_sample,
+                    require_canonical=is_current_lock,
+                )
+            )
             if is_current_lock:
                 evaluation_role, role_errors = evaluation_role_for_sample(label, manifest_sample)
                 errors.extend(f"{sample_id}: {error}" for error in role_errors)

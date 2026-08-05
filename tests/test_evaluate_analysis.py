@@ -12,12 +12,19 @@ from scripts.evaluate_analysis import (
     _layer_attribution,
     _phase_c_audit,
     _stage_oracle_audit,
+    blind_contract_violations,
     ground_truth_label_inventory,
+    normalize_human_gap,
     severity_diagnostics,
 )
 
 
 class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
+    def test_canonical_human_gap_keeps_none_and_uncertain_out_of_severity_normalization(self) -> None:
+        self.assertEqual(normalize_human_gap("none"), "none")
+        self.assertEqual(normalize_human_gap("uncertain"), "uncertain")
+        self.assertEqual(normalize_human_gap("not_applicable"), "na")
+
     def test_gt_inventory_separates_not_applicable_from_missing(self) -> None:
         inventory = ground_truth_label_inventory({
             "samples": {

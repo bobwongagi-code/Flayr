@@ -90,6 +90,24 @@ class HumanModelAlignmentTests(unittest.TestCase):
         self.assertEqual(score["metrics"]["error_class_counts"]["prediction_unavailable"], 1)
         self.assertNotIn("prediction_unavailable", {"direction_error", "magnitude_error"})
 
+    def test_relation_accuracy_has_its_own_denominator(self) -> None:
+        result = _judgment_result()
+        result["stage_judgments"][0]["gap_magnitude"] = "uncertain"
+        result["stage_judgments"][0]["relation"] = "benchmark_better"
+        score = score_judgment(result, _labels(), artifact_status="completed")
+        self.assertEqual(score["denominator"]["scored_relation_cells"], 3)
+        self.assertEqual(score["metrics"]["relation_accuracy"], 1.0)
+        self.assertEqual(score["metrics"]["gap_accuracy"], 1 / 2)
+        self.assertEqual(score["metrics"]["exact_direction_and_gap_accuracy"], 1 / 2)
+
+    def test_invalid_model_relation_is_unavailable_not_direction_error(self) -> None:
+        result = _judgment_result()
+        result["stage_judgments"][0]["relation"] = "invalid"
+        score = score_judgment(result, _labels(), artifact_status="completed")
+        self.assertEqual(score["denominator"]["scored_relation_cells"], 2)
+        self.assertEqual(score["metrics"]["relation_accuracy"], 1.0)
+        self.assertEqual(score["metrics"]["error_class_counts"]["prediction_unavailable"], 1)
+
     def test_aggregate_recall_excludes_failed_sample_events(self) -> None:
         completed_result = {
             "creator_evidence_units": [],
@@ -194,6 +212,78 @@ class HumanModelAlignmentTests(unittest.TestCase):
         )
         self.assertEqual(score["denominator"]["matched_key_events"], 0)
         self.assertEqual(score["denominator"]["valid_model_units"], 0)
+
+    def test_extraction_treats_absent_key_events_as_negative_checks(self) -> None:
+        result = {
+            "creator_evidence_units": [
+                {
+                    "id": "C1",
+                    "time_range": "1s - 2s",
+                    "functions": ["S5"],
+                    "information": "认证机构背书",
+                }
+            ],
+            "benchmark_evidence_units": [],
+        }
+        sample = {
+            "key_events": [
+                {"id": "present", "role": "creator", "stage": "S5", "time_range": [1.0, 2.0], "expected_state": "present"},
+                {"id": "absent", "role": "creator", "stage": "S5", "time_range": [1.0, 2.0], "expected_state": "absent", "terms_any": ["认证"]},
+            ]
+        }
+        score = score_extraction(result, sample, artifact_status="completed")
+        self.assertEqual(score["denominator"]["required_key_events"], 2)
+        self.assertEqual(score["denominator"]["present_key_events"], 1)
+        self.assertEqual(score["denominator"]["scored_key_events"], 1)
+        self.assertEqual(score["denominator"]["matched_key_events"], 1)
+        self.assertEqual(score["denominator"]["absence_checks"], 1)
+        self.assertEqual(score["denominator"]["absence_respected"], 0)
+        self.assertEqual(score["metrics"]["absence_respected_rate"], 0.0)
+
+    def test_absent_key_event_uses_terms_to_ignore_unrelated_overlap(self) -> None:
+        result = {
+            "creator_evidence_units": [
+                {
+                    "id": "C1",
+                    "time_range": "1s - 2s",
+                    "functions": ["S5"],
+                    "information": "产品规格和容量",
+                }
+            ],
+            "benchmark_evidence_units": [],
+        }
+        sample = {
+            "key_events": [
+                {
+                    "id": "absent",
+                    "role": "creator",
+                    "stage": "S5",
+                    "time_range": [1.0, 2.0],
+                    "expected_state": "absent",
+                    "terms_any": ["认证", "授权"],
+                }
+            ]
+        }
+        score = score_extraction(result, sample, artifact_status="completed")
+        self.assertEqual(score["denominator"]["absence_respected"], 1)
+        self.assertEqual(score["metrics"]["absence_respected_rate"], 1.0)
+
+    def test_failed_extraction_is_excluded_from_absence_denominator(self) -> None:
+        sample = {
+            "key_events": [
+                {
+                    "id": "absent",
+                    "role": "creator",
+                    "stage": "S5",
+                    "time_range": [1.0, 2.0],
+                    "expected_state": "absent",
+                    "terms_any": ["认证"],
+                }
+            ]
+        }
+        score = score_extraction(None, sample, artifact_status="failed")
+        self.assertEqual(score["denominator"]["absence_checks"], 0)
+        self.assertIsNone(score["metrics"]["absence_respected_rate"])
 
     def test_aggregate_preserves_failure_in_operational_denominator(self) -> None:
         labels = _labels()
