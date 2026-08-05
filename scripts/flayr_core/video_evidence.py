@@ -157,6 +157,10 @@ def audit_video_evidence(
             continue
         if item.get("selection_source") != "analysis_frame_manifest":
             warnings.append(f"timeline view did not use canonical manifest: {item.get('label') or 'unknown'}")
+        if item.get("transcript_scope") == "insufficient_precision":
+            warnings.append(
+                f"timeline view transcript lacks window-level timing: {item.get('label') or 'unknown'}"
+            )
         outside = [str(path) for path in frame_paths if str(path) not in canonical_paths]
         if outside:
             warnings.append(
@@ -485,6 +489,126 @@ def parse_srt_timestamp(value: str) -> float | None:
     return parse_timestamp_seconds(normalized.replace(",", "."))
 
 
+def parse_transcript_words(path: Path) -> list[dict[str, Any]]:
+    """Read the normalized word-level ASR artifact used by timeline views."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, dict) or not isinstance(payload.get("words"), list):
+        return []
+
+    words: list[dict[str, Any]] = []
+    for item in payload["words"]:
+        if not isinstance(item, dict):
+            continue
+        start = parse_timestamp_seconds(item.get("start_seconds"))
+        end = parse_timestamp_seconds(item.get("end_seconds"))
+        text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip()
+        if start is None or end is None or end < start or not text:
+            continue
+        words.append(
+            {
+                "start_seconds": round(start, 3),
+                "end_seconds": round(end, 3),
+                "text": text,
+            }
+        )
+    return sorted(words, key=lambda item: (item["start_seconds"], item["end_seconds"]))
+
+
+def load_transcript_words(info: dict[str, Any]) -> list[dict[str, Any]]:
+    """Resolve and read the current-generation word timestamp artifact."""
+    raw_path = str(info.get("transcript_words_path") or "").strip()
+    if not raw_path:
+        return []
+    path = resolve_artifact_path(
+        info,
+        raw_path,
+        require_file=True,
+        require_root=bool(str(info.get("work_dir") or "").strip()),
+    )
+    return parse_transcript_words(path) if path is not None else []
+
+
+def select_timeline_transcript(
+    transcript: list[dict[str, Any]],
+    transcript_words: list[dict[str, Any]],
+    start: float,
+    end: float,
+) -> dict[str, Any]:
+    """Select only speech that can be attributed to a requested time window.
+
+    A segment that merely overlaps a window is not precise enough to display
+    its entire text. Word timestamps are the authoritative fallback for that
+    case; without them we show a warning instead of leaking full-video text.
+    """
+    if transcript_words:
+        window_words = [
+            word
+            for word in transcript_words
+            if float(word["end_seconds"]) > start and float(word["start_seconds"]) < end
+        ]
+        if not window_words:
+            return {
+                "scope": "word_window",
+                "display_lines": ["窗口内未检测到带时间戳的口播。"],
+                "word_count": 0,
+                "segment_count": 0,
+            }
+        visible_start = max(start, float(window_words[0]["start_seconds"]))
+        visible_end = min(end, float(window_words[-1]["end_seconds"]))
+        text = " ".join(str(word["text"]) for word in window_words).strip()
+        return {
+            "scope": "word_window",
+            "display_lines": [f"[{visible_start:.2f}-{visible_end:.2f}] {text}"],
+            "word_count": len(window_words),
+            "segment_count": 0,
+        }
+
+    overlapping = [
+        segment
+        for segment in transcript
+        if float(segment["end_seconds"]) > start and float(segment["start_seconds"]) < end
+    ]
+    if not overlapping:
+        return {
+            "scope": "segment_window",
+            "display_lines": ["窗口内未检测到带时间戳的口播。"],
+            "word_count": 0,
+            "segment_count": 0,
+        }
+
+    outside_window = any(
+        float(segment["start_seconds"]) < start or float(segment["end_seconds"]) > end
+        for segment in overlapping
+    )
+    if outside_window:
+        ranges = ", ".join(
+            f"{float(segment['start_seconds']):.2f}-{float(segment['end_seconds']):.2f}s"
+            for segment in overlapping[:3]
+        )
+        return {
+            "scope": "insufficient_precision",
+            "display_lines": [
+                f"转写时间粒度不足，未展示全文（原始分段：{ranges}）。",
+                "请使用词级时间戳后再做窗口内口播归因。",
+            ],
+            "word_count": 0,
+            "segment_count": len(overlapping),
+        }
+
+    return {
+        "scope": "segment_window",
+        "display_lines": [
+            f"[{float(segment['start_seconds']):.2f}-{float(segment['end_seconds']):.2f}] {segment['text']}"
+            for segment in overlapping
+        ],
+        "word_count": 0,
+        "segment_count": len(overlapping),
+    }
+
+
 def build_timeline_views(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]:
     if Image is None or ImageDraw is None:
         return {}
@@ -499,9 +623,18 @@ def build_timeline_views(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]
 
     transcript_path = current_transcript_segments_path(info)
     transcript = parse_srt_segments(transcript_path) if transcript_path else []
+    transcript_words = load_transcript_words(info)
     written: list[dict[str, Any]] = []
     for label, start, end in ranges:
-        view = build_timeline_view_for_range(role_dir, info, label, start, end, transcript=transcript)
+        view = build_timeline_view_for_range(
+            role_dir,
+            info,
+            label,
+            start,
+            end,
+            transcript=transcript,
+            transcript_words=transcript_words,
+        )
         if view:
             written.append(view)
     return {"timeline_views_dir": str(out_dir), "timeline_views": written}
@@ -515,8 +648,14 @@ def build_timeline_view_for_range(
     end: float,
     *,
     transcript: list[dict[str, Any]] | None = None,
+    transcript_words: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
-    """Render a filmstrip/waveform/transcript view for any requested window."""
+    """Render a filmstrip/waveform/transcript view for any requested window.
+
+    Word timestamps are preferred because an SRT segment can span the entire
+    video. A coarse segment that only overlaps the requested window must never
+    be rendered as if its full text belongs to that window.
+    """
     if Image is None or ImageDraw is None:
         return None
     duration = parse_timestamp_seconds(info.get("duration_seconds"))
@@ -536,8 +675,25 @@ def build_timeline_view_for_range(
     if transcript is None:
         transcript_path = current_transcript_segments_path(info)
         transcript = parse_srt_segments(transcript_path) if transcript_path else []
+    if transcript_words is None:
+        transcript_words = load_transcript_words(info)
     frames = frames_for_range(info, start_value, end_value, limit=8)
-    write_timeline_view(out_path, info, transcript, safe_label, start_value, end_value, frames=frames)
+    transcript_window = select_timeline_transcript(
+        transcript,
+        transcript_words,
+        start_value,
+        end_value,
+    )
+    write_timeline_view(
+        out_path,
+        info,
+        transcript,
+        safe_label,
+        start_value,
+        end_value,
+        frames=frames,
+        transcript_window=transcript_window,
+    )
     selection_source = "analysis_frame_manifest" if get_analysis_frame_entries(info) else "compatibility_manifest"
     return {
         "label": safe_label,
@@ -547,6 +703,9 @@ def build_timeline_view_for_range(
         "selection_source": selection_source,
         "frame_count": len(frames),
         "frame_paths": [str(item.get("path") or "") for item in frames if str(item.get("path") or "")],
+        "transcript_scope": transcript_window["scope"],
+        "transcript_word_count": transcript_window["word_count"],
+        "transcript_segment_count": transcript_window["segment_count"],
     }
 
 
@@ -559,6 +718,7 @@ def write_timeline_view(
     end: float,
     *,
     frames: list[dict[str, Any]] | None = None,
+    transcript_window: dict[str, Any] | None = None,
 ) -> None:
     width = 1280
     height = 760
@@ -587,13 +747,16 @@ def write_timeline_view(
     waveform_box = (30, 395, width - 30, 535)
     draw.rectangle(waveform_box, fill="#ffffff", outline="#cbd5e1")
     draw_waveform(draw, waveform_box, Path(str(info.get("audio_path") or "")), start, end)
-    draw.text((30, 552), "Transcript in window", fill="#334155", font=label_font)
+    transcript_window = transcript_window or select_timeline_transcript(transcript, [], start, end)
+    draw.text(
+        (30, 552),
+        f"Transcript in window [{start:.1f}s-{end:.1f}s]",
+        fill="#334155",
+        font=label_font,
+    )
 
     y = 588
-    for segment in transcript:
-        if float(segment["end_seconds"]) < start or float(segment["start_seconds"]) > end:
-            continue
-        line = f"[{segment['start_seconds']:.2f}-{segment['end_seconds']:.2f}] {segment['text']}"
+    for line in transcript_window["display_lines"]:
         for wrapped in wrap_text(line, 76):
             draw.text((30, y), wrapped, fill="#0f172a", font=small_font)
             y += 24

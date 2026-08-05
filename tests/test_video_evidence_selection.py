@@ -24,6 +24,7 @@ from flayr_core.asr import extract_word_timestamps  # noqa: E402
 from flayr_core.video_evidence import (  # noqa: E402
     build_timeline_view_for_range,
     build_video_evidence_artifacts,
+    select_timeline_transcript,
     write_selection_report_html,
 )
 
@@ -175,6 +176,73 @@ class VideoEvidenceSelectionTests(unittest.TestCase):
             )
             self.assertIsNotNone(view)
             self.assertEqual(view["frame_paths"], [str(canonical.resolve())])
+
+    def test_timeline_transcript_prefers_word_window_over_coarse_segment(self) -> None:
+        selected = select_timeline_transcript(
+            [{"start_seconds": 0.12, "end_seconds": 50.74, "text": "full video transcript"}],
+            [
+                {"start_seconds": 0.12, "end_seconds": 0.4, "text": "hook"},
+                {"start_seconds": 7.0, "end_seconds": 7.3, "text": "later"},
+            ],
+            0.0,
+            6.0,
+        )
+        self.assertEqual(selected["scope"], "word_window")
+        self.assertEqual(selected["word_count"], 1)
+        self.assertIn("hook", selected["display_lines"][0])
+        self.assertNotIn("full video transcript", selected["display_lines"][0])
+
+    def test_timeline_transcript_hides_coarse_full_video_segment(self) -> None:
+        selected = select_timeline_transcript(
+            [{"start_seconds": 0.12, "end_seconds": 50.74, "text": "full video transcript"}],
+            [],
+            0.0,
+            6.0,
+        )
+        self.assertEqual(selected["scope"], "insufficient_precision")
+        self.assertNotIn("full video transcript", " ".join(selected["display_lines"]))
+        self.assertIn("时间粒度不足", " ".join(selected["display_lines"]))
+
+    def test_timeline_view_loads_word_timestamps_from_video_info(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames_dir = root / "frames"
+            frames_dir.mkdir()
+            frame = self._write_frame(frames_dir, "frame.jpg", (20, 30, 40))
+            srt_path = root / "transcript.srt"
+            srt_path.write_text(
+                "1\n00:00:00,120 --> 00:00:10,000\nfull video transcript\n",
+                encoding="utf-8",
+            )
+            words_path = root / "transcript.words.json"
+            words_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "flayr.transcript_words.v1",
+                        "words": [
+                            {"start_seconds": 0.12, "end_seconds": 0.4, "text": "hook"},
+                            {"start_seconds": 7.0, "end_seconds": 7.3, "text": "later"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            view = build_timeline_view_for_range(
+                root,
+                {
+                    "work_dir": str(root),
+                    "duration_seconds": 10.0,
+                    "transcript_segments_path": str(srt_path),
+                    "transcript_words_path": str(words_path),
+                    "analysis_frames": [{"path": str(frame), "timestamp_seconds": 1.0}],
+                },
+                "hook",
+                0.0,
+                6.0,
+            )
+            self.assertIsNotNone(view)
+            self.assertEqual(view["transcript_scope"], "word_window")
+            self.assertEqual(view["transcript_word_count"], 1)
 
     def test_first_build_passes_canonical_manifest_to_all_downstream_views(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
