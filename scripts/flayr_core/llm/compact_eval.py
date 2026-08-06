@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from copy import deepcopy
 import hashlib
 import json
 import math
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from ..artifacts import get_stage_frame_entries, parse_time_range_seconds
-from ..evidence_states import EVIDENCE_STATE_STRENGTHS
+from ..evidence_states import EVIDENCE_STATE_STRENGTHS, S4_EFFECT_EVIDENCE_STATES, S5_TRUST_STATES
 from ..postprocess.utils import evidence_overlaps_range
 from ..resources import ResourceBudget, ResourceBudgetExceeded, ResourceLimits, encode_file_data_url
 from ..report_metadata import current_code_commit
@@ -33,10 +34,16 @@ from .parse import parse_json_text
 COMPACT_EVAL_SCHEMA_VERSION = 1
 VISUAL_EXTRACTION_SCHEMA_VERSION = 2
 MODEL_INDEPENDENT_SCHEMA_VERSION = 2
+S4_FACT_STATE_SCHEMA_VERSION = 1
+S4_JUDGMENT_SCHEMA_VERSION = 1
+S5_AUDIT_SCHEMA_VERSION = 1
 COMPACT_EVAL_ROLE = "compact_judgment_on_locked_facts"
 SEVERITY_ONLY_ROLE = "severity_judgment_on_locked_facts"
 VISUAL_EXTRACTION_ROLE = "visual_fact_extraction_on_locked_frames"
 MODEL_INDEPENDENT_ROLE = "model_independent_comparison_on_model_facts"
+S4_FACT_STATE_ROLE = "s4_fact_state_on_locked_facts"
+S4_JUDGMENT_ROLE = "s4_judgment_on_locked_fact_state"
+S5_AUDIT_ROLE = "s5_source_audit_on_locked_facts"
 EVALUATION_ROLES = frozenset({"model_calibration", "mechanism_regression", "blind_validation"})
 DECISION_SCOPE_BY_ROLE = {
     "model_calibration": "calibration_only",
@@ -47,6 +54,8 @@ COMPACT_OUTPUT_BUDGET = 8192
 COMPACT_MAX_REASON_CHARS = 240
 COMPACT_MAX_BASIS_CHARS = 320
 COMPACT_MAX_EVIDENCE_IDS = 4
+S4_MAX_EVIDENCE_IDS = 8
+S5_MAX_EVIDENCE_IDS = 8
 MODEL_INDEPENDENT_WINNERS = frozenset({"benchmark", "creator", "tie", "uncertain"})
 MODEL_INDEPENDENT_RELATIONS = frozenset({"benchmark_better", "creator_better", "tie", "uncertain"})
 MODEL_INDEPENDENT_GAPS = frozenset({"none", "small", "medium", "large", "uncertain"})
@@ -73,6 +82,10 @@ FACT_QUALITY_FIELDS = {
     ),
     "causal_link": frozenset({"supported", "weak", "unsupported", "uncertain", "not_applicable"}),
 }
+S4_STATE_VISIBILITY = FACT_QUALITY_FIELDS["visibility"]
+S4_STATE_PROOF = FACT_QUALITY_FIELDS["proof"]
+S4_STATE_CAUSAL_LINK = FACT_QUALITY_FIELDS["causal_link"]
+S5_AUDIT_STATES = frozenset(S5_TRUST_STATES)
 
 
 def _stage_evidence_id_limit(value: int | None) -> int:
@@ -111,6 +124,26 @@ def contract_limits_for_variant(variant: str) -> dict[str, int]:
                 "max_information_chars": EXTRACTION_MAX_INFORMATION_CHARS,
             }
         )
+    if variant == "s4_fact_state":
+        limits.update(
+            {
+                "stage_count": 1,
+                "max_reason_chars": COMPACT_MAX_REASON_CHARS,
+                "max_stage_evidence_ids": S4_MAX_EVIDENCE_IDS,
+            }
+        )
+    if variant == "s5_audit":
+        limits.update(
+            {
+                "stage_count": 1,
+                "max_reason_chars": COMPACT_MAX_REASON_CHARS,
+                "max_stage_evidence_ids": S5_MAX_EVIDENCE_IDS,
+                "max_decision_basis_chars": COMPACT_MAX_BASIS_CHARS,
+            }
+        )
+    if variant == "s4_judgment":
+        limits["stage_count"] = 1
+        limits["max_decision_basis_chars"] = COMPACT_MAX_BASIS_CHARS
     return limits
 
 
@@ -934,6 +967,376 @@ def validate_model_independent_result(
                 max_stage_evidence_ids=evidence_id_limit,
             )
         )
+    return errors
+
+
+def _s4_state_shape() -> dict[str, Any]:
+    return {
+        "schema_version": S4_FACT_STATE_SCHEMA_VERSION,
+        "stage": "S4 效果呈现",
+        "creator": {
+            "effect_evidence_state": "none|result_only|verified|uncertain",
+            "visibility": "clear|partial|obscured|uncertain|not_applicable",
+            "proof": "direct_comparison|result_only|claim_only|none|uncertain|not_applicable",
+            "causal_link": "supported|weak|unsupported|uncertain|not_applicable",
+            "evidence_ids": ["C1"],
+            "reason": "一句不超过240字的事实依据",
+        },
+        "benchmark": {
+            "effect_evidence_state": "none|result_only|verified|uncertain",
+            "visibility": "clear|partial|obscured|uncertain|not_applicable",
+            "proof": "direct_comparison|result_only|claim_only|none|uncertain|not_applicable",
+            "causal_link": "supported|weak|unsupported|uncertain|not_applicable",
+            "evidence_ids": ["B1"],
+            "reason": "一句不超过240字的事实依据",
+        },
+    }
+
+
+def build_s4_fact_state_payload(
+    model: str,
+    bundle: FrozenCompactBundle,
+    *,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+) -> dict[str, Any]:
+    """Build the first S4 step: classify effect evidence from locked facts."""
+
+    response_shape = _s4_state_shape()
+    system = (
+        "你是 Flayr 的 S4 事实状态判定器。只输出严格 JSON，不要 Markdown，不要解释。"
+        "本次只判定双方效果证据状态，不输出 severity、relation、gap 或改进建议。"
+        "输入事实已经锁定；不得新增、改写、合并或跨角色移动 evidence_units。"
+        "effect_evidence_state 的判断必须严格区分：none=没有效果证据；"
+        "result_only=只有结果画面或结果口播，没有产品导致结果的因果桥；"
+        "verified=效果肉眼可见，且产品使用/过程与结果之间存在可信连接；"
+        "uncertain=事实冲突、看不清或证据不足。"
+        "visibility、proof、causal_link 只能描述锁定事实本身；不确定就填 uncertain。"
+        f"evidence_ids 只能引用同侧 S4 事实，最多 {S4_MAX_EVIDENCE_IDS} 个；不能引用相邻阶段。"
+        f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
+    )
+    user_text = (
+        "请先分别判断 creator 和 benchmark 的 S4 效果事实状态。"
+        "这一步的结果会被锁定后交给下一步判断层，不能提前比较谁更好。\n\n"
+        + json.dumps(bundle.context, ensure_ascii=False, indent=2)
+    )
+    return _build_multimodal_payload(
+        model,
+        bundle,
+        system=system,
+        user_text=user_text,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+
+
+def _validate_s4_state_side(
+    value: Any,
+    *,
+    role: str,
+    allowed_ids: dict[str, set[str]],
+    path: str,
+) -> list[str]:
+    if not isinstance(value, dict):
+        return [f"{path} must be an object"]
+    expected = {"effect_evidence_state", "visibility", "proof", "causal_link", "evidence_ids", "reason"}
+    errors: list[str] = []
+    extra = set(value) - expected
+    missing = expected - set(value)
+    if extra:
+        errors.append(f"{path} has unsupported fields: {sorted(extra)}")
+    if missing:
+        errors.append(f"{path} is missing fields: {sorted(missing)}")
+    if value.get("effect_evidence_state") not in S4_EFFECT_EVIDENCE_STATES:
+        errors.append(f"{path}.effect_evidence_state is invalid")
+    if value.get("visibility") not in S4_STATE_VISIBILITY:
+        errors.append(f"{path}.visibility is invalid")
+    if value.get("proof") not in S4_STATE_PROOF:
+        errors.append(f"{path}.proof is invalid")
+    if value.get("causal_link") not in S4_STATE_CAUSAL_LINK:
+        errors.append(f"{path}.causal_link is invalid")
+    evidence_ids = value.get("evidence_ids")
+    if not isinstance(evidence_ids, list) or any(not isinstance(item, str) or not item.strip() for item in evidence_ids):
+        errors.append(f"{path}.evidence_ids must be a list of non-empty strings")
+        evidence_ids = []
+    if len(evidence_ids) > S4_MAX_EVIDENCE_IDS:
+        errors.append(f"{path}.evidence_ids exceeds max_stage_evidence_ids={S4_MAX_EVIDENCE_IDS}")
+    if len(set(evidence_ids)) != len(evidence_ids):
+        errors.append(f"{path}.evidence_ids contains duplicate IDs")
+    for evidence_id in evidence_ids:
+        if evidence_id not in allowed_ids.get(role, {}).get("S4", set()):
+            errors.append(f"{path}.evidence_ids contains {evidence_id!r} outside {role}/S4")
+    reason = value.get("reason")
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > COMPACT_MAX_REASON_CHARS:
+        errors.append(f"{path}.reason must be a non-empty string <= {COMPACT_MAX_REASON_CHARS} chars")
+    return errors
+
+
+def validate_s4_fact_state_result(result: Any, bundle: FrozenCompactBundle) -> list[str]:
+    """Validate the first S4 step without semantic repair."""
+
+    if not isinstance(result, dict):
+        return ["result must be an object"]
+    errors: list[str] = []
+    expected_root = {"schema_version", "stage", "creator", "benchmark"}
+    if result.get("schema_version") != S4_FACT_STATE_SCHEMA_VERSION:
+        errors.append("schema_version mismatch")
+    extra = set(result) - expected_root
+    missing = expected_root - set(result)
+    if extra:
+        errors.append(f"unsupported root fields: {sorted(extra)}")
+    if missing:
+        errors.append(f"missing root fields: {sorted(missing)}")
+    if result.get("stage") != "S4 效果呈现":
+        errors.append("stage must be S4 效果呈现")
+    for role in RAW_VIDEO_ROLES:
+        errors.extend(
+            _validate_s4_state_side(
+                result.get(role),
+                role=role,
+                allowed_ids=bundle.allowed_evidence_ids,
+                path=role,
+            )
+        )
+    return errors
+
+
+def build_s4_state_locked_bundle(
+    base_bundle: FrozenCompactBundle,
+    state_result: dict[str, Any],
+    *,
+    state_artifact: str = "",
+    state_source_digest: str | None = None,
+    state_model: str | None = None,
+    expected_model: str | None = None,
+) -> FrozenCompactBundle:
+    """Create the second-step S4 bundle from a validated, immutable state result."""
+
+    if state_artifact and not state_source_digest:
+        raise CompactEvaluationError("S4 fact state artifact is missing source_digest provenance")
+    if state_source_digest is not None and state_source_digest != base_bundle.source_digest:
+        raise CompactEvaluationError("S4 fact state source_digest does not match the locked base bundle")
+    if expected_model is not None and state_model != expected_model:
+        raise CompactEvaluationError("S4 fact state was produced by a different model")
+    locked_state = deepcopy(state_result)
+    errors = validate_s4_fact_state_result(locked_state, base_bundle)
+    if errors:
+        raise CompactEvaluationError("invalid S4 fact state: " + "; ".join(errors[:8]))
+    # The second step must not receive the original fact pack again.  Keeping
+    # it in the prompt would let the judgment model silently re-extract or
+    # reinterpret facts, defeating the extraction-vs-judgment split.
+    context = {
+        "s4_fact_state": locked_state,
+    }
+    context["experiment_boundary"] = (
+        "这是 S4 两步判断实验的第二步。S4 effect_evidence_state、proof、causal_link 和 visibility "
+        "已经由第一步判定并锁定；本次只能基于这些状态输出 relation、gap_magnitude 和简短依据，不能重判或改写事实。"
+    )
+    provenance = {
+        "state_artifact": state_artifact,
+        "state_model": state_model,
+        "state_source_digest": state_source_digest,
+        "state_result_digest": _stable_digest(locked_state),
+        "base_source_digest": base_bundle.source_digest,
+        "human_initial_loaded": False,
+        "gt_loaded": False,
+    }
+    context["s4_fact_state_provenance"] = provenance
+    return replace(
+        base_bundle,
+        context=context,
+        source_digest=_stable_digest({"base": base_bundle.source_digest, "s4_state": locked_state}),
+        input_mode="s4_fact_state_locked",
+        visual_inputs=(),
+        video_inputs=(),
+    )
+
+
+def build_s4_judgment_payload(
+    model: str,
+    bundle: FrozenCompactBundle,
+    *,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+) -> dict[str, Any]:
+    """Build the second S4 step: judge relation and gap from locked state."""
+
+    if bundle.input_mode != "s4_fact_state_locked" or "s4_fact_state" not in bundle.context:
+        raise CompactEvaluationError("S4 judgment requires a locked S4 fact-state bundle")
+    response_shape = {
+        "schema_version": S4_JUDGMENT_SCHEMA_VERSION,
+        "stage": "S4 效果呈现",
+        "relation": "benchmark_better|creator_better|tie|uncertain",
+        "gap_magnitude": "none|small|medium|large|uncertain",
+        "confidence": "high|medium|low",
+        "decision_basis": "一到两句不超过320字的可审计判断依据",
+    }
+    system = (
+        "你是 Flayr 的 S4 判断器。只输出严格 JSON，不要 Markdown，不要解释。"
+        "输入中的 S4 事实状态已经锁定，不得重新抽取、改写或补充证据。"
+        "先根据 creator 与 benchmark 的 effect_evidence_state、proof、causal_link、visibility 形成简短判断依据，"
+        "再输出 relation 和 gap_magnitude。relation 只能是 benchmark_better、creator_better、tie、uncertain；"
+        "gap_magnitude 只能是 none、small、medium、large、uncertain。"
+        "relation=tie 时 gap_magnitude 只能是 none 或 uncertain；gap_magnitude=none 时 relation 只能是 tie 或 uncertain。"
+        f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
+    )
+    user_text = (
+        "请只基于已经锁定的 S4 事实状态进行比较。不要把 result_only 当作 verified，"
+        "也不要因为事实不确定而强行给出 large。\n\n"
+        + json.dumps(bundle.context, ensure_ascii=False, indent=2)
+    )
+    return _build_multimodal_payload(
+        model,
+        bundle,
+        system=system,
+        user_text=user_text,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+
+
+def validate_s4_judgment_result(result: Any) -> list[str]:
+    if not isinstance(result, dict):
+        return ["result must be an object"]
+    expected = {"schema_version", "stage", "relation", "gap_magnitude", "confidence", "decision_basis"}
+    errors: list[str] = []
+    if result.get("schema_version") != S4_JUDGMENT_SCHEMA_VERSION:
+        errors.append("schema_version mismatch")
+    extra = set(result) - expected
+    missing = expected - set(result)
+    if extra:
+        errors.append(f"unsupported root fields: {sorted(extra)}")
+    if missing:
+        errors.append(f"missing root fields: {sorted(missing)}")
+    if result.get("stage") != "S4 效果呈现":
+        errors.append("stage must be S4 效果呈现")
+    if result.get("relation") not in MODEL_INDEPENDENT_RELATIONS:
+        errors.append("relation is invalid")
+    if result.get("gap_magnitude") not in MODEL_INDEPENDENT_GAPS:
+        errors.append("gap_magnitude is invalid")
+    if result.get("confidence") not in COMPACT_CONFIDENCES:
+        errors.append("confidence is invalid")
+    basis = result.get("decision_basis")
+    if not isinstance(basis, str) or not basis.strip() or len(basis) > COMPACT_MAX_BASIS_CHARS:
+        errors.append(f"decision_basis must be a non-empty string <= {COMPACT_MAX_BASIS_CHARS} chars")
+    errors.extend(
+        _validate_relation_gap_pair(
+            result.get("relation"),
+            result.get("gap_magnitude"),
+            path="s4",
+        )
+    )
+    return errors
+
+
+def build_s5_audit_payload(
+    model: str,
+    bundle: FrozenCompactBundle,
+    *,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+) -> dict[str, Any]:
+    """Build an audit-only S5 source-state and comparison contract."""
+
+    response_shape = {
+        "schema_version": S5_AUDIT_SCHEMA_VERSION,
+        "stage": "S5 信任放大",
+        "creator": {
+            "trust_state": "explicit_absence|product_claim_or_offer|credible_source|uncertain",
+            "evidence_ids": ["C1"],
+            "reason": "一句不超过240字的事实依据",
+        },
+        "benchmark": {
+            "trust_state": "explicit_absence|product_claim_or_offer|credible_source|uncertain",
+            "evidence_ids": ["B1"],
+            "reason": "一句不超过240字的事实依据",
+        },
+        "relation": "benchmark_better|creator_better|tie|uncertain",
+        "gap_magnitude": "none|small|medium|large|uncertain",
+        "confidence": "high|medium|low",
+        "decision_basis": "一到两句不超过320字的可审计判断依据",
+    }
+    system = (
+        "你是 Flayr 的 S5 来源审计器。只输出严格 JSON，不要 Markdown，不要解释。"
+        "本结果只用于 audit，不改写生产 severity。先分别分类双方信任来源，再比较方向和差距。"
+        "explicit_absence 只有在事实明确显示没有独立来源时使用；缺字段、看不清或不确定必须使用 uncertain。"
+        "product_claim_or_offer 表示只有产品功效主张、参数、价格、优惠或赠品，没有独立信任来源；"
+        "它不能与 explicit_absence 等同。credible_source 必须有可见、可追溯且可信的来源事实。"
+        f"evidence_ids 只能引用同侧 S5 事实，最多 {S5_MAX_EVIDENCE_IDS} 个。"
+        "relation 和 gap_magnitude 必须分开判断；不要把未知当作双方都没有。"
+        f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
+    )
+    user_text = "请基于已锁定事实完成 S5 来源审计和比较。\n\n" + json.dumps(bundle.context, ensure_ascii=False, indent=2)
+    return _build_multimodal_payload(
+        model,
+        bundle,
+        system=system,
+        user_text=user_text,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+
+
+def _validate_s5_audit_side(value: Any, *, role: str, allowed_ids: dict[str, set[str]], path: str) -> list[str]:
+    if not isinstance(value, dict):
+        return [f"{path} must be an object"]
+    expected = {"trust_state", "evidence_ids", "reason"}
+    errors: list[str] = []
+    extra = set(value) - expected
+    missing = expected - set(value)
+    if extra:
+        errors.append(f"{path} has unsupported fields: {sorted(extra)}")
+    if missing:
+        errors.append(f"{path} is missing fields: {sorted(missing)}")
+    if value.get("trust_state") not in S5_AUDIT_STATES:
+        errors.append(f"{path}.trust_state is invalid")
+    ids = value.get("evidence_ids")
+    if not isinstance(ids, list) or any(not isinstance(item, str) or not item.strip() for item in ids):
+        errors.append(f"{path}.evidence_ids must be a list of non-empty strings")
+        ids = []
+    if len(ids) > S5_MAX_EVIDENCE_IDS:
+        errors.append(f"{path}.evidence_ids exceeds max_stage_evidence_ids={S5_MAX_EVIDENCE_IDS}")
+    if len(set(ids)) != len(ids):
+        errors.append(f"{path}.evidence_ids contains duplicate IDs")
+    for evidence_id in ids:
+        if evidence_id not in allowed_ids.get(role, {}).get("S5", set()):
+            errors.append(f"{path}.evidence_ids contains {evidence_id!r} outside {role}/S5")
+    trust_state = value.get("trust_state")
+    if trust_state in {"product_claim_or_offer", "credible_source"} and not ids:
+        errors.append(f"{path}: {trust_state} requires evidence_ids")
+    reason = value.get("reason")
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > COMPACT_MAX_REASON_CHARS:
+        errors.append(f"{path}.reason must be a non-empty string <= {COMPACT_MAX_REASON_CHARS} chars")
+    return errors
+
+
+def validate_s5_audit_result(result: Any, bundle: FrozenCompactBundle) -> list[str]:
+    if not isinstance(result, dict):
+        return ["result must be an object"]
+    expected = {"schema_version", "stage", "creator", "benchmark", "relation", "gap_magnitude", "confidence", "decision_basis"}
+    errors: list[str] = []
+    if result.get("schema_version") != S5_AUDIT_SCHEMA_VERSION:
+        errors.append("schema_version mismatch")
+    extra = set(result) - expected
+    missing = expected - set(result)
+    if extra:
+        errors.append(f"unsupported root fields: {sorted(extra)}")
+    if missing:
+        errors.append(f"missing fields: {sorted(missing)}")
+    if result.get("stage") != "S5 信任放大":
+        errors.append("stage must be S5 信任放大")
+    for role in RAW_VIDEO_ROLES:
+        errors.extend(_validate_s5_audit_side(result.get(role), role=role, allowed_ids=bundle.allowed_evidence_ids, path=role))
+    if result.get("relation") not in MODEL_INDEPENDENT_RELATIONS:
+        errors.append("relation is invalid")
+    if result.get("gap_magnitude") not in MODEL_INDEPENDENT_GAPS:
+        errors.append("gap_magnitude is invalid")
+    if result.get("confidence") not in COMPACT_CONFIDENCES:
+        errors.append("confidence is invalid")
+    basis = result.get("decision_basis")
+    if not isinstance(basis, str) or not basis.strip() or len(basis) > COMPACT_MAX_BASIS_CHARS:
+        errors.append(f"decision_basis must be a non-empty string <= {COMPACT_MAX_BASIS_CHARS} chars")
+    errors.extend(_validate_relation_gap_pair(result.get("relation"), result.get("gap_magnitude"), path="s5"))
     return errors
 
 
@@ -1886,6 +2289,7 @@ def _run_isolated_evaluation(
     gt_stages: dict[str, str] | None = None,
     diagnostics: Any = None,
     max_stage_evidence_ids: int | None = None,
+    experiment_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if evaluation_role not in EVALUATION_ROLES:
         raise CompactEvaluationError(f"unsupported evaluation_role: {evaluation_role}")
@@ -1900,6 +2304,12 @@ def _run_isolated_evaluation(
         "severity_scaffold_failure.json",
         "visual_extraction_evaluation.json",
         "visual_extraction_failure.json",
+        "s4_fact_state_evaluation.json",
+        "s4_fact_state_failure.json",
+        "s4_judgment_evaluation.json",
+        "s4_judgment_failure.json",
+        "s5_audit_evaluation.json",
+        "s5_audit_failure.json",
         "raw_model_response.json",
         ".compact-request.json",
     ):
@@ -1920,6 +2330,12 @@ def _run_isolated_evaluation(
             if variant == "model_independent"
             else VISUAL_EXTRACTION_SCHEMA_VERSION
             if variant in {"visual_extraction", "visual_extraction_on_raw_video"}
+            else S4_FACT_STATE_SCHEMA_VERSION
+            if variant == "s4_fact_state"
+            else S4_JUDGMENT_SCHEMA_VERSION
+            if variant == "s4_judgment"
+            else S5_AUDIT_SCHEMA_VERSION
+            if variant == "s5_audit"
             else COMPACT_EVAL_SCHEMA_VERSION
         ),
         "model": model,
@@ -1941,6 +2357,8 @@ def _run_isolated_evaluation(
         "video_data_url_sha256": [item["data_url_sha256"] for item in bundle.video_inputs],
         "video_source_duration_seconds": [item["duration_seconds"] for item in bundle.video_inputs],
     }
+    if experiment_metadata:
+        metadata["experiment"] = dict(experiment_metadata)
     metadata["protocol_hash"] = _stable_digest(
         {
             "task_role": task_role,
@@ -2111,6 +2529,18 @@ def run_compact_evaluation(
         gt_stages=gt_stages,
         diagnostics=diagnose_compact_evidence_references,
         max_stage_evidence_ids=max_stage_evidence_ids,
+        experiment_metadata=(
+            {
+                "name": "max_stage_evidence_ids",
+                "baseline": COMPACT_MAX_EVIDENCE_IDS,
+                "candidate": _stage_evidence_id_limit(max_stage_evidence_ids),
+                "single_variable": True,
+                "candidate_is_diagnostic_only": True,
+                "production_default_unchanged": True,
+            }
+            if max_stage_evidence_ids is not None
+            else None
+        ),
     )
 
 
@@ -2159,6 +2589,18 @@ def run_model_independent_evaluation(
         gt_stages=None,
         diagnostics=diagnose_compact_evidence_references,
         max_stage_evidence_ids=max_stage_evidence_ids,
+        experiment_metadata=(
+            {
+                "name": "max_stage_evidence_ids",
+                "baseline": COMPACT_MAX_EVIDENCE_IDS,
+                "candidate": _stage_evidence_id_limit(max_stage_evidence_ids),
+                "single_variable": True,
+                "candidate_is_diagnostic_only": True,
+                "production_default_unchanged": True,
+            }
+            if max_stage_evidence_ids is not None
+            else None
+        ),
     )
 
 
@@ -2248,6 +2690,123 @@ def run_visual_extraction_evaluation(
         success_filename="visual_extraction_evaluation.json",
         failure_filename="visual_extraction_failure.json",
         call_kind="compact_extraction_eval",
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+        request_timeout_seconds=request_timeout_seconds,
+    )
+
+
+def run_s4_fact_state_evaluation(
+    *,
+    model: str,
+    bundle: FrozenCompactBundle,
+    output_dir: Path,
+    api_url: str,
+    api_key_args: Any,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+    request_timeout_seconds: int = 600,
+    evaluation_role: str = "model_calibration",
+) -> dict[str, Any]:
+    """Run S4 fact-state classification without severity or resolver logic."""
+    payload = build_s4_fact_state_payload(
+        model,
+        bundle,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+    return _run_isolated_evaluation(
+        model=model,
+        bundle=bundle,
+        output_dir=output_dir,
+        api_url=api_url,
+        api_key_args=api_key_args,
+        payload=payload,
+        validator=lambda value: validate_s4_fact_state_result(value, bundle),
+        task_role=S4_FACT_STATE_ROLE,
+        evaluation_role=evaluation_role,
+        variant="s4_fact_state",
+        success_filename="s4_fact_state_evaluation.json",
+        failure_filename="s4_fact_state_failure.json",
+        call_kind="s4_fact_state_eval",
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+        request_timeout_seconds=request_timeout_seconds,
+    )
+
+
+def run_s4_judgment_evaluation(
+    *,
+    model: str,
+    bundle: FrozenCompactBundle,
+    output_dir: Path,
+    api_url: str,
+    api_key_args: Any,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+    request_timeout_seconds: int = 600,
+    evaluation_role: str = "model_calibration",
+) -> dict[str, Any]:
+    """Run S4 relation/gap judgment from an immutable fact-state bundle."""
+    payload = build_s4_judgment_payload(
+        model,
+        bundle,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+    return _run_isolated_evaluation(
+        model=model,
+        bundle=bundle,
+        output_dir=output_dir,
+        api_url=api_url,
+        api_key_args=api_key_args,
+        payload=payload,
+        validator=validate_s4_judgment_result,
+        task_role=S4_JUDGMENT_ROLE,
+        evaluation_role=evaluation_role,
+        variant="s4_judgment",
+        success_filename="s4_judgment_evaluation.json",
+        failure_filename="s4_judgment_failure.json",
+        call_kind="s4_judgment_eval",
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+        request_timeout_seconds=request_timeout_seconds,
+    )
+
+
+def run_s5_audit_evaluation(
+    *,
+    model: str,
+    bundle: FrozenCompactBundle,
+    output_dir: Path,
+    api_url: str,
+    api_key_args: Any,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+    request_timeout_seconds: int = 600,
+    evaluation_role: str = "model_calibration",
+) -> dict[str, Any]:
+    """Run the S5 trust-state audit; it never writes production severity."""
+    payload = build_s5_audit_payload(
+        model,
+        bundle,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+    return _run_isolated_evaluation(
+        model=model,
+        bundle=bundle,
+        output_dir=output_dir,
+        api_url=api_url,
+        api_key_args=api_key_args,
+        payload=payload,
+        validator=lambda value: validate_s5_audit_result(value, bundle),
+        task_role=S5_AUDIT_ROLE,
+        evaluation_role=evaluation_role,
+        variant="s5_audit",
+        success_filename="s5_audit_evaluation.json",
+        failure_filename="s5_audit_failure.json",
+        call_kind="s5_audit_eval",
         output_budget=output_budget,
         output_budget_field=output_budget_field,
         request_timeout_seconds=request_timeout_seconds,

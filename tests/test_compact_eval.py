@@ -12,7 +12,14 @@ from scripts.flayr_core.llm import compact_eval
 from scripts.flayr_core.llm.compact_eval import (
     COMPACT_EVAL_SCHEMA_VERSION,
     MODEL_INDEPENDENT_SCHEMA_VERSION,
+    S4_FACT_STATE_SCHEMA_VERSION,
+    S4_JUDGMENT_SCHEMA_VERSION,
+    S5_AUDIT_SCHEMA_VERSION,
     VISUAL_EXTRACTION_SCHEMA_VERSION,
+    build_s4_fact_state_payload,
+    build_s4_judgment_payload,
+    build_s4_state_locked_bundle,
+    build_s5_audit_payload,
     build_model_independent_payload,
     build_model_owned_fact_bundle,
     build_compact_eval_payload,
@@ -31,6 +38,9 @@ from scripts.flayr_core.llm.compact_eval import (
     summarize_visual_extraction_result,
     validate_compact_result,
     validate_model_independent_result,
+    validate_s4_fact_state_result,
+    validate_s4_judgment_result,
+    validate_s5_audit_result,
     validate_severity_only_result,
     validate_visual_extraction_result,
 )
@@ -215,6 +225,61 @@ def _model_independent_result() -> dict:
     }
 
 
+def _s4_fact_state_result() -> dict:
+    return {
+        "schema_version": S4_FACT_STATE_SCHEMA_VERSION,
+        "stage": "S4 效果呈现",
+        "creator": {
+            "effect_evidence_state": "result_only",
+            "visibility": "clear",
+            "proof": "result_only",
+            "causal_link": "unsupported",
+            "evidence_ids": ["C4"],
+            "reason": "达人展示了结果，但锁定事实没有证明产品使用与结果之间的因果连接。",
+        },
+        "benchmark": {
+            "effect_evidence_state": "verified",
+            "visibility": "clear",
+            "proof": "direct_comparison",
+            "causal_link": "supported",
+            "evidence_ids": ["B4"],
+            "reason": "标杆事实同时包含过程、可见结果和清晰的因果连接。",
+        },
+    }
+
+
+def _s4_judgment_result() -> dict:
+    return {
+        "schema_version": S4_JUDGMENT_SCHEMA_VERSION,
+        "stage": "S4 效果呈现",
+        "relation": "benchmark_better",
+        "gap_magnitude": "medium",
+        "confidence": "high",
+        "decision_basis": "标杆为 verified，达人只有 result_only，差距来自效果因果链是否被证实。",
+    }
+
+
+def _s5_audit_result() -> dict:
+    return {
+        "schema_version": S5_AUDIT_SCHEMA_VERSION,
+        "stage": "S5 信任放大",
+        "creator": {
+            "trust_state": "product_claim_or_offer",
+            "evidence_ids": ["C5"],
+            "reason": "达人只提出产品主张，没有独立来源支撑。",
+        },
+        "benchmark": {
+            "trust_state": "credible_source",
+            "evidence_ids": ["B5"],
+            "reason": "标杆引用了可追溯且可见的独立来源。",
+        },
+        "relation": "benchmark_better",
+        "gap_magnitude": "small",
+        "confidence": "medium",
+        "decision_basis": "标杆有可信来源，达人只有产品主张；本结果仅用于 S5 audit。",
+    }
+
+
 class CompactEvalContractTests(unittest.TestCase):
     def test_contract_limits_describe_each_variant_without_hidden_fields(self) -> None:
         self.assertEqual(
@@ -235,6 +300,62 @@ class CompactEvalContractTests(unittest.TestCase):
             contract_limits_for_variant("severity_only_scaffold")["stage_count"],
             6,
         )
+        self.assertEqual(contract_limits_for_variant("s4_fact_state")["max_stage_evidence_ids"], 8)
+        self.assertEqual(contract_limits_for_variant("s5_audit")["max_decision_basis_chars"], 320)
+
+    def test_s4_two_step_contract_locks_state_and_source_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = load_frozen_compact_bundle(_write_bundle(Path(tmp)), include_images=False)
+            state = _s4_fact_state_result()
+            self.assertEqual(validate_s4_fact_state_result(state, base), [])
+            state_payload = build_s4_fact_state_payload("qwen3.6-plus", base, output_budget=4096)
+            self.assertIn("不输出 severity", state_payload["messages"][0]["content"])
+            locked = build_s4_state_locked_bundle(
+                base,
+                state,
+                state_artifact="state.json",
+                state_source_digest=base.source_digest,
+                state_model="qwen3.6-plus",
+                expected_model="qwen3.6-plus",
+            )
+            self.assertEqual(locked.input_mode, "s4_fact_state_locked")
+            self.assertEqual(locked.visual_inputs, ())
+            self.assertNotIn("facts", locked.context)
+            self.assertIn("s4_fact_state", locked.context)
+            self.assertNotEqual(locked.source_digest, base.source_digest)
+            judgment_payload = build_s4_judgment_payload("qwen3.6-plus", locked, output_budget=4096)
+            self.assertIn("已经锁定", judgment_payload["messages"][0]["content"])
+            self.assertEqual(validate_s4_judgment_result(_s4_judgment_result()), [])
+            with self.assertRaises(compact_eval.CompactEvaluationError):
+                build_s4_state_locked_bundle(
+                    base,
+                    state,
+                    state_source_digest="wrong-source",
+                    state_model="qwen3.6-plus",
+                    expected_model="qwen3.6-plus",
+                )
+            with self.assertRaises(compact_eval.CompactEvaluationError):
+                build_s4_state_locked_bundle(
+                    base,
+                    state,
+                    state_source_digest=base.source_digest,
+                    state_model="qwen3.7-plus",
+                    expected_model="qwen3.6-plus",
+                )
+
+    def test_s5_audit_distinguishes_claim_from_credible_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = load_frozen_compact_bundle(_write_bundle(Path(tmp)), include_images=False)
+            result = _s5_audit_result()
+            self.assertEqual(validate_s5_audit_result(result, bundle), [])
+            payload = build_s5_audit_payload("qwen3.6-plus", bundle, output_budget=4096)
+            system = payload["messages"][0]["content"]
+            self.assertIn("只用于 audit", system)
+            self.assertIn("product_claim_or_offer", system)
+            invalid = json.loads(json.dumps(result))
+            invalid["creator"]["trust_state"] = "credible_source"
+            invalid["creator"]["evidence_ids"] = []
+            self.assertTrue(any("credible_source requires evidence_ids" in error for error in validate_s5_audit_result(invalid, bundle)))
 
     def test_valid_result_is_accepted_and_scored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -641,6 +762,7 @@ class CompactEvalContractTests(unittest.TestCase):
                     api_key_args=SimpleNamespace(),
                     output_budget=4096,
                     gt_stages={f"S{i}": "small" for i in range(1, 7)},
+                    max_stage_evidence_ids=8,
                 )
 
             self.assertEqual(outcome["status"], "completed")
@@ -649,6 +771,10 @@ class CompactEvalContractTests(unittest.TestCase):
             self.assertEqual(outcome["decision_scope"], "calibration_only")
             self.assertEqual(call.call_count, 1)
             self.assertTrue((output_dir / "compact_evaluation.json").is_file())
+            metadata = json.loads((output_dir / "compact_request_metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["contract_limits"]["max_stage_evidence_ids"], 8)
+            self.assertEqual(metadata["experiment"]["baseline"], 4)
+            self.assertTrue(metadata["experiment"]["single_variable"])
             self.assertFalse((output_dir / "analysis_result.json").exists())
             self.assertFalse((output_dir / "_SUCCESS.json").exists())
 

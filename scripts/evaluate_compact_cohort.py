@@ -33,12 +33,16 @@ if str(ROOT / "scripts") not in sys.path:
 from flayr_core.llm.compact_eval import (  # noqa: E402
     COMPACT_OUTPUT_BUDGET,
     CompactEvaluationError,
+    build_s4_state_locked_bundle,
     EVALUATION_ROLES,
     contract_limits_for_variant,
     load_frozen_compact_bundle,
     load_frozen_video_bundle,
     load_gt_stages,
     run_compact_evaluation,
+    run_s4_fact_state_evaluation,
+    run_s4_judgment_evaluation,
+    run_s5_audit_evaluation,
     run_severity_only_evaluation,
     run_visual_extraction_evaluation,
 )
@@ -49,6 +53,24 @@ from flayr_core.report_metadata import current_code_commit  # noqa: E402
 def _safe_component(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value).strip())
     return cleaned.strip("._") or "unnamed"
+
+
+def _safe_component_map(values: list[str], *, label: str) -> dict[str, str]:
+    """Reject sanitized-name collisions before artifacts can overwrite each other."""
+    safe_to_value: dict[str, str] = {}
+    value_to_safe: dict[str, str] = {}
+    for value in values:
+        if value in value_to_safe:
+            raise CompactEvaluationError(f"{label} contains duplicate value: {value!r}")
+        safe = _safe_component(value)
+        previous = safe_to_value.get(safe)
+        if previous is not None and previous != value:
+            raise CompactEvaluationError(
+                f"{label} values {previous!r} and {value!r} share output component {safe!r}"
+            )
+        safe_to_value[safe] = value
+        value_to_safe[value] = safe
+    return value_to_safe
 
 
 def _read_manifest(path: Path) -> list[dict[str, str]]:
@@ -110,7 +132,46 @@ def _run_variant(
         return run_severity_only_evaluation(**common, gt_stages=gt_stages, scaffold=False)
     if variant == "severity_scaffold":
         return run_severity_only_evaluation(**common, gt_stages=gt_stages, scaffold=True)
-    return run_visual_extraction_evaluation(**common)
+    if variant == "visual_extraction":
+        return run_visual_extraction_evaluation(**common)
+    if variant == "s4_fact_state":
+        return run_s4_fact_state_evaluation(**common)
+    if variant == "s4_judgment":
+        return run_s4_judgment_evaluation(**common)
+    return run_s5_audit_evaluation(**common)
+
+
+def _load_s4_state_locked_bundle(
+    state_root: Path,
+    *,
+    sample_id: str,
+    model: str,
+    base_bundle: Any,
+) -> tuple[Any, Path]:
+    path = (
+        state_root
+        / _safe_component(sample_id)
+        / _safe_component(model)
+        / "s4_fact_state_evaluation.json"
+    )
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CompactEvaluationError(f"invalid S4 state artifact: {path}: {exc}") from exc
+    if not isinstance(record, dict) or record.get("status") != "completed":
+        raise CompactEvaluationError(f"S4 state artifact is not completed: {path}")
+    state_result = record.get("result")
+    if not isinstance(state_result, dict):
+        raise CompactEvaluationError(f"S4 state artifact has no result object: {path}")
+    locked = build_s4_state_locked_bundle(
+        base_bundle,
+        state_result,
+        state_artifact=str(path),
+        state_source_digest=str(record.get("source_digest") or "") or None,
+        state_model=str(record.get("model") or "") or None,
+        expected_model=model,
+    )
+    return locked, path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -124,7 +185,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-url", required=True, help="Approved Chat Completions endpoint.")
     parser.add_argument(
         "--variant",
-        choices=("evidence_grounded", "severity_only", "severity_scaffold", "visual_extraction"),
+        choices=(
+            "evidence_grounded",
+            "severity_only",
+            "severity_scaffold",
+            "visual_extraction",
+            "s4_fact_state",
+            "s4_judgment",
+            "s5_audit",
+        ),
         default="severity_only",
     )
     parser.add_argument(
@@ -143,6 +212,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="max_completion_tokens",
     )
     parser.add_argument("--request-timeout-seconds", type=int, default=600)
+    parser.add_argument(
+        "--s4-state-root",
+        type=Path,
+        default=None,
+        help="s4_judgment 必填：按 sample_id/model 保存 s4_fact_state_evaluation.json 的目录。",
+    )
     parser.add_argument(
         "--max-stage-evidence-ids",
         type=int,
@@ -165,7 +240,14 @@ def main() -> int:
         raise SystemExit("--max-stage-evidence-ids must be between 1 and 16")
     if args.max_stage_evidence_ids is not None and args.variant != "evidence_grounded":
         raise SystemExit("--max-stage-evidence-ids is only valid with --variant evidence_grounded")
+    if args.variant == "s4_judgment" and args.s4_state_root is None:
+        raise SystemExit("--s4-state-root is required with --variant s4_judgment")
     manifest = _read_manifest(args.manifest.expanduser().resolve())
+    sample_components = _safe_component_map(
+        [sample["sample_id"] for sample in manifest],
+        label="sample_id",
+    )
+    model_components = _safe_component_map(args.models, label="model")
     api_key_args = SimpleNamespace(
         llm_api_key_env=args.api_key_env,
         llm_api_key_keychain_service=args.keychain_service,
@@ -182,16 +264,38 @@ def main() -> int:
         if args.variant == "visual_extraction":
             bundle = load_frozen_video_bundle(run_dir)
             gt_stages = None
+        elif args.variant in {"s4_fact_state", "s4_judgment", "s5_audit"}:
+            bundle = load_frozen_compact_bundle(run_dir, include_images=False)
+            gt_stages = None
         else:
             bundle = load_frozen_compact_bundle(run_dir, include_images=not args.no_images)
             gt_stages = load_gt_stages(args.gt_path, sample["sample_id"])
         preflight.append((sample, bundle, gt_stages))
+    locked_state_bundles: dict[tuple[str, str], tuple[Any, Path]] = {}
+    if args.variant == "s4_judgment":
+        state_root = args.s4_state_root.expanduser().resolve()
+        for sample, bundle, _ in preflight:
+            for model in args.models:
+                locked_state_bundles[(sample["sample_id"], model)] = _load_s4_state_locked_bundle(
+                    state_root,
+                    sample_id=sample["sample_id"],
+                    model=model,
+                    base_bundle=bundle,
+                )
 
     contract_limits = contract_limits_for_variant(
         "visual_extraction" if args.variant == "visual_extraction" else args.variant
     )
     if args.max_stage_evidence_ids is not None and args.variant == "evidence_grounded":
         contract_limits["max_stage_evidence_ids"] = args.max_stage_evidence_ids
+    if args.max_stage_evidence_ids is not None:
+        contract_limits["experiment"] = {
+            "name": "max_stage_evidence_ids",
+            "baseline": 4,
+            "candidate": args.max_stage_evidence_ids,
+            "single_variable": True,
+            "production_default_unchanged": True,
+        }
     summary: dict[str, Any] = {
         "schema_version": 1,
         "evaluation_role": args.evaluation_role,
@@ -215,11 +319,16 @@ def main() -> int:
             "results": [],
         }
         for model in args.models:
+            run_bundle = bundle
+            state_artifact = None
+            if args.variant == "s4_judgment":
+                run_bundle, state_path = locked_state_bundles[(sample["sample_id"], model)]
+                state_artifact = str(state_path)
             result = _run_variant(
                 variant=args.variant,
                 model=model,
-                bundle=bundle,
-                output_dir=output_root / _safe_component(sample["sample_id"]) / _safe_component(model),
+                bundle=run_bundle,
+                output_dir=output_root / sample_components[sample["sample_id"]] / model_components[model],
                 args=args,
                 api_key_args=api_key_args,
                 gt_stages=gt_stages,
@@ -231,6 +340,7 @@ def main() -> int:
                     "gt_score": result.get("gt_score"),
                     "errors": result.get("errors"),
                     "error": result.get("error"),
+                    "state_artifact": state_artifact,
                 }
             )
         summary["samples"].append(sample_record)

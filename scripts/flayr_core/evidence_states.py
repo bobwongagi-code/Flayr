@@ -14,6 +14,7 @@ from typing import Any, Iterable
 
 S3_USAGE_EVIDENCE_STATES = ("none", "partial", "complete", "uncertain")
 S4_EFFECT_EVIDENCE_STATES = ("none", "result_only", "verified", "uncertain")
+S5_TRUST_STATES = ("explicit_absence", "product_claim_or_offer", "credible_source", "uncertain")
 EVIDENCE_STATE_STRENGTHS = ("direct", "explicit", "inferred", "absent")
 
 
@@ -163,6 +164,12 @@ AUDIT_REASON_CODES = frozenset(
         "s3_creator_none_benchmark_complete",
         "s4_creator_none_benchmark_verified",
         "s5_product_claim_or_offer",
+        "s5_explicit_absence",
+        "s5_credible_source",
+        "s5_absence_not_explicit",
+        "s5_source_not_verified",
+        "s5_missing_or_unknown_source_fields",
+        "audit_consistent",
         "activation_gate_closed",
         "model_preserved",
         "rule_error",
@@ -250,6 +257,7 @@ __all__ = [
     "S4_HARD_FACT_FIELDS",
     "S3_USAGE_EVIDENCE_STATES",
     "S4_EFFECT_EVIDENCE_STATES",
+    "S5_TRUST_STATES",
     "hard_fact_fingerprint",
     "s2_hard_fact_snapshot",
     "normalize_evidence_state",

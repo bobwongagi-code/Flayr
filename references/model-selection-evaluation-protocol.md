@@ -70,6 +70,37 @@ S4 的结构性问题在 v2 中仍然清晰：6 个 GT=`large` 的格全部被�
 4. **分歧复核。** 模型理由只是待核实线索。模型提出人工未记录的新事实时，回视频独立核实；纯权重分歧进入第二人工盲标，不用“谁说得更像真的”裁定。
 5. **最后才谈选型。** 只有 fresh blind cohort 同时满足事实召回、方向/大小准确率、S3/S4 结构指标、运行完整性、成本和稳定性门槛，才允许设计 promotion；当前脚本永久写 `promotion_eligible: false`。
 
+### S4 两步归因与 S5 audit
+
+S4 的低分先通过隔离实验拆成两层，不直接改生产 severity：
+
+1. `s4_fact_state`：只基于锁定的 Stage1 facts，分别输出 creator/benchmark 的
+   `effect_evidence_state`、`visibility`、`proof`、`causal_link` 和同侧 S4 evidence IDs；
+2. `s4_judgment`：读取同一模型、同一 source digest 的已完成第一步产物，只输出
+   `relation`、`gap_magnitude`、`confidence` 和简短 `decision_basis`，不能重新抽事实或改写状态。
+
+第一步产物必须带 `source_digest` 和 `model`，第二步会拒绝跨运行或跨模型拼接。两步结果都是
+`promotion_eligible: false` 的诊断 artifact，不会写入 `analysis_result.json` 或触发 resolver。
+
+S5 使用独立的 `s5_audit` 合同，明确区分 `explicit_absence`、`product_claim_or_offer`、
+`credible_source` 和 `uncertain`。缺字段不能变成 `explicit_absence`，只有产品主张/优惠也不能
+冒充独立可信来源；S5 仍保持 `audit-only`。
+
+对应的单样本入口是：
+
+```text
+scripts/evaluate_compact_model.py --variant s4_fact_state ...
+scripts/evaluate_compact_model.py --variant s4_judgment --s4-state-path ... ...
+scripts/evaluate_compact_model.py --variant s5_audit ...
+```
+
+批量运行时，`s4_judgment` 的 `--s4-state-root` 必须按
+`<sample_id>/<model>/s4_fact_state_evaluation.json` 提供第一步产物。没有通过状态、运行身份和
+模型身份校验的产物不得进入第二步。
+
+生产结果的既有 S4 四态和 Batch B `evidence_strength` 仍由生产 validator/derive 负责；本节新增
+的是可回放的分层诊断链，不把未经 blind 验证的诊断结果直接提升为生产规则。
+
 历史 v1 artifact 可以用于诊断和兼容读取，但不能与 v2 artifact 静默合并成“当前模型表现”。需要重新运行的地方必须显式标记 schema、source commit、source identity 和协议 hash。
 
 当前 9 组重评分中的 `carslan-b0`、`tashadiyana` 仍来自旧 calibration severity 标签，缺少
@@ -210,3 +241,12 @@ scripts/evaluate_human_model_alignment.py
 ```
 
 该工具只读保存的模型 artifact 与人工 GT，不发起网络请求。它可以同时评估 raw extraction 和 model-independent judgment；没有人工 `key_events` 时，会把抽取召回率和阶段/时间精确率代理都输出为 `null`，不会把模型单元数量当成召回率或错误率。
+
+对已经生成的生产分析结果，可使用以下离线审计入口，不发起模型调用：
+
+```text
+scripts/audit_analysis_chain.py --manifest <manifest.json> --output <audit.json>
+```
+
+它只报告 S4 硬事实冲突、S4 evidence 时间/阶段归属错误、S5 来源状态分布和
+`evidence_strength` gate 状态，不修改任何原始结果。
