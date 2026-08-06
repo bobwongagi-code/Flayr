@@ -371,10 +371,10 @@ scripts/
 职责：
 
 - 通过批准的北京 MaaS Fun-ASR endpoint 发送本地音频 Data URI。
-- 保留 `transcript.txt`、`transcript.srt` 和 `transcript.words.json` 作为下游唯一转写接口。
+- 保留 `transcript.txt`、`transcript.srt` 和 `transcript.words.json` 作为审计/兼容产物；下游阶段归属唯一消费接口是词级时间线生成的 `transcript_windowed`。
 - 直接归一化句级与词级时间戳，不在本地运行 ASR 模型。
 - 输出本地语言 `transcript.txt`。
-- 输出短分段时间戳口播 `transcript.srt`，供审计和兼容读取；有词级时间戳时另生成 `transcript_windowed.md/json`，阶段证据对齐以窗口安全版本为准。
+- 输出短分段时间戳口播 `transcript.srt`，供审计和兼容读取；有词级时间戳时另生成 `transcript_windowed.md/json`，阶段证据对齐以窗口安全版本为准；没有词级时间戳时不能把粗分段扩展成精确阶段证据。
 
 约束：
 

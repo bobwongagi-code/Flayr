@@ -207,13 +207,13 @@ python3 -m unittest tests.test_analysis_model
 - 修补：`scripts/flayr_core/postprocess/repair.py::materialize_spoken_stage_evidence`
 - 修补：`scripts/flayr_core/postprocess/repair.py::fill_missing_evidence_references`
 
-### Q07 口播归属以 transcript.srt 为准
+### Q07 口播归属以 transcript_windowed 为准
 
 规则：
 
-- 阶段 quote 必须来自该视频转写。
+- 阶段 quote 必须来自该视频的窗口安全转写；原始 `transcript.srt` 只作审计和兼容读取。
 - 不得把标杆口播写到达人，或把达人口播写到标杆。
-- 有时间戳口播时，阶段边界必须服务于真实口播时间，而不是固定 0-3s / 3-6s。
+- 有词级时间戳时，阶段边界必须服务于 `transcript_windowed` 的真实口播时间，而不是固定 0-3s / 3-6s；只有粗粒度分段时不得伪造精确归属。
 
 处理：已阻断 + 已修补。
 

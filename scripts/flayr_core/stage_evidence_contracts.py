@@ -22,7 +22,7 @@ from .artifacts import (
 from .transcript import current_transcript_segments_path, current_transcript_words_path
 
 
-STAGE_EVIDENCE_CONTRACT_VERSION = 2
+STAGE_EVIDENCE_CONTRACT_VERSION = 3
 STAGE_EVIDENCE_SNAPSHOT_VERSION = 1
 STAGE_EVIDENCE_GATE_VERSION = 1
 STAGE1_ACQUISITION_VERSION = 3
@@ -36,6 +36,8 @@ STAGE1_ACQUISITION_COVERAGE_STATES = ("full", "sampled", "partial", "none", "unk
 STAGE1_STAGE_COVERAGE_STATUSES = ("observed", "complete", "partial", "unknown")
 STAGE1_COVERAGE_AUDIT_RUN_STATUSES = ("completed", "partial", "failed", "unknown")
 STAGE1_COVERAGE_AUDIT_STATUSES = ("found", "clear", "conflict", "unknown")
+STAGE1_COVERAGE_AUDIT_INDEPENDENCE = "separate_request_same_model"
+STAGE_EVIDENCE_BINDING_STATUSES = ("supported", "missing", "unknown", "conflict")
 STAGE_EVIDENCE_LINK_RELATIONS = ("primary", "supporting", "contradicting")
 STAGE_EVIDENCE_LINK_CONFIDENCES = ("high", "medium", "low", "unknown")
 STAGE_EVIDENCE_LINK_SOURCES = ("model", "compatibility")
@@ -590,6 +592,11 @@ def normalize_stage1_coverage_audit(value: Any, valid_ids: set[str] | None = Non
             token for token in _clean_tokens(raw.get("missing_signals"))
             if token in contract.allowed_signals
         ]
+        signal_bindings, invalid_signal_bindings = _normalize_signal_bindings(
+            raw.get("signal_bindings"),
+            contract,
+            valid_ids,
+        )
         normalized_stages[contract.code] = {
             "status": status,
             "coverage": coverage,
@@ -597,6 +604,8 @@ def normalize_stage1_coverage_audit(value: Any, valid_ids: set[str] | None = Non
             "invalid_evidence_ids": invalid_ids,
             "observed_signals": observed,
             "missing_signals": missing,
+            "signal_bindings": signal_bindings,
+            "invalid_signal_bindings": invalid_signal_bindings,
             "reason": str(raw.get("reason") or "").strip(),
         }
     raw_run_status = str(value.get("status") or "unknown").strip().lower()
@@ -1327,6 +1336,11 @@ def normalize_stage_evidence_checks(value: Any, valid_ids: set[str]) -> list[dic
         missing = [token for token in raw_missing if token in contract.allowed_signals]
         invalid_observed_signals = [token for token in raw_observed if token not in contract.allowed_signals]
         invalid_missing_signals = [token for token in raw_missing if token not in contract.allowed_signals]
+        signal_bindings, invalid_signal_bindings = _normalize_signal_bindings(
+            raw.get("signal_bindings"),
+            contract,
+            valid_ids,
+        )
         observed_disqualifiers = [
             token
             for token in _clean_tokens(raw.get("observed_disqualifiers") or raw.get("disqualifiers"))
@@ -1353,6 +1367,8 @@ def normalize_stage_evidence_checks(value: Any, valid_ids: set[str]) -> list[dic
             "missing_signals": missing,
             "invalid_observed_signals": invalid_observed_signals,
             "invalid_missing_signals": invalid_missing_signals,
+            "signal_bindings": signal_bindings,
+            "invalid_signal_bindings": invalid_signal_bindings,
             "observed_disqualifiers": observed_disqualifiers,
             "invalid_observed_disqualifiers": invalid_observed_disqualifiers,
             "evidence_strength": strength,
@@ -1373,6 +1389,8 @@ def normalize_stage_evidence_checks(value: Any, valid_ids: set[str]) -> list[dic
                 "missing_signals": [],
                 "invalid_observed_signals": [],
                 "invalid_missing_signals": [],
+                "signal_bindings": {},
+                "invalid_signal_bindings": [],
                 "observed_disqualifiers": [],
                 "invalid_observed_disqualifiers": [],
                 "evidence_strength": None,
@@ -1389,6 +1407,100 @@ def normalize_stage_evidence_checks(value: Any, valid_ids: set[str]) -> list[dic
             }
         normalized.append(item)
     return normalized
+
+
+def _normalize_signal_bindings(
+    value: Any,
+    contract: StageEvidenceContract,
+    valid_ids: set[str],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Normalize signal-to-evidence bindings without inventing support.
+
+    A stage-level evidence list is not sufficient to prove every required
+    signal.  Each supported signal therefore carries its own evidence IDs. A
+    malformed binding becomes ``unknown`` and is retained as an audit issue;
+    it is never silently converted into a valid binding.
+    """
+    raw_bindings = value if isinstance(value, dict) else {}
+    bindings: dict[str, dict[str, Any]] = {}
+    invalid_signals: list[str] = []
+    for raw_signal, raw_binding in raw_bindings.items():
+        signal = str(raw_signal or "").strip()
+        if signal not in contract.allowed_signals:
+            if signal and signal not in invalid_signals:
+                invalid_signals.append(signal)
+            continue
+        if not isinstance(raw_binding, dict):
+            raw_binding = {}
+        raw_status = str(raw_binding.get("status") or "unknown").strip().lower()
+        status = raw_status if raw_status in STAGE_EVIDENCE_BINDING_STATUSES else "unknown"
+        evidence_ids: list[str] = []
+        invalid_ids: list[str] = []
+        raw_ids = raw_binding.get("evidence_ids")
+        if isinstance(raw_ids, list):
+            for raw_id in raw_ids:
+                evidence_id = str(raw_id or "").strip()
+                if not evidence_id:
+                    continue
+                if evidence_id in valid_ids and evidence_id not in evidence_ids:
+                    evidence_ids.append(evidence_id)
+                elif evidence_id not in invalid_ids:
+                    invalid_ids.append(evidence_id)
+        bindings[signal] = {
+            "status": status,
+            "evidence_ids": evidence_ids,
+            "invalid_evidence_ids": invalid_ids,
+            "reason": str(raw_binding.get("reason") or "").strip(),
+        }
+    return bindings, invalid_signals
+
+
+def merge_stage_signal_bindings(*values: Any) -> dict[str, dict[str, Any]]:
+    """Merge binding evidence without allowing a later pass to erase facts."""
+    merged: dict[str, dict[str, Any]] = {}
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        for signal, raw in value.items():
+            if not isinstance(raw, dict):
+                continue
+            current = merged.setdefault(
+                str(signal),
+                {
+                    "status": "unknown",
+                    "evidence_ids": [],
+                    "invalid_evidence_ids": [],
+                    "reason": "",
+                },
+            )
+            for field in ("evidence_ids", "invalid_evidence_ids"):
+                for evidence_id in raw.get(field) or []:
+                    token = str(evidence_id or "").strip()
+                    if token and token not in current[field]:
+                        current[field].append(token)
+            statuses = {
+                str(current.get("status") or "unknown").strip().lower(),
+                str(raw.get("status") or "unknown").strip().lower(),
+            }
+            if "conflict" in statuses:
+                current["status"] = "conflict"
+            elif len(statuses - {"unknown"}) > 1:
+                # Independent passes disagree about the same signal.  Keep
+                # the disagreement explicit so it cannot be mistaken for an
+                # ordinary missing observation downstream.
+                current["status"] = "conflict"
+            elif "supported" in statuses and current.get("evidence_ids"):
+                current["status"] = "supported"
+            elif "missing" in statuses and statuses <= {"missing", "unknown"}:
+                current["status"] = "missing"
+            else:
+                current["status"] = "unknown"
+            reason = str(raw.get("reason") or "").strip()
+            if reason and reason not in str(current.get("reason") or ""):
+                current["reason"] = "；".join(
+                    item for item in (str(current.get("reason") or "").strip(), reason) if item
+                )
+    return merged
 
 
 def stage_evidence_check_map(side: Any) -> dict[str, dict[str, Any]]:
@@ -1496,6 +1608,7 @@ def _stage_check_issues(
         "invalid_observed_signals",
         "invalid_missing_signals",
         "invalid_observed_disqualifiers",
+        "invalid_signal_bindings",
     ):
         invalid = [str(value) for value in check.get(field) or [] if str(value).strip()]
         if invalid:
@@ -1508,9 +1621,43 @@ def _stage_check_issues(
     missing = set(check.get("missing_signals") or [])
     required = set(contract.required_signals)
     observed_disqualifiers = set(check.get("observed_disqualifiers") or [])
+    signal_bindings = check.get("signal_bindings") if isinstance(check.get("signal_bindings"), dict) else {}
     contradictory_signals = sorted(observed & missing)
     if contradictory_signals:
         issues.append(f"{contract.code}:signal_both_observed_and_missing:{','.join(contradictory_signals)}")
+
+    # Validate every binding, including bindings for optional signals and
+    # negative/unknown stages.  Checking only ``observed`` would let an
+    # invalid or unsupported binding hide inside an ``absent`` or ``unknown``
+    # projection without blocking qualification.
+    for signal, binding in signal_bindings.items():
+        if not isinstance(binding, dict):
+            issues.append(f"{contract.code}:invalid_signal_binding:{signal}")
+            continue
+        binding_ids = [
+            str(value).strip()
+            for value in binding.get("evidence_ids") or []
+            if str(value).strip()
+        ]
+        if binding.get("invalid_evidence_ids"):
+            issues.append(f"{contract.code}:signal_binding_invalid_evidence:{signal}")
+        outside_stage = sorted(set(binding_ids) - set(evidence_ids))
+        if outside_stage:
+            issues.append(
+                f"{contract.code}:signal_binding_outside_stage_evidence:{signal}:{','.join(outside_stage)}"
+            )
+        if binding.get("status") == "supported" and not binding_ids:
+            issues.append(f"{contract.code}:supported_signal_without_evidence:{signal}")
+        elif binding.get("status") != "supported" and binding_ids:
+            issues.append(f"{contract.code}:unsupported_signal_with_evidence:{signal}")
+
+    # Every observed signal must point to the exact atomic facts that support
+    # it.  The stage-level evidence_ids list remains a compatibility index, but
+    # it is no longer sufficient for qualification on its own.
+    for signal in sorted(observed):
+        binding = signal_bindings.get(signal)
+        if not isinstance(binding, dict) or binding.get("status") != "supported":
+            issues.append(f"{contract.code}:observed_signal_without_supported_binding:{signal}")
 
     if status == "present":
         if coverage != "complete":
@@ -1520,6 +1667,15 @@ def _stage_check_issues(
         missing_required = sorted(required - observed)
         if missing_required:
             issues.append(f"{contract.code}:present_missing_required_signals:{','.join(missing_required)}")
+        missing_bindings: list[str] = []
+        for signal in sorted(required):
+            binding = signal_bindings.get(signal)
+            if not isinstance(binding, dict) or binding.get("status") != "supported":
+                missing_bindings.append(signal)
+        if missing_bindings:
+            issues.append(
+                f"{contract.code}:present_missing_required_signal_bindings:{','.join(missing_bindings)}"
+            )
         if observed_disqualifiers:
             issues.append(
                 f"{contract.code}:present_with_disqualifiers:{','.join(sorted(observed_disqualifiers))}"
@@ -1542,10 +1698,23 @@ def _stage_check_issues(
             ):
                 issues.append(f"{contract.code}:required_observation_channel_missing")
     elif status == "absent":
-        if coverage != "complete" or evidence_ids or not required.issubset(missing):
+        supported_bindings = sorted(
+            signal
+            for signal, binding in signal_bindings.items()
+            if isinstance(binding, dict)
+            and binding.get("status") == "supported"
+        )
+        if coverage != "complete" or evidence_ids or supported_bindings or not required.issubset(missing):
             issues.append(f"{contract.code}:absence_without_complete_coverage")
     elif status in {"unknown", "conflict"}:
-        if evidence_ids:
+        bound_ids = [
+            value
+            for binding in signal_bindings.values()
+            if isinstance(binding, dict)
+            for value in binding.get("evidence_ids") or []
+            if str(value).strip()
+        ]
+        if evidence_ids or bound_ids:
             issues.append(f"{contract.code}:{status}_with_evidence")
     else:
         issues.append(f"{contract.code}:invalid_status")
@@ -1669,6 +1838,8 @@ def stage1_coverage_audit_issues(side: Any, stage: Any | None = None) -> list[st
         return [f"{code}:coverage_audit_missing_or_old" for code in codes if code]
     if audit.get("source") != "pipeline":
         return [f"{code}:coverage_audit_not_code_owned" for code in codes if code]
+    if audit.get("independence") != STAGE1_COVERAGE_AUDIT_INDEPENDENCE:
+        return [f"{code}:coverage_audit_independence_unverified" for code in codes if code]
     if audit.get("status") != "completed":
         return [f"{code}:coverage_audit_not_completed" for code in codes if code]
     stages = audit.get("stages") if isinstance(audit.get("stages"), dict) else {}
@@ -1744,12 +1915,18 @@ def stage_evidence_diagnostics(side: Any, stage: Any) -> dict[str, Any]:
     acquisition_issues = stage1_acquisition_issues(side, code)
     audit_issues = stage1_coverage_audit_issues(side, code)
     snapshot_issues = stage_evidence_snapshot_issues(side, require_snapshot=True)
-    issues = [*acquisition_issues, *audit_issues]
+    primary_issues = []
+    contract = stage_evidence_contract(code)
+    if contract is not None and isinstance(check, dict):
+        primary_issues = _stage_check_issues(contract, check, _evidence_units_by_id(side))
+    issues = [*primary_issues, *acquisition_issues, *audit_issues]
     reason_codes: list[str] = []
     if primary_status == "missing" or primary_status == "unknown":
         reason_codes.append("primary_unknown")
     elif primary_status == "conflict":
         reason_codes.append("primary_conflict")
+    if primary_issues:
+        reason_codes.append("primary_qualification_gate")
     if acquisition_issues:
         reason_codes.append("acquisition_gate")
     if audit_issues:
@@ -1772,6 +1949,14 @@ def stage_evidence_diagnostics(side: Any, stage: Any) -> dict[str, Any]:
 def qualified_stage_evidence_ids(side: Any, stage: Any, *, allow_inferred: bool = False) -> set[str]:
     """Return IDs qualified by the locked unit facts, never inferred from functions."""
     stage_code = normalize_stage_code(stage) or ""
+    if (
+        isinstance(side, dict)
+        and side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+        and stage_evidence_snapshot_issues(side, require_snapshot=True)
+    ):
+        # This helper is called directly by many consumers.  Do not rely on a
+        # caller having checked stage_evidence_readiness first.
+        return set()
     if not _budget_recovery_allows_qualification(side, stage_code):
         return set()
     check = stage_evidence_check_map(side).get(stage_code)

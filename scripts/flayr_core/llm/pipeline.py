@@ -34,6 +34,7 @@ from ..analysis_model import ANALYSIS_RESULT_CONTRACT, AnalysisResult, schema_sh
 from ..stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
     STAGE1_COVERAGE_AUDIT_VERSION,
+    STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
     build_stage1_acquisition_manifest,
     freeze_stage_evidence,
     normalize_stage_evidence_checks,
@@ -50,6 +51,9 @@ from ..stage_evidence_contracts import (
     stage_evidence_snapshot_issues,
     stage1_coverage_audit_issues,
     stage1_acquisition_issues,
+    stage1_forbidden_field_issues,
+    stage1_pipeline_owned_field_issues,
+    merge_stage_signal_bindings,
     reconcile_stage_evidence_links,
 )
 from ..structure_modules import canonical_module_id
@@ -2396,7 +2400,16 @@ def _merge_video_fact_coverage_audit(
         for item in merged.get("evidence_units") or []
         if isinstance(item, dict) and str(item.get("id") or "").strip()
     }
-    normalized_audit = normalize_stage1_coverage_audit(audit, valid_ids)
+    normalized_audit = normalize_stage1_coverage_audit(
+        {
+            **copy.deepcopy(audit),
+            "source": "pipeline",
+            # The request boundary is code-owned.  Do not trust a model echo
+            # to prove that this was a separate request.
+            "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
+        },
+        valid_ids,
+    )
     primary_checks = stage_evidence_check_map(base)
     audit_stages = normalized_audit.get("stages") if isinstance(normalized_audit.get("stages"), dict) else {}
     merged_checks: list[dict[str, Any]] = []
@@ -2423,6 +2436,10 @@ def _merge_video_fact_coverage_audit(
             for value in audit_item.get("evidence_ids") or []
             if str(value).strip() in valid_ids
         ]
+        merged_signal_bindings = merge_stage_signal_bindings(
+            primary.get("signal_bindings"),
+            audit_item.get("signal_bindings"),
+        )
         observed = list(dict.fromkeys(
             [str(value).strip() for value in primary.get("observed_signals") or [] if str(value).strip()]
             + [str(value).strip() for value in audit_item.get("observed_signals") or [] if str(value).strip()]
@@ -2460,6 +2477,13 @@ def _merge_video_fact_coverage_audit(
         primary["evidence_ids"] = list(dict.fromkeys(primary_ids + audit_ids))
         primary["observed_signals"] = observed
         primary["missing_signals"] = [value for value in dict.fromkeys(missing) if value not in observed]
+        primary["signal_bindings"] = merged_signal_bindings
+        primary["invalid_signal_bindings"] = list(dict.fromkeys(
+            [
+                *[str(value).strip() for value in primary.get("invalid_signal_bindings") or [] if str(value).strip()],
+                *[str(value).strip() for value in audit_item.get("invalid_signal_bindings") or [] if str(value).strip()],
+            ]
+        ))
         if audit_status in {"unknown", "conflict"}:
             primary["reason"] = (
                 str(primary.get("reason") or "").strip()
@@ -2477,6 +2501,8 @@ def _merge_video_fact_coverage_audit(
             "invalid_evidence_ids": list(audit_item.get("invalid_evidence_ids") or []),
             "observed_signals": list(audit_item.get("observed_signals") or []),
             "missing_signals": list(audit_item.get("missing_signals") or []),
+            "signal_bindings": copy.deepcopy(audit_item.get("signal_bindings") or {}),
+            "invalid_signal_bindings": list(audit_item.get("invalid_signal_bindings") or []),
             "primary_status": str(primary_checks.get(code, {}).get("status") or "unknown"),
             "primary_evidence_ids": primary_ids,
             "reason": str(audit_item.get("reason") or "").strip(),
@@ -2496,7 +2522,7 @@ def _merge_video_fact_coverage_audit(
             "version": STAGE1_COVERAGE_AUDIT_VERSION,
             "source": "pipeline",
             "status": normalized_audit.get("status") or "unknown",
-            "independence": normalized_audit.get("independence") or "unknown",
+            "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
             "stages": audit_stages_out,
             "errors": normalized_audit.get("errors") or [],
         },
@@ -2548,7 +2574,7 @@ def _mark_video_fact_coverage_audit_failed(
             "version": STAGE1_COVERAGE_AUDIT_VERSION,
             "source": "pipeline",
             "status": "failed",
-            "independence": "separate_request_same_model",
+            "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
             "stages": failed_stages,
             "errors": [f"{type(error).__name__}: {safe_error}"],
         },
@@ -2569,7 +2595,7 @@ def _mark_video_fact_coverage_audit_failed(
         "trigger_reasons": list(dict.fromkeys([*trigger_reasons, "coverage_audit_failed"])),
         "budget_flag_before_recovery": budget_flag,
         "budget_status": "unresolved" if budget_flag else "not_flagged",
-        "audit_independence": "separate_request_same_model",
+        "audit_independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
         "failure_reason": safe_error,
     }
     return facts
@@ -2640,6 +2666,16 @@ def _maybe_recover_video_facts(
         recovery = parse_json_text(recovery_text)
         if not isinstance(recovery, dict):
             raise ValueError("Stage1 coverage audit 必须返回 JSON object。")
+        forbidden = stage1_forbidden_field_issues(recovery)
+        pipeline_owned = stage1_pipeline_owned_field_issues(recovery)
+        if forbidden:
+            raise ValueError(
+                "Stage1 coverage audit returned downstream fields: " + ", ".join(forbidden)
+            )
+        if pipeline_owned:
+            raise ValueError(
+                "Stage1 coverage audit returned pipeline-owned fields: " + ", ".join(pipeline_owned)
+            )
         if recovery.get("version") != STAGE1_COVERAGE_AUDIT_VERSION:
             raise ValueError("Stage1 coverage audit 缺少匹配的 audit version。")
         returned_stages = {
@@ -2687,7 +2723,7 @@ def _maybe_recover_video_facts(
         "budget_status": "resolved_for_stage_qualification" if budget_flag and not unresolved_stages else (
             "unresolved" if budget_flag else "not_flagged"
         ),
-        "audit_independence": str(recovery.get("independence") or "unknown").strip().lower(),
+        "audit_independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
     }
     final_issues = stage_evidence_contract_issues(merged, require_version=True)
     if final_issues:

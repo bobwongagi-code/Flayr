@@ -182,7 +182,19 @@ def render_global_cause_note(value: Any) -> str:
 def stage_skipped(stage: dict[str, Any]) -> tuple[bool, str]:
     """判断阶段是否双方都未设计（如 S5 都无信任背书），如是则折叠不展开分析。"""
     gate = stage.get("stage_evidence_gate") if isinstance(stage, dict) else None
-    if isinstance(gate, dict) and gate.get("status") in {"blocked", "not_applicable", "not_comparable"}:
+    if isinstance(gate, dict) and gate.get("status") in {
+        "blocked",
+        "not_applicable",
+        "not_comparable",
+        "legacy",
+    }:
+        if gate.get("status") == "legacy":
+            reason = str(
+                stage.get("analysis_reason")
+                or gate.get("reason")
+                or "历史阶段结果不能作为当前 grounded 结论。"
+            )
+            return True, f"历史结果仅供审计，不输出差距判断。{reason}"
         return True, str(
             stage.get("analysis_reason")
             or gate.get("reason")
@@ -333,7 +345,7 @@ def stage_report_severity(stage: dict[str, Any]) -> Any:
     closed evidence state for both sides.
     """
     gate = stage.get("stage_evidence_gate") if isinstance(stage, dict) else None
-    if isinstance(gate, dict) and gate.get("status") == "blocked":
+    if isinstance(gate, dict) and gate.get("status") in {"blocked", "legacy"}:
         return None
     return stage.get("severity") if isinstance(stage, dict) else None
 

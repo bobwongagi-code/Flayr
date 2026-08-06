@@ -140,12 +140,12 @@
         "variant_focus": "complete | unknown",
         "attention_scan": "complete | unknown"
       },
-      "stage_evidence_contract_version": 2,
+      "stage_evidence_contract_version": 3,
       "stage1_coverage_audit": {
         "version": 1,
         "source": "pipeline",
         "status": "completed | partial | failed | unknown。代码保存独立覆盖扫描的运行状态。",
-        "independence": "separate_request_same_model | separate_model | unknown",
+        "independence": "separate_request_same_model",
         "stages": "S1-S6 各自的 found | clear | conflict | unknown、coverage、候选 evidence_ids 和观察信号；由 pipeline 归一化，模型不能回写最终字段。",
         "errors": ["覆盖审计的机器可读错误"]
       },
@@ -162,6 +162,15 @@
           "invalid_evidence_ids": ["代码保留的非法/未知引用，仅用于审计；不能参与分析"],
           "observed_signals": ["来自该阶段统一合同的信号名"],
           "missing_signals": ["来自该阶段统一合同的缺失信号名"],
+          "signal_bindings": {
+            "signal_id": {
+              "status": "supported | missing | unknown | conflict",
+              "evidence_ids": ["必须属于本阶段 evidence_ids 的真实 ID"],
+              "invalid_evidence_ids": ["代码保留的非法引用"],
+              "reason": "该信号与原子事实的绑定说明"
+            }
+          },
+          "invalid_signal_bindings": ["代码保留的非法信号名"],
           "observed_disqualifiers": ["来自该阶段统一合同的直接排除条件"],
           "invalid_observed_signals": ["代码保留的非法观察信号，仅用于审计"],
           "invalid_missing_signals": ["代码保留的非法缺失信号，仅用于审计"],
@@ -251,12 +260,12 @@
         "variant_focus": "complete | unknown",
         "attention_scan": "complete | unknown"
       },
-      "stage_evidence_contract_version": 2,
+      "stage_evidence_contract_version": 3,
       "stage1_coverage_audit": {
         "version": 1,
         "source": "pipeline",
         "status": "completed | partial | failed | unknown。代码保存独立覆盖扫描的运行状态。",
-        "independence": "separate_request_same_model | separate_model | unknown",
+        "independence": "separate_request_same_model",
         "stages": "S1-S6 各自的 found | clear | conflict | unknown、coverage、候选 evidence_ids 和观察信号；由 pipeline 归一化，模型不能回写最终字段。",
         "errors": ["覆盖审计的机器可读错误"]
       },
@@ -273,6 +282,15 @@
           "invalid_evidence_ids": ["代码保留的非法/未知引用，仅用于审计；不能参与分析"],
           "observed_signals": ["来自该阶段统一合同的信号名"],
           "missing_signals": ["来自该阶段统一合同的缺失信号名"],
+          "signal_bindings": {
+            "signal_id": {
+              "status": "supported | missing | unknown | conflict",
+              "evidence_ids": ["必须属于本阶段 evidence_ids 的真实 ID"],
+              "invalid_evidence_ids": ["代码保留的非法引用"],
+              "reason": "该信号与原子事实的绑定说明"
+            }
+          },
+          "invalid_signal_bindings": ["代码保留的非法信号名"],
           "observed_disqualifiers": ["来自该阶段统一合同的直接排除条件"],
           "invalid_observed_signals": ["代码保留的非法观察信号，仅用于审计"],
           "invalid_missing_signals": ["代码保留的非法缺失信号，仅用于审计"],
@@ -391,7 +409,7 @@
             "primary_status": "present | absent | unknown | conflict | missing | legacy",
             "acquisition_status": "complete | partial | failed | unknown | legacy",
             "coverage_audit_status": "completed | partial | failed | unknown | legacy",
-            "reason_codes": ["ready | primary_unknown | primary_conflict | acquisition_gate | coverage_audit_gate | snapshot_invalid | legacy_contract | side_missing"],
+            "reason_codes": ["ready | primary_unknown | primary_conflict | primary_qualification_gate | acquisition_gate | coverage_audit_gate | snapshot_invalid | legacy_contract | side_missing"],
             "issues": []
           }
         },
@@ -404,7 +422,7 @@
             "primary_status": "present | absent | unknown | conflict | missing | legacy",
             "acquisition_status": "complete | partial | failed | unknown | legacy",
             "coverage_audit_status": "completed | partial | failed | unknown | legacy",
-            "reason_codes": ["ready | primary_unknown | primary_conflict | acquisition_gate | coverage_audit_gate | snapshot_invalid | legacy_contract | side_missing"],
+            "reason_codes": ["ready | primary_unknown | primary_conflict | primary_qualification_gate | acquisition_gate | coverage_audit_gate | snapshot_invalid | legacy_contract | side_missing"],
             "issues": []
           }
         },

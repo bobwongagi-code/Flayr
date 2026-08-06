@@ -547,7 +547,9 @@ def build_video_fact_payload(
             "status=absent 只有在 coverage=complete、没有对应 evidence_ids 且明确列出 missing_signals 时才允许。"
             "coverage=partial/unknown、事实冲突、时间范围不足或非替代渠道缺失时写 unknown/conflict，绝不能写 absent。"
             "stage_evidence_checks 里的 evidence_strength 只作模型自检摘要，不能覆盖 evidence_unit 的权威强度；"
-            "同一个 evidence unit 可以被多个阶段引用，但必须分别填写 observed_signals；S3/S4 的 visual_required 不得被口播替代。"
+            "同一个 evidence unit 可以被多个阶段引用，但必须分别填写 observed_signals 和 signal_bindings；"
+            "signal_bindings 必须逐个把每个 observed signal 绑定到本阶段 evidence_ids 中真实存在的证据，"
+            "required signal 没有逐项绑定时不得写 present；S3/S4 的 visual_required 不得被口播替代。"
             "Stage1 输出严格禁止 severity、model_severity、gap、comparison、commercial_priority、recommendations、improvements、stage_analysis 和 stage_evidence_links；"
             "stage1_acquisition、evidence_set_* 和 stage1_recovery 是代码拥有的采集/冻结元数据，模型不得输出或覆盖；"
             "这些字段属于后续 Judgment/Resolution/Report，出现时必须拒绝，不得由代码静默丢弃。\n"
@@ -683,6 +685,15 @@ def build_video_fact_payload(
                             "invalid_evidence_ids": [],
                             "observed_signals": ["该阶段合同中实际观察到的信号"],
                             "missing_signals": [],
+                            "signal_bindings": {
+                                "required_signal_id": {
+                                    "status": "supported|missing|unknown|conflict",
+                                    "evidence_ids": [f"{code}1"],
+                                    "invalid_evidence_ids": [],
+                                    "reason": "该信号由哪些原子事实支持。"
+                                }
+                            },
+                            "invalid_signal_bindings": [],
                             "observed_disqualifiers": [],
                             "invalid_observed_signals": [],
                             "invalid_missing_signals": [],
@@ -859,6 +870,8 @@ def build_video_fact_recovery_payload(
                             "evidence_ids": ["已有或新增的真实 ID"],
                             "observed_signals": [],
                             "missing_signals": [],
+                            "signal_bindings": {},
+                            "invalid_signal_bindings": [],
                             "observed_disqualifiers": [],
                             "invalid_evidence_ids": [],
                             "invalid_observed_signals": [],
@@ -920,6 +933,8 @@ def build_video_fact_coverage_audit_payload(
             "如果素材、时间区间或响应预算不足，写 coverage=partial/unknown 和 status=unknown。"
             "status=found 表示本次审计直接发现至少一个候选事实；status=clear 表示完整搜索后未发现该阶段 required signals；"
             "两者都不能直接替代代码生成的 stage qualification。\n"
+            "每个 observed signal 都必须在 signal_bindings 中逐项绑定到候选 evidence_ids；不能用阶段总 evidence_ids 代替逐信号绑定。"
+            "independence/source 等运行 provenance 由管线写入，不要把模型自报值当作证明。\n"
             "## 输出 JSON\n"
             + json.dumps(
                 {
@@ -947,6 +962,15 @@ def build_video_fact_coverage_audit_payload(
                             "evidence_ids": ["本次审计新发现的候选事实 ID"],
                             "observed_signals": ["required/optional signal id"],
                             "missing_signals": [],
+                            "signal_bindings": {
+                                "required_signal_id": {
+                                    "status": "supported|missing|unknown|conflict",
+                                    "evidence_ids": ["本次审计新发现的候选事实 ID"],
+                                    "invalid_evidence_ids": [],
+                                    "reason": "只写信号与候选事实的绑定。"
+                                }
+                            },
+                            "invalid_signal_bindings": [],
                             "reason": "只写覆盖和事实观察，不写 severity",
                         }
                     },

@@ -88,10 +88,31 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "observed_signals": list(stage_evidence_contract(stage).required_signals)
                 if status == "present" else [],
                 "missing_signals": [],
+                "signal_bindings": {
+                    signal: {
+                        "status": "supported",
+                        "evidence_ids": ["C1"],
+                        "invalid_evidence_ids": [],
+                        "reason": "fixture binding",
+                    }
+                    for signal in stage_evidence_contract(stage).required_signals
+                } if status == "present" else {},
                 "evidence_strength": strength,
             }
             for stage in stage_codes()
         ]
+
+    @staticmethod
+    def _signal_bindings(stage: str, evidence_id: str, status: str = "supported") -> dict[str, object]:
+        return {
+            signal: {
+                "status": status,
+                "evidence_ids": [evidence_id] if status == "supported" else [],
+                "invalid_evidence_ids": [],
+                "reason": "fixture binding",
+            }
+            for signal in stage_evidence_contract(stage).required_signals
+        }
 
     @staticmethod
     def _coverage_audit(checks: list[dict[str, object]]) -> dict[str, object]:
@@ -109,12 +130,13 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "evidence_ids": list(check.get("evidence_ids") or []),
                 "observed_signals": list(check.get("observed_signals") or []),
                 "missing_signals": list(check.get("missing_signals") or []),
+                "signal_bindings": dict(check.get("signal_bindings") or {}),
             }
         return {
             "version": STAGE1_COVERAGE_AUDIT_VERSION,
             "source": "pipeline",
             "status": "completed",
-            "independence": "test_fixture",
+            "independence": "separate_request_same_model",
             "stages": stages,
             "errors": [],
         }
@@ -141,6 +163,107 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertIn("S1:present_without_explicit_strength", issues)
         self.assertIn("S6:present_without_explicit_strength", issues)
 
+    def test_present_requires_each_required_signal_to_bind_to_stage_evidence(self) -> None:
+        side = self._active_side("C", "present")
+        s4 = next(item for item in side["stage_evidence_checks"] if item["stage"] == "S4")
+        s4.update(
+            {
+                "status": "present",
+                "coverage": "complete",
+                "evidence_ids": ["C4"],
+                "observed_signals": list(stage_evidence_contract("S4").required_signals),
+                "missing_signals": [],
+                "signal_bindings": self._signal_bindings("S4", "C4"),
+            }
+        )
+        required_signal = stage_evidence_contract("S4").required_signals[0]
+        s4["signal_bindings"].pop(required_signal)
+        freeze_stage_evidence(side)
+        issues = stage_evidence_contract_issues(side)
+        self.assertIn("S4:present_missing_required_signal_bindings:" + required_signal, issues)
+        self.assertEqual(stage_evidence_readiness(side, "S4"), "unknown")
+        diagnostics = stage_evidence_diagnostics(side, "S4")
+        self.assertIn("primary_qualification_gate", diagnostics["reason_codes"])
+
+    def test_signal_binding_must_stay_inside_the_stage_evidence_list(self) -> None:
+        checks = self._checks("present", "direct")
+        checks[3]["evidence_ids"] = ["C4"]
+        checks[3]["signal_bindings"] = self._signal_bindings("S4", "C5")
+        side = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage_evidence_checks": checks,
+            "evidence_units": [
+                {"id": "C4", "evidence_strength": "direct", "visual_fact": "阶段事实"},
+                {"id": "C5", "evidence_strength": "direct", "visual_fact": "其他阶段事实"},
+            ],
+        }
+        issues = stage_evidence_contract_issues(side)
+        self.assertTrue(
+            any(issue.startswith("S4:signal_binding_outside_stage_evidence:") for issue in issues)
+        )
+
+    def test_absent_rejects_supported_binding_without_evidence(self) -> None:
+        checks = self._checks("unknown")
+        required_signal = stage_evidence_contract("S4").required_signals[0]
+        checks[3] = {
+            "stage": "S4",
+            "status": "absent",
+            "coverage": "complete",
+            "evidence_ids": [],
+            "observed_signals": [],
+            "missing_signals": list(stage_evidence_contract("S4").required_signals),
+            "signal_bindings": {
+                required_signal: {
+                    "status": "supported",
+                    "evidence_ids": [],
+                    "invalid_evidence_ids": [],
+                    "reason": "无证据却声明支持",
+                }
+            },
+        }
+        side = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage_evidence_checks": checks,
+            "evidence_units": [],
+        }
+        issues = stage_evidence_contract_issues(side)
+        self.assertIn(
+            f"S4:supported_signal_without_evidence:{required_signal}",
+            issues,
+        )
+        self.assertIn("S4:absence_without_complete_coverage", issues)
+
+    def test_primary_and_audit_signal_disagreement_is_explicit_conflict(self) -> None:
+        checks = self._checks("present", "direct")
+        s4 = checks[3]
+        signal = stage_evidence_contract("S4").required_signals[0]
+        s4["signal_bindings"][signal] = {
+            "status": "supported",
+            "evidence_ids": ["C1"],
+            "invalid_evidence_ids": [],
+            "reason": "primary",
+        }
+        base = self._active_side("C", "unknown")
+        base["stage_evidence_checks"] = checks
+        audit = {
+            "version": STAGE1_COVERAGE_AUDIT_VERSION,
+            "status": "completed",
+            "independence": "separate_request_same_model",
+            "stages": {
+                "S1": {
+                    "status": "found",
+                    "coverage": "complete",
+                    "evidence_ids": ["C1"],
+                    "observed_signals": list(stage_evidence_contract("S1").required_signals),
+                    "signal_bindings": self._signal_bindings("S1", "C1", "missing"),
+                }
+            },
+        }
+        merged = _merge_video_fact_coverage_audit("creator", base, audit, self._analysis())
+        s1 = next(item for item in merged["stage_evidence_checks"] if item["stage"] == "S1")
+        signal = stage_evidence_contract("S1").required_signals[0]
+        self.assertEqual(s1["signal_bindings"][signal]["status"], "conflict")
+
     def test_present_qualification_uses_unit_strength_and_required_signals(self) -> None:
         checks = self._checks("present", "inferred")
         side = {
@@ -150,6 +273,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "stage1_acquisition": self._active_side("C")["stage1_acquisition"],
         }
         side["stage1_coverage_audit"] = self._coverage_audit(checks)
+        freeze_stage_evidence(side)
         self.assertEqual({"C1"}, qualified_stage_evidence_ids(side, "S1"))
         side["evidence_units"][0]["evidence_strength"] = "inferred"
         self.assertEqual(set(), qualified_stage_evidence_ids(side, "S1"))
@@ -215,6 +339,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_ids": ["C1"],
             "observed_signals": list(stage_evidence_contract("S1").required_signals),
             "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S1", "C1"),
         }
         side["stage1_coverage_audit"]["stages"].pop("S4")
         freeze_stage_evidence(side)
@@ -258,6 +383,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_ids": ["C1"],
             "observed_signals": list(stage_evidence_contract("S1").required_signals),
             "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S1", "C1"),
         }
         freeze_stage_evidence(result["video_understanding"]["creator"])
         materialize_stage_evidence_gates(result)
@@ -335,6 +461,57 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(result["stage1_recovery"]["status"], "coverage_audited_with_unresolved")
         self.assertEqual(result["stage1_coverage_audit"]["status"], "partial")
 
+    def test_coverage_audit_rejects_nested_downstream_judgment_fields(self) -> None:
+        facts = self._active_side("C")
+        args = type(
+            "Args",
+            (),
+            {
+                "llm_dry_run": False,
+                "llm_model": "test-model",
+                "llm_api_url": "https://example.invalid/api",
+                "_resource_budget": None,
+            },
+        )()
+        audit_response = {
+            "version": STAGE1_COVERAGE_AUDIT_VERSION,
+            "source": "model",
+            "status": "partial",
+            "independence": "separate_request_same_model",
+            "candidate_evidence_units": [],
+            "stages": {
+                stage: {
+                    "status": "unknown",
+                    "coverage": "unknown",
+                    "evidence_ids": [],
+                    "observed_signals": [],
+                    "missing_signals": [],
+                    "reason": {"severity": "large"} if stage == "S4" else "未确认",
+                }
+                for stage in stage_codes()
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch(
+                "flayr_core.llm.pipeline.build_video_fact_coverage_audit_payload",
+                return_value={"messages": []},
+            ), patch(
+                "flayr_core.llm.pipeline.fetch_json_completion",
+                return_value=json.dumps(audit_response),
+            ):
+                result = _maybe_recover_video_facts(
+                    args,
+                    self._analysis(),
+                    Path(tmp_dir),
+                    "secret",
+                    "creator",
+                    facts,
+                    [],
+                )
+        self.assertEqual(result["stage1_coverage_audit"]["status"], "failed")
+        self.assertIn("returned downstream fields", result["stage1_recovery"]["failure_reason"])
+        self.assertIn("stages.S4.reason.severity", result["stage1_recovery"]["failure_reason"])
+
     def test_alignment_uses_final_readiness_after_coverage_audit_failure(self) -> None:
         sides = {
             role: _mark_video_fact_coverage_audit_failed(
@@ -382,6 +559,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                     "evidence_ids": ["C_A1"],
                     "observed_signals": list(contract.required_signals),
                     "missing_signals": [],
+                    "signal_bindings": self._signal_bindings("S4", "C_A1"),
                 }
             },
         }
@@ -467,6 +645,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_ids": ["C4"],
             "observed_signals": list(stage_evidence_contract("S4").required_signals),
             "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S4", "C4"),
         }
         base["stage_evidence_checks"] = checks
         base["stage1_coverage_audit"] = self._coverage_audit(checks)
@@ -651,6 +830,7 @@ class StageEvidenceContractTests(unittest.TestCase):
         side["attention_scan_audit"] = {"evidence_ids": ["C6", "C_UNQUALIFIED"]}
         side["content_summary"] = "不应绕过资格闸门进入分析"
         side["structure_event_checks"] = [{"evidence_ids": ["C_UNQUALIFIED"]}]
+        freeze_stage_evidence(side)
         view = stage_analysis_evidence_view({"creator": side, "benchmark": side})
         self.assertEqual({"C6"}, {unit["id"] for unit in view["creator"]["evidence_units"]})
         self.assertNotIn("attention_scan_audit", view["creator"])
@@ -678,6 +858,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_ids": ["C1"],
             "observed_signals": list(stage_evidence_contract("S1").required_signals),
             "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S1", "C1"),
         }
         checks[5] = {
             "stage": "S6",
@@ -686,6 +867,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_ids": ["C6"],
             "observed_signals": list(stage_evidence_contract("S6").required_signals),
             "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S6", "C6"),
         }
         side["stage_evidence_checks"] = checks
         side["evidence_units"] = [
@@ -702,6 +884,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "visual_fact": "S6 画面",
             },
         ]
+        freeze_stage_evidence(side)
         view = stage_analysis_evidence_view({"creator": side})["creator"]
         self.assertEqual([unit["id"] for unit in view["stage_evidence_units"]["S1"]], ["C1"])
         self.assertEqual([unit["id"] for unit in view["stage_evidence_units"]["S6"]], ["C6"])
@@ -757,6 +940,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                     "evidence_ids": ["C1"],
                     "observed_signals": list(stage_evidence_contract("S1").required_signals),
                     "missing_signals": [],
+                    "signal_bindings": self._signal_bindings("S1", "C1"),
                 }
             ],
         }
@@ -775,6 +959,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "visual_fact": "不应进入比较输入",
             "evidence_strength": "direct",
         })
+        freeze_stage_evidence(side)
         compact = _compact_comparison_facts(side)
         self.assertEqual([unit["id"] for unit in compact["evidence_units"]], ["C6"])
         self.assertEqual([unit["id"] for unit in compact["stage_evidence_units"]["S6"]], ["C6"])
@@ -788,6 +973,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_ids": ["C4"],
             "observed_signals": list(stage_evidence_contract("S4").required_signals),
             "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S4", "C4"),
         }
         side = {
             "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
@@ -915,6 +1101,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_ids": ["C1"],
             "observed_signals": list(stage_evidence_contract("S3").required_signals),
             "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S3", "C1"),
         }
         side = {
             "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
@@ -1004,6 +1191,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             checks = self._checks("present", "direct")
             for check in checks:
                 check["evidence_ids"] = [unit_id]
+                check["signal_bindings"] = self._signal_bindings(check["stage"], unit_id)
             sides["creator" if role_code == "C" else "benchmark"] = {
                 "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
                 "stage1_acquisition": self._active_side(role_code)["stage1_acquisition"],
@@ -1147,6 +1335,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                     "evidence_ids": ["C2"],
                     "observed_signals": list(stage_evidence_contract("S1").required_signals),
                     "missing_signals": [],
+                    "signal_bindings": self._signal_bindings("S1", "C2"),
                 }
             ],
         }
@@ -1177,6 +1366,15 @@ class StageEvidenceContractTests(unittest.TestCase):
                         "evidence_ids": [f"{role_code}6"],
                         "observed_signals": list(stage_evidence_contract("S6").required_signals),
                         "missing_signals": [],
+                        "signal_bindings": {
+                            signal: {
+                                "status": "supported",
+                                "evidence_ids": [f"{role_code}6"],
+                                "invalid_evidence_ids": [],
+                                "reason": "fixture binding",
+                            }
+                            for signal in stage_evidence_contract("S6").required_signals
+                        },
                     }
                 )
             else:
@@ -1190,7 +1388,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                         "missing_signals": [],
                     }
                 )
-        return {
+        side = {
             "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
             "stage1_acquisition": {
                 "version": STAGE1_ACQUISITION_VERSION,
@@ -1217,7 +1415,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "version": STAGE1_COVERAGE_AUDIT_VERSION,
                 "source": "pipeline",
                 "status": "completed",
-                "independence": "test_fixture",
+                "independence": "separate_request_same_model",
                 "stages": {
                     stage: {
                         "status": "found",
@@ -1225,6 +1423,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                         "evidence_ids": [f"{role_code}{index}"],
                         "observed_signals": list(stage_evidence_contract(stage).required_signals),
                         "missing_signals": [],
+                        "signal_bindings": StageEvidenceContractTests._signal_bindings(stage, f"{role_code}{index}"),
                     }
                     for index, stage in enumerate(stage_codes(), start=1)
                 },
@@ -1240,6 +1439,8 @@ class StageEvidenceContractTests(unittest.TestCase):
                 for index, stage in enumerate(stage_codes(), start=1)
             ],
         }
+        freeze_stage_evidence(side)
+        return side
 
     def test_active_s6_ceiling_requires_qualified_stage1_evidence(self) -> None:
         stage = {
@@ -1335,6 +1536,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_ids": ["C5"],
             "observed_signals": list(stage_evidence_contract("S5").required_signals),
             "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S5", "C5"),
             "evidence_strength": "direct",
         }
         side["stage_evidence_checks"] = checks
@@ -1400,6 +1602,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_ids": ["C5"],
             "observed_signals": list(stage_evidence_contract("S5").required_signals),
             "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S5", "C5"),
             "evidence_strength": "direct",
         }
         side["stage_evidence_checks"] = checks
@@ -1699,6 +1902,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_ids": ["C1"],
             "observed_signals": list(stage_evidence_contract("S1").required_signals),
             "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S1", "C1"),
             "evidence_strength": "direct",
         }
         freeze_stage_evidence(side)
@@ -1725,6 +1929,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_ids": ["C1"],
             "observed_signals": list(stage_evidence_contract("S1").required_signals),
             "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S1", "C1"),
             "evidence_strength": "direct",
         }
         freeze_stage_evidence(side)
@@ -1766,6 +1971,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_ids": ["C1"],
             "observed_signals": list(stage_evidence_contract("S1").required_signals),
             "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S1", "C1"),
         }
         side["stage1_acquisition"]["channels"]["voiceover"] = {
             "status": "failed",
@@ -1784,6 +1990,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_ids": ["C6"],
             "observed_signals": list(stage_evidence_contract("S6").required_signals),
             "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S6", "C6"),
             "evidence_strength": "direct",
         }
         side["stage1_acquisition"]["channels"]["visual"] = {
@@ -1806,6 +2013,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_ids": [],
             "observed_signals": [],
             "missing_signals": list(stage_evidence_contract("S4").required_signals),
+            "signal_bindings": self._signal_bindings("S4", "", "missing"),
         }
         side["stage1_acquisition"]["channels"]["visual"]["coverage"] = "sampled"
         side["stage1_acquisition"]["visual_input_timestamps"] = []
@@ -1822,6 +2030,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_ids": ["C4"],
             "observed_signals": list(stage_evidence_contract("S4").required_signals),
             "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S4", "C4"),
         }
         side["evidence_units"][3]["visual_fact"] = "效果变化直接可见"
         side["stage1_acquisition"]["channels"]["visual"]["coverage"] = "sampled"
@@ -1842,6 +2051,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_ids": ["C4"],
             "observed_signals": list(stage_evidence_contract("S4").required_signals),
             "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S4", "C4"),
         }
         side["evidence_units"][3]["time_range"] = "3.4s - 3.8s"
         side["stage1_acquisition"]["channels"]["visual"]["coverage"] = "sampled"
@@ -2109,6 +2319,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                     "evidence_ids": [f"{role_code}{index}"],
                     "observed_signals": list(stage_evidence_contract(stage).required_signals),
                     "missing_signals": [],
+                    "signal_bindings": self._signal_bindings(stage, f"{role_code}{index}"),
                 }
                 for index, stage in enumerate(stage_codes(), start=1)
             ]

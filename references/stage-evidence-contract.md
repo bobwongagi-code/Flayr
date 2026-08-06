@@ -88,9 +88,12 @@ audit clear/unknown/partial                                -> 不把未知转换
 - `coverage`：`complete / partial / unknown`；
 - `evidence_ids`：只能引用本侧真实原子事实；
 - `observed_signals`、`missing_signals`、`observed_disqualifiers`；
+- `signal_bindings`：每个已观察信号分别绑定到本阶段的原子 `evidence_ids`；阶段总证据列表不能替代逐信号绑定；
 - `reason` 和必要的 `evidence_strength` 自检摘要。
 
-`present` 必须有完整覆盖、全部 required signals、真实证据 ID、`direct/explicit` 原子强度和所需渠道。`absent` 必须有完整覆盖，并明确缺少 required signals。`partial`、`unknown`、冲突、预算超限或渠道缺失只能进入 `unknown/conflict`，不能降格成 `absent`。
+`present` 必须有完整覆盖、全部 required signals、每个 required signal 的有效 `signal_bindings`、真实证据 ID、`direct/explicit` 原子强度和所需渠道。`absent` 必须有完整覆盖，并明确缺少 required signals，且不能存在支持性 signal binding。`partial`、`unknown`、冲突、预算超限或渠道缺失只能进入 `unknown/conflict`，不能降格成 `absent`。
+
+`signal_bindings` 是 S1-S6 共用的泛化约束。例如 S4 不能因为一条证据同时出现在阶段列表中，就默认它同时证明“结果可见”和“结果由本品操作造成”；这两个信号必须分别绑定。一个原子事实可以支持多个信号，但每次绑定都必须留下可追溯关系。
 
 Stage1 完成后由代码对全部规范化观察字段、`stage1_acquisition`、`stage1_coverage_audit`、`evidence_units` 和 `stage_evidence_checks` 生成 `evidence_set_sha256`，并标记 `evidence_set_status=frozen`。从这一刻起，Stage2、Repair、Phase C 和 Resolver 都只能读取它；任意事实内容、时间、归属、采集能力、覆盖审计、门控观察或阶段资格变化都会使运行失败。阶段链接是可变的判断投影，不进入事实哈希。
 
@@ -104,11 +107,11 @@ Stage1 完成后由代码对全部规范化观察字段、`stage1_acquisition`�
 | `blocked` | 任一侧 `unknown`、`conflict`、预算未闭合、采集不完整、采集通道不可用或冻结摘要无效 | 阶段标记 `evidence_blocked`；模型 severity 只保留在审计字段，不作为有证据结论展示 |
 | `not_applicable` | 比较合同确认双方均未涉及该功能 | 不生成阶段差距 |
 | `not_comparable` | 商品关系或共同任务不允许比较 | 不生成阶段差距 |
-| `legacy` | 至少一侧没有 active Stage1 合同 | 可以读取历史产物，但不能与新合同的 grounded 结果混为同一统计口径 |
+| `legacy` | 至少一侧没有 active Stage1 合同 | 仅保留历史审计读取；报告不显示为当前阶段结论，不能与新合同的 grounded 结果混为同一统计口径 |
 
 模型的 `model_severity` 可以为了审计留存；它不等于 `grounded` 的最终结论。报告层遇到 `blocked` 显示“未分析/待核验”，不能把缺证据的模型档位当成真实 GT。
 
-`stage_evidence_gate.creator/benchmark.diagnostics` 是代码生成的解释字段。它只回答“为什么这一侧当前可用或被阻断”，不重新判断视频事实；`primary_unknown` 表示主抽取没有形成确定资格，`acquisition_gate` 表示输入能力、覆盖或边界不闭合，`coverage_audit_gate` 表示独立覆盖审计不可用或与主投影不一致，`snapshot_invalid` 表示冻结摘要失效。报告和历史分析应按这些稳定代码统计，不应从自由文本 `reason` 反推根因。
+`stage_evidence_gate.creator/benchmark.diagnostics` 是代码生成的解释字段。它只回答“为什么这一侧当前可用或被阻断”，不重新判断视频事实；`primary_unknown` 表示主抽取没有形成确定资格，`primary_qualification_gate` 表示阶段信号没有逐项绑定到本阶段原子证据或其他资格投影不成立，`acquisition_gate` 表示输入能力、覆盖或边界不闭合，`coverage_audit_gate` 表示独立覆盖审计不可用或与主投影不一致，`snapshot_invalid` 表示冻结摘要失效。报告和历史分析应按这些稳定代码统计，不应从自由文本 `reason` 反推根因。
 
 阶段证据引用使用独立的 `stage_evidence_links[]`：
 
