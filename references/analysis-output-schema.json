@@ -112,6 +112,26 @@
         "variant_focus": "complete | unknown",
         "attention_scan": "complete | unknown"
       },
+      "stage_evidence_contract_version": 1,
+      "stage_evidence_checks": [
+        {
+          "stage": "S1 | S2 | S3 | S4 | S5 | S6",
+          "status": "present | absent | unknown | conflict。unknown/absence 不能互换。",
+          "coverage": "complete | partial | unknown。只有 complete 才允许 absent。",
+          "evidence_ids": ["只能引用本侧 evidence_units 的真实 ID"],
+          "invalid_evidence_ids": ["代码保留的非法/未知引用，仅用于审计；不能参与分析"],
+          "observed_signals": ["来自该阶段统一合同的信号名"],
+          "missing_signals": ["来自该阶段统一合同的缺失信号名"],
+          "observed_disqualifiers": ["来自该阶段统一合同的直接排除条件"],
+          "invalid_observed_signals": ["代码保留的非法观察信号，仅用于审计"],
+          "invalid_missing_signals": ["代码保留的非法缺失信号，仅用于审计"],
+          "invalid_observed_disqualifiers": ["代码保留的非法排除条件，仅用于审计"],
+          "evidence_strength": "direct | explicit | inferred | absent。present 只能用 direct/explicit。",
+          "reason": "只解释阶段证据资格，不写双方比较或 severity。"
+        }
+      ],
+      "evidence_budget_exceeded": "true | false。若模型无法在预算内保留全部决策关键事件，必须显式为 true，代码不得静默截断。",
+      "stage1_recovery": "Stage1 预锁定一次定向补观察的状态、目标阶段和候选事实数量；失败不得伪装成完成。",
       "attention_scan_audit": {
         "recording_equipment_visible": "true | false | null",
         "foreground_non_task_object_visible": "true | false | null",
@@ -163,6 +183,26 @@
         "variant_focus": "complete | unknown",
         "attention_scan": "complete | unknown"
       },
+      "stage_evidence_contract_version": 1,
+      "stage_evidence_checks": [
+        {
+          "stage": "S1 | S2 | S3 | S4 | S5 | S6",
+          "status": "present | absent | unknown | conflict。unknown/absence 不能互换。",
+          "coverage": "complete | partial | unknown。只有 complete 才允许 absent。",
+          "evidence_ids": ["只能引用本侧 evidence_units 的真实 ID"],
+          "invalid_evidence_ids": ["代码保留的非法/未知引用，仅用于审计；不能参与分析"],
+          "observed_signals": ["来自该阶段统一合同的信号名"],
+          "missing_signals": ["来自该阶段统一合同的缺失信号名"],
+          "observed_disqualifiers": ["来自该阶段统一合同的直接排除条件"],
+          "invalid_observed_signals": ["代码保留的非法观察信号，仅用于审计"],
+          "invalid_missing_signals": ["代码保留的非法缺失信号，仅用于审计"],
+          "invalid_observed_disqualifiers": ["代码保留的非法排除条件，仅用于审计"],
+          "evidence_strength": "direct | explicit | inferred | absent。present 只能用 direct/explicit。",
+          "reason": "只解释阶段证据资格，不写双方比较或 severity。"
+        }
+      ],
+      "evidence_budget_exceeded": "true | false。若模型无法在预算内保留全部决策关键事件，必须显式为 true，代码不得静默截断。",
+      "stage1_recovery": "Stage1 预锁定一次定向补观察的状态、目标阶段和候选事实数量；失败不得伪装成完成。",
       "attention_scan_audit": {
         "recording_equipment_visible": "true | false | null",
         "foreground_non_task_object_visible": "true | false | null",

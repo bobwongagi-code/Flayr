@@ -31,6 +31,10 @@ from ..evidence_states import (
     s2_hard_fact_snapshot,
 )
 from ..llm.parse import S5_SOURCE_STATUSES, is_effective_voiceover, normalize_s5_source_status
+from ..stage_evidence_contracts import (
+    STAGE_EVIDENCE_CONTRACT_VERSION,
+    qualified_stage_evidence_ids,
+)
 from .utils import (
     adjacent_review_range,
     ensure_evidence_unit,
@@ -44,6 +48,14 @@ from .utils import (
 
 
 # region bind ----------------------------------------------------------------
+
+def _stage_contract_allowed_ids(result: dict[str, Any], role: str, stage_code: str) -> set[str] | None:
+    """Return active Stage1-qualified IDs; ``None`` keeps legacy compatibility."""
+    understanding = result.get("video_understanding") if isinstance(result, dict) else None
+    side = understanding.get(role) if isinstance(understanding, dict) else None
+    if not isinstance(side, dict) or side.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+        return None
+    return qualified_stage_evidence_ids(side, stage_code)
 
 def bind_timed_transcript_quotes(result: dict[str, Any], analysis: dict[str, Any]) -> None:
     """用 SRT 时间戳重新校对每个阶段的 quote，并清除已知的"视觉证据"占位。"""
@@ -78,6 +90,10 @@ def align_stage_flag_evidence(result: dict[str, Any]) -> None:
                 if str(value).strip()
             ]
             units = understanding.get(role, {}).get("evidence_units", [])
+            allowed_stage_ids = _stage_contract_allowed_ids(result, role, f"S{index}")
+            if allowed_stage_ids is not None:
+                stage_ids = [value for value in stage_ids if value in allowed_stage_ids]
+                stage[stage_key] = stage_ids
             # 多模态判断和阶段主结论消费同一批锁定事实。模型可能在 channel_evidence_ids
             # 引用同阶段真实单元，却漏把它同步到主 evidence_ids；只将同侧、真实且与阶段
             # 时间相交的引用并入主列表，未知或跨时段引用仍留给 validator 阻断。
@@ -96,6 +112,7 @@ def align_stage_flag_evidence(result: dict[str, Any]) -> None:
                     for unit in units
                     if isinstance(unit, dict)
                     and str(unit.get("id")) in multimodal_ids
+                    and (allowed_stage_ids is None or str(unit.get("id")) in allowed_stage_ids)
                     and evidence_overlaps_range(unit, stage.get(f"{role}_time_range"))
                 }
                 for evidence_id in multimodal_ids:
@@ -112,6 +129,7 @@ def align_stage_flag_evidence(result: dict[str, Any]) -> None:
                 for unit in units
                 if isinstance(unit, dict)
                 and str(unit.get("id")) in flag_ids
+                and (allowed_stage_ids is None or str(unit.get("id")) in allowed_stage_ids)
                 and evidence_overlaps_range(unit, stage.get(f"{role}_time_range"))
             ]
             if flag_units and (not stage_ids or any("_NO_" in value for value in stage_ids)):
@@ -136,6 +154,8 @@ def align_stage_flag_evidence(result: dict[str, Any]) -> None:
                 continue
             if flag_ids:
                 continue
+            if allowed_stage_ids is not None:
+                continue
             reliable_unit = referenced_spoken_unit(result, stage, role)
             if reliable_unit:
                 stage[f"{role}_quote"] = str(reliable_unit.get("voiceover") or "")
@@ -147,8 +167,8 @@ def prune_multimodal_evidence_to_stage(result: dict[str, Any]) -> None:
     """在阶段证据最终收口后，裁掉跨模态字段里已不属于该阶段的旧引用。
 
     只做集合交集，不新增证据：允许集合由阶段主引用与 Stage1 锁定的同阶段
-    ``functions`` 共同构成。这样 S5 等后续专项修复收窄主引用后，不会留下
-    已过期的渠道引用，也不需要让 LLM repair 改写 evidence ids。
+    对新版产物，允许集合只来自 Stage1 阶段资格化结果；旧产物才回退到
+    ``functions`` 兼容投影。这样后续专项修复不能把未资格化事实重新带回报告。
     """
     stage_functions = {
         "S1": "S1_hook",
@@ -175,12 +195,16 @@ def prune_multimodal_evidence_to_stage(result: dict[str, Any]) -> None:
                 if str(item).strip()
             }
             role_understanding = understanding.get(role) if isinstance(understanding.get(role), dict) else {}
-            allowed.update(
-                str(unit.get("id"))
-                for unit in role_understanding.get("evidence_units") or []
-                if isinstance(unit, dict)
-                and function in {str(value) for value in unit.get("functions") or []}
-            )
+            qualified = _stage_contract_allowed_ids(result, role, stage_id)
+            if qualified is not None:
+                allowed = set(qualified)
+            else:
+                allowed.update(
+                    str(unit.get("id"))
+                    for unit in role_understanding.get("evidence_units") or []
+                    if isinstance(unit, dict)
+                    and function in {str(value) for value in unit.get("functions") or []}
+                )
             for channel, refs in channel_refs.items():
                 if isinstance(refs, list):
                     channel_refs[channel] = [
@@ -710,11 +734,18 @@ def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
             reason = "未见明确下单/路径，且不满足“购买邀请+利益点”的软促单定义，按无 CTA 处理。"
             flag["cta_reason"] = f"{previous_reason} {reason}".strip()
         units = result.get("video_understanding", {}).get(role, {}).get("evidence_units", [])
+        allowed_stage_ids = _stage_contract_allowed_ids(result, role, "S6")
         flag_ids = [str(value) for value in flag.get("evidence_ids", []) if str(value).strip()]
+        if allowed_stage_ids is not None:
+            flag_ids = [value for value in flag_ids if value in allowed_stage_ids]
+            flag["evidence_ids"] = flag_ids
         referenced = [
             unit for unit in units
             if isinstance(unit, dict) and str(unit.get("id")) in flag_ids and "_NO_CTA" not in str(unit.get("id"))
         ]
+        if allowed_stage_ids is not None and not referenced:
+            cta[f"{role}_evidence_ids"] = []
+            continue
         referenced_text = json.dumps(referenced, ensure_ascii=False)
         has_positive_flag = (
             flag.get("exists") is True
@@ -724,7 +755,7 @@ def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
             )
             and bool(referenced)
         )
-        has_positive_text = bool(
+        has_positive_text = allowed_stage_ids is None and bool(
             re.search(
                 r"\b(beli|troli|klik|cart|checkout|order|link|shop)\b|购买|下单|购物车|点击|购买号召|购买指令",
                 quote + " " + referenced_text,
@@ -927,6 +958,16 @@ def reconcile_s5_trust_sources(result: dict[str, Any], source_signals_required: 
             continue
         units = understanding.get(role, {}).get("evidence_units", [])
         units = units if isinstance(units, list) else []
+        allowed_stage_ids = _stage_contract_allowed_ids(result, role, "S5")
+        if allowed_stage_ids is not None:
+            flag["evidence_ids"] = [
+                str(value) for value in flag.get("evidence_ids") or []
+                if str(value).strip() in allowed_stage_ids
+            ]
+            flag["trust_source_evidence_ids"] = [
+                str(value) for value in flag.get("trust_source_evidence_ids") or []
+                if str(value).strip() in allowed_stage_ids
+            ]
         source_status, source_ids = _s5_source_status(flag, units)
         basis = str(flag.get("trust_basis") or "unknown")
         has_valid_source = (
@@ -1172,6 +1213,10 @@ def fill_missing_evidence_references(result: dict[str, Any]) -> None:
                 if review_range:
                     stage[f"{role}_time_range"] = review_range
             references = {str(item) for item in stage.get(key, [])}
+            allowed_stage_ids = _stage_contract_allowed_ids(result, role, f"S{index}")
+            if allowed_stage_ids is not None:
+                stage[key] = sorted(references & allowed_stage_ids)
+                continue
             overlapping = [
                 str(unit.get("id"))
                 for unit in units
@@ -1224,6 +1269,10 @@ def materialize_spoken_stage_evidence(result: dict[str, Any]) -> None:
                 if review_range:
                     stage[f"{role}_time_range"] = review_range
             references = {str(item) for item in stage.get(f"{role}_evidence_ids", [])}
+            allowed_stage_ids = _stage_contract_allowed_ids(result, role, f"S{index}")
+            if allowed_stage_ids is not None:
+                stage[f"{role}_evidence_ids"] = sorted(references & allowed_stage_ids)
+                continue
             if any(
                 str(unit.get("id")) in references
                 and evidence_overlaps_range(unit, stage.get(f"{role}_time_range"))

@@ -13,11 +13,15 @@ from scripts.flayr_core.llm.compact_eval import (
     COMPACT_EVAL_SCHEMA_VERSION,
     MODEL_INDEPENDENT_SCHEMA_VERSION,
     S4_FACT_STATE_SCHEMA_VERSION,
+    S4_FREE_TEXT_STEPS_SCHEMA_VERSION,
     S4_JUDGMENT_SCHEMA_VERSION,
+    S4_SINGLE_PASS_SCHEMA_VERSION,
     S5_AUDIT_SCHEMA_VERSION,
     VISUAL_EXTRACTION_SCHEMA_VERSION,
     build_s4_fact_state_payload,
+    build_s4_free_text_steps_payload,
     build_s4_judgment_payload,
+    build_s4_single_pass_payload,
     build_s4_state_locked_bundle,
     build_s5_audit_payload,
     build_model_independent_payload,
@@ -40,7 +44,9 @@ from scripts.flayr_core.llm.compact_eval import (
     validate_model_independent_result,
     validate_s4_fact_state_artifact_metadata,
     validate_s4_fact_state_result,
+    validate_s4_free_text_steps_result,
     validate_s4_judgment_result,
+    validate_s4_single_pass_result,
     validate_s5_audit_result,
     validate_severity_only_result,
     validate_visual_extraction_result,
@@ -260,6 +266,32 @@ def _s4_judgment_result() -> dict:
     }
 
 
+def _s4_single_pass_result() -> dict:
+    state = _s4_fact_state_result()
+    return {
+        **state,
+        "schema_version": S4_SINGLE_PASS_SCHEMA_VERSION,
+        "relation": "benchmark_better",
+        "gap_magnitude": "medium",
+        "confidence": "high",
+        "decision_basis": "标杆的效果状态已验证，达人只有结果描述，差距来自因果链是否成立。",
+    }
+
+
+def _s4_free_text_steps_result() -> dict:
+    return {
+        "schema_version": S4_FREE_TEXT_STEPS_SCHEMA_VERSION,
+        "stage": "S4 效果呈现",
+        "creator_stage_facts": "达人有结果描述，但锁定事实未形成产品与效果之间的因果连接。",
+        "benchmark_stage_facts": "标杆同时呈现使用过程、可见效果和对应关系。",
+        "comparison": "标杆的效果证明链更完整。",
+        "purchase_impact": "可见且可归因的效果更能降低购买者对产品是否有效的疑虑。",
+        "relation": "benchmark_better",
+        "gap_magnitude": "medium",
+        "confidence": "high",
+    }
+
+
 def _s5_audit_result() -> dict:
     return {
         "schema_version": S5_AUDIT_SCHEMA_VERSION,
@@ -302,7 +334,38 @@ class CompactEvalContractTests(unittest.TestCase):
             6,
         )
         self.assertEqual(contract_limits_for_variant("s4_fact_state")["max_stage_evidence_ids"], 8)
+        self.assertEqual(contract_limits_for_variant("s4_single_pass")["max_stage_evidence_ids"], 8)
+        self.assertEqual(contract_limits_for_variant("s4_free_text_steps")["max_comparison_chars"], 240)
         self.assertEqual(contract_limits_for_variant("s5_audit")["max_decision_basis_chars"], 320)
+
+    def test_s4_structure_controls_have_distinct_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = load_frozen_compact_bundle(_write_bundle(Path(tmp)), include_images=False)
+
+            single_pass = _s4_single_pass_result()
+            self.assertEqual(validate_s4_single_pass_result(single_pass, bundle), [])
+            single_payload = build_s4_single_pass_payload("qwen3.6-plus", bundle, output_budget=4096)
+            single_system = single_payload["messages"][0]["content"]
+            self.assertIn("单次混合判断器", single_system)
+            self.assertIn("先分别填写 creator 与 benchmark", single_system)
+
+            free_text = _s4_free_text_steps_result()
+            self.assertEqual(validate_s4_free_text_steps_result(free_text), [])
+            free_payload = build_s4_free_text_steps_payload("qwen3.6-plus", bundle, output_budget=4096)
+            free_system = free_payload["messages"][0]["content"]
+            self.assertIn("五步自由文本判断器", free_system)
+            self.assertIn("不要输出 effect_evidence_state", free_system)
+
+            invalid = _s4_single_pass_result()
+            invalid["benchmark"]["evidence_ids"] = ["C4"]
+            self.assertTrue(
+                any("outside benchmark/S4" in error for error in validate_s4_single_pass_result(invalid, bundle))
+            )
+            invalid_free_text = _s4_free_text_steps_result()
+            invalid_free_text["gap_magnitude"] = "none"
+            self.assertTrue(
+                any("gap_magnitude=none" in error for error in validate_s4_free_text_steps_result(invalid_free_text))
+            )
 
     def test_s4_two_step_contract_locks_state_and_source_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

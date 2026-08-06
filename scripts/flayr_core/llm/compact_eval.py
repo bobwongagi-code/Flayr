@@ -36,6 +36,8 @@ VISUAL_EXTRACTION_SCHEMA_VERSION = 2
 MODEL_INDEPENDENT_SCHEMA_VERSION = 2
 S4_FACT_STATE_SCHEMA_VERSION = 1
 S4_JUDGMENT_SCHEMA_VERSION = 1
+S4_SINGLE_PASS_SCHEMA_VERSION = 1
+S4_FREE_TEXT_STEPS_SCHEMA_VERSION = 1
 S5_AUDIT_SCHEMA_VERSION = 1
 COMPACT_EVAL_ROLE = "compact_judgment_on_locked_facts"
 SEVERITY_ONLY_ROLE = "severity_judgment_on_locked_facts"
@@ -43,6 +45,8 @@ VISUAL_EXTRACTION_ROLE = "visual_fact_extraction_on_locked_frames"
 MODEL_INDEPENDENT_ROLE = "model_independent_comparison_on_model_facts"
 S4_FACT_STATE_ROLE = "s4_fact_state_on_locked_facts"
 S4_JUDGMENT_ROLE = "s4_judgment_on_locked_fact_state"
+S4_SINGLE_PASS_ROLE = "s4_single_pass_judgment_on_locked_facts"
+S4_FREE_TEXT_STEPS_ROLE = "s4_free_text_steps_judgment_on_locked_facts"
 S5_AUDIT_ROLE = "s5_source_audit_on_locked_facts"
 EVALUATION_ROLES = frozenset({"model_calibration", "mechanism_regression", "blind_validation"})
 DECISION_SCOPE_BY_ROLE = {
@@ -55,6 +59,7 @@ COMPACT_MAX_REASON_CHARS = 240
 COMPACT_MAX_BASIS_CHARS = 320
 COMPACT_MAX_EVIDENCE_IDS = 4
 S4_MAX_EVIDENCE_IDS = 8
+S4_FREE_TEXT_MAX_CHARS = 240
 S5_MAX_EVIDENCE_IDS = 8
 MODEL_INDEPENDENT_WINNERS = frozenset({"benchmark", "creator", "tie", "uncertain"})
 MODEL_INDEPENDENT_RELATIONS = frozenset({"benchmark_better", "creator_better", "tie", "uncertain"})
@@ -124,12 +129,23 @@ def contract_limits_for_variant(variant: str) -> dict[str, int]:
                 "max_information_chars": EXTRACTION_MAX_INFORMATION_CHARS,
             }
         )
-    if variant == "s4_fact_state":
+    if variant in {"s4_fact_state", "s4_single_pass"}:
         limits.update(
             {
                 "stage_count": 1,
                 "max_reason_chars": COMPACT_MAX_REASON_CHARS,
                 "max_stage_evidence_ids": S4_MAX_EVIDENCE_IDS,
+            }
+        )
+    if variant == "s4_single_pass":
+        limits["max_decision_basis_chars"] = COMPACT_MAX_BASIS_CHARS
+    if variant == "s4_free_text_steps":
+        limits.update(
+            {
+                "stage_count": 1,
+                "max_stage_facts_chars": S4_FREE_TEXT_MAX_CHARS,
+                "max_comparison_chars": S4_FREE_TEXT_MAX_CHARS,
+                "max_purchase_impact_chars": S4_FREE_TEXT_MAX_CHARS,
             }
         )
     if variant == "s5_audit":
@@ -1118,6 +1134,219 @@ def validate_s4_fact_state_result(result: Any, bundle: FrozenCompactBundle) -> l
                 path=role,
             )
         )
+    return errors
+
+
+def _s4_single_pass_shape() -> dict[str, Any]:
+    return {
+        **_s4_state_shape(),
+        "schema_version": S4_SINGLE_PASS_SCHEMA_VERSION,
+        "relation": "benchmark_better|creator_better|tie|uncertain",
+        "gap_magnitude": "none|small|medium|large|uncertain",
+        "confidence": "high|medium|low",
+        "decision_basis": "一到两句不超过320字的可审计判断依据",
+    }
+
+
+def build_s4_single_pass_payload(
+    model: str,
+    bundle: FrozenCompactBundle,
+    *,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+) -> dict[str, Any]:
+    """Build a one-call S4 state-and-judgment control contract.
+
+    This deliberately keeps S4 evidence-state classification and the final
+    comparison in one response.  It is the one-call control for the separate
+    locked-state two-call experiment below; neither path reaches production
+    analysis or the resolver.
+    """
+
+    response_shape = _s4_single_pass_shape()
+    system = (
+        "你是 Flayr 的 S4 单次混合判断器。只输出严格 JSON，不要 Markdown，不要解释。"
+        "输入事实已经锁定；不得新增、改写、合并或跨角色移动 evidence_units。"
+        "在同一个 JSON 中，先分别填写 creator 与 benchmark 的效果事实状态，再填写 relation 和 gap_magnitude。"
+        "effect_evidence_state 必须严格区分：none=没有效果证据；"
+        "result_only=只有结果画面或结果口播，没有产品导致结果的因果桥；"
+        "verified=效果肉眼可见，且产品使用/过程与结果之间存在可信连接；"
+        "uncertain=事实冲突、看不清或证据不足。"
+        "visibility、proof、causal_link 只能描述锁定事实本身；不确定就填 uncertain。"
+        f"evidence_ids 只能引用同侧 S4 事实，最多 {S4_MAX_EVIDENCE_IDS} 个；不能引用相邻阶段。"
+        "基于刚填写的双方状态给出简短 decision_basis，再输出 relation 和 gap_magnitude。"
+        "relation=tie 时 gap_magnitude 只能是 none 或 uncertain；gap_magnitude=none 时 relation 只能是 tie 或 uncertain。"
+        f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
+    )
+    user_text = (
+        "请执行一次完整但隔离的 S4 判断：先写双方事实状态，再判断双方关系和差距。"
+        "不要输出其他阶段、severity 或改进建议。\n\n"
+        + json.dumps(bundle.context, ensure_ascii=False, indent=2)
+    )
+    return _build_multimodal_payload(
+        model,
+        bundle,
+        system=system,
+        user_text=user_text,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+
+
+def _validate_s4_judgment_fields(result: dict[str, Any], *, path: str) -> list[str]:
+    errors: list[str] = []
+    if result.get("relation") not in MODEL_INDEPENDENT_RELATIONS:
+        errors.append(f"{path}.relation is invalid")
+    if result.get("gap_magnitude") not in MODEL_INDEPENDENT_GAPS:
+        errors.append(f"{path}.gap_magnitude is invalid")
+    if result.get("confidence") not in COMPACT_CONFIDENCES:
+        errors.append(f"{path}.confidence is invalid")
+    basis = result.get("decision_basis")
+    if not isinstance(basis, str) or not basis.strip() or len(basis) > COMPACT_MAX_BASIS_CHARS:
+        errors.append(f"{path}.decision_basis must be a non-empty string <= {COMPACT_MAX_BASIS_CHARS} chars")
+    errors.extend(
+        _validate_relation_gap_pair(
+            result.get("relation"),
+            result.get("gap_magnitude"),
+            path=path,
+        )
+    )
+    return errors
+
+
+def validate_s4_single_pass_result(result: Any, bundle: FrozenCompactBundle) -> list[str]:
+    """Validate the one-call S4 state-and-judgment control without repair."""
+
+    if not isinstance(result, dict):
+        return ["result must be an object"]
+    expected_root = {
+        "schema_version",
+        "stage",
+        "creator",
+        "benchmark",
+        "relation",
+        "gap_magnitude",
+        "confidence",
+        "decision_basis",
+    }
+    errors: list[str] = []
+    if result.get("schema_version") != S4_SINGLE_PASS_SCHEMA_VERSION:
+        errors.append("schema_version mismatch")
+    extra = set(result) - expected_root
+    missing = expected_root - set(result)
+    if extra:
+        errors.append(f"unsupported root fields: {sorted(extra)}")
+    if missing:
+        errors.append(f"missing root fields: {sorted(missing)}")
+    if result.get("stage") != "S4 效果呈现":
+        errors.append("stage must be S4 效果呈现")
+    for role in RAW_VIDEO_ROLES:
+        errors.extend(
+            _validate_s4_state_side(
+                result.get(role),
+                role=role,
+                allowed_ids=bundle.allowed_evidence_ids,
+                path=role,
+            )
+        )
+    errors.extend(_validate_s4_judgment_fields(result, path="s4"))
+    return errors
+
+
+def _s4_free_text_steps_shape() -> dict[str, Any]:
+    return {
+        "schema_version": S4_FREE_TEXT_STEPS_SCHEMA_VERSION,
+        "stage": "S4 效果呈现",
+        "creator_stage_facts": "不超过240字的 creator S4 事实描述",
+        "benchmark_stage_facts": "不超过240字的 benchmark S4 事实描述",
+        "comparison": "不超过240字的双方差异描述",
+        "purchase_impact": "不超过240字的该差异对购买说服力影响",
+        "relation": "benchmark_better|creator_better|tie|uncertain",
+        "gap_magnitude": "none|small|medium|large|uncertain",
+        "confidence": "high|medium|low",
+    }
+
+
+def build_s4_free_text_steps_payload(
+    model: str,
+    bundle: FrozenCompactBundle,
+    *,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+) -> dict[str, Any]:
+    """Build a one-call free-text S4 reasoning control with fixed outputs."""
+
+    response_shape = _s4_free_text_steps_shape()
+    system = (
+        "你是 Flayr 的 S4 五步自由文本判断器。只输出严格 JSON，不要 Markdown，不要解释。"
+        "输入事实已经锁定；不得新增、改写、合并或跨角色移动 evidence_units。"
+        "严格按输出字段的顺序完成五步："
+        "(1) creator_stage_facts，(2) benchmark_stage_facts，(3) comparison，"
+        "(4) purchase_impact，(5) relation 与 gap_magnitude。"
+        "前四步是简短、可审计的公开判断依据，不要输出隐藏推理过程。"
+        "不要输出 effect_evidence_state、visibility、proof、causal_link、evidence_ids、severity 或改进建议。"
+        "relation=tie 时 gap_magnitude 只能是 none 或 uncertain；gap_magnitude=none 时 relation 只能是 tie 或 uncertain。"
+        f"每段自由文本最多 {S4_FREE_TEXT_MAX_CHARS} 字符。"
+        f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
+    )
+    user_text = (
+        "请只基于锁定的 S4 事实按五步完成比较，不要补充输入中不存在的视觉或口播内容。\n\n"
+        + json.dumps(bundle.context, ensure_ascii=False, indent=2)
+    )
+    return _build_multimodal_payload(
+        model,
+        bundle,
+        system=system,
+        user_text=user_text,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+
+
+def validate_s4_free_text_steps_result(result: Any) -> list[str]:
+    """Validate the free-text control while retaining its intentionally open semantics."""
+
+    if not isinstance(result, dict):
+        return ["result must be an object"]
+    expected = {
+        "schema_version",
+        "stage",
+        "creator_stage_facts",
+        "benchmark_stage_facts",
+        "comparison",
+        "purchase_impact",
+        "relation",
+        "gap_magnitude",
+        "confidence",
+    }
+    errors: list[str] = []
+    if result.get("schema_version") != S4_FREE_TEXT_STEPS_SCHEMA_VERSION:
+        errors.append("schema_version mismatch")
+    extra = set(result) - expected
+    missing = expected - set(result)
+    if extra:
+        errors.append(f"unsupported root fields: {sorted(extra)}")
+    if missing:
+        errors.append(f"missing root fields: {sorted(missing)}")
+    if result.get("stage") != "S4 效果呈现":
+        errors.append("stage must be S4 效果呈现")
+    for field_name in ("creator_stage_facts", "benchmark_stage_facts", "comparison", "purchase_impact"):
+        value = result.get(field_name)
+        if not isinstance(value, str) or not value.strip() or len(value) > S4_FREE_TEXT_MAX_CHARS:
+            errors.append(f"{field_name} must be a non-empty string <= {S4_FREE_TEXT_MAX_CHARS} chars")
+    if result.get("relation") not in MODEL_INDEPENDENT_RELATIONS:
+        errors.append("relation is invalid")
+    if result.get("gap_magnitude") not in MODEL_INDEPENDENT_GAPS:
+        errors.append("gap_magnitude is invalid")
+    if result.get("confidence") not in COMPACT_CONFIDENCES:
+        errors.append("confidence is invalid")
+    errors.extend(
+        _validate_relation_gap_pair(
+            result.get("relation"),
+            result.get("gap_magnitude"),
+            path="s4",
+        )
+    )
     return errors
 
 
@@ -2355,6 +2584,10 @@ def _run_isolated_evaluation(
         "s4_fact_state_failure.json",
         "s4_judgment_evaluation.json",
         "s4_judgment_failure.json",
+        "s4_single_pass_evaluation.json",
+        "s4_single_pass_failure.json",
+        "s4_free_text_steps_evaluation.json",
+        "s4_free_text_steps_failure.json",
         "s5_audit_evaluation.json",
         "s5_audit_failure.json",
         "raw_model_response.json",
@@ -2381,6 +2614,10 @@ def _run_isolated_evaluation(
             if variant == "s4_fact_state"
             else S4_JUDGMENT_SCHEMA_VERSION
             if variant == "s4_judgment"
+            else S4_SINGLE_PASS_SCHEMA_VERSION
+            if variant == "s4_single_pass"
+            else S4_FREE_TEXT_STEPS_SCHEMA_VERSION
+            if variant == "s4_free_text_steps"
             else S5_AUDIT_SCHEMA_VERSION
             if variant == "s5_audit"
             else COMPACT_EVAL_SCHEMA_VERSION
@@ -2737,6 +2974,86 @@ def run_visual_extraction_evaluation(
         success_filename="visual_extraction_evaluation.json",
         failure_filename="visual_extraction_failure.json",
         call_kind="compact_extraction_eval",
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+        request_timeout_seconds=request_timeout_seconds,
+    )
+
+
+def run_s4_single_pass_evaluation(
+    *,
+    model: str,
+    bundle: FrozenCompactBundle,
+    output_dir: Path,
+    api_url: str,
+    api_key_args: Any,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+    request_timeout_seconds: int = 600,
+    evaluation_role: str = "model_calibration",
+) -> dict[str, Any]:
+    """Run the one-call structured S4 control against immutable facts."""
+
+    payload = build_s4_single_pass_payload(
+        model,
+        bundle,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+    return _run_isolated_evaluation(
+        model=model,
+        bundle=bundle,
+        output_dir=output_dir,
+        api_url=api_url,
+        api_key_args=api_key_args,
+        payload=payload,
+        validator=lambda value: validate_s4_single_pass_result(value, bundle),
+        task_role=S4_SINGLE_PASS_ROLE,
+        evaluation_role=evaluation_role,
+        variant="s4_single_pass",
+        success_filename="s4_single_pass_evaluation.json",
+        failure_filename="s4_single_pass_failure.json",
+        call_kind="s4_single_pass_eval",
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+        request_timeout_seconds=request_timeout_seconds,
+    )
+
+
+def run_s4_free_text_steps_evaluation(
+    *,
+    model: str,
+    bundle: FrozenCompactBundle,
+    output_dir: Path,
+    api_url: str,
+    api_key_args: Any,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+    request_timeout_seconds: int = 600,
+    evaluation_role: str = "model_calibration",
+) -> dict[str, Any]:
+    """Run the one-call five-step free-text S4 control on immutable facts."""
+
+    payload = build_s4_free_text_steps_payload(
+        model,
+        bundle,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+    return _run_isolated_evaluation(
+        model=model,
+        bundle=bundle,
+        output_dir=output_dir,
+        api_url=api_url,
+        api_key_args=api_key_args,
+        payload=payload,
+        validator=validate_s4_free_text_steps_result,
+        task_role=S4_FREE_TEXT_STEPS_ROLE,
+        evaluation_role=evaluation_role,
+        variant="s4_free_text_steps",
+        success_filename="s4_free_text_steps_evaluation.json",
+        failure_filename="s4_free_text_steps_failure.json",
+        call_kind="s4_free_text_steps_eval",
         output_budget=output_budget,
         output_budget_field=output_budget_field,
         request_timeout_seconds=request_timeout_seconds,

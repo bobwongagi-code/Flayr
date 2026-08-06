@@ -31,6 +31,12 @@ from ..evidence_states import stage_flag_allows_empty_evidence
 from ..multimodal import sanitize_audio_observations
 from ..utils import write_json, write_text
 from ..analysis_model import ANALYSIS_RESULT_CONTRACT, AnalysisResult, schema_sha256
+from ..stage_evidence_contracts import (
+    STAGE_EVIDENCE_CONTRACT_VERSION,
+    stage_codes,
+    stage_evidence_contract_issues,
+    stage_evidence_recovery_targets,
+)
 from ..structure_modules import canonical_module_id
 from .api import (
     call_llm_api,
@@ -59,6 +65,7 @@ from .payload import (
     build_product_foundation_payload,
     build_product_foundation_repair_payload,
     build_stage_review_payload,
+    build_video_fact_recovery_payload,
     build_video_identity_payload,
     build_video_fact_payload,
     load_brand_proposition,
@@ -98,7 +105,7 @@ from ..postprocess.validate import (
 
 
 # 修改 build_video_fact_payload 的语义合同后必须递增，避免旧 facts 与新判断规则混用。
-VIDEO_FACT_CACHE_SCHEMA_VERSION = 9
+VIDEO_FACT_CACHE_SCHEMA_VERSION = 10
 PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION = 2
 CACHE_RECORD_SCHEMA_VERSION = 1
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -346,6 +353,12 @@ def finalize_analysis_result(
         validate_normalized_analysis_contract(normalized)
     except AnalysisContractError as exc:
         raise SystemExit(str(exc)) from exc
+    if analysis.get("stage_evidence_contract_required") is True:
+        for role in ("benchmark", "creator"):
+            side = normalized.get("video_understanding", {}).get(role)
+            issues = stage_evidence_contract_issues(side, require_version=True)
+            if issues:
+                raise SystemExit(f"{role} Stage1 阶段证据合同无效：" + "；".join(issues))
 
     validated_snapshot = copy.deepcopy(normalized)
     if artifact_dir is not None:
@@ -746,6 +759,7 @@ def run_large_model_analysis(
         # Legacy artifacts without this marker remain readable but cannot trigger
         # the new floor rules.
         analysis["evidence_state_required"] = True
+        analysis["stage_evidence_contract_required"] = True
         analysis["s5_flags_required"] = True
         analysis["s5_source_signals_required"] = True
         analysis["s6_flags_required"] = True
@@ -2146,6 +2160,15 @@ def run_video_fact_extraction(
                 {"video_understanding": {role: cached}, "stage_analysis": []},
                 can_analyze_native_audio(args.llm_api_url, args.llm_model),
             )
+            cached = _maybe_recover_video_facts(
+                args,
+                analysis,
+                run_dir,
+                api_key,
+                role,
+                cached,
+                select_role_visual_inputs(videos[role], role, per_role_limit),
+            )
             facts[role] = cached
             write_json(result_path, cached)
             continue
@@ -2172,10 +2195,189 @@ def run_video_fact_extraction(
         )
         # 能力状态取自实际请求载荷，不让模型猜自己是否看到了连续视频。
         fact_result["temporal_evidence_mode"] = "full_temporal" if payload_has_video(payload) else "static_only"
+        fact_result = _maybe_recover_video_facts(
+            args,
+            analysis,
+            run_dir,
+            api_key,
+            role,
+            fact_result,
+            visual_inputs,
+        )
         facts[role] = fact_result
         write_json(result_path, fact_result)
         _write_cache_result(cache_path, {**cache_key, "fact_result": fact_result})
     return facts
+
+
+def _maybe_recover_video_facts(
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    run_dir: Path,
+    api_key: str,
+    role: str,
+    facts: dict[str, Any],
+    visual_inputs: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Run at most one bounded Stage1 recovery pass before facts are locked."""
+    targets = stage_evidence_recovery_targets(facts)
+    contract_issues = stage_evidence_contract_issues(facts, require_version=True)
+    if not targets and not contract_issues:
+        facts.setdefault("stage1_recovery", {"status": "not_needed", "target_stages": []})
+        return facts
+    if args.llm_dry_run:
+        facts["stage1_recovery"] = {
+            "status": "deferred_dry_run",
+            "target_stages": targets or list(stage_codes()),
+        }
+        return facts
+
+    target_stages = targets or list(stage_codes())
+    request_path = run_dir / f"llm_facts_{role}_recovery_request.json"
+    response_path = run_dir / f"llm_facts_{role}_recovery_response.json"
+    payload = build_video_fact_recovery_payload(
+        args.llm_model,
+        role,
+        analysis,
+        visual_inputs,
+        facts,
+        target_stages,
+        api_url=args.llm_api_url,
+        budget=getattr(args, "_resource_budget", None),
+    )
+    write_json(request_path, payload)
+    recovery_text = fetch_json_completion(args, api_key, request_path, response_path)
+    recovery = parse_json_text(recovery_text)
+    if not isinstance(recovery, dict):
+        raise SystemExit(f"{role} Stage1 recovery 必须返回 JSON object。")
+    if recovery.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+        raise SystemExit(f"{role} Stage1 recovery 缺少匹配的 evidence contract version。")
+    returned_stages = {
+        str(item.get("stage") or item.get("stage_code") or "").strip().upper()[:2]
+        for item in recovery.get("stage_evidence_checks") or []
+        if isinstance(item, dict)
+    }
+    out_of_scope = sorted(stage for stage in returned_stages if stage and stage not in set(target_stages))
+    if out_of_scope:
+        raise SystemExit(
+            f"{role} Stage1 recovery returned out-of-scope stage checks: {', '.join(out_of_scope)}"
+        )
+    merged = _merge_video_fact_recovery(role, facts, recovery, analysis, target_stages)
+    unresolved_stages = [
+        stage
+        for stage in target_stages
+        if stage in stage_evidence_recovery_targets(merged)
+    ]
+    merged["stage1_recovery"] = {
+        "status": "applied_with_unresolved" if unresolved_stages else "applied",
+        "target_stages": target_stages,
+        "unresolved_stages": unresolved_stages,
+        "candidate_unit_count": len(recovery.get("candidate_evidence_units") or [])
+        if isinstance(recovery.get("candidate_evidence_units"), list)
+        else 0,
+        "contract_issues_before_recovery": contract_issues,
+    }
+    final_issues = stage_evidence_contract_issues(merged, require_version=True)
+    if final_issues:
+        raise SystemExit(
+            f"{role} Stage1 evidence contract remains invalid after bounded recovery: "
+            + "; ".join(final_issues)
+        )
+    return merged
+
+
+def _merge_video_fact_recovery(
+    role: str,
+    base: dict[str, Any],
+    recovery: dict[str, Any],
+    analysis: dict[str, Any],
+    target_stages: list[str],
+) -> dict[str, Any]:
+    """Append recovery observations and replace only target-stage qualifications."""
+    code = "B" if role == "benchmark" else "C"
+    merged = copy.deepcopy(base)
+    existing_units = merged.get("evidence_units") if isinstance(merged.get("evidence_units"), list) else []
+    existing_ids = {
+        str(item.get("id") or "").strip()
+        for item in existing_units
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    candidates = recovery.get("candidate_evidence_units")
+    if not isinstance(candidates, list):
+        candidates = []
+    safe_candidates: list[dict[str, Any]] = []
+    blocked_candidate_ids: set[str] = set()
+    candidate_ids: set[str] = set()
+    next_index = len(existing_units) + 1
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        item = copy.deepcopy(candidate)
+        candidate_id = str(item.get("id") or "").strip().upper()
+        if candidate_id and (candidate_id in existing_ids or candidate_id in candidate_ids):
+            # A duplicate candidate ID is ambiguous: silently renaming it can
+            # make a recovery check point at the old observation.  Reject the
+            # candidate and make any reference fail closed below.
+            blocked_candidate_ids.add(candidate_id)
+            continue
+        if not candidate_id:
+            candidate_id = f"{code}R{next_index}"
+        while candidate_id in existing_ids:
+            next_index += 1
+            candidate_id = f"{code}R{next_index}"
+        item["id"] = candidate_id
+        existing_ids.add(candidate_id)
+        candidate_ids.add(candidate_id)
+        safe_candidates.append(item)
+        next_index += 1
+    merged["evidence_units"] = existing_units + safe_candidates
+    merged["stage_evidence_contract_version"] = STAGE_EVIDENCE_CONTRACT_VERSION
+
+    existing_checks = merged.get("stage_evidence_checks") if isinstance(merged.get("stage_evidence_checks"), list) else []
+    replacement_items: dict[str, list[dict[str, Any]]] = {}
+    for item in recovery.get("stage_evidence_checks") or []:
+        if isinstance(item, dict):
+            replacement_items.setdefault(str(item.get("stage") or "").strip().upper()[:2], []).append(item)
+    replacement_by_stage: dict[str, dict[str, Any]] = {}
+    for stage, items in replacement_items.items():
+        if len(items) == 1:
+            replacement_by_stage[stage] = items[0]
+        else:
+            replacement_by_stage[stage] = {
+                "stage": stage,
+                "status": "conflict",
+                "coverage": "unknown",
+                "evidence_ids": [],
+                "observed_signals": [],
+                "missing_signals": [],
+                "observed_disqualifiers": [],
+                "reason": "恢复响应中同一阶段出现多个资格判断，需重新观察。",
+            }
+    if blocked_candidate_ids:
+        for item in replacement_by_stage.values():
+            evidence_ids = item.get("evidence_ids") if isinstance(item.get("evidence_ids"), list) else []
+            item["evidence_ids"] = [
+                f"__RECOVERY_REJECTED_{value}__" if str(value).strip().upper() in blocked_candidate_ids else value
+                for value in evidence_ids
+            ]
+    target_set = {str(stage).strip().upper()[:2] for stage in target_stages}
+    merged_checks: list[dict[str, Any]] = []
+    seen_stages: set[str] = set()
+    for item in existing_checks:
+        if not isinstance(item, dict):
+            continue
+        stage = str(item.get("stage") or "").strip().upper()[:2]
+        if stage in target_set and stage in replacement_by_stage:
+            merged_checks.append(replacement_by_stage[stage])
+        else:
+            merged_checks.append(item)
+        if stage:
+            seen_stages.add(stage)
+    for stage, item in replacement_by_stage.items():
+        if stage in target_set and stage not in seen_stages:
+            merged_checks.append(item)
+    merged["stage_evidence_checks"] = merged_checks
+    return normalize_video_fact_result(role, merged, analysis)
 
 
 def run_video_identity_extraction(

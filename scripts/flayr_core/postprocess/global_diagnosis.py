@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..artifacts import parse_time_range_seconds
+from ..stage_evidence_contracts import STAGE_EVIDENCE_CONTRACT_VERSION, qualified_stage_evidence_ids
 from .commercial_priority import (
     COMMERCIAL_PRIORITY_SCHEMA_VERSION,
     classify_painpoint_relevance,
@@ -198,12 +199,25 @@ def _variant_side_status(side: dict[str, Any], mode: str) -> tuple[str, list[str
     )
     evidence_ids = list(rule.get("evidence_ids") or [])
     evidence_ids.extend(str(unit.get("id") or "") for unit in units if len(unit.get("variant_ids") or []) >= 2)
+    active_contract = side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+    qualified_core_ids: set[str] = set()
+    if active_contract:
+        for stage_code in ("S2", "S3", "S4"):
+            qualified_core_ids.update(qualified_stage_evidence_ids(side, stage_code))
+        # A variant can be present in raw observations while its core-stage
+        # ownership is unresolved.  That is not evidence of a broken focus.
+        if not qualified_core_ids:
+            return "unknown", evidence_ids, variant_ids
     if explained:
         return "explained_comparison", evidence_ids, variant_ids
     ambiguous_core = any(
         len(unit.get("variant_ids") or []) >= 2
         and unit.get("variant_attribution_confident") is not True
-        and set(unit.get("functions") or []) & {"S2_intro", "S3_usage", "S4_effect"}
+        and (
+            str(unit.get("id") or "") in qualified_core_ids
+            if active_contract
+            else set(unit.get("functions") or []) & {"S2_intro", "S3_usage", "S4_effect"}
+        )
         for unit in units
     )
     if mode == "full_temporal" and ambiguous_core:

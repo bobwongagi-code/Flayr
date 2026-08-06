@@ -18,6 +18,49 @@ def _s4_flag(*, state: str, evidence_ids: list[str]) -> dict:
 
 
 class EvaluationChainTests(unittest.TestCase):
+    def test_active_stage_contract_rejects_functions_only_ownership(self) -> None:
+        checks = [
+            {
+                "stage": f"S{index}",
+                "status": "unknown",
+                "coverage": "unknown",
+                "evidence_ids": [],
+                "observed_signals": [],
+                "missing_signals": [],
+            }
+            for index in range(1, 7)
+        ]
+        result = {
+            "video_understanding": {
+                "creator": {
+                    "stage_evidence_contract_version": 1,
+                    "stage_evidence_checks": checks,
+                    "evidence_units": [{"id": "C1", "functions": ["S1_hook"]}],
+                },
+                "benchmark": {
+                    "stage_evidence_contract_version": 1,
+                    "stage_evidence_checks": checks,
+                    "evidence_units": [{"id": "B1", "functions": ["S1_hook"]}],
+                },
+            },
+            "stage_analysis": [
+                {
+                    "stage": "S1",
+                    "creator_evidence_ids": ["C1"],
+                    "benchmark_evidence_ids": ["B1"],
+                }
+            ],
+        }
+        audit = audit_analysis_chain(result)
+        self.assertEqual(
+            audit["stage_evidence"]["roles"]["S1"]["creator"]["status"],
+            "invalid",
+        )
+        self.assertIn(
+            "stage_evidence_unresolved:S1:C1",
+            audit["stage_evidence"]["roles"]["S1"]["creator"]["errors"],
+        )
+
     def test_s4_audit_is_mechanical_and_detects_impossible_state(self) -> None:
         flag = _s4_flag(state="verified", evidence_ids=["C1"])
         flag["process_linked_effect"] = False

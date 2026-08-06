@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -33,19 +34,26 @@ if str(ROOT / "scripts") not in sys.path:
 from flayr_core.llm.compact_eval import (  # noqa: E402
     COMPACT_OUTPUT_BUDGET,
     CompactEvaluationError,
+    build_model_owned_fact_bundle,
     build_s4_state_locked_bundle,
     EVALUATION_ROLES,
     contract_limits_for_variant,
     load_frozen_compact_bundle,
+    load_frozen_visual_bundle,
     load_frozen_video_bundle,
     load_gt_stages,
     run_compact_evaluation,
     run_s4_fact_state_evaluation,
+    run_s4_free_text_steps_evaluation,
     run_s4_judgment_evaluation,
+    run_s4_single_pass_evaluation,
     run_s5_audit_evaluation,
     run_severity_only_evaluation,
     run_visual_extraction_evaluation,
+    frozen_raw_video_source_identity,
     validate_s4_fact_state_artifact_metadata,
+    validate_visual_extraction_result,
+    VISUAL_EXTRACTION_SCHEMA_VERSION,
 )
 from flayr_core.utils import write_json  # noqa: E402
 from flayr_core.report_metadata import current_code_commit  # noqa: E402
@@ -137,6 +145,10 @@ def _run_variant(
         return run_visual_extraction_evaluation(**common)
     if variant == "s4_fact_state":
         return run_s4_fact_state_evaluation(**common)
+    if variant == "s4_single_pass":
+        return run_s4_single_pass_evaluation(**common)
+    if variant == "s4_free_text_steps":
+        return run_s4_free_text_steps_evaluation(**common)
     if variant == "s4_judgment":
         return run_s4_judgment_evaluation(**common)
     return run_s5_audit_evaluation(**common)
@@ -184,6 +196,74 @@ def _load_s4_state_locked_bundle(
     return locked, path
 
 
+def _load_model_owned_s4_bundle(
+    *,
+    run_dir: Path,
+    extraction_root: Path,
+    sample_id: str,
+    fact_source_model: str,
+) -> Any:
+    """Load a current raw-video fact artifact as the fixed S4 experiment input."""
+
+    base_bundle = load_frozen_visual_bundle(run_dir, include_images=False)
+    source_identity = frozen_raw_video_source_identity(run_dir)
+    extraction_path = (
+        extraction_root
+        / _safe_component(sample_id)
+        / _safe_component(fact_source_model)
+        / "visual_extraction_evaluation.json"
+    )
+    try:
+        record = json.loads(extraction_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CompactEvaluationError(f"invalid raw fact artifact: {extraction_path}: {exc}") from exc
+    if not isinstance(record, dict) or record.get("status") != "completed":
+        raise CompactEvaluationError(f"raw fact artifact is not completed: {extraction_path}")
+    result = record.get("result")
+    if not isinstance(result, dict):
+        raise CompactEvaluationError(f"raw fact artifact has no result object: {extraction_path}")
+    if (
+        record.get("schema_version") != VISUAL_EXTRACTION_SCHEMA_VERSION
+        or result.get("schema_version") != VISUAL_EXTRACTION_SCHEMA_VERSION
+    ):
+        raise CompactEvaluationError(
+            f"raw fact artifact uses an incompatible schema: {extraction_path}; "
+            f"expected {VISUAL_EXTRACTION_SCHEMA_VERSION}"
+        )
+    if record.get("model") != fact_source_model:
+        raise CompactEvaluationError(f"raw fact artifact model does not match {fact_source_model}: {extraction_path}")
+    if record.get("source_run") != run_dir.name:
+        raise CompactEvaluationError(f"raw fact artifact source_run does not match {run_dir.name}: {extraction_path}")
+    roles = record.get("video_role_order")
+    hashes = record.get("video_source_sha256")
+    durations = record.get("video_source_duration_seconds")
+    if not isinstance(roles, list) or not isinstance(hashes, list):
+        raise CompactEvaluationError(f"raw fact artifact is missing video identity metadata: {extraction_path}")
+    if roles != source_identity["video_role_order"] or hashes != source_identity["video_source_sha256"]:
+        raise CompactEvaluationError(f"raw fact artifact video identity does not match current source: {extraction_path}")
+    if not isinstance(durations, list) or len(durations) != len(roles):
+        raise CompactEvaluationError(f"raw fact artifact is missing role durations: {extraction_path}")
+    source_durations: dict[str, float] = {}
+    for role, raw_duration in zip(roles, durations):
+        try:
+            duration = float(raw_duration)
+        except (TypeError, ValueError) as exc:
+            raise CompactEvaluationError(f"raw fact artifact has an invalid duration for {role}: {extraction_path}") from exc
+        if not math.isfinite(duration) or duration <= 0:
+            raise CompactEvaluationError(f"raw fact artifact has a non-positive duration for {role}: {extraction_path}")
+        source_durations[role] = duration
+    errors = validate_visual_extraction_result(
+        result,
+        expected_roles=("creator", "benchmark"),
+        source_durations=source_durations,
+    )
+    if errors:
+        raise CompactEvaluationError(
+            f"raw fact artifact fails the current contract: {extraction_path}: " + "; ".join(errors[:8])
+        )
+    return build_model_owned_fact_bundle(base_bundle, result, extraction_artifact=str(extraction_path))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run one isolated compact-evaluation variant over a declared cohort.",
@@ -201,6 +281,8 @@ def build_parser() -> argparse.ArgumentParser:
             "severity_scaffold",
             "visual_extraction",
             "s4_fact_state",
+            "s4_single_pass",
+            "s4_free_text_steps",
             "s4_judgment",
             "s5_audit",
         ),
@@ -229,6 +311,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="s4_judgment 必填：按 sample_id/model 保存 s4_fact_state_evaluation.json 的目录。",
     )
     parser.add_argument(
+        "--fact-extraction-root",
+        type=Path,
+        default=None,
+        help="仅 S4 对照实验：当前 visual_extraction_evaluation.json 的根目录，用于固定模型抽取事实。",
+    )
+    parser.add_argument(
+        "--fact-source-model",
+        default=None,
+        help="仅配合 --fact-extraction-root：产生固定事实的模型名。",
+    )
+    parser.add_argument(
         "--max-stage-evidence-ids",
         type=int,
         default=None,
@@ -252,6 +345,11 @@ def main() -> int:
         raise SystemExit("--max-stage-evidence-ids is only valid with --variant evidence_grounded")
     if args.variant == "s4_judgment" and args.s4_state_root is None:
         raise SystemExit("--s4-state-root is required with --variant s4_judgment")
+    s4_variants = {"s4_fact_state", "s4_single_pass", "s4_free_text_steps", "s4_judgment"}
+    if (args.fact_extraction_root is None) != (args.fact_source_model is None):
+        raise SystemExit("--fact-extraction-root and --fact-source-model must be provided together")
+    if args.fact_extraction_root is not None and args.variant not in s4_variants:
+        raise SystemExit("--fact-extraction-root is only valid with S4 experiment variants")
     manifest = _read_manifest(args.manifest.expanduser().resolve())
     sample_components = _safe_component_map(
         [sample["sample_id"] for sample in manifest],
@@ -268,13 +366,22 @@ def main() -> int:
 
     # Preflight all source inputs before the first request. This prevents a
     # partial cohort caused by a missing later sample or missing GT.
+    fact_extraction_root = args.fact_extraction_root.expanduser().resolve() if args.fact_extraction_root else None
     preflight: list[tuple[dict[str, str], Any, dict[str, str] | None]] = []
     for sample in manifest:
         run_dir = Path(sample["run_dir"])
-        if args.variant == "visual_extraction":
+        if fact_extraction_root is not None:
+            bundle = _load_model_owned_s4_bundle(
+                run_dir=run_dir,
+                extraction_root=fact_extraction_root,
+                sample_id=sample["sample_id"],
+                fact_source_model=args.fact_source_model,
+            )
+            gt_stages = None
+        elif args.variant == "visual_extraction":
             bundle = load_frozen_video_bundle(run_dir)
             gt_stages = None
-        elif args.variant in {"s4_fact_state", "s4_judgment", "s5_audit"}:
+        elif args.variant in {"s4_fact_state", "s4_single_pass", "s4_free_text_steps", "s4_judgment", "s5_audit"}:
             bundle = load_frozen_compact_bundle(run_dir, include_images=False)
             gt_stages = None
         else:
@@ -319,6 +426,8 @@ def main() -> int:
         "models": list(args.models),
         "source_commit": current_code_commit(),
         "contract_limits": {**contract_limits, "output_budget": args.output_budget},
+        "fact_extraction_root": str(fact_extraction_root) if fact_extraction_root else None,
+        "fact_source_model": args.fact_source_model,
         "samples": [],
     }
     for sample, bundle, gt_stages in preflight:

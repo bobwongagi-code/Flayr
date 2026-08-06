@@ -15,6 +15,12 @@ from .evidence_states import (
     evidence_strength_gate_report,
     normalize_reason_code,
 )
+from .stage_evidence_contracts import (
+    STAGE_EVIDENCE_CONTRACT_VERSION,
+    qualified_stage_evidence_ids,
+    stage_codes,
+    stage_evidence_check_map,
+)
 
 
 ROLE_NAMES = ("creator", "benchmark")
@@ -184,22 +190,70 @@ def _unit_map(result: dict[str, Any], role: str) -> dict[str, dict[str, Any]]:
     }
 
 
-def _audit_s4_evidence_ids(result: dict[str, Any], role: str, flag_audit: dict[str, Any]) -> list[str]:
+def _stage_referenced_ids(result: dict[str, Any], stage_code: str, role: str) -> set[str]:
+    suffix = {"S1": "hook", "S2": "s2", "S3": "s3", "S4": "s4", "S5": "s5", "S6": "s6"}.get(stage_code)
+    for stage in result.get("stage_analysis") or []:
+        if not isinstance(stage, dict) or not str(stage.get("stage") or "").upper().startswith(stage_code):
+            continue
+        references = {
+            str(value)
+            for value in stage.get(f"{role}_evidence_ids") or []
+            if str(value).strip()
+        }
+        flag = stage.get(f"{role}_{suffix}") if suffix else None
+        if isinstance(flag, dict):
+            references.update(
+                str(value)
+                for value in flag.get("evidence_ids") or []
+                if str(value).strip()
+            )
+        return references
+    return set()
+
+
+def _audit_stage_evidence_ids(
+    result: dict[str, Any],
+    role: str,
+    stage_code: str,
+    evidence_ids: list[str] | set[str],
+) -> list[str]:
+    """Audit one stage's references against the active Stage1 qualification.
+
+    Legacy artifacts still use the descriptive ``functions`` projection.  New
+    artifacts must use the canonical stage check and the strength on the
+    referenced locked units; no downstream repair or audit may infer ownership
+    from a free-form compatibility field.
+    """
     units = _unit_map(result, role)
+    side = (result.get("video_understanding") or {}).get(role, {})
+    active_contract = isinstance(side, dict) and side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+    check = stage_evidence_check_map(side).get(stage_code) if active_contract else None
+    qualified = qualified_stage_evidence_ids(side, stage_code) if active_contract else set()
     errors: list[str] = []
-    for evidence_id in flag_audit.get("evidence_ids", []):
+    for evidence_id in evidence_ids:
+        evidence_id = str(evidence_id)
         unit = units.get(evidence_id)
         if unit is None:
             errors.append(f"unknown_evidence_id:{evidence_id}")
+            continue
+        if active_contract:
+            if not isinstance(check, dict) or check.get("status") in {"unknown", "conflict"}:
+                errors.append(f"stage_evidence_unresolved:{stage_code}:{evidence_id}")
+            elif evidence_id not in qualified:
+                errors.append(f"stage_evidence_not_qualified:{stage_code}:{evidence_id}")
             continue
         functions = {
             str(function).strip().upper().split("_", 1)[0]
             for function in unit.get("functions", [])
             if isinstance(function, str)
         }
-        if "S4" not in functions:
+        if stage_code not in functions:
             errors.append(f"evidence_temporal_mismatch:{evidence_id}")
     return errors
+
+
+def _audit_s4_evidence_ids(result: dict[str, Any], role: str, flag_audit: dict[str, Any]) -> list[str]:
+    return _audit_stage_evidence_ids(result, role, "S4", flag_audit.get("evidence_ids", []))
 
 
 def audit_analysis_chain(result: Any) -> dict[str, Any]:
@@ -236,6 +290,22 @@ def audit_analysis_chain(result: Any) -> dict[str, Any]:
 
     strength = evidence_strength_gate_report(result)
     s4_errors = sum(len(item.get("evidence_errors", [])) + len(item.get("errors", [])) for item in s4_roles.values())
+    stage_evidence_roles: dict[str, dict[str, Any]] = {}
+    for stage_code in stage_codes():
+        stage_evidence_roles[stage_code] = {}
+        for role in ROLE_NAMES:
+            references = sorted(_stage_referenced_ids(result, stage_code, role))
+            errors = _audit_stage_evidence_ids(result, role, stage_code, references)
+            stage_evidence_roles[stage_code][role] = {
+                "referenced_evidence_ids": references,
+                "errors": errors,
+                "status": "ok" if not errors else "invalid",
+            }
+    stage_evidence_error_count = sum(
+        len(role_data.get("errors", []))
+        for stage_data in stage_evidence_roles.values()
+        for role_data in stage_data.values()
+    )
     return {
         "schema_version": 1,
         "status": "ok" if s4 is not None and s5 is not None else "incomplete",
@@ -253,10 +323,16 @@ def audit_analysis_chain(result: Any) -> dict[str, Any]:
             "final_severity": s5.get("severity") if isinstance(s5, dict) else None,
             "roles": s5_roles,
         },
+        "stage_evidence": {
+            "contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "roles": stage_evidence_roles,
+            "error_count": stage_evidence_error_count,
+        },
         "summary": {
             "s4_state_conflict": s4_errors > 0 or any(item["status"] == "state_conflict" for item in s4_roles.values()),
             "s5_uncertain_roles": sum(item.get("state") == "uncertain" for item in s5_roles.values()),
             "evidence_strength_gate": strength.get("status"),
+            "stage_evidence_error_count": stage_evidence_error_count,
         },
     }
 

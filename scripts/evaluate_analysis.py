@@ -23,6 +23,13 @@ if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 from flayr_core.structure_modules import stage1_event_catalog
+from flayr_core.stage_evidence_contracts import (
+    STAGE_EVIDENCE_CONTRACT_VERSION,
+    stage_codes,
+    stage_evidence_check_map,
+    stage_evidence_contract_issues,
+    qualified_stage_evidence_ids,
+)
 from flayr_core.artifacts import parse_time_range_seconds
 from flayr_core.postprocess.chain import finalize_severity_after_repairs
 from flayr_core.validation_cohort import (
@@ -530,6 +537,8 @@ def _human_key_event_audit(
                     continue
                 matches.append(unit_id)
             referenced = _stage_referenced_ids(result, current_stage, role)
+            side = result.get("video_understanding", {}).get(role, {})
+            qualified_ids = qualified_stage_evidence_ids(side, current_stage) if isinstance(side, dict) else set()
             records.append({
                 "sample_id": sample_id,
                 "event_id": str(event.get("id") or f"event_{index}"),
@@ -540,11 +549,13 @@ def _human_key_event_audit(
                 "importance": importance,
                 "source_artifact_ready": _source_artifact_ready(result, role, event),
                 "stage1_recalled": bool(matches) if expected_state == "present" else None,
+                "stage1_qualified": bool(set(matches) & qualified_ids) if expected_state == "present" else None,
                 "absence_respected": not bool(matches) if expected_state == "absent" else None,
                 "unexpected_claim_evidence_ids": matches if expected_state == "absent" else [],
                 "stage1_matching_evidence_ids": matches,
                 "stage2_referenced": bool(set(matches) & referenced) if expected_state == "present" else None,
                 "stage2_referenced_evidence_ids": sorted(set(matches) & referenced),
+                "stage1_qualified_evidence_ids": sorted(set(matches) & qualified_ids),
             })
     if not records:
         status = "unavailable_without_human_key_events"
@@ -555,6 +566,7 @@ def _human_key_event_audit(
     present_records = [row for row in records if row["expected_state"] == "present"]
     absent_records = [row for row in records if row["expected_state"] == "absent"]
     stage1_recalled = sum(1 for row in present_records if row["stage1_recalled"])
+    stage1_qualified = sum(1 for row in present_records if row.get("stage1_qualified"))
     stage2_referenced = sum(1 for row in present_records if row["stage2_referenced"])
     absence_respected = sum(1 for row in absent_records if row["absence_respected"])
     return {
@@ -570,6 +582,10 @@ def _human_key_event_audit(
             "absent_events": len(absent_records),
             "stage1_recalled": stage1_recalled,
             "stage1_recall": round(stage1_recalled / len(present_records), 4) if present_records else None,
+            "stage1_qualified": stage1_qualified,
+            "stage1_qualification_given_observation": round(
+                stage1_qualified / stage1_recalled, 4
+            ) if stage1_recalled else None,
             "stage2_referenced": stage2_referenced,
             "stage2_use_given_recall": round(stage2_referenced / stage1_recalled, 4) if stage1_recalled else None,
             "absence_respected": absence_respected,
@@ -895,6 +911,23 @@ def _stage1_audit_contract(run_paths: dict[str, Path]) -> dict[str, Any]:
                 "unexpected_event_modules": unexpected,
                 "duplicate_event_modules": duplicates,
                 "invalid_present_evidence_ids": invalid_present_evidence,
+                "stage_evidence_contract_version": side.get("stage_evidence_contract_version"),
+                "stage_evidence_statuses": {
+                    stage: (stage_evidence_check_map(side).get(stage) or {}).get("status", "unknown")
+                    for stage in stage_codes()
+                },
+                "stage_evidence_qualified_counts": {
+                    stage: len(qualified_stage_evidence_ids(side, stage))
+                    if side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+                    else None
+                    for stage in stage_codes()
+                },
+                "evidence_unit_count": len(units),
+                "evidence_budget_exceeded": side.get("evidence_budget_exceeded") is True,
+                "stage1_recovery_status": str(
+                    (side.get("stage1_recovery") or {}).get("status") or "not_recorded"
+                ),
+                "stage_evidence_issues": stage_evidence_contract_issues(side, require_version=False),
             })
     complete = [
         row for row in records
@@ -911,6 +944,48 @@ def _stage1_audit_contract(run_paths: dict[str, Path]) -> dict[str, Any]:
             "role_artifacts": len(records),
             "complete_role_artifacts": len(complete),
             "complete_rate": round(len(complete) / len(records), 4) if records else None,
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage_evidence_role_artifacts": sum(
+                1 for row in records if row.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+            ),
+            "stage_evidence_contract_rate": round(
+                sum(
+                    1
+                    for row in records
+                    if row.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+                    and not row.get("stage_evidence_issues")
+                ) / len(records),
+                4,
+            ) if records else None,
+            "stage_evidence_status_counts": {
+                stage: dict(
+                    Counter(
+                        row.get("stage_evidence_statuses", {}).get(stage, "unknown")
+                        for row in records
+                    )
+                )
+                for stage in stage_codes()
+            },
+            "stage_evidence_qualified_counts": {
+                stage: {
+                    "total_qualified_units": sum(
+                        int(row.get("stage_evidence_qualified_counts", {}).get(stage) or 0)
+                        for row in records
+                    ),
+                    "role_artifacts_with_qualified_evidence": sum(
+                        1
+                        for row in records
+                        if (row.get("stage_evidence_qualified_counts", {}).get(stage) or 0) > 0
+                    ),
+                }
+                for stage in stage_codes()
+            },
+            "stage1_recovery_status_counts": dict(
+                Counter(row.get("stage1_recovery_status", "not_recorded") for row in records)
+            ),
+            "evidence_budget_exceeded_role_artifacts": sum(
+                1 for row in records if row.get("evidence_budget_exceeded") is True
+            ),
         },
         "violations": [row for row in records if row not in complete],
         "records": records,

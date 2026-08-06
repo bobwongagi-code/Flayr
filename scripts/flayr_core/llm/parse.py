@@ -30,6 +30,10 @@ from ..multimodal import (
     MULTIMODAL_RELATIONS,
 )
 from ..stage_catalog import stage_tuples
+from ..stage_evidence_contracts import (
+    STAGE_EVIDENCE_CONTRACT_VERSION,
+    normalize_stage_evidence_checks,
+)
 from ..structure_modules import canonical_module_id, stage1_event_catalog
 from .analysis_contract import AnalysisContractError, validate_raw_analysis_envelope
 from .json_codec import escape_unquoted_string_quotes, parse_json_text, remove_trailing_commas
@@ -1003,7 +1007,6 @@ def normalize_video_understanding(value: Any) -> dict[str, Any]:
             }
             normalized_unit.update(normalize_variant_unit_fields(unit))
             normalized_units.append(normalized_unit)
-        normalized_units = normalized_units[:20]
         valid_ids = {unit["id"] for unit in normalized_units}
         raw_gate_status = item.get("gate_observation_status") if isinstance(item.get("gate_observation_status"), dict) else {}
         normalized[role] = {
@@ -1019,6 +1022,14 @@ def normalize_video_understanding(value: Any) -> dict[str, Any]:
             # Stage1 锁定 facts 的审计字段必须进入最终产物；不得由 Stage2 回显内容覆盖。
             "evidence_checklist": normalize_fact_evidence_checklist(item.get("evidence_checklist"), valid_ids),
             "structure_event_checks": normalize_structure_event_checks(item.get("structure_event_checks"), valid_ids),
+            "stage_evidence_contract_version": normalize_stage_evidence_contract_version(
+                item.get("stage_evidence_contract_version")
+            ),
+            "stage_evidence_checks": normalize_stage_evidence_checks(
+                item.get("stage_evidence_checks"), valid_ids
+            ),
+            "evidence_budget_exceeded": bool(item.get("evidence_budget_exceeded") is True),
+            "stage1_recovery": item.get("stage1_recovery") if isinstance(item.get("stage1_recovery"), dict) else {},
         }
     return normalized
 
@@ -1490,7 +1501,7 @@ def normalize_fact_evidence_checklist(value: Any, valid_ids: set[str]) -> list[d
 
 
 def normalize_structure_event_checks(value: Any, valid_ids: set[str]) -> list[dict[str, Any]]:
-    """按结构库事件目录补齐 Stage1 观测，防止模型省略 false 项造成不可比。"""
+    """归一结构库事件；未观察到不再伪装成确认不存在。"""
     catalog = stage1_event_catalog()
     catalog_ids = {str(item["id"]) for item in catalog}
     raw_checks = value if isinstance(value, list) else []
@@ -1504,17 +1515,48 @@ def normalize_structure_event_checks(value: Any, valid_ids: set[str]) -> list[di
         module_id = str(catalog_item["id"])
         item = event_by_module.get(module_id)
         if not isinstance(item, dict):
-            normalized.append({"module_id": module_id, "present": False, "evidence_ids": []})
+            normalized.append(
+                {
+                    "module_id": module_id,
+                    "stage": str(catalog_item.get("stage") or ""),
+                    "status": "unknown",
+                    "coverage": "unknown",
+                    "present": None,
+                    "evidence_ids": [],
+                }
+            )
             continue
+        raw_status = str(item.get("status") or "").strip().lower()
+        if raw_status not in {"present", "absent", "unknown", "conflict"}:
+            raw_present = normalize_bool_flag(item.get("present"))
+            raw_status = "present" if raw_present is True else "absent" if raw_present is False else "unknown"
+        raw_coverage = str(item.get("coverage") or "").strip().lower()
+        if raw_coverage not in {"complete", "partial", "unknown"}:
+            raw_coverage = "complete" if raw_status in {"present", "absent"} else "unknown"
+        observed = [
+            str(signal).strip()
+            for signal in item.get("observed_signals") or []
+            if str(signal).strip()
+        ]
+        missing = [
+            str(signal).strip()
+            for signal in item.get("missing_signals") or []
+            if str(signal).strip()
+        ]
         normalized.append(
             {
                 "module_id": module_id,
-                "present": normalize_bool_flag(item.get("present")) is True,
+                "stage": str(catalog_item.get("stage") or ""),
+                "status": raw_status,
+                "coverage": raw_coverage,
+                "present": True if raw_status == "present" else False if raw_status == "absent" else None,
                 "evidence_ids": [
                     str(evidence_id).strip()
                     for evidence_id in item.get("evidence_ids") or []
                     if str(evidence_id).strip() in valid_ids
                 ],
+                "observed_signals": observed,
+                "missing_signals": missing,
             }
         )
     return normalized
@@ -1531,8 +1573,13 @@ def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dic
         "product_identity": normalize_video_product_identity(result.get("product_identity")),
         "temporal_evidence_mode": normalize_temporal_evidence_mode(result.get("temporal_evidence_mode")),
         "evidence_units": [],
+        "stage_evidence_contract_version": normalize_stage_evidence_contract_version(
+            result.get("stage_evidence_contract_version")
+        ),
+        "evidence_budget_exceeded": bool(result.get("evidence_budget_exceeded") is True),
+        "stage1_recovery": result.get("stage1_recovery") if isinstance(result.get("stage1_recovery"), dict) else {},
     }
-    for index, unit in enumerate(units[:8], start=1):
+    for index, unit in enumerate(units, start=1):
         if not isinstance(unit, dict):
             continue
         information = str(unit.get("information") or "").strip()
@@ -1571,6 +1618,8 @@ def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dic
             }
         normalized_unit.update(normalize_variant_unit_fields(unit))
         normalized["evidence_units"].append(normalized_unit)
+    if not normalized["evidence_units"]:
+        raise SystemExit(f"{role} fact extraction returned no valid evidence units.")
     validate_single_video_facts(role, normalized, analysis)
     valid_ids = {unit["id"] for unit in normalized["evidence_units"]}
     normalized["selling_point_observations"] = normalize_selling_point_observations(
@@ -1585,7 +1634,18 @@ def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dic
     )
     normalized["evidence_checklist"] = normalize_fact_evidence_checklist(result.get("evidence_checklist"), valid_ids)
     normalized["structure_event_checks"] = normalize_structure_event_checks(result.get("structure_event_checks"), valid_ids)
+    normalized["stage_evidence_checks"] = normalize_stage_evidence_checks(
+        result.get("stage_evidence_checks"), valid_ids
+    )
     return normalized
+
+
+def normalize_stage_evidence_contract_version(value: Any) -> int | None:
+    try:
+        version = int(value)
+    except (TypeError, ValueError):
+        return None
+    return version if version == STAGE_EVIDENCE_CONTRACT_VERSION else None
 
 
 def normalize_gate_observation_status(
@@ -1637,6 +1697,16 @@ def normalized_fact_id(value: Any, code: str, index: int) -> str:
 
 def validate_single_video_facts(role: str, facts: dict[str, Any], analysis: dict[str, Any]) -> None:
     """单视频 fact 校验：拒绝跨视频串证据；缺失 information 直接 fail。"""
+    seen_ids: set[str] = set()
+    duplicate_ids: list[str] = []
+    for unit in facts.get("evidence_units", []):
+        evidence_id = str(unit.get("id") or "").strip()
+        if evidence_id in seen_ids and evidence_id not in duplicate_ids:
+            duplicate_ids.append(evidence_id)
+        seen_ids.add(evidence_id)
+    if duplicate_ids:
+        raise SystemExit(f"{role} fact evidence IDs must be unique: {', '.join(duplicate_ids)}")
+
     info = analysis.get("videos", {}).get(role, {})
     transcript = normalized_transcript_text(read_transcript_text(info))
     other_role = "creator" if role == "benchmark" else "benchmark"

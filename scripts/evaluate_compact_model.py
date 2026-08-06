@@ -27,7 +27,9 @@ from flayr_core.llm.compact_eval import (  # noqa: E402
     load_gt_stages,
     run_compact_evaluation,
     run_s4_fact_state_evaluation,
+    run_s4_free_text_steps_evaluation,
     run_s4_judgment_evaluation,
+    run_s4_single_pass_evaluation,
     run_s5_audit_evaluation,
     run_severity_only_evaluation,
     run_visual_extraction_evaluation,
@@ -52,6 +54,8 @@ def build_parser() -> argparse.ArgumentParser:
             "severity_scaffold",
             "visual_extraction",
             "s4_fact_state",
+            "s4_single_pass",
+            "s4_free_text_steps",
             "s4_judgment",
             "s5_audit",
         ),
@@ -114,7 +118,7 @@ def main() -> int:
     try:
         if args.variant == "visual_extraction":
             bundle = load_frozen_video_bundle(args.run_dir)
-        elif args.variant in {"s4_fact_state", "s4_judgment", "s5_audit"}:
+        elif args.variant in {"s4_fact_state", "s4_single_pass", "s4_free_text_steps", "s4_judgment", "s5_audit"}:
             bundle = load_frozen_compact_bundle(args.run_dir, include_images=False)
         else:
             bundle = load_frozen_compact_bundle(args.run_dir, include_images=not args.no_images)
@@ -153,6 +157,10 @@ def main() -> int:
             result = run_visual_extraction_evaluation(**common)
         elif args.variant == "s4_fact_state":
             result = run_s4_fact_state_evaluation(**common)
+        elif args.variant == "s4_single_pass":
+            result = run_s4_single_pass_evaluation(**common)
+        elif args.variant == "s4_free_text_steps":
+            result = run_s4_free_text_steps_evaluation(**common)
         elif args.variant == "s5_audit":
             result = run_s5_audit_evaluation(**common)
         else:

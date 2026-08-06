@@ -30,6 +30,7 @@ from ..evidence_states import (
     s2_hard_fact_snapshot,
 )
 from ..multimodal import channel_requirement_for, has_multimodal_assessment, multimodal_execution
+from ..stage_evidence_contracts import STAGE_EVIDENCE_CONTRACT_VERSION, qualified_stage_evidence_ids
 from .calibration import TrustedS4ActivationEvidence, validate_s4_large_floor_activation_evidence
 
 _STAGE_RE = re.compile(r"(S[1-6])")
@@ -62,6 +63,11 @@ def _side_endorsement(result: dict[str, Any], side: str) -> _Endorsement:
     if not isinstance(units, list):
         return _NO_ENDORSEMENT
     units = [u for u in units if isinstance(u, dict)]
+    if isinstance(side_vu, dict) and side_vu.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+        qualified_s5_ids = qualified_stage_evidence_ids(side_vu, "S5")
+        units = [unit for unit in units if str(unit.get("id") or "") in qualified_s5_ids]
+        if not units:
+            return _NO_ENDORSEMENT
     verbal = any(u.get("endorsement_verbal") is True for u in units)
     visual = any(u.get("endorsement_visual") is True for u in units)
     # normalize 层会保留缺失字段为 None；只有明确出现 true/false 才算该观察
@@ -611,16 +617,48 @@ def _stage_strength_gate(
     creator: dict[str, Any],
     benchmark_role: str,
     benchmark: dict[str, Any],
+    stage_code: str | None = None,
 ) -> tuple[str, list[str], dict[str, Any]]:
     creator_state = _flag_strength(result, creator_role, creator)
     benchmark_state = _flag_strength(result, benchmark_role, benchmark)
     evidence_ids = sorted(set(creator_state.get("evidence_ids", [])) | set(benchmark_state.get("evidence_ids", [])))
+    if stage_code:
+        understanding = result.get("video_understanding") if isinstance(result, dict) else None
+        for role, flag in ((creator_role, creator), (benchmark_role, benchmark)):
+            side = understanding.get(role) if isinstance(understanding, dict) else None
+            if not isinstance(side, dict) or side.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+                continue
+            qualified = qualified_stage_evidence_ids(side, stage_code)
+            flag_ids = set(_flag_evidence_ids(flag))
+            if not flag_ids or not flag_ids.issubset(qualified):
+                return (
+                    "stage_evidence_unresolved",
+                    evidence_ids,
+                    {
+                        "creator": creator_state,
+                        "benchmark": benchmark_state,
+                        "role": role,
+                        "stage": stage_code,
+                        "flag_evidence_ids": sorted(flag_ids),
+                        "qualified_evidence_ids": sorted(qualified),
+                    },
+                )
     if creator_state.get("status") != "eligible" or benchmark_state.get("status") != "eligible":
         status = creator_state.get("status") if creator_state.get("status") != "eligible" else benchmark_state.get("status")
         return str(status), evidence_ids, {"creator": creator_state, "benchmark": benchmark_state}
     if creator_state.get("strength") not in _EXPLICIT_STRENGTHS or benchmark_state.get("strength") not in _EXPLICIT_STRENGTHS:
         return "insufficient_strength", evidence_ids, {"creator": creator_state, "benchmark": benchmark_state}
     return "eligible", evidence_ids, {"creator": creator_state, "benchmark": benchmark_state}
+
+
+def _has_active_stage_evidence_contract(result: dict[str, Any], roles: tuple[str, ...]) -> bool:
+    understanding = result.get("video_understanding") if isinstance(result, dict) else None
+    return any(
+        isinstance(understanding, dict)
+        and isinstance(understanding.get(role), dict)
+        and understanding[role].get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+        for role in roles
+    )
 
 
 def _constraint_evaluation(rule: str, status: str, reason: str, **extra: Any) -> dict[str, Any]:
@@ -634,6 +672,7 @@ def _constraint_evaluation(rule: str, status: str, reason: str, **extra: Any) ->
         "uncertain_evidence_strength": "insufficient_strength",
         "insufficient_strength": "insufficient_strength",
         "uncertain_fact": "uncertain_fact",
+        "stage_evidence_unresolved": "stage_evidence_unresolved",
         "precondition_missing": "precondition_missing",
         "audit_only": "activation_gate_closed",
         "model_preserved": "model_preserved",
@@ -812,7 +851,7 @@ def _derive_one(
         elif not _has_required_evidence(creator, benchmark):
             skip(rule, "missing_field", "S1 Hook 缺少双方 evidence_ids。")
         elif benchmark.get("exists") is True and creator.get("exists") is False:
-            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark)
+            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, stage_id)
             if status == "eligible":
                 add("floor", "large", rule, "标杆有 Hook、达人明确没有 Hook。", ids)
             else:
@@ -846,7 +885,7 @@ def _derive_one(
             if not predicate(creator, benchmark):
                 skip(rule, "predicate_not_met", "S1 比较型下限条件未满足。")
                 continue
-            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark)
+            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, stage_id)
             if status != "eligible":
                 skip(rule, status, "S1 比较型下限需要 direct/explicit evidence_strength。", evidence=detail)
                 continue
@@ -873,7 +912,7 @@ def _derive_one(
                 evidence=hard_fact_failure["evidence"],
             )
         elif all(benchmark.get(key) is True for key in keys) and any(creator.get(key) is False for key in keys):
-            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark)
+            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, stage_id)
             if status == "eligible":
                 add("floor", "medium", rule, "标杆完成 S2 承接契约、达人明确缺少关键契约。", ids)
             else:
@@ -924,7 +963,7 @@ def _derive_one(
                     reason_code=f"{partial_role}_usage_partial",
                 )
             elif creator_state == "none" and benchmark_state == "complete":
-                status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark)
+                status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, stage_id)
                 if status == "eligible":
                     add("floor", "large", rule, "标杆完成可复核真实使用、达人明确没有真实使用过程。", ids)
                 else:
@@ -962,7 +1001,7 @@ def _derive_one(
         elif benchmark.get("process_framing_met") is not True or creator.get("process_framing_met") is not False:
             skip(rule, "predicate_not_met", "S3 未形成标杆做厚、达人单薄的明确差异。")
         else:
-            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark)
+            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, stage_id)
             if status == "eligible":
                 add("floor", "medium", rule, "双方都有基础使用过程，但标杆明确做厚、达人呈现单薄。", ids)
             else:
@@ -1011,7 +1050,7 @@ def _derive_one(
                     reason_code=f"{result_only_role}_effect_result_only",
                 )
             elif creator_state == "none" and benchmark_state == "verified":
-                status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark)
+                status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, stage_id)
                 if status != "eligible":
                     skip(rule, status, "S4 结构性大下限需要双方 direct/explicit evidence_strength。", evidence=detail)
                 elif not validate_s4_large_floor_activation_evidence(activation_evidence):
@@ -1059,7 +1098,7 @@ def _derive_one(
         elif str(creator.get("effect_salience") or "") == "strong" and creator.get("effect_maximized") is True:
             skip(rule, "predicate_not_met", "达人效果同样做强，不构成薄效果差距。")
         else:
-            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark)
+            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, stage_id)
             if status == "eligible":
                 add("floor", "medium", rule, "双方都有可信效果，但标杆效果更显著、更聚焦。", ids)
             else:
@@ -1115,7 +1154,27 @@ def _derive_one(
         elif not _has_required_evidence(creator, benchmark):
             skip(rule, "missing_field", "S6 CTA 安全封顶缺少双方 evidence_ids。")
         elif benchmark.get("exists") is False and (creator.get("direct_order_met") is True or creator.get("action_path_clear") is True):
-            add("ceiling", "small", rule, "达人有明确购买路径、标杆没有独立 CTA，不因缺少促销放大话术制造差距。", (*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)))
+            if _has_active_stage_evidence_contract(facts, ("creator", "benchmark")):
+                status, ids, detail = _stage_strength_gate(
+                    facts,
+                    "creator",
+                    creator,
+                    "benchmark",
+                    benchmark,
+                    stage_id,
+                )
+                if status == "eligible":
+                    add("ceiling", "small", rule, "达人有明确购买路径、标杆没有独立 CTA，不因缺少促销放大话术制造差距。", ids)
+                else:
+                    skip(rule, status, "S6 安全封顶需要双方 Stage1 阶段证据已资格化且为 direct/explicit。", evidence=detail)
+            else:
+                add(
+                    "ceiling",
+                    "small",
+                    rule,
+                    "达人有明确购买路径、标杆没有独立 CTA，不因缺少促销放大话术制造差距。",
+                    (*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)),
+                )
         else:
             skip(rule, "predicate_not_met", "S6 未形成达人明确优于标杆 CTA 的安全封顶条件。")
 

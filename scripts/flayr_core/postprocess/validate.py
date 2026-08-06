@@ -36,6 +36,11 @@ from ..multimodal import (
     MULTIMODAL_RELATIONS,
 )
 from ..stage_ownership import CERTIFICATION_OWNER_STAGE, contains_certification, is_certification_owner_stage
+from ..stage_evidence_contracts import (
+    qualified_stage_evidence_ids,
+    stage_evidence_check_map,
+    stage_evidence_contract_issues,
+)
 from ..structure_modules import official_module_ids
 from ..transcript import load_transcript_words
 from .utils import evidence_overlaps_range
@@ -170,7 +175,10 @@ def validate_evidence_alignment(result: dict[str, Any]) -> None:
             raise SystemExit(f"stage_analysis 必须按 S1 到 S6 顺序输出；第 {index} 项不是 {expected_stage}。")
         for role in ("benchmark", "creator"):
             references = stage.get(f"{role}_evidence_ids", [])
-            if not references:
+            side = understanding.get(role, {}) if isinstance(understanding.get(role), dict) else {}
+            stage_check = stage_evidence_check_map(side).get(expected_stage) if side.get("stage_evidence_contract_version") == 1 else None
+            contract_status = stage_check.get("status") if isinstance(stage_check, dict) else None
+            if not references and contract_status not in {"absent", "unknown", "conflict"}:
                 raise SystemExit(f"S{index} 缺少 {role}_evidence_ids，结论无法对应证据。")
             missing = [item for item in references if item not in available[role]]
             if missing:
@@ -178,7 +186,7 @@ def validate_evidence_alignment(result: dict[str, Any]) -> None:
             units = understanding.get(role, {}).get("evidence_units", [])
             is_silent_role = not any(is_effective_voiceover(unit.get("voiceover")) for unit in units if isinstance(unit, dict))
             referenced = [unit for unit in units if str(unit.get("id")) in references]
-            if not is_silent_role and not any(
+            if references and not is_silent_role and not any(
                 evidence_overlaps_range(unit, stage.get(f"{role}_time_range")) for unit in referenced
             ):
                 raise SystemExit(f"S{index} 的 {role} 证据不在对应阶段时间内，需补充该时段事实单元。")
@@ -192,6 +200,49 @@ def validate_evidence_alignment(result: dict[str, Any]) -> None:
                 source_text = json.dumps(claim_referenced or referenced, ensure_ascii=False)
                 if not contains_certification(source_text):
                     raise SystemExit(f"S{index} 的 {role} 认证结论没有被所引用事实单元支持。")
+    validate_stage_evidence_qualification(result)
+
+
+def validate_stage_evidence_qualification(result: dict[str, Any]) -> None:
+    """Ensure Stage2 consumes Stage1-qualified evidence when the new contract is active.
+
+    ``functions`` remains a compatibility projection, never a source of stage
+    ownership.  Unknown/conflict checks are allowed to remain unresolved, but
+    they cannot silently become an absence claim.
+    """
+    understanding = result.get("video_understanding") if isinstance(result, dict) else None
+    if not isinstance(understanding, dict):
+        return
+    active_sides = {
+        role: side
+        for role in ("benchmark", "creator")
+        if isinstance((side := understanding.get(role)), dict)
+        and side.get("stage_evidence_contract_version") == 1
+    }
+    if not active_sides:
+        return
+    for role, side in active_sides.items():
+        issues = stage_evidence_contract_issues(side, require_version=True)
+        if issues:
+            raise SystemExit(f"{role} Stage1 阶段证据合同无效：" + "；".join(issues))
+        checks = stage_evidence_check_map(side)
+        for index, stage in enumerate(result.get("stage_analysis", []), start=1):
+            stage_code = f"S{index}"
+            check = checks.get(stage_code) or {}
+            status = check.get("status")
+            references = [str(value) for value in stage.get(f"{role}_evidence_ids") or [] if str(value).strip()]
+            qualified = qualified_stage_evidence_ids(side, stage_code)
+            if status == "present" and not (set(references) & qualified):
+                raise SystemExit(
+                    f"{stage_code} {role} 阶段引用没有命中 Stage1 已资格化证据，"
+                    "不能用 functions 或自由文本补回。"
+                )
+            if status == "absent" and references:
+                raise SystemExit(f"{stage_code} {role} 已确认 absent 时不得继续引用阶段证据。")
+            if status in {"unknown", "conflict"} and references:
+                raise SystemExit(
+                    f"{stage_code} {role} 阶段证据仍为 {status}，不得把未资格化证据作为阶段结论引用。"
+                )
 
 
 def validate_analysis_dimensions(result: dict[str, Any]) -> None:
@@ -894,12 +945,15 @@ def validate_multimodal_assessments(result: dict[str, Any], analysis: dict[str, 
             # 还可引用 Stage1 已锁定为同阶段功能的其它单元；否则摘要只选一帧时会把真实
             # 的声音/画面证据误报成“跨阶段”。没有 functions 的旧结果仍只认主引用。
             role_understanding = understanding.get(role) if isinstance(understanding.get(role), dict) else {}
-            locked_stage_refs = {
-                str(unit.get("id"))
-                for unit in role_understanding.get("evidence_units") or []
-                if isinstance(unit, dict)
-                and stage_functions[stage_id] in {str(value) for value in unit.get("functions") or []}
-            }
+            if role_understanding.get("stage_evidence_contract_version") == 1:
+                locked_stage_refs = qualified_stage_evidence_ids(role_understanding, stage_id)
+            else:
+                locked_stage_refs = {
+                    str(unit.get("id"))
+                    for unit in role_understanding.get("evidence_units") or []
+                    if isinstance(unit, dict)
+                    and stage_functions[stage_id] in {str(value) for value in unit.get("functions") or []}
+                }
             allowed_refs = stage_refs | locked_stage_refs
             for channel in MULTIMODAL_CHANNELS:
                 impact = impacts.get(channel)

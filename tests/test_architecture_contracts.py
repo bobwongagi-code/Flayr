@@ -1856,7 +1856,19 @@ class ArchitectureContractTests(unittest.TestCase):
             },
             {"videos": {"benchmark": {}, "creator": {}}},
         )
-        self.assertEqual(facts["structure_event_checks"][0], {"module_id": "S3-A", "present": True, "evidence_ids": ["C1"]})
+        self.assertEqual(
+            facts["structure_event_checks"][0],
+            {
+                "module_id": "S3-A",
+                "stage": "S3",
+                "status": "present",
+                "coverage": "complete",
+                "present": True,
+                "evidence_ids": ["C1"],
+                "observed_signals": [],
+                "missing_signals": [],
+            },
+        )
         self.assertEqual(len(facts["structure_event_checks"]), 11)
         self.assertNotIn("S4-Z", [item["module_id"] for item in facts["structure_event_checks"]])
 
@@ -1881,7 +1893,19 @@ class ArchitectureContractTests(unittest.TestCase):
         )
         benchmark = normalized["video_understanding"]["benchmark"]
         self.assertEqual(benchmark["evidence_checklist"][0]["evidence_ids"], ["B1"])
-        self.assertEqual(benchmark["structure_event_checks"][0], {"module_id": "S3-A", "present": True, "evidence_ids": ["B1"]})
+        self.assertEqual(
+            benchmark["structure_event_checks"][0],
+            {
+                "module_id": "S3-A",
+                "stage": "S3",
+                "status": "present",
+                "coverage": "complete",
+                "present": True,
+                "evidence_ids": ["B1"],
+                "observed_signals": [],
+                "missing_signals": [],
+            },
+        )
         self.assertEqual(len(benchmark["structure_event_checks"]), 11)
 
     def test_locked_comparison_scope_reaches_and_overrides_main_analysis(self) -> None:

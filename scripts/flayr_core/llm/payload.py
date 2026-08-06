@@ -17,6 +17,11 @@ from ..market import render_market_knowledge
 from ..multimodal import multimodal_output_example, render_multimodal_prompt_contract
 from ..shot_track import render_shot_track_markdown
 from ..speech_mode import speech_mode_prompt
+from ..stage_evidence_contracts import (
+    STAGE_EVIDENCE_CONTRACT_VERSION,
+    qualified_stage_evidence_ids,
+    stage_evidence_contract_prompt,
+)
 from ..structure_modules import stage1_event_catalog
 from ..stage_ownership import (
     CERTIFICATION_OWNERSHIP_PROMPT,
@@ -275,6 +280,8 @@ def _compact_comparison_facts(value: Any) -> dict[str, Any]:
         "content_summary": value.get("content_summary") or "",
         "evidence_units": units,
         "structure_event_checks": value.get("structure_event_checks") or [],
+        "stage_evidence_contract_version": value.get("stage_evidence_contract_version"),
+        "stage_evidence_checks": value.get("stage_evidence_checks") or [],
         "evidence_checklist": value.get("evidence_checklist") or [],
     }
 
@@ -477,8 +484,18 @@ def build_video_fact_payload(
             obs_hint,
             observation_checklist,
             "## 结构库事件目录（逐项核对，不是阶段评分）\n"
-            "先自由观察，再对每项写 present=true/false；present=true 必须绑定 evidence_units 中的真实 id，false 必须无 evidence_ids。\n"
+            "先自由观察，再逐项写 status=present|absent|unknown|conflict 和 coverage=complete|partial|unknown；"
+            "只有 coverage=complete 时才允许写 absent，present/absent 都必须遵守证据引用合同，不能把未观察到写成 absent。\n"
             + event_catalog_text,
+            "## S1-S6 阶段证据合同（Stage1-B，只做证据资格，不做达人/标杆比较）\n"
+            "先完成 evidence_units 的原始观察，再为每个阶段输出一个 stage_evidence_checks。"
+            "stage_evidence_checks 是阶段归属的唯一权威；functions 只是旧版本兼容投影，不能用来替代它。"
+            "status=present 必须引用同侧真实 evidence_ids，并且这些 evidence_units 的 evidence_strength 必须由代码核验为 direct 或 explicit；"
+            "status=absent 只有在 coverage=complete、没有对应 evidence_ids 且明确列出 missing_signals 时才允许。"
+            "coverage=partial/unknown、事实冲突、时间范围不足或非替代渠道缺失时写 unknown/conflict，绝不能写 absent。"
+            "stage_evidence_checks 里的 evidence_strength 只作模型自检摘要，不能覆盖 evidence_unit 的权威强度；"
+            "同一个 evidence unit 可以被多个阶段引用，但必须分别填写 observed_signals；S3/S4 的 visual_required 不得被口播替代。\n"
+            + stage_evidence_contract_prompt(),
             "## 本地语言转写（语义参考；不提供精确窗口边界）",
             read_text_if_exists(role_dir / "transcript.txt"),
             "",
@@ -595,8 +612,27 @@ def build_video_fact_payload(
                     "structure_event_checks": [
                         {
                             "module_id": "必须是上方结构库事件目录中的 S3-A~E 或 S4-A~F。",
-                            "present": True,
+                            "status": "present|absent|unknown|conflict",
+                            "coverage": "complete|partial|unknown",
                             "evidence_ids": [f"{code}1"],
+                        }
+                    ],
+                    "stage_evidence_contract_version": 1,
+                    "stage_evidence_checks": [
+                        {
+                            "stage": "S1",
+                            "status": "present|absent|unknown|conflict",
+                            "coverage": "complete|partial|unknown",
+                            "evidence_ids": [f"{code}1"],
+                            "invalid_evidence_ids": [],
+                            "observed_signals": ["该阶段合同中实际观察到的信号"],
+                            "missing_signals": [],
+                            "observed_disqualifiers": [],
+                            "invalid_observed_signals": [],
+                            "invalid_missing_signals": [],
+                            "invalid_observed_disqualifiers": [],
+                            "evidence_strength": "direct|explicit|inferred|absent",
+                            "reason": "只说明资格事实，不写比较结论。",
                         }
                     ],
                 },
@@ -653,7 +689,8 @@ def build_video_fact_payload(
         "music_driven 在可直接感知音轨时以画面变化、BGM/节奏/音效为骨架；否则只按画面变化组织。无有效口播时 voiceover 与 voiceover_zh 必须留空，"
         "不得把屏幕字幕、画面文案或你对画面的理解伪装成口播。"
         "按带货短视频的天然结构（钩子→产品引出→使用过程→效果呈现→信任放大→促单）找证据切分 evidence_units，"
-        "目标是抽出对分析带货视频有价值的事实，而非随意找转折点；输出 4 到 8 条，沿时间线排列，id 必须使用指定前缀，"
+        "目标是完整抽出对分析带货视频有价值的原子事实，而非随意找转折点或为凑数量合并事实；"
+        "不设固定条数上限，沿时间线排列，id 必须使用指定前缀；如果受响应预算影响无法覆盖全部关键事实，必须设置 evidence_budget_exceeded=true，不能静默省略，"
         "time_range 用真实时间（如 2.5s - 4.0s）。"
         "product_identity 必须只记录当前视频里实际看见、听见或读到的产品身份；声明产品名只作核对线索，"
         "不得因为输入声明是某品就把视频中看不出的品牌、品类或形态填成该品。"
@@ -700,6 +737,88 @@ def build_video_fact_payload(
         ],
         "temperature": 0.0,
     }
+
+
+def build_video_fact_recovery_payload(
+    model: str,
+    role: str,
+    analysis: dict[str, Any],
+    visual_inputs: list[dict[str, str]],
+    current_facts: dict[str, Any],
+    target_stages: list[str],
+    api_url: str = "",
+    budget: ResourceBudget | None = None,
+) -> dict[str, Any]:
+    """Build one bounded pre-lock re-observation request.
+
+    Recovery can add candidate observations and stage qualifications, but it
+    cannot rewrite existing facts.  The caller merges and re-normalizes the
+    candidate output before Stage2 sees it.
+    """
+    payload = build_video_fact_payload(
+        model,
+        role,
+        analysis,
+        visual_inputs,
+        api_url=api_url,
+        budget=budget,
+    )
+    target_text = ", ".join(str(stage).upper() for stage in target_stages if str(stage).strip()) or "S1-S6"
+    recovery_system = (
+        "你是 Flayr Stage1 的定向证据复核器。只输出严格 JSON。"
+        "这是一次且仅一次的事实恢复，不得改写、删除或合并已有 evidence_units，"
+        "只能补充当前视频中可直接观察到的新 candidate_evidence_units，并重新给出目标阶段资格。"
+        "没有确认事实就写空数组和 unknown，不得为了让阶段成立而推断。"
+    )
+    payload["messages"][0]["content"] = recovery_system
+    user_content = payload["messages"][1]["content"]
+    if isinstance(user_content, list) and user_content and isinstance(user_content[0], dict):
+        user_content[0]["text"] += (
+            "\n\n## 定向复核目标\n"
+            f"只复核这些阶段：{target_text}。优先检查它们的 required_signals、非替代渠道和 disqualifiers。\n"
+            "## 已锁定的原始事实（只读，不能改写）\n"
+            + json.dumps(current_facts, ensure_ascii=False, indent=2)
+            + "\n## 输出合同\n"
+            + json.dumps(
+                {
+                    "candidate_evidence_units": [
+                        {
+                            "id": "新的唯一 ID，例如 C9；不能复用已有 ID",
+                            "time_range": "真实时间范围",
+                            "information": "直接观察到的事实",
+                            "voiceover": "仅窗口安全口播中的原句，没有则留空",
+                            "voiceover_zh": "中文翻译，没有则留空",
+                            "visual_fact": "直接看到的画面事实",
+                            "subtitle_fact": "直接读到的字幕，没有则留空",
+                            "audio_fact": "直接听到的音频事实，没有则写无",
+                            "evidence_strength": "direct|explicit|inferred|absent",
+                            "functions": [],
+                        }
+                    ],
+                    "stage_evidence_checks": [
+                        {
+                            "stage": "S1",
+                            "status": "present|absent|unknown|conflict",
+                            "coverage": "complete|partial|unknown",
+                            "evidence_ids": ["已有或新增的真实 ID"],
+                            "observed_signals": [],
+                            "missing_signals": [],
+                            "observed_disqualifiers": [],
+                            "invalid_evidence_ids": [],
+                            "invalid_observed_signals": [],
+                            "invalid_missing_signals": [],
+                            "invalid_observed_disqualifiers": [],
+                            "evidence_strength": "direct|explicit|inferred|absent",
+                            "reason": "只写资格事实",
+                        }
+                    ],
+                    "stage_evidence_contract_version": 1,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    return payload
 
 
 def build_absolute_execution_shadow_payload(
@@ -1023,6 +1142,14 @@ def infer_boundary_from_evidence(role: str, facts: dict[str, Any]) -> dict[str, 
     units = get_role_evidence_units(role, facts)
     if len(units) < 2:
         return None
+    role_facts = get_role_fact_view(role, facts)
+    active_contract = role_facts.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+    qualified_s1 = qualified_stage_evidence_ids(role_facts, "S1") if active_contract else set()
+    qualified_s2 = qualified_stage_evidence_ids(role_facts, "S2") if active_contract else set()
+    if active_contract:
+        units = [unit for unit in units if str(unit.get("id") or "") in (qualified_s1 | qualified_s2)]
+        if len(units) < 2:
+            return None
     previous = units[0]
     for current in units[1:4]:
         current_start = parse_evidence_start(current.get("time_range"))
@@ -1034,9 +1161,10 @@ def infer_boundary_from_evidence(role: str, facts: dict[str, Any]) -> dict[str, 
             str(current.get(key) or "")
             for key in ("information", "voiceover_zh", "visual_fact", "subtitle_fact")
         )
-        if "S1_hook" in prev_functions and (
-            "S2_intro" in current_functions or find_s2_start_cue(current_text)
-        ):
+        previous_is_s1 = str(previous.get("id") or "") in qualified_s1 if active_contract else "S1_hook" in prev_functions
+        current_is_s2 = str(current.get("id") or "") in qualified_s2 if active_contract else "S2_intro" in current_functions
+        transition_confirmed = current_is_s2 if active_contract else current_is_s2 or find_s2_start_cue(current_text)
+        if previous_is_s1 and transition_confirmed:
             return {
                 "seconds": current_start,
                 "reason": (
@@ -1050,6 +1178,10 @@ def infer_boundary_from_evidence(role: str, facts: dict[str, Any]) -> dict[str, 
 
 def find_early_evidence_for_role(role: str, facts: dict[str, Any]) -> dict[str, Any]:
     role_units = get_role_evidence_units(role, facts)
+    role_facts = get_role_fact_view(role, facts)
+    if role_facts.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+        qualified_s1 = qualified_stage_evidence_ids(role_facts, "S1")
+        role_units = [unit for unit in role_units if str(unit.get("id") or "") in qualified_s1]
     if not role_units:
         return {}
     return min(role_units, key=lambda unit: parse_evidence_start(unit.get("time_range")))
@@ -1069,6 +1201,16 @@ def get_role_evidence_units(role: str, facts: dict[str, Any]) -> list[dict[str, 
     if not role_units:
         return []
     return [unit for unit in role_units if isinstance(unit, dict)]
+
+
+def get_role_fact_view(role: str, facts: dict[str, Any]) -> dict[str, Any]:
+    """Return the side-level facts for a combined benchmark/creator bundle."""
+    if not isinstance(facts, dict):
+        return {}
+    if facts.get("stage_evidence_contract_version") is not None:
+        return facts
+    nested = facts.get(role)
+    return nested if isinstance(nested, dict) else facts
 
 
 def parse_evidence_start(value: Any) -> float:
@@ -1465,6 +1607,12 @@ def build_llm_comparison_payload(
             qa_rules,
             "## 已校验单视频事实清单（唯一事实来源）",
             json.dumps(facts, ensure_ascii=False, indent=2),
+            "## Stage1 阶段资格使用规则",
+            "stage_evidence_checks 是 Stage1 对每个阶段的资格投影，不是比较结论。"
+            "只有 status=present 且 evidence_strength=direct/explicit 的证据，才能支持该阶段的确定性事实判断；"
+            "unknown/conflict 必须保留为低置信或待核验，不能改写成 absent，也不能用 functions 自行补回。"
+            "stage_analysis 的 evidence_ids 必须来自同侧 evidence_units，并优先来自该阶段的 stage_evidence_checks；"
+            "如果阶段资格不足，明确写 support_status=unknown 或 low，不得为了填满字段而创造事实。",
             "## 各视频证据组织模式（判断时必须尊重）",
             speech_mode_block,
             "## 输出要求",

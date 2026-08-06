@@ -16,6 +16,7 @@ from typing import Any
 from ..artifacts import format_seconds, parse_time_range_seconds, parse_timestamp_seconds
 from ..evidence_states import S1_HOOK_FLOOR_FIELDS, hard_fact_fingerprint
 from ..stage_catalog import stage_tuples
+from ..stage_evidence_contracts import STAGE_EVIDENCE_CONTRACT_VERSION, qualified_stage_evidence_ids
 from ..transcript import read_timed_transcript_segments
 
 STAGES = stage_tuples()
@@ -245,7 +246,9 @@ def direct_anchor_hit(text: str, terms: list[str]) -> bool:
 def repair_s1_hook_observable_floor(role: str, hook: dict[str, Any], result: dict[str, Any]) -> None:
     """用早段 facts 给 hook_exists 和四维可观察项做下限，防模型偶发把有证据的 Hook 判成全无。"""
     evidence = find_early_evidence_for_role(role, result)
-    if not evidence or not early_evidence_has_hook_signal(evidence):
+    side = (result.get("video_understanding") or {}).get(role, {}) if isinstance(result, dict) else {}
+    active_contract = isinstance(side, dict) and side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+    if not evidence or not early_evidence_has_hook_signal(evidence, allow_function_projection=not active_contract):
         return
     if hook.get("exists") is not True:
         hook["exists"] = True
@@ -260,10 +263,13 @@ def repair_s1_hook_observable_floor(role: str, hook: dict[str, Any], result: dic
         dims["sound"] = True
 
 
-def early_evidence_has_hook_signal(unit: dict[str, Any]) -> bool:
+def early_evidence_has_hook_signal(unit: dict[str, Any], *, allow_function_projection: bool = True) -> bool:
     funcs = {str(item) for item in unit.get("functions") or []}
     text = evidence_text(unit)
-    return "S1_hook" in funcs or any(cue.lower() in text.lower() for cue in S1_HOOK_CUES)
+    return (
+        (allow_function_projection and "S1_hook" in funcs)
+        or any(cue.lower() in text.lower() for cue in S1_HOOK_CUES)
+    )
 
 
 def has_visual_signal(unit: dict[str, Any]) -> bool:
@@ -341,6 +347,11 @@ def infer_boundary_from_evidence(role: str, result: dict[str, Any]) -> dict[str,
     units = get_role_evidence_units(role, result)
     if len(units) < 2:
         return None
+    s1_ids = _qualified_stage_ids(role, result, "S1")
+    s2_ids = _qualified_stage_ids(role, result, "S2")
+    if s1_ids is not None or s2_ids is not None:
+        if not s1_ids or not s2_ids:
+            return None
     previous = units[0]
     for current in units[1:4]:
         parsed = parse_time_range_seconds(current.get("time_range"), None)
@@ -356,7 +367,12 @@ def infer_boundary_from_evidence(role: str, result: dict[str, Any]) -> dict[str,
             for key in ("information", "voiceover_zh", "visual_fact", "subtitle_fact")
         )
         cue = find_s2_start_cue(current_text)
-        if "S1_hook" in prev_functions and ("S2_intro" in current_functions or cue):
+        is_stage_transition = (
+            (str(previous.get("id")) in s1_ids and str(current.get("id")) in s2_ids)
+            if s1_ids is not None or s2_ids is not None
+            else ("S1_hook" in prev_functions and ("S2_intro" in current_functions or cue))
+        )
+        if is_stage_transition:
             return {
                 "seconds": round(current_start, 2),
                 "cue": cue,
@@ -372,6 +388,9 @@ def infer_boundary_from_evidence(role: str, result: dict[str, Any]) -> dict[str,
 
 def find_early_evidence_for_role(role: str, result: dict[str, Any]) -> dict[str, Any]:
     units = get_role_evidence_units(role, result)
+    qualified = _qualified_stage_ids(role, result, "S1")
+    if qualified is not None:
+        units = [unit for unit in units if str(unit.get("id")) in qualified]
     if not units:
         return {}
     timed_units = []
@@ -387,6 +406,14 @@ def get_role_evidence_units(role: str, result: dict[str, Any]) -> list[dict[str,
     direct = facts.get(role) if isinstance(facts.get(role), dict) else {}
     units = direct.get("evidence_units") if isinstance(direct.get("evidence_units"), list) else []
     return [unit for unit in units if isinstance(unit, dict)]
+
+
+def _qualified_stage_ids(role: str, result: dict[str, Any], stage_code: str) -> set[str] | None:
+    facts = result.get("video_understanding") if isinstance(result.get("video_understanding"), dict) else {}
+    side = facts.get(role) if isinstance(facts.get(role), dict) else {}
+    if side.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+        return None
+    return qualified_stage_evidence_ids(side, stage_code)
 
 
 def find_s2_start_cue(text: str) -> str:
@@ -411,8 +438,14 @@ def align_clear_commerce_evidence(result: dict[str, Any]) -> None:
     leave the stage and its nested flag inconsistent, so this helper only
     fills missing or repair-placeholder references.
     """
+    benchmark_side = result.get("video_understanding", {}).get("benchmark", {})
+    # Active Stage1 facts are already locked.  This legacy keyword fallback can
+    # only assign or append synthetic units, so letting it run would create a
+    # second evidence source after the lock and bypass stage qualification.
+    if benchmark_side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+        return
     stages = result.get("stage_analysis", [])
-    units = result.get("video_understanding", {}).get("benchmark", {}).get("evidence_units", [])
+    units = benchmark_side.get("evidence_units", [])
     if len(stages) != len(STAGES) or not isinstance(units, list):
         return
     assignments = {
@@ -466,6 +499,11 @@ def align_timed_cta_from_transcript(result: dict[str, Any], analysis: dict[str, 
         return
     cta = stages[5]
     for role, code in (("benchmark", "B"), ("creator", "C")):
+        # The active Stage1 contract is the only source allowed to establish
+        # CTA evidence.  Transcript alignment remains available for legacy
+        # artifacts, but must not append a post-lock evidence unit.
+        if _qualified_stage_ids(role, result, "S6") is not None:
+            continue
         info = analysis.get("videos", {}).get(role, {})
         duration = parse_timestamp_seconds(info.get("duration_seconds"))
         if duration is None or duration <= 0:
