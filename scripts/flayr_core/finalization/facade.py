@@ -82,7 +82,8 @@ def _constraint_view(value: Any) -> LegacyConstraintView:
     if isinstance(value, Mapping):
         read = value.get
     else:
-        read = lambda key, default=None: getattr(value, key, default)
+        def read(key: str, default: Any = None) -> Any:
+            return getattr(value, key, default)
 
     raw_evidence_ids = read("evidence_ids", ())
     if raw_evidence_ids is None:

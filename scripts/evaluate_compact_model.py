@@ -31,6 +31,7 @@ from flayr_core.llm.compact_eval import (  # noqa: E402
     run_s5_audit_evaluation,
     run_severity_only_evaluation,
     run_visual_extraction_evaluation,
+    validate_s4_fact_state_artifact_metadata,
 )
 
 
@@ -162,6 +163,15 @@ def main() -> int:
                 raise CompactEvaluationError(f"invalid S4 state artifact: {state_path}: {exc}") from exc
             if not isinstance(state_record, dict) or state_record.get("status") != "completed":
                 raise CompactEvaluationError("S4 state artifact must be a completed evaluation artifact")
+            metadata_errors = validate_s4_fact_state_artifact_metadata(
+                state_record,
+                expected_model=args.model,
+                expected_source_digest=bundle.source_digest,
+            )
+            if metadata_errors:
+                raise CompactEvaluationError(
+                    "invalid S4 state artifact metadata: " + "; ".join(metadata_errors[:8])
+                )
             state_result = state_record.get("result")
             if not isinstance(state_result, dict):
                 raise CompactEvaluationError("S4 state artifact has no result object")

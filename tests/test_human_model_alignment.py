@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
-from scripts.evaluate_human_model_alignment import aggregate_model, score_extraction, score_judgment
+from scripts.evaluate_human_model_alignment import (
+    _read_result_artifact,
+    _safe_component_map,
+    _source_identity_audit,
+    aggregate_model,
+    score_extraction,
+    score_judgment,
+)
 
 
 def _labels() -> dict[str, dict[str, object]]:
@@ -70,6 +80,24 @@ class HumanModelAlignmentTests(unittest.TestCase):
         self.assertEqual(score["denominator"]["gt_relation_missing_cells"], 1)
         self.assertEqual(score["denominator"]["gt_relation_invalid_cells"], 1)
         self.assertEqual(score["denominator"]["scored_relation_cells"], 1)
+
+    def test_judgment_excludes_gt_relation_gap_conflicts(self) -> None:
+        labels = _labels()
+        labels["S1"] = {"status": "labeled", "gap_magnitude": "none", "relation": "benchmark_better"}
+        score = score_judgment(_judgment_result(), labels, artifact_status="completed")
+        self.assertEqual(score["denominator"]["gt_relation_gap_conflict_cells"], 1)
+        self.assertEqual(score["denominator"]["gt_invalid_cells"], 1)
+        self.assertEqual(score["rows"][0]["error_class"], "gt_relation_gap_conflict")
+
+    def test_invalid_labeled_gap_is_not_scored(self) -> None:
+        labels = _labels()
+        labels["S1"] = {"status": "labeled", "gap_magnitude": "not-a-gap", "relation": "benchmark_better"}
+        score = score_judgment(_judgment_result(), labels, artifact_status="completed")
+        row = next(row for row in score["rows"] if row["stage"] == "S1")
+        self.assertEqual(score["denominator"]["gt_invalid_cells"], 1)
+        self.assertEqual(row["status"], "invalid")
+        self.assertEqual(row["error_class"], "gt_invalid")
+        self.assertEqual(score["denominator"]["model_available_cells"], 2)
 
     def test_legacy_severity_cannot_claim_none_as_small(self) -> None:
         legacy = {
@@ -247,6 +275,146 @@ class HumanModelAlignmentTests(unittest.TestCase):
         score = score_extraction(result, {}, artifact_status="completed")
         self.assertIsNone(score["metrics"]["temporal_stage_recall_proxy"])
         self.assertIsNone(score["metrics"]["temporal_stage_precision_proxy"])
+
+    def test_invalid_human_key_events_are_excluded_from_recall_denominator(self) -> None:
+        score = score_extraction(
+            {"creator_evidence_units": [], "benchmark_evidence_units": []},
+            {
+                "key_events": [
+                    {"role": "creator", "stage": "S3", "time_range": [4.0, 1.0]},
+                    {
+                        "role": "creator",
+                        "stage": "S5",
+                        "time_range": [1.0, 2.0],
+                        "expected_state": "absent",
+                    },
+                ]
+            },
+            artifact_status="completed",
+        )
+        self.assertEqual(score["denominator"]["required_key_events"], 2)
+        self.assertEqual(score["denominator"]["invalid_key_events"], 2)
+        self.assertEqual(score["denominator"]["present_key_events"], 0)
+        self.assertEqual(score["denominator"]["absence_checks"], 0)
+
+    def test_source_identity_mismatch_is_explicit(self) -> None:
+        audit = _source_identity_audit(
+            {
+                "status": "completed",
+                "source_digest": "source-a",
+                "video_role_order": ["creator", "benchmark"],
+                "video_source_sha256": ["a", "b"],
+            },
+            {
+                "status": "completed",
+                "base_source_digest": "source-b",
+                "source_extraction": {
+                    "video_role_order": ["creator", "benchmark"],
+                    "video_source_sha256": ["a", "b"],
+                },
+            },
+        )
+        self.assertEqual(audit["status"], "blocked_source_identity_mismatch")
+        self.assertEqual(audit["mismatches"][0]["field"], "source_digest")
+
+    def test_model_independent_pairing_uses_raw_extraction_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            result_path = output_dir / "model_independent_evaluation.json"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "source_digest": "derived-fact-bundle",
+                        "result": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output_dir / "compact_request_metadata.json").write_text(
+                json.dumps({"protocol_hash": "protocol", "source_commit": "commit"}),
+                encoding="utf-8",
+            )
+            (output_dir / "model_independent_input_metadata.json").write_text(
+                json.dumps(
+                    {
+                        "base_source_digest": "visual-facts-bundle",
+                        "source_extraction": {
+                            "source_digest": "raw-video-bundle",
+                            "video_role_order": ["creator", "benchmark"],
+                            "video_source_sha256": ["a", "b"],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            _, metadata = _read_result_artifact(result_path, "result")
+            self.assertEqual(metadata["source_digest"], "derived-fact-bundle")
+            self.assertEqual(metadata["base_source_digest"], "visual-facts-bundle")
+            self.assertEqual(metadata["paired_source_digest"], "raw-video-bundle")
+            audit = _source_identity_audit(
+                {
+                    "status": "completed",
+                    "source_digest": "raw-video-bundle",
+                    "video_role_order": ["creator", "benchmark"],
+                    "video_source_sha256": ["a", "b"],
+                },
+                metadata,
+            )
+            self.assertEqual(audit["status"], "matched")
+
+    def test_missing_base_source_digest_is_incomplete_not_a_false_mismatch(self) -> None:
+        audit = _source_identity_audit(
+            {
+                "status": "completed",
+                "source_digest": "source-a",
+                "video_role_order": ["creator", "benchmark"],
+                "video_source_sha256": ["a", "b"],
+            },
+            {
+                "status": "completed",
+                "source_digest": "derived-fact-bundle",
+                "paired_source_digest": None,
+                "video_role_order": ["creator", "benchmark"],
+                "video_source_sha256": ["a", "b"],
+            },
+        )
+        self.assertEqual(audit["status"], "source_identity_incomplete")
+        self.assertEqual(audit["mismatches"], [])
+
+    def test_source_identity_mismatch_is_excluded_from_aggregate_metrics(self) -> None:
+        record = {
+            "model": "m",
+            "source_identity": {"status": "blocked_source_identity_mismatch"},
+            "judgment": {"score": score_judgment(_judgment_result(), _labels(), artifact_status="completed")},
+            "extraction": {
+                "score": score_extraction(None, {}, artifact_status="not_requested"),
+            },
+        }
+        aggregate = aggregate_model([record], "m")
+        self.assertEqual(aggregate["sample_count"], 1)
+        self.assertEqual(aggregate["scored_sample_count"], 0)
+        self.assertEqual(aggregate["source_identity_mismatch_sample_count"], 1)
+        self.assertIsNone(aggregate["judgment"]["gap_accuracy"])
+
+    def test_incomplete_source_identity_is_excluded_from_aggregate_metrics(self) -> None:
+        record = {
+            "model": "m",
+            "source_identity": {"status": "source_identity_incomplete"},
+            "judgment": {"score": score_judgment(_judgment_result(), _labels(), artifact_status="completed")},
+            "extraction": {
+                "score": score_extraction(None, {}, artifact_status="not_requested"),
+            },
+        }
+        aggregate = aggregate_model([record], "m")
+        self.assertEqual(aggregate["sample_count"], 1)
+        self.assertEqual(aggregate["scored_sample_count"], 0)
+        self.assertEqual(aggregate["source_identity_incomplete_sample_count"], 1)
+        self.assertIsNone(aggregate["judgment"]["gap_accuracy"])
+
+    def test_sanitized_alignment_paths_cannot_collide(self) -> None:
+        with self.assertRaisesRegex(ValueError, "share output component"):
+            _safe_component_map(["sample/a", "sample_a"], label="sample_id")
 
     def test_extraction_proxy_rejects_unit_outside_artifact_video_duration(self) -> None:
         result = {

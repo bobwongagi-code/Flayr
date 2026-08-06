@@ -47,6 +47,24 @@ def _safe_component(value: str) -> str:
     return cleaned.strip("._") or "unnamed"
 
 
+def _safe_component_map(values: list[str], *, label: str) -> dict[str, str]:
+    """Reject sanitized-name collisions before reading or writing artifacts."""
+    safe_to_value: dict[str, str] = {}
+    value_to_safe: dict[str, str] = {}
+    for value in values:
+        if value in value_to_safe:
+            raise CompactEvaluationError(f"{label} contains duplicate value: {value!r}")
+        safe = _safe_component(value)
+        previous = safe_to_value.get(safe)
+        if previous is not None and previous != value:
+            raise CompactEvaluationError(
+                f"{label} values {previous!r} and {value!r} share output component {safe!r}"
+            )
+        safe_to_value[safe] = value
+        value_to_safe[value] = safe
+    return value_to_safe
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -240,6 +258,11 @@ def main() -> int:
     if args.max_stage_evidence_ids is not None and not 1 <= args.max_stage_evidence_ids <= 16:
         raise SystemExit("--max-stage-evidence-ids must be between 1 and 16")
     manifest = _read_manifest(args.manifest.expanduser().resolve())
+    sample_components = _safe_component_map(
+        [sample["sample_id"] for sample in manifest],
+        label="sample_id",
+    )
+    model_components = _safe_component_map(args.models, label="model")
     raw_root = args.raw_root.expanduser().resolve()
     output_root = args.output_root.expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -301,9 +324,9 @@ def main() -> int:
             "results": [],
         }
         for model in args.models:
-            extraction_path = raw_root / _safe_component(sample["sample_id"]) / _safe_component(model) / "visual_extraction_evaluation.json"
+            extraction_path = raw_root / sample_components[sample["sample_id"]] / model_components[model] / "visual_extraction_evaluation.json"
             extraction_result, extraction_meta = _read_extraction(extraction_path)
-            output_dir = output_root / _safe_component(sample["sample_id"]) / _safe_component(model)
+            output_dir = output_root / sample_components[sample["sample_id"]] / model_components[model]
             output_dir.mkdir(parents=True, exist_ok=True)
             _clear_judgment_outputs(output_dir)
             write_json(

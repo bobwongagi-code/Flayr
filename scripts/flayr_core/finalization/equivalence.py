@@ -783,7 +783,9 @@ def _constraint_to_legacy_dict(constraint: Any) -> dict[str, Any]:
     if isinstance(constraint, Mapping):
         read = constraint.get
     else:
-        read = lambda key, default=None: getattr(constraint, key, default)
+        def read(key: str, default: Any = None) -> Any:
+            return getattr(constraint, key, default)
+
     evidence_ids = read("evidence_ids", ()) or ()
     return {
         "kind": read("kind"),

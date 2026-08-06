@@ -80,6 +80,8 @@ def audit_s4_flag(flag: Any) -> dict[str, Any]:
             errors.append("verified_marked_result_only")
 
     evidence_ids = flag.get("evidence_ids")
+    if state == "none" and evidence_ids:
+        errors.append("none_with_evidence_ids")
     if state in {"verified", "result_only"} and not evidence_ids:
         errors.append("evidence_ids_missing_for_state")
     if evidence_ids is not None and (
@@ -123,7 +125,18 @@ def classify_s5_trust_state(flag: Any) -> dict[str, Any]:
         }
 
     if basis == "none":
-        if exists is False and source_visible is False and source_credible is False:
+        contradictory_source_fields = (
+            trust_type not in {"", "none", "unknown"}
+            or source_visible is True
+            or source_credible is True
+            or has_source_ids
+        )
+        if (
+            not contradictory_source_fields
+            and exists is False
+            and source_visible is False
+            and source_credible is False
+        ):
             return {
                 "state": "explicit_absence",
                 "reason_code": normalize_reason_code("s5_explicit_absence"),
@@ -136,7 +149,7 @@ def classify_s5_trust_state(flag: Any) -> dict[str, Any]:
         }
 
     if basis in _S5_CREDIBLE_BASES:
-        if source_visible is True and source_credible is True and has_source_ids:
+        if exists is not False and source_visible is True and source_credible is True and has_source_ids:
             return {
                 "state": "credible_source",
                 "reason_code": normalize_reason_code("s5_credible_source"),

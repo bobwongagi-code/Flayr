@@ -38,6 +38,7 @@ from scripts.flayr_core.llm.compact_eval import (
     summarize_visual_extraction_result,
     validate_compact_result,
     validate_model_independent_result,
+    validate_s4_fact_state_artifact_metadata,
     validate_s4_fact_state_result,
     validate_s4_judgment_result,
     validate_s5_audit_result,
@@ -356,6 +357,52 @@ class CompactEvalContractTests(unittest.TestCase):
             invalid["creator"]["trust_state"] = "credible_source"
             invalid["creator"]["evidence_ids"] = []
             self.assertTrue(any("credible_source requires evidence_ids" in error for error in validate_s5_audit_result(invalid, bundle)))
+
+    def test_s4_state_validator_rejects_cross_field_contradictions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = load_frozen_compact_bundle(_write_bundle(Path(tmp)), include_images=False)
+            invalid = _s4_fact_state_result()
+            invalid["benchmark"]["causal_link"] = "unsupported"
+            errors = validate_s4_fact_state_result(invalid, bundle)
+            self.assertTrue(any("verified requires supported causal_link" in error for error in errors))
+
+            invalid = _s4_fact_state_result()
+            invalid["creator"]["effect_evidence_state"] = "none"
+            invalid["creator"]["proof"] = "direct_comparison"
+            errors = validate_s4_fact_state_result(invalid, bundle)
+            self.assertTrue(any("none has effect proof" in error for error in errors))
+
+    def test_s4_state_artifact_requires_explicit_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = load_frozen_compact_bundle(_write_bundle(Path(tmp)), include_images=False)
+            record = {
+                "status": "completed",
+                "variant": "s4_fact_state",
+                "schema_version": S4_FACT_STATE_SCHEMA_VERSION,
+                "model": "qwen3.6-plus",
+                "source_digest": bundle.source_digest,
+                "source_commit": "abc123",
+                "protocol_hash": "def456",
+            }
+            self.assertEqual(
+                validate_s4_fact_state_artifact_metadata(
+                    record,
+                    expected_model="qwen3.6-plus",
+                    expected_source_digest=bundle.source_digest,
+                ),
+                [],
+            )
+            record.pop("protocol_hash")
+            self.assertTrue(
+                any(
+                    "protocol_hash" in error
+                    for error in validate_s4_fact_state_artifact_metadata(
+                        record,
+                        expected_model="qwen3.6-plus",
+                        expected_source_digest=bundle.source_digest,
+                    )
+                )
+            )
 
     def test_valid_result_is_accepted_and_scored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

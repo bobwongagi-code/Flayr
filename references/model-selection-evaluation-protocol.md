@@ -208,6 +208,14 @@ S3 的阶段质量诊断重点是 `subject`、`visibility`、`composition`、`co
 
 模型失败、合同失败或缺失产物不会进入抽取召回/精确率的可评分分母；它们只计入 `model_failure_or_missing`，全部人工事件仍保留在 `required_key_events` 中供审计。
 
+### 配对源身份
+
+抽取结果与 model-independent judgment 只有在原始抽取源摘要、视频角色顺序和视频文件
+SHA256 全部一致时，才允许进入配对语义汇总。模型独立判断产物自身的 `source_digest`
+是派生事实包摘要，不能直接当作原始视频摘要；评估器通过输入旁车中的
+`source_extraction` 对账原始源身份。身份不匹配或身份信息不完整的样本保留在逐样本审计中，
+但从语义准确率、召回率和精确率汇总中排除；缺失/失败产物仍按运行失败统计。
+
 ## 合同上限
 
 所有数值限制必须同时出现在 prompt、validator 和 `compact_request_metadata.json`：

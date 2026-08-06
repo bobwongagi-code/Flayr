@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -66,6 +67,24 @@ def _safe_component(value: str) -> str:
     return cleaned.strip("._") or "unnamed"
 
 
+def _safe_component_map(values: list[str], *, label: str) -> dict[str, str]:
+    """Reject sanitized-name collisions before reading or writing artifacts."""
+    safe_to_value: dict[str, str] = {}
+    value_to_safe: dict[str, str] = {}
+    for value in values:
+        if value in value_to_safe:
+            raise ValueError(f"{label} contains duplicate value: {value!r}")
+        safe = _safe_component(value)
+        previous = safe_to_value.get(safe)
+        if previous is not None and previous != value:
+            raise ValueError(
+                f"{label} values {previous!r} and {value!r} share output component {safe!r}"
+            )
+        safe_to_value[safe] = value
+        value_to_safe[value] = safe
+    return value_to_safe
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -76,6 +95,16 @@ def _sha256(path: Path) -> str:
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _read_optional_json(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        value = _read_json(path)
+    except (OSError, json.JSONDecodeError):
+        return {"_sidecar_error": str(path)}
+    return value if isinstance(value, dict) else {"_sidecar_error": str(path)}
 
 
 def _sample_ids(gt_path: Path, manifest_path: Path | None) -> list[str]:
@@ -136,16 +165,38 @@ def _read_result_artifact(path: Path, result_key: str) -> tuple[dict[str, Any] |
             "contract_error_codes": record.get("contract_error_codes", []),
             "error": str(record.get("error") or record.get("errors") or "no completed result")[:1000],
         }
-    return result, {
+    request_metadata = _read_optional_json(path.parent / "compact_request_metadata.json")
+    input_metadata = _read_optional_json(path.parent / "model_independent_input_metadata.json")
+    metadata = {
         "status": "completed",
         "artifact": str(path),
         "artifact_sha256": _sha256(path),
         "schema_version": record.get("schema_version"),
         "source_commit": record.get("source_commit"),
         "source_digest": record.get("source_digest"),
+        "paired_source_digest": record.get("source_digest"),
         "source_durations": _artifact_source_durations(record),
+        "video_role_order": record.get("video_role_order"),
+        "video_source_sha256": record.get("video_source_sha256"),
+        "protocol_hash": request_metadata.get("protocol_hash"),
+        "request_source_commit": request_metadata.get("source_commit"),
         "failure_class": None,
     }
+    if result_key == "result" and path.name == "model_independent_evaluation.json":
+        metadata["base_source_digest"] = input_metadata.get("base_source_digest")
+        # This artifact's own source_digest is the derived fact-bundle digest.
+        # The base bundle is a visual-facts input and may have a different digest
+        # from the raw-video extraction input. Pair against the latter.
+        source_extraction = input_metadata.get("source_extraction")
+        metadata["source_extraction"] = source_extraction
+        metadata["paired_source_digest"] = (
+            source_extraction.get("source_digest")
+            if isinstance(source_extraction, dict)
+            else None
+        )
+        metadata["input_metadata_sidecar_error"] = input_metadata.get("_sidecar_error")
+    metadata["request_metadata_sidecar_error"] = request_metadata.get("_sidecar_error")
+    return result, metadata
 
 
 def _human_stage_status(label: dict[str, Any] | None) -> str:
@@ -173,6 +224,7 @@ def _empty_denominator() -> dict[str, int]:
         "gt_relation_missing_cells": 0,
         "gt_relation_uncertain_cells": 0,
         "gt_relation_invalid_cells": 0,
+        "gt_relation_gap_conflict_cells": 0,
     }
 
 
@@ -221,6 +273,7 @@ def score_judgment(
         status = _human_stage_status(label)
         gap = label.get("gap_magnitude")
         relation = label.get("relation")
+        prediction = predictions.get(stage_code)
         if status == "not_applicable":
             denominator["gt_not_applicable_cells"] += 1
         elif status == "uncertain" or gap in {"uncertain", "unknown"}:
@@ -230,6 +283,25 @@ def score_judgment(
         elif status == "invalid" or gap not in GT_GAPS:
             denominator["gt_invalid_cells"] += 1
         else:
+            relation_gap_conflict = (
+                gap in SCORABLE_GAPS
+                and relation in SCORABLE_RELATIONS
+                and not _relation_gap_compatible(relation, gap)
+            )
+            if relation_gap_conflict:
+                denominator["gt_invalid_cells"] += 1
+                denominator["gt_relation_gap_conflict_cells"] += 1
+                rows.append(
+                    {
+                        "stage": stage_code,
+                        "status": "invalid",
+                        "gt_gap_magnitude": gap,
+                        "gt_relation": relation,
+                        "prediction": prediction,
+                        "error_class": "gt_relation_gap_conflict",
+                    }
+                )
+                continue
             denominator["gt_labeled_cells"] += 1
             if gap in SCORABLE_GAPS:
                 denominator["gt_scorable_gap_cells"] += 1
@@ -242,16 +314,16 @@ def score_judgment(
             else:
                 denominator["gt_relation_invalid_cells"] += 1
 
-        prediction = predictions.get(stage_code)
-        if status != "labeled":
+        if status != "labeled" or gap not in GT_GAPS:
+            row_status = "invalid" if status == "labeled" and gap not in GT_GAPS else status
             rows.append(
                 {
                     "stage": stage_code,
-                    "status": status,
+                    "status": row_status,
                     "gt_gap_magnitude": gap,
                     "gt_relation": relation,
                     "prediction": prediction,
-                    "error_class": "gt_not_scored",
+                    "error_class": "gt_invalid" if row_status == "invalid" else "gt_not_scored",
                 }
             )
             continue
@@ -392,12 +464,53 @@ def score_judgment(
     }
 
 
+def _relation_gap_compatible(relation: str, gap: str) -> bool:
+    """Mirror the frozen GT invariant without importing validator internals."""
+    if relation == "uncertain" or gap == "uncertain":
+        return True
+    if gap == "none":
+        return relation == "tie"
+    if relation == "tie":
+        return False
+    return relation in {"creator_better", "benchmark_better"}
+
+
 def _overlaps(left: Any, right: Any) -> bool:
     left_range = parse_time_range_seconds(left, None)
     right_range = parse_time_range_seconds(right, None)
     if left_range is None or right_range is None:
         return False
     return min(left_range[1], right_range[1]) > max(left_range[0], right_range[0])
+
+
+def _validate_key_event(event: dict[str, Any]) -> list[str]:
+    """Validate only the fields needed to put a GT event in a denominator."""
+    errors: list[str] = []
+    role = str(event.get("role") or "").strip().lower()
+    if role not in ROLE_NAMES:
+        errors.append("invalid_role")
+    stage = str(event.get("stage") or "").strip().upper()
+    if stage not in STAGE_CODES:
+        errors.append("invalid_stage")
+    time_range = event.get("time_range")
+    if not isinstance(time_range, (list, tuple)) or len(time_range) != 2:
+        errors.append("invalid_time_range")
+    else:
+        try:
+            start, end = float(time_range[0]), float(time_range[1])
+        except (TypeError, ValueError):
+            errors.append("invalid_time_range")
+        else:
+            if not all(map(math.isfinite, (start, end))) or start < 0 or end <= start:
+                errors.append("invalid_time_range")
+    expected_state = str(event.get("expected_state") or "present").strip().lower()
+    if expected_state not in {"present", "absent"}:
+        errors.append("invalid_expected_state")
+    if expected_state == "absent":
+        terms = event.get("terms_any")
+        if not isinstance(terms, list) or not any(str(term).strip() for term in terms):
+            errors.append("absent_event_missing_terms_any")
+    return errors
 
 
 def _event_matches_unit(
@@ -473,6 +586,38 @@ def score_extraction(
     for index, event in enumerate(events):
         if not isinstance(event, dict):
             invalid_event_count += 1
+            event_rows.append(
+                {
+                    "event_index": index,
+                    "event_id": None,
+                    "role": None,
+                    "stage": None,
+                    "expected_state": None,
+                    "evidence_found": None,
+                    "matched": None,
+                    "valid": False,
+                    "invalid_reasons": ["event_not_object"],
+                    "matching_unit_ids": [],
+                }
+            )
+            continue
+        invalid_reasons = _validate_key_event(event)
+        if invalid_reasons:
+            invalid_event_count += 1
+            event_rows.append(
+                {
+                    "event_index": index,
+                    "event_id": event.get("id"),
+                    "role": event.get("role"),
+                    "stage": event.get("stage"),
+                    "expected_state": event.get("expected_state") or "present",
+                    "evidence_found": None,
+                    "matched": None,
+                    "valid": False,
+                    "invalid_reasons": invalid_reasons,
+                    "matching_unit_ids": [],
+                }
+            )
             continue
         role = str(event.get("role") or "").strip().lower()
         candidates = units_by_role.get(role, [])
@@ -511,6 +656,8 @@ def score_extraction(
                 "expected_state": expected_state,
                 "evidence_found": evidence_found,
                 "matched": matched,
+                "valid": True,
+                "invalid_reasons": [],
                 "matching_unit_ids": [unit.get("id") for _, unit in matching],
             }
         )
@@ -522,8 +669,12 @@ def score_extraction(
     ]
     precision_denominator = len(valid_units)
     precision_numerator = len(matched_unit_keys)
-    present_event_rows = [row for row in event_rows if row.get("expected_state") == "present"]
-    absent_event_rows = [row for row in event_rows if row.get("expected_state") == "absent"]
+    present_event_rows = [
+        row for row in event_rows if row.get("valid") is True and row.get("expected_state") == "present"
+    ]
+    absent_event_rows = [
+        row for row in event_rows if row.get("valid") is True and row.get("expected_state") == "absent"
+    ]
     recall_denominator = len(present_event_rows)
     recall_numerator = len(matched_event_indexes)
     absence_denominator = len(absent_event_rows)
@@ -631,6 +782,76 @@ def score_extraction(
     }
 
 
+def _source_digest(meta: dict[str, Any]) -> str | None:
+    if "paired_source_digest" in meta:
+        paired_digest = meta.get("paired_source_digest")
+        return paired_digest.strip() if isinstance(paired_digest, str) and paired_digest.strip() else None
+    base_digest = meta.get("base_source_digest")
+    if isinstance(base_digest, str) and base_digest.strip():
+        return base_digest.strip()
+    source_digest = meta.get("source_digest")
+    return source_digest.strip() if isinstance(source_digest, str) and source_digest.strip() else None
+
+
+def _video_identity(meta: dict[str, Any]) -> dict[str, Any]:
+    source_extraction = meta.get("source_extraction")
+    source = source_extraction if isinstance(source_extraction, dict) else meta
+    return {
+        "video_role_order": source.get("video_role_order"),
+        "video_source_sha256": source.get("video_source_sha256"),
+    }
+
+
+def _source_identity_audit(
+    extraction_meta: dict[str, Any],
+    judgment_meta: dict[str, Any],
+) -> dict[str, Any]:
+    """Make paired source provenance explicit before combining two artifacts."""
+    if extraction_meta.get("status") == "not_requested" or judgment_meta.get("status") == "not_requested":
+        return {"status": "not_comparable", "mismatches": [], "missing_fields": []}
+    if extraction_meta.get("status") != "completed" or judgment_meta.get("status") != "completed":
+        return {"status": "not_comparable", "mismatches": [], "missing_fields": []}
+
+    mismatches: list[dict[str, Any]] = []
+    missing_fields: list[str] = []
+    extraction_digest = _source_digest(extraction_meta)
+    judgment_digest = _source_digest(judgment_meta)
+    if not extraction_digest or not judgment_digest:
+        missing_fields.append("source_digest")
+    elif extraction_digest != judgment_digest:
+        mismatches.append(
+            {
+                "field": "source_digest",
+                "extraction": extraction_digest,
+                "judgment": judgment_digest,
+            }
+        )
+    extraction_identity = _video_identity(extraction_meta)
+    judgment_identity = _video_identity(judgment_meta)
+    for field in ("video_role_order", "video_source_sha256"):
+        left = extraction_identity.get(field)
+        right = judgment_identity.get(field)
+        if left in (None, []) or right in (None, []):
+            missing_fields.append(field)
+        elif left != right:
+            mismatches.append({"field": field, "extraction": left, "judgment": right})
+
+    status = "blocked_source_identity_mismatch" if mismatches else "matched" if not missing_fields else "source_identity_incomplete"
+    return {
+        "status": status,
+        "mismatches": mismatches,
+        "missing_fields": sorted(set(missing_fields)),
+        "extraction_source_digest": extraction_digest,
+        "judgment_source_digest": judgment_digest,
+        "provenance": {
+            "extraction_source_commit": extraction_meta.get("source_commit") or extraction_meta.get("request_source_commit"),
+            "judgment_source_commit": judgment_meta.get("source_commit") or judgment_meta.get("request_source_commit"),
+            "extraction_protocol_hash": extraction_meta.get("protocol_hash"),
+            "judgment_protocol_hash": judgment_meta.get("protocol_hash"),
+        },
+    }
+
+
 def _sample_record(
     sample_id: str,
     gt_labels: dict[str, dict[str, Any]],
@@ -638,24 +859,27 @@ def _sample_record(
     extraction_root: Path | None,
     judgment_root: Path | None,
     model: str,
+    *,
+    sample_component: str,
+    model_component: str,
 ) -> dict[str, Any]:
-    safe_sample = _safe_component(sample_id)
-    safe_model = _safe_component(model)
     extraction_path = (
-        extraction_root / safe_sample / safe_model / "visual_extraction_evaluation.json"
+        extraction_root / sample_component / model_component / "visual_extraction_evaluation.json"
         if extraction_root is not None
         else Path("__not_requested__")
     )
     judgment_path = (
-        judgment_root / safe_sample / safe_model / "model_independent_evaluation.json"
+        judgment_root / sample_component / model_component / "model_independent_evaluation.json"
         if judgment_root is not None
         else Path("__not_requested__")
     )
     extraction_result, extraction_meta = _read_result_artifact(extraction_path, "result") if extraction_root else (None, {"status": "not_requested"})
     judgment_result, judgment_meta = _read_result_artifact(judgment_path, "result") if judgment_root else (None, {"status": "not_requested"})
+    source_identity = _source_identity_audit(extraction_meta, judgment_meta)
     return {
         "sample_id": sample_id,
         "model": model,
+        "source_identity": source_identity,
         "extraction": {
             "artifact": extraction_meta,
             "score": score_extraction(
@@ -805,7 +1029,25 @@ def _merge_stage_quality_counts(stage_scores: list[dict[str, Any]]) -> dict[str,
 
 
 def aggregate_model(records: list[dict[str, Any]], model: str) -> dict[str, Any]:
-    selected = [record for record in records if record.get("model") == model]
+    all_selected = [record for record in records if record.get("model") == model]
+    blocked = [
+        record
+        for record in all_selected
+        if isinstance(record.get("source_identity"), dict)
+        and record["source_identity"].get("status") == "blocked_source_identity_mismatch"
+    ]
+    incomplete = [
+        record
+        for record in all_selected
+        if isinstance(record.get("source_identity"), dict)
+        and record["source_identity"].get("status") == "source_identity_incomplete"
+    ]
+    excluded = {id(record) for record in [*blocked, *incomplete]}
+    selected = [
+        record
+        for record in all_selected
+        if id(record) not in excluded
+    ]
     judgment_rows = [record["judgment"]["score"] for record in selected]
     extraction_rows = [record["extraction"]["score"] for record in selected]
     judgment_denominator = _empty_denominator()
@@ -887,7 +1129,10 @@ def aggregate_model(records: list[dict[str, Any]], model: str) -> dict[str, Any]
     }
     return {
         "model": model,
-        "sample_count": len(selected),
+        "sample_count": len(all_selected),
+        "scored_sample_count": len(selected),
+        "source_identity_mismatch_sample_count": len(blocked),
+        "source_identity_incomplete_sample_count": len(incomplete),
         "judgment": {
             "denominator": judgment_denominator,
             "gap_accuracy": (
@@ -974,6 +1219,11 @@ def main() -> int:
     if not isinstance(samples, dict):
         raise SystemExit("GT must contain a samples object")
     sample_ids = _sample_ids(gt_path, args.manifest.expanduser().resolve() if args.manifest else None)
+    try:
+        sample_components = _safe_component_map(sample_ids, label="sample_id")
+        model_components = _safe_component_map(args.models, label="model")
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     extraction_root = args.extraction_root.expanduser().resolve() if args.extraction_root else None
     judgment_root = args.judgment_root.expanduser().resolve() if args.judgment_root else None
     records: list[dict[str, Any]] = []
@@ -983,7 +1233,18 @@ def main() -> int:
             raise SystemExit(f"GT sample is missing or invalid: {sample_id}")
         labels = load_gt_stage_labels(gt_path, sample_id)
         for model in args.models:
-            records.append(_sample_record(sample_id, labels, sample, extraction_root, judgment_root, model))
+            records.append(
+                _sample_record(
+                    sample_id,
+                    labels,
+                    sample,
+                    extraction_root,
+                    judgment_root,
+                    model,
+                    sample_component=sample_components[sample_id],
+                    model_component=model_components[model],
+                )
+            )
     output = {
         "schema_version": ALIGNMENT_SCHEMA_VERSION,
         "protocol": ALIGNMENT_PROTOCOL,
@@ -1001,6 +1262,7 @@ def main() -> int:
             "stage_cell_count": len(sample_ids) * len(STAGE_CODES),
             "denominator_rule": "exclude not_applicable, uncertain, missing, and invalid GT cells from semantic accuracy; count model failures separately",
             "extraction_matching_rule": "role + stage function + positive time overlap; semantic truth is not proven by this proxy",
+            "source_identity_rule": "paired extraction/judgment records with mismatched or incomplete source identity are explicitly excluded from aggregate semantic metrics; missing artifacts remain operational failures",
         },
         "metric_definitions": ALIGNMENT_METRIC_DEFINITIONS,
         "models": list(args.models),

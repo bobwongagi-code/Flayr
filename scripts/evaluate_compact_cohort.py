@@ -45,6 +45,7 @@ from flayr_core.llm.compact_eval import (  # noqa: E402
     run_s5_audit_evaluation,
     run_severity_only_evaluation,
     run_visual_extraction_evaluation,
+    validate_s4_fact_state_artifact_metadata,
 )
 from flayr_core.utils import write_json  # noqa: E402
 from flayr_core.report_metadata import current_code_commit  # noqa: E402
@@ -160,6 +161,15 @@ def _load_s4_state_locked_bundle(
         raise CompactEvaluationError(f"invalid S4 state artifact: {path}: {exc}") from exc
     if not isinstance(record, dict) or record.get("status") != "completed":
         raise CompactEvaluationError(f"S4 state artifact is not completed: {path}")
+    metadata_errors = validate_s4_fact_state_artifact_metadata(
+        record,
+        expected_model=model,
+        expected_source_digest=base_bundle.source_digest,
+    )
+    if metadata_errors:
+        raise CompactEvaluationError(
+            f"invalid S4 state artifact metadata: {path}: " + "; ".join(metadata_errors[:8])
+        )
     state_result = record.get("result")
     if not isinstance(state_result, dict):
         raise CompactEvaluationError(f"S4 state artifact has no result object: {path}")

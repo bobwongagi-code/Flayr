@@ -26,6 +26,11 @@ class EvaluationChainTests(unittest.TestCase):
         self.assertEqual(audit["reason_code"], "state_hard_fact_conflict")
         self.assertIn("verified_without_process_linked_effect", audit["errors"])
 
+    def test_s4_none_cannot_carry_effect_evidence_ids(self) -> None:
+        audit = audit_s4_flag(_s4_flag(state="none", evidence_ids=["C4"]))
+        self.assertEqual(audit["status"], "state_conflict")
+        self.assertIn("none_with_evidence_ids", audit["errors"])
+
     def test_s5_missing_source_is_uncertain_not_explicit_absence(self) -> None:
         self.assertEqual(
             classify_s5_trust_state({"trust_basis": "none"})["state"],
@@ -62,6 +67,19 @@ class EvaluationChainTests(unittest.TestCase):
         self.assertEqual(
             classify_s5_trust_state({"trust_basis": "product_claim"})["state"],
             "product_claim_or_offer",
+        )
+        self.assertEqual(
+            classify_s5_trust_state(
+                {
+                    "exists": False,
+                    "trust_evidence_type": "credible",
+                    "trust_basis": "none",
+                    "trust_source_visible": False,
+                    "trust_source_credible": False,
+                    "trust_source_evidence_ids": ["C5"],
+                }
+            )["state"],
+            "uncertain",
         )
 
     def test_full_audit_separates_s4_temporal_error_and_strength_gate(self) -> None:

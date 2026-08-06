@@ -1066,6 +1066,26 @@ def _validate_s4_state_side(
     for evidence_id in evidence_ids:
         if evidence_id not in allowed_ids.get(role, {}).get("S4", set()):
             errors.append(f"{path}.evidence_ids contains {evidence_id!r} outside {role}/S4")
+    state = value.get("effect_evidence_state")
+    proof = value.get("proof")
+    causal_link = value.get("causal_link")
+    if state in {"result_only", "verified"} and not evidence_ids:
+        errors.append(f"{path}.{state} requires evidence_ids")
+    if state == "none":
+        if proof in {"direct_comparison", "result_only", "claim_only"}:
+            errors.append(f"{path}.none has effect proof")
+        if causal_link == "supported":
+            errors.append(f"{path}.none has supported causal_link")
+    elif state == "result_only":
+        if proof == "direct_comparison":
+            errors.append(f"{path}.result_only has direct_comparison proof")
+        if causal_link == "supported":
+            errors.append(f"{path}.result_only has supported causal_link")
+    elif state == "verified":
+        if proof != "direct_comparison":
+            errors.append(f"{path}.verified requires direct_comparison proof")
+        if causal_link != "supported":
+            errors.append(f"{path}.verified requires supported causal_link")
     reason = value.get("reason")
     if not isinstance(reason, str) or not reason.strip() or len(reason) > COMPACT_MAX_REASON_CHARS:
         errors.append(f"{path}.reason must be a non-empty string <= {COMPACT_MAX_REASON_CHARS} chars")
@@ -1098,6 +1118,33 @@ def validate_s4_fact_state_result(result: Any, bundle: FrozenCompactBundle) -> l
                 path=role,
             )
         )
+    return errors
+
+
+def validate_s4_fact_state_artifact_metadata(
+    record: Any,
+    *,
+    expected_model: str,
+    expected_source_digest: str,
+) -> list[str]:
+    """Validate the provenance envelope before a locked S4 state is consumed."""
+    if not isinstance(record, dict):
+        return ["artifact root must be an object"]
+    errors: list[str] = []
+    if record.get("status") != "completed":
+        errors.append("artifact status must be completed")
+    if record.get("variant") != "s4_fact_state":
+        errors.append("artifact variant must be s4_fact_state")
+    if record.get("schema_version") != S4_FACT_STATE_SCHEMA_VERSION:
+        errors.append("artifact schema_version mismatch")
+    if record.get("model") != expected_model:
+        errors.append("artifact model does not match requested judgment model")
+    if record.get("source_digest") != expected_source_digest:
+        errors.append("artifact source_digest does not match the locked base bundle")
+    for provenance_field in ("source_commit", "protocol_hash"):
+        value = record.get(provenance_field)
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"artifact is missing provenance field: {provenance_field}")
     return errors
 
 

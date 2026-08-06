@@ -5,11 +5,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.evaluate_model_independent_cohort import _read_extraction
+from scripts.evaluate_model_independent_cohort import _read_extraction, _safe_component_map
 from scripts.flayr_core.llm.compact_eval import VISUAL_EXTRACTION_SCHEMA_VERSION
 
 
 class ModelIndependentCohortInputTests(unittest.TestCase):
+    def test_sanitized_sample_or_model_collisions_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "share output component"):
+            _safe_component_map(["a/b", "a_b"], label="sample_id")
+
     def _write_record(self, root: Path, result: dict) -> Path:
         path = root / "visual_extraction_evaluation.json"
         path.write_text(
