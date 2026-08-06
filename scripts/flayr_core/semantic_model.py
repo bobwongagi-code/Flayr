@@ -51,12 +51,16 @@ _CREATOR_CONTEXT_FIELDS = (
 # from hiding inside a stage or improvement and bypassing the top-level gate.
 _SEMANTIC_STAGE_FIELDS = (
     "stage",
+    "stage_evidence_gate",
+    "analysis_status",
+    "analysis_reason",
     "time_range",
     "benchmark_time_range",
     "creator_time_range",
     "core_question",
     "affected_by_global_issues",
     "severity",
+    "model_severity",
     "gap_type",
     "gap_summary",
     "comparison_reason",

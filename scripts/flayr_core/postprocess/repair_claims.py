@@ -4,11 +4,13 @@
   - downgrade_*   未验证敏感主张降级 voice_only
   - derive_product_visibility  达人产品出镜标记确定性累加
   - 品牌/型号清洗 + 时间归一（行为同样是修改 data 后返回）
-所有函数都是"修改 result data 后正常返回"，不抛 SystemExit。
+普通报告字段修补会正常返回；active Stage1 事实如果出现非法时间范围则 fail closed，抛出
+`SystemExit`，防止后处理把坏事实修成看似合法的数据。
 """
 
 from __future__ import annotations
 
+import copy
 import re
 from pathlib import Path
 from typing import Any
@@ -18,7 +20,11 @@ from ..artifacts import (
     parse_time_range_seconds,
     parse_timestamp_seconds,
 )
-from ..stage_evidence_contracts import qualified_stage_evidence_units
+from ..stage_evidence_contracts import (
+    STAGE_EVIDENCE_CONTRACT_VERSION,
+    STAGE1_IMMUTABLE_FIELDS,
+    qualified_stage_evidence_units,
+)
 
 
 # region downgrade -----------------------------------------------------------
@@ -118,7 +124,32 @@ def remove_unverified_brand_models(result: dict[str, Any], analysis: dict[str, A
             return [clean_object(item, key) for item in value]
         return clean_text(value, key)
 
-    result["video_understanding"] = clean_object(result.get("video_understanding", {}))
+    understanding = result.get("video_understanding", {})
+    cleaned_understanding = clean_object(understanding)
+    # Active Stage1 evidence is locked before postprocess. Brand/model cleanup
+    # may rewrite report prose, but it must never rewrite evidence content,
+    # timestamps, or attribution after the lock.
+    if isinstance(understanding, dict) and isinstance(cleaned_understanding, dict):
+        for role in ("benchmark", "creator"):
+            original_side = understanding.get(role)
+            cleaned_side = cleaned_understanding.get(role)
+            if (
+                isinstance(original_side, dict)
+                and original_side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+                and isinstance(cleaned_side, dict)
+            ):
+                cleaned_side["evidence_units"] = copy.deepcopy(original_side.get("evidence_units") or [])
+                cleaned_side["stage_evidence_checks"] = copy.deepcopy(original_side.get("stage_evidence_checks") or [])
+                for key in (*STAGE1_IMMUTABLE_FIELDS,
+                    "evidence_set_version",
+                    "evidence_set_sha256",
+                    "evidence_set_status",
+                    "evidence_set_source",
+                    "stage_evidence_contract_version",
+                ):
+                    if key in original_side:
+                        cleaned_side[key] = copy.deepcopy(original_side[key])
+    result["video_understanding"] = cleaned_understanding
     result["stage_analysis"] = clean_object(result.get("stage_analysis", []))
     result["improvements"] = clean_object(result.get("improvements", []))
     result["executive_summary"] = clean_text(result.get("executive_summary", ""))
@@ -163,9 +194,23 @@ def clamp_result_time_ranges(result: dict[str, Any], analysis: dict[str, Any]) -
         for role, duration in (("benchmark", benchmark_duration), ("creator", creator_duration)):
             role_result = understanding.get(role, {})
             if isinstance(role_result, dict):
+                active_contract = (
+                    isinstance(role_result, dict)
+                    and role_result.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+                )
                 for unit in role_result.get("evidence_units", []):
-                    if isinstance(unit, dict):
-                        unit["time_range"] = bounded_time_range(unit.get("time_range"), duration)
+                    if not isinstance(unit, dict):
+                        continue
+                    if active_contract:
+                        # A locked Stage1 unit is an observation, not a report
+                        # field. Invalid/out-of-bounds input fails closed; a
+                        # valid range is left byte-for-byte untouched.
+                        if parse_time_range_seconds(unit.get("time_range"), duration) is None:
+                            raise SystemExit(
+                                f"{role} Stage1 evidence {unit.get('id')} has invalid time_range after lock."
+                            )
+                        continue
+                    unit["time_range"] = bounded_time_range(unit.get("time_range"), duration)
     for stage in result.get("stage_analysis", []):
         stage["benchmark_time_range"] = bounded_time_range(stage.get("benchmark_time_range"), benchmark_duration)
         stage["creator_time_range"] = bounded_time_range(stage.get("creator_time_range"), creator_duration)

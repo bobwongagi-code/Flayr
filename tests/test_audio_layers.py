@@ -68,6 +68,26 @@ class AudioLayerTests(unittest.TestCase):
         self.assertEqual(stage["creator_multimodal"]["dominant_channel"], "unknown")
         self.assertIn("未直接感知音轨", result["holistic_assessment"]["pace_and_emotion"])
 
+    def test_locked_stage1_audio_facts_are_not_rewritten_by_capability_sanitizer(self) -> None:
+        result = {
+            "video_understanding": {
+                "creator": {
+                    "evidence_units": [
+                        {
+                            "id": "C1",
+                            "audio_fact": "可听见明显的节奏变化。",
+                        }
+                    ]
+                }
+            },
+            "stage_analysis": [],
+        }
+        sanitize_audio_observations(result, False, preserve_stage1_facts=True)
+        self.assertEqual(
+            result["video_understanding"]["creator"]["evidence_units"][0]["audio_fact"],
+            "可听见明显的节奏变化。",
+        )
+
     def test_audio_quality_reports_conservative_hard_issues(self) -> None:
         diagnostic = """
 [silencedetect @ 0x1] silence_duration: 7.0

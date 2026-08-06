@@ -192,7 +192,12 @@ def has_multimodal_assessment(stage: dict[str, Any]) -> bool:
     return any(isinstance(stage.get(f"{role}_multimodal"), dict) for role in ("creator", "benchmark"))
 
 
-def sanitize_audio_observations(result: dict[str, Any], native_audio_analysis: bool) -> None:
+def sanitize_audio_observations(
+    result: dict[str, Any],
+    native_audio_analysis: bool,
+    *,
+    preserve_stage1_facts: bool = False,
+) -> None:
     """Remove unsupported audio judgments while preserving transcript semantics."""
     if native_audio_analysis:
         return
@@ -221,7 +226,7 @@ def sanitize_audio_observations(result: dict[str, Any], native_audio_analysis: b
     if isinstance(holistic, dict):
         holistic["pace_and_emotion"] = "当前模型未直接感知音轨；本项不评价语气、BGM或音效。"
     understanding = result.get("video_understanding")
-    if isinstance(understanding, dict):
+    if isinstance(understanding, dict) and not preserve_stage1_facts:
         for role in ("creator", "benchmark"):
             side = understanding.get(role)
             if not isinstance(side, dict):

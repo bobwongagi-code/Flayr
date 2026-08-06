@@ -61,6 +61,7 @@ from .claims_my import (
 from ..finalization import facade as finalization_facade
 from .calibration import TrustedS4ActivationEvidence
 from .proposition import materialize_cross_stage_inputs, materialize_quality_audits
+from ..stage_evidence_contracts import materialize_stage_evidence_gates
 
 
 def stamp_product_foundation(normalized: dict[str, Any], analysis: dict[str, Any] | None) -> None:
@@ -172,6 +173,10 @@ def apply_postprocess_chain(
     step("postprocess.prune_multimodal_evidence_to_stage", prune_multimodal_evidence_to_stage, normalized)
     step("postprocess.materialize_cross_stage_inputs", materialize_cross_stage_inputs, normalized, analysis)
     step("postprocess.stabilize_stage_severity", stabilize_stage_severity, normalized)
+    # The resolver must see the same Stage1-to-judgment gate as the report.  If
+    # this is delayed until comparison eligibility, derive could apply a
+    # constraint to an unqualified stage and only hide the mistake later.
+    step("postprocess.materialize_stage_evidence_gates.pre_resolver", materialize_stage_evidence_gates, normalized)
     finalize_severity_after_repairs(
         normalized,
         analysis,

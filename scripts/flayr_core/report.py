@@ -150,7 +150,7 @@ def render_stage_rows(analysis: dict[str, Any], assets: ReportAssetContext | Non
             # 跨两列的阶段头：阶段名 + 差距等级
             '<div class="stage-header">',
             f"<h3>{escape(stage['stage'])}</h3>",
-            render_gap_badge(stage.get("severity")),
+            render_gap_badge(stage_report_severity(stage)),
             "</div>",
             render_global_cause_note(stage.get("affected_by_global_issues")),
             # 列头
@@ -181,6 +181,13 @@ def render_global_cause_note(value: Any) -> str:
 
 def stage_skipped(stage: dict[str, Any]) -> tuple[bool, str]:
     """判断阶段是否双方都未设计（如 S5 都无信任背书），如是则折叠不展开分析。"""
+    gate = stage.get("stage_evidence_gate") if isinstance(stage, dict) else None
+    if isinstance(gate, dict) and gate.get("status") in {"blocked", "not_applicable", "not_comparable"}:
+        return True, str(
+            stage.get("analysis_reason")
+            or gate.get("reason")
+            or "该阶段没有可发布的阶段比较结论。"
+        )
     comparison_status = str(stage.get("comparison_status") or "")
     if comparison_status == "not_directly_comparable":
         reason = str(stage.get("comparison_reason") or "两条视频不能在该阶段做产品级直接比较。")
@@ -318,6 +325,19 @@ def render_gap_badge(severity: str) -> str:
     )
 
 
+def stage_report_severity(stage: dict[str, Any]) -> Any:
+    """Hide a blocked active-stage severity while preserving model output for audit.
+
+    ``model_severity`` remains available in the semantic result and derivation
+    trace.  It is not a report conclusion when Stage1 has not produced a
+    closed evidence state for both sides.
+    """
+    gate = stage.get("stage_evidence_gate") if isinstance(stage, dict) else None
+    if isinstance(gate, dict) and gate.get("status") == "blocked":
+        return None
+    return stage.get("severity") if isinstance(stage, dict) else None
+
+
 def render_list_items(text: Any, limit: int = 3) -> list[str]:
     parts = split_readable_points(text, limit)
     return [f"<li>{escape(part)}</li>" for part in parts]
@@ -387,7 +407,7 @@ def executive_summary(analysis: dict[str, Any]) -> str:
     large_stages = [
         item.get("stage", "")
         for item in result.stages()
-        if item.get("severity") == "large"
+        if stage_report_severity(item) == "large"
         and str(item.get("comparison_status") or "") not in {"not_directly_comparable", "not_applicable"}
     ]
     if large_stages:
@@ -618,7 +638,7 @@ def render_gap_overview(analysis: dict[str, Any]) -> str:
             css_level = "skip"
             label = "不比较" if str(stage.get("comparison_status") or "") == "not_directly_comparable" else "未涉及"
         else:
-            severity = severity_value(stage.get("severity"))
+            severity = severity_value(stage_report_severity(stage))
             if severity is None:
                 css_level = "unknown"
                 label = "未分析"

@@ -86,9 +86,37 @@
   },
   "video_understanding": {
     "benchmark": {
+      "product_identity": {
+        "brand_or_product_name": "当前视频实际看见、听见或读到的品牌/产品名；未出现留空。",
+        "brand": "当前视频实际可识别的品牌；未出现留空。",
+        "product_line": "当前视频实际可识别的产品线；不从外部 product.name 猜测。",
+        "product_category": "当前视频实际可识别的品类。",
+        "functional_form": "当前视频实际可识别的功能形态。",
+        "form_factor": "兼容 functional_form 的镜像字段。",
+        "variant_attributes": [],
+        "core_job": "视频中实际可观察的产品任务。",
+        "target_object": "视频中实际可观察的作用对象。",
+        "use_mechanism": "视频中实际可观察的使用机制。",
+        "desired_outcome": "视频中实际表达或展示的目标结果。",
+        "identity_basis": "visual | subtitle | voiceover | multiple | unknown。",
+        "confidence": "high | medium | low。"
+      },
       "content_summary": "先整体概括标杆视频传递了什么信息、如何推进成交。",
       "communication_strategy": "概括口播、画面、字幕如何配合。",
       "temporal_evidence_mode": "full_temporal | focused_temporal | static_only | unknown。由代码按实际请求能力写入，不由模型猜。",
+      "stage1_acquisition": {
+        "version": 3,
+        "source": "pipeline",
+        "status": "complete | partial | failed | unknown。代码从预处理产物生成；不是模型结论。",
+        "input_mode": "native_video | canonical_frames | unknown",
+        "speech_mode": "spoken | subtitle_driven | music_driven | visual_driven | unknown",
+        "duration_seconds": "代码读取的有限视频时长；缺失时为 null。",
+        "channels": "visual、voiceover、subtitle、audio 的代码拥有状态、覆盖、计数和时间边界精度；voiceover 只有 boundary_precision=word 且存在窗口安全转写时才可用于阶段级口播归因；coverage=full 才表示可用于否定性结论的全覆盖，sampled 表示只有离散采样。",
+        "visual_input_timestamps": "本次请求实际送入模型的、带时间戳的采样帧；时间线概览图没有时间戳，不能单独证明时间范围内的视觉事实。",
+        "stage_coverage": "代码拥有的粗粒度诊断字段；阶段资格不使用固定时间片推断，而是用原生视频或 evidence_unit 自身时间范围与实际输入时间戳核对。",
+        "errors": ["采集或边界能力的机器可读问题"],
+        "note": "Stage1 的 absent 只有在相关采集通道闭合后才可进入后续分析。"
+      },
       "selling_point_observations": [
         {
           "id": "SP1",
@@ -112,7 +140,19 @@
         "variant_focus": "complete | unknown",
         "attention_scan": "complete | unknown"
       },
-      "stage_evidence_contract_version": 1,
+      "stage_evidence_contract_version": 2,
+      "stage1_coverage_audit": {
+        "version": 1,
+        "source": "pipeline",
+        "status": "completed | partial | failed | unknown。代码保存独立覆盖扫描的运行状态。",
+        "independence": "separate_request_same_model | separate_model | unknown",
+        "stages": "S1-S6 各自的 found | clear | conflict | unknown、coverage、候选 evidence_ids 和观察信号；由 pipeline 归一化，模型不能回写最终字段。",
+        "errors": ["覆盖审计的机器可读错误"]
+      },
+      "evidence_set_version": 1,
+      "evidence_set_sha256": "Stage1 全部不可变观察与资格投影的代码摘要；由 pipeline 写入，Stage2/Repair 不得改写。",
+      "evidence_set_status": "frozen | missing | invalid。active contract 只有 frozen 可进入阶段分析。",
+      "evidence_set_source": "pipeline | legacy。",
       "stage_evidence_checks": [
         {
           "stage": "S1 | S2 | S3 | S4 | S5 | S6",
@@ -168,9 +208,37 @@
       ]
     },
     "creator": {
+      "product_identity": {
+        "brand_or_product_name": "当前视频实际看见、听见或读到的品牌/产品名；未出现留空。",
+        "brand": "当前视频实际可识别的品牌；未出现留空。",
+        "product_line": "当前视频实际可识别的产品线；不从外部 product.name 猜测。",
+        "product_category": "当前视频实际可识别的品类。",
+        "functional_form": "当前视频实际可识别的功能形态。",
+        "form_factor": "兼容 functional_form 的镜像字段。",
+        "variant_attributes": [],
+        "core_job": "视频中实际可观察的产品任务。",
+        "target_object": "视频中实际可观察的作用对象。",
+        "use_mechanism": "视频中实际可观察的使用机制。",
+        "desired_outcome": "视频中实际表达或展示的目标结果。",
+        "identity_basis": "visual | subtitle | voiceover | multiple | unknown。",
+        "confidence": "high | medium | low。"
+      },
       "content_summary": "先整体概括达人视频传递了什么信息、如何推进成交。",
       "communication_strategy": "概括口播、画面、字幕如何配合。",
       "temporal_evidence_mode": "full_temporal | focused_temporal | static_only | unknown。",
+      "stage1_acquisition": {
+        "version": 3,
+        "source": "pipeline",
+        "status": "complete | partial | failed | unknown。代码从预处理产物生成；不是模型结论。",
+        "input_mode": "native_video | canonical_frames | unknown",
+        "speech_mode": "spoken | subtitle_driven | music_driven | visual_driven | unknown",
+        "duration_seconds": "代码读取的有限视频时长；缺失时为 null。",
+        "channels": "visual、voiceover、subtitle、audio 的代码拥有状态、覆盖、计数和时间边界精度；coverage=full 才表示可用于否定性结论的全覆盖，sampled 表示只有离散采样。",
+        "visual_input_timestamps": "本次请求实际送入模型的、带时间戳的采样帧；时间线概览图没有时间戳，不能单独证明时间范围内的视觉事实。",
+        "stage_coverage": "代码拥有的粗粒度诊断字段；阶段资格不使用固定时间片推断，而是用原生视频或 evidence_unit 自身时间范围与实际输入时间戳核对。",
+        "errors": ["采集或边界能力的机器可读问题"],
+        "note": "Stage1 的 absent 只有在相关采集通道闭合后才可进入后续分析。"
+      },
       "selling_point_observations": [],
       "variant_decision_rule": {
         "speech_explains_choice": "true | false | null。",
@@ -183,7 +251,19 @@
         "variant_focus": "complete | unknown",
         "attention_scan": "complete | unknown"
       },
-      "stage_evidence_contract_version": 1,
+      "stage_evidence_contract_version": 2,
+      "stage1_coverage_audit": {
+        "version": 1,
+        "source": "pipeline",
+        "status": "completed | partial | failed | unknown。代码保存独立覆盖扫描的运行状态。",
+        "independence": "separate_request_same_model | separate_model | unknown",
+        "stages": "S1-S6 各自的 found | clear | conflict | unknown、coverage、候选 evidence_ids 和观察信号；由 pipeline 归一化，模型不能回写最终字段。",
+        "errors": ["覆盖审计的机器可读错误"]
+      },
+      "evidence_set_version": 1,
+      "evidence_set_sha256": "Stage1 全部不可变观察与资格投影的代码摘要；由 pipeline 写入，Stage2/Repair 不得改写。",
+      "evidence_set_status": "frozen | missing | invalid。active contract 只有 frozen 可进入阶段分析。",
+      "evidence_set_source": "pipeline | legacy。",
       "stage_evidence_checks": [
         {
           "stage": "S1 | S2 | S3 | S4 | S5 | S6",
@@ -239,6 +319,17 @@
       ]
     }
   },
+  "stage_evidence_links": [
+    {
+      "stage_id": "S1 | S2 | S3 | S4 | S5 | S6",
+      "role": "creator | benchmark",
+      "evidence_id": "必须来自对应侧 Stage1 evidence_units",
+      "relation": "primary | supporting | contradicting",
+      "linking_reason": "为什么这条不可变事实被用于该阶段；不得用空字符串代替",
+      "confidence": "high | medium | low | unknown",
+      "source": "model | compatibility。旧结果迁移时必须显式标记 compatibility。"
+    }
+  ],
   "global_diagnosis": {
     "version": "1.0",
     "temporal_capability": {
@@ -284,6 +375,43 @@
   "stage_analysis": [
     {
       "stage": "S1 Hook",
+      "stage_evidence_gate": {
+        "version": 1,
+        "status": "grounded | blocked | not_applicable | not_comparable | legacy。代码根据双方 Stage1 资格和比较范围生成，模型不得填写或覆盖。",
+        "analysis_allowed": "代码生成的 bool；只有 grounded 才允许把阶段结论作为有证据支撑的比较结果发布。",
+        "reason_code": "qualified_stage1_evidence | evidence_collection_incomplete | evidence_budget_exceeded | conflicting_stage_evidence | evidence_snapshot_invalid | comparison_scope_closed | legacy_stage1_contract",
+        "reason": "代码生成的证据交接原因。",
+        "comparison_status": "direct | structural_comparison | not_applicable | not_directly_comparable",
+        "creator": {
+          "status": "present | absent | unknown | conflict | legacy",
+          "evidence_ids": [],
+          "evidence_set_sha256": "",
+          "diagnostics": {
+            "status": "present | absent | unknown | conflict | legacy",
+            "primary_status": "present | absent | unknown | conflict | missing | legacy",
+            "acquisition_status": "complete | partial | failed | unknown | legacy",
+            "coverage_audit_status": "completed | partial | failed | unknown | legacy",
+            "reason_codes": ["ready | primary_unknown | primary_conflict | acquisition_gate | coverage_audit_gate | snapshot_invalid | legacy_contract | side_missing"],
+            "issues": []
+          }
+        },
+        "benchmark": {
+          "status": "present | absent | unknown | conflict | legacy",
+          "evidence_ids": [],
+          "evidence_set_sha256": "",
+          "diagnostics": {
+            "status": "present | absent | unknown | conflict | legacy",
+            "primary_status": "present | absent | unknown | conflict | missing | legacy",
+            "acquisition_status": "complete | partial | failed | unknown | legacy",
+            "coverage_audit_status": "completed | partial | failed | unknown | legacy",
+            "reason_codes": ["ready | primary_unknown | primary_conflict | acquisition_gate | coverage_audit_gate | snapshot_invalid | legacy_contract | side_missing"],
+            "issues": []
+          }
+        },
+        "source": "code"
+      },
+      "analysis_status": "grounded | evidence_blocked | not_applicable | not_comparable | legacy_evidence_contract。代码生成。",
+      "analysis_reason": "证据不足或旧合同下的代码生成说明。",
       "time_range": "标杆真实时间 / 达人真实时间",
       "benchmark_time_range": "标杆视频中该阶段真实起止时间，例如 0~5s",
       "creator_time_range": "达人视频中该阶段真实起止时间，例如 0~8s",

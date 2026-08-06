@@ -33,7 +33,11 @@ from ..multimodal import (
 from ..stage_catalog import stage_tuples
 from ..stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
+    STAGE_EVIDENCE_SNAPSHOT_VERSION,
     normalize_stage_evidence_checks,
+    normalize_stage_evidence_links,
+    stage1_forbidden_field_issues,
+    stage1_pipeline_owned_field_issues,
 )
 from ..structure_modules import canonical_module_id, stage1_event_catalog
 from .analysis_contract import AnalysisContractError, validate_raw_analysis_envelope
@@ -976,11 +980,30 @@ def normalize_variant_unit_fields(unit: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def normalize_video_understanding(value: Any) -> dict[str, Any]:
+def normalize_video_understanding(
+    value: Any,
+    *,
+    trusted_stage1_acquisition: dict[str, dict[str, Any]] | None = None,
+    trusted_stage1_coverage_audit: dict[str, dict[str, Any]] | None = None,
+    allow_trusted_pipeline_metadata: bool = False,
+) -> dict[str, Any]:
     source = value if isinstance(value, dict) else {}
     normalized: dict[str, Any] = {}
     for role in ("benchmark", "creator"):
         item = source.get(role) if isinstance(source.get(role), dict) else {}
+        if item.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+            forbidden = stage1_forbidden_field_issues(item)
+            if forbidden:
+                raise SystemExit(
+                    f"{role} Stage1 输出越权字段，拒绝静默丢弃：{', '.join(forbidden)}"
+                )
+            if not allow_trusted_pipeline_metadata:
+                pipeline_owned = stage1_pipeline_owned_field_issues(item)
+                if pipeline_owned:
+                    raise SystemExit(
+                        f"{role} Stage1 输出包含非模型可写的管线字段，拒绝静默丢弃："
+                        + ", ".join(pipeline_owned)
+                    )
         units = item.get("evidence_units") if isinstance(item.get("evidence_units"), list) else []
         normalized_units = []
         for index, unit in enumerate(units, start=1):
@@ -1011,6 +1034,9 @@ def normalize_video_understanding(value: Any) -> dict[str, Any]:
         valid_ids = {unit["id"] for unit in normalized_units}
         raw_gate_status = item.get("gate_observation_status") if isinstance(item.get("gate_observation_status"), dict) else {}
         normalized[role] = {
+            # 产品身份是 Stage1 的全局观察，不能在完整归一化时丢失；S2 是否能使用它
+            # 仍由 stage_evidence_units/S2 的资格闸门决定。
+            "product_identity": normalize_video_product_identity(item.get("product_identity")),
             "content_summary": str(item.get("content_summary") or "").strip(),
             "communication_strategy": str(item.get("communication_strategy") or "").strip(),
             "temporal_evidence_mode": normalize_temporal_evidence_mode(item.get("temporal_evidence_mode")),
@@ -1030,9 +1056,28 @@ def normalize_video_understanding(value: Any) -> dict[str, Any]:
                 item.get("stage_evidence_checks"), valid_ids
             ),
             "evidence_budget_exceeded": bool(item.get("evidence_budget_exceeded") is True),
+            # Both records are pipeline-owned. A model-shaped full analysis
+            # response cannot author or replay them; finalize_analysis_result
+            # restores the trusted copies from the locked Stage1 handoff.
+            "stage1_acquisition": {},
+            "stage1_coverage_audit": {},
+            "evidence_set_version": (
+                STAGE_EVIDENCE_SNAPSHOT_VERSION
+                if item.get("evidence_set_version") == STAGE_EVIDENCE_SNAPSHOT_VERSION
+                else None
+            ),
+            "evidence_set_sha256": str(item.get("evidence_set_sha256") or "").strip(),
+            "evidence_set_status": str(item.get("evidence_set_status") or "").strip().lower(),
+            "evidence_set_source": str(item.get("evidence_set_source") or "").strip().lower(),
             # Recovery 状态由 pipeline 在事实合并后写入；模型回显的同名字段不具备控制权。
             "stage1_recovery": {},
         }
+    for role, metadata in (trusted_stage1_acquisition or {}).items():
+        if role in normalized and isinstance(metadata, dict):
+            normalized[role]["stage1_acquisition"] = copy.deepcopy(metadata)
+    for role, metadata in (trusted_stage1_coverage_audit or {}).items():
+        if role in normalized and isinstance(metadata, dict):
+            normalized[role]["stage1_coverage_audit"] = copy.deepcopy(metadata)
     return normalized
 
 
@@ -1135,7 +1180,10 @@ def adapt_misnested_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
 def normalize_analysis_result(
     result: dict[str, Any],
     *,
+    trusted_stage1_acquisition: dict[str, dict[str, Any]] | None = None,
     trusted_stage1_recovery: dict[str, dict[str, Any]] | None = None,
+    trusted_stage1_coverage_audit: dict[str, dict[str, Any]] | None = None,
+    allow_trusted_pipeline_metadata: bool = False,
 ) -> dict[str, Any]:
     """把 LLM dict 归一为 schema 规范结构；缺字段或阶段数不对会抛 SystemExit。"""
     result = adapt_misnested_analysis_result(result)
@@ -1276,13 +1324,21 @@ def normalize_analysis_result(
                 key_conclusions.append(text)
         key_conclusions = key_conclusions[:5]
 
-    normalized_video_understanding = normalize_video_understanding(result.get("video_understanding"))
-    # The extraction pipeline writes this metadata after the model response is
-    # normalized.  Restore only that explicitly supplied, code-owned copy;
-    # arbitrary model fields were discarded by normalize_video_understanding.
+    normalized_video_understanding = normalize_video_understanding(
+        result.get("video_understanding"),
+        trusted_stage1_acquisition=trusted_stage1_acquisition,
+        trusted_stage1_coverage_audit=trusted_stage1_coverage_audit,
+        allow_trusted_pipeline_metadata=allow_trusted_pipeline_metadata,
+    )
+    # Recovery metadata is written by the extraction pipeline after the model
+    # response is normalized; arbitrary model fields were discarded above.
     for role, metadata in (trusted_stage1_recovery or {}).items():
         if role in normalized_video_understanding and isinstance(metadata, dict):
             normalized_video_understanding[role]["stage1_recovery"] = copy.deepcopy(metadata)
+    stage_evidence_links = normalize_stage_evidence_links(
+        result.get("stage_evidence_links"),
+        normalized_stages,
+    )
 
     return {
         "one_line_verdict": str(result.get("one_line_verdict") or "").strip(),
@@ -1303,6 +1359,7 @@ def normalize_analysis_result(
         "s3_s4_relationship": normalize_s3_s4_relationship(result.get("s3_s4_relationship")),
         "promise_chain": normalize_promise_chain(result.get("promise_chain")),
         "video_understanding": normalized_video_understanding,
+        "stage_evidence_links": stage_evidence_links,
         "stage_analysis": normalized_stages,
         "improvements": normalized_improvements,
     }
@@ -1576,8 +1633,26 @@ def normalize_structure_event_checks(value: Any, valid_ids: set[str]) -> list[di
     return normalized
 
 
-def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
+def normalize_video_fact_result(
+    role: str,
+    result: dict[str, Any],
+    analysis: dict[str, Any],
+    *,
+    allow_trusted_pipeline_metadata: bool = False,
+) -> dict[str, Any]:
     code = "B" if role == "benchmark" else "C"
+    if result.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+        forbidden = stage1_forbidden_field_issues(result)
+        if forbidden:
+            raise SystemExit(
+                f"{role} Stage1 输出越权字段，拒绝静默丢弃：{', '.join(forbidden)}"
+            )
+        pipeline_owned = stage1_pipeline_owned_field_issues(result)
+        if pipeline_owned and not allow_trusted_pipeline_metadata:
+            raise SystemExit(
+                f"{role} Stage1 输出包含非模型可写的管线字段，拒绝静默丢弃："
+                + ", ".join(pipeline_owned)
+            )
     units = result.get("evidence_units")
     if not isinstance(units, list) or not units:
         raise SystemExit(f"{role} fact extraction returned no evidence_units.")
@@ -1591,6 +1666,9 @@ def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dic
             result.get("stage_evidence_contract_version")
         ),
         "evidence_budget_exceeded": bool(result.get("evidence_budget_exceeded") is True),
+        # This is code-owned from preprocessing metadata; the model cannot set it.
+        "stage1_acquisition": {},
+        "stage1_coverage_audit": {},
         # Recovery 状态由 pipeline 在事实合并后写入；模型回显的同名字段不具备控制权。
         "stage1_recovery": {},
     }
@@ -1652,6 +1730,8 @@ def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dic
     normalized["stage_evidence_checks"] = normalize_stage_evidence_checks(
         result.get("stage_evidence_checks"), valid_ids
     )
+    # This field is pipeline-owned and is restored by the extraction pipeline
+    # after model-shaped normalization.  Never trust an LLM echo of it here.
     return normalized
 
 

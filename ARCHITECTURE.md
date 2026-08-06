@@ -48,6 +48,10 @@ evidence_unit 含多模态事实字段 +
 （占比累加、归属搬运、状态一致性），不得用正则重新推断语义。
 
 Stage1 的 `stage_evidence_checks` 是共享注册表 `stage_evidence_contracts.py` 的资格投影，不是第二份事实库：
+
+Stage1 到阶段判断的完整交接合同见 `references/stage-evidence-contract.md`。代码为 S1-S6 统一生成
+`stage_evidence_gate`：只有两侧证据均已闭合时才进入 grounded 判断；unknown、conflict、预算未闭合
+和旧合同结果必须显式阻断或标记 legacy，不能由 Stage2、Repair 或报告层猜成 absent。
 每个阶段只能有 `present/absent/unknown/conflict` 之一；`present` 必须列出该阶段全部必需信号并引用真实单元，资格强度由引用单元的
 `evidence_strength` 重新计算，不能信任模型在投影中自报的强度。`unknown`、`conflict` 和不完整覆盖不得被归一成 `absent`。
 旧 `functions` 仅保留为兼容和原始观察统计字段，新合同下不得作为阶段归属或严重度依据。

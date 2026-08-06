@@ -215,7 +215,18 @@ def validate_evidence_alignment(result: dict[str, Any]) -> None:
                 else None
             )
             contract_status = stage_check.get("status") if isinstance(stage_check, dict) else None
-            if not references and contract_status not in {"absent", "unknown", "conflict"}:
+            active_contract = side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+            readiness = stage_evidence_readiness(side, expected_stage) if active_contract else None
+            if active_contract:
+                # The handoff state includes code-owned acquisition and
+                # coverage-audit gates. A primary ``present`` must not force
+                # references after the independent audit has failed; that
+                # case is blocked and is intentionally allowed to retain no
+                # publishable evidence references.
+                references_required = readiness == "present"
+            else:
+                references_required = contract_status not in {"absent", "unknown", "conflict"}
+            if not references and references_required:
                 raise SystemExit(f"S{index} 缺少 {role}_evidence_ids，结论无法对应证据。")
             missing = [item for item in references if item not in available[role]]
             if missing:
@@ -333,6 +344,15 @@ def validate_analysis_dimensions(result: dict[str, Any]) -> None:
     }
     for stage in result.get("stage_analysis", []):
         match = re.match(r"(S[1-6])", str(stage.get("stage") or ""), flags=re.IGNORECASE)
+        gate = stage.get("stage_evidence_gate") if isinstance(stage, dict) else None
+        if (
+            match
+            and isinstance(gate, dict)
+            and gate.get("status") == "blocked"
+        ):
+            # A blocked model severity is retained for audit only; it is not a
+            # published conclusion that must have a corresponding improvement.
+            continue
         if match and str(stage.get("severity") or "") == "large" and match.group(1).upper() not in improvement_targets:
             warnings.append(f"[Q13] {match.group(1).upper()} 最终为 large，但 Top 提升点未覆盖该阶段。")
 

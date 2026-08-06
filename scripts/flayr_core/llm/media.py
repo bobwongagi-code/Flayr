@@ -28,9 +28,9 @@ from ..resources import ResourceBudget
 from ..stage_evidence_contracts import stage_analysis_evidence_view
 
 
-def select_role_visual_inputs(info: dict[str, Any], role: str, image_limit: int) -> list[dict[str, str]]:
+def select_role_visual_inputs(info: dict[str, Any], role: str, image_limit: int) -> list[dict[str, Any]]:
     """为单视频事实抽取选关键帧，最多 image_limit 张。"""
-    selected: list[dict[str, str]] = []
+    selected: list[dict[str, Any]] = []
     for entry in get_llm_visual_candidates(info, image_limit):
         frame = resolve_artifact_path(info, entry.get("path"), require_file=True, require_root=True)
         if frame is None:
@@ -43,6 +43,7 @@ def select_role_visual_inputs(info: dict[str, Any], role: str, image_limit: int)
                 "path": str(frame),
                 "label": f"{role} {entry.get('stage') or entry.get('label', 'frame')}{marker} {frame.name}",
                 "data_url": image_to_data_url(frame),
+                "timestamp_seconds": entry.get("timestamp_seconds"),
             }
         )
     return selected[:image_limit]

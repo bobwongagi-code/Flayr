@@ -11,6 +11,7 @@ from .report import (
     format_generated_at,
     referenced_evidence_units,
     severity_value,
+    stage_report_severity,
     stage_display_names,
     stage_skipped,
 )
@@ -132,7 +133,7 @@ def _stage_payload(
     elif analysis_state in {"degraded", "not_run"}:
         severity = "unknown"
     else:
-        severity = severity_value(stage.get("severity")) or "skip"
+        severity = severity_value(stage_report_severity(stage)) or "skip"
     creator_units = referenced_evidence_units(stage.get("creator_evidence_ids"), creator_understanding, code)
     benchmark_units = referenced_evidence_units(stage.get("benchmark_evidence_ids"), benchmark_understanding, code)
     gap = _first_text(

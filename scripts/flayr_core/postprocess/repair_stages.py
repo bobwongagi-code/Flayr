@@ -18,6 +18,7 @@ from ..evidence_states import S1_HOOK_FLOOR_FIELDS, hard_fact_fingerprint
 from ..stage_catalog import stage_tuples
 from ..stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
+    materialize_stage_evidence_gates,
     qualified_stage_evidence_ids,
     stage_evidence_readiness,
 )
@@ -577,6 +578,8 @@ def apply_comparison_eligibility(result: dict[str, Any]) -> None:
     if not isinstance(contract, dict):
         understanding = result.get("video_understanding")
         if not isinstance(understanding, dict):
+            materialize_stage_evidence_gates(result)
+            _suppress_blocked_stage_improvements(result)
             return
         for stage in result.get("stage_analysis", []):
             if not isinstance(stage, dict):
@@ -603,6 +606,8 @@ def apply_comparison_eligibility(result: dict[str, Any]) -> None:
             trace = stage.get("severity_derivation")
             if isinstance(trace, dict):
                 trace["direct_product_comparison_eligible"] = False
+        materialize_stage_evidence_gates(result)
+        _suppress_blocked_stage_improvements(result)
         return
     from ..llm.parse import normalize_comparison_contract
 
@@ -611,6 +616,8 @@ def apply_comparison_eligibility(result: dict[str, Any]) -> None:
     result["comparison_eligibility"] = contract
     stage_contracts = contract.get("stage_eligibility")
     if not isinstance(stage_contracts, dict):
+        materialize_stage_evidence_gates(result)
+        _suppress_blocked_stage_improvements(result)
         return
     default_reason = str(contract.get("reason") or "两条视频在该阶段缺少共同比较合同。").strip()
     for stage in result.get("stage_analysis", []):
@@ -662,6 +669,40 @@ def apply_comparison_eligibility(result: dict[str, Any]) -> None:
 
     if contract.get("overall_status") != "full_direct":
         result["comparison_scope_note"] = comparison_scope_summary(contract)
+    materialize_stage_evidence_gates(result)
+    _suppress_blocked_stage_improvements(result)
+
+
+def _suppress_blocked_stage_improvements(result: dict[str, Any]) -> None:
+    """Do not publish model recommendations for an unqualified active stage.
+
+    The raw model response and the preserved ``model_severity`` remain in the
+    audit artifacts.  The final report must not turn an unsupported hypothesis
+    into an actionable improvement merely because the model supplied fluent
+    prose for it.
+    """
+    stages = {
+        stage_code(stage): stage
+        for stage in result.get("stage_analysis", [])
+        if isinstance(stage, dict) and stage_code(stage)
+    }
+    blocked = {
+        code
+        for code, stage in stages.items()
+        if isinstance(stage.get("stage_evidence_gate"), dict)
+        and stage["stage_evidence_gate"].get("status") == "blocked"
+    }
+    if not blocked:
+        return
+    improvements = result.get("improvements")
+    if not isinstance(improvements, list):
+        return
+    result["improvements"] = [
+        item
+        for item in improvements
+        if not isinstance(item, dict)
+        or improvement_stage_code(item) not in blocked
+    ]
 
 
 def comparison_scope_summary(eligibility: dict[str, Any]) -> str:

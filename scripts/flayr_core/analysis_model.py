@@ -87,6 +87,7 @@ ANALYSIS_PROJECTION_FIELDS = (
     "product_visibility",
     "loop_closure",
     "video_understanding",
+    "stage_evidence_links",
     "stage_analysis",
     "improvements",
     "category_profile",

@@ -226,9 +226,13 @@ def _audit_stage_evidence_ids(
     """
     units = _unit_map(result, role)
     side = (result.get("video_understanding") or {}).get(role, {})
-    active_contract = isinstance(side, dict) and side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
-    check = stage_evidence_check_map(side).get(stage_code) if active_contract else None
-    qualified = qualified_stage_evidence_ids(side, stage_code) if active_contract else set()
+    # Any artifact that declares a Stage1 contract is audited against that
+    # contract, including older versions.  A version mismatch is not allowed
+    # to fall back to the legacy ``functions`` projection: that would let an
+    # old or partially migrated result bypass the closed-world evidence gate.
+    declared_contract = isinstance(side, dict) and side.get("stage_evidence_contract_version") is not None
+    check = stage_evidence_check_map(side).get(stage_code) if declared_contract else None
+    qualified = qualified_stage_evidence_ids(side, stage_code) if declared_contract else set()
     errors: list[str] = []
     for evidence_id in evidence_ids:
         evidence_id = str(evidence_id)
@@ -236,7 +240,7 @@ def _audit_stage_evidence_ids(
         if unit is None:
             errors.append(f"unknown_evidence_id:{evidence_id}")
             continue
-        if active_contract:
+        if declared_contract:
             if not isinstance(check, dict) or check.get("status") in {"unknown", "conflict"}:
                 errors.append(f"stage_evidence_unresolved:{stage_code}:{evidence_id}")
             elif evidence_id not in qualified:

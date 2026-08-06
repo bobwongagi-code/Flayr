@@ -1332,6 +1332,26 @@ def derive_severity_from_facts(
         if not match:
             continue
         model = _normalize_model_severity(stage.get("model_severity") or stage.get("severity"))
+        gate = stage.get("stage_evidence_gate") if isinstance(stage.get("stage_evidence_gate"), dict) else None
+        understanding = result.get("video_understanding") if isinstance(result.get("video_understanding"), dict) else {}
+        active_contract = any(
+            isinstance(understanding.get(role), dict)
+            and understanding[role].get("stage_evidence_contract_version")
+            == STAGE_EVIDENCE_CONTRACT_VERSION
+            for role in ("creator", "benchmark")
+        )
+        if active_contract and isinstance(gate, dict) and gate.get("status") != "grounded":
+            stage["severity"] = model
+            stage["severity_derivation"] = {
+                "status": "evidence_blocked",
+                "severity": model,
+                "model_severity": model,
+                "resolver": "floor_ceiling_v1",
+                "phase_c_candidate": False,
+                "constraints": [],
+                "reason": str(gate.get("reason") or "Stage1 证据未闭合，保留模型结果仅供审计。"),
+            }
+            continue
         try:
             trace = _derive_one(
                 match.group(1),

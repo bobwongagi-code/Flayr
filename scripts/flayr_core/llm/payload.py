@@ -433,7 +433,7 @@ def build_video_fact_payload(
     model: str,
     role: str,
     analysis: dict[str, Any],
-    visual_inputs: list[dict[str, str]],
+    visual_inputs: list[dict[str, Any]],
     api_url: str = "",
     budget: ResourceBudget | None = None,
 ) -> dict[str, Any]:
@@ -547,7 +547,10 @@ def build_video_fact_payload(
             "status=absent 只有在 coverage=complete、没有对应 evidence_ids 且明确列出 missing_signals 时才允许。"
             "coverage=partial/unknown、事实冲突、时间范围不足或非替代渠道缺失时写 unknown/conflict，绝不能写 absent。"
             "stage_evidence_checks 里的 evidence_strength 只作模型自检摘要，不能覆盖 evidence_unit 的权威强度；"
-            "同一个 evidence unit 可以被多个阶段引用，但必须分别填写 observed_signals；S3/S4 的 visual_required 不得被口播替代。\n"
+            "同一个 evidence unit 可以被多个阶段引用，但必须分别填写 observed_signals；S3/S4 的 visual_required 不得被口播替代。"
+            "Stage1 输出严格禁止 severity、model_severity、gap、comparison、commercial_priority、recommendations、improvements、stage_analysis 和 stage_evidence_links；"
+            "stage1_acquisition、evidence_set_* 和 stage1_recovery 是代码拥有的采集/冻结元数据，模型不得输出或覆盖；"
+            "这些字段属于后续 Judgment/Resolution/Report，出现时必须拒绝，不得由代码静默丢弃。\n"
             + stage_evidence_contract_prompt(),
             "## 本地语言转写（语义参考；不提供精确窗口边界）",
             read_text_if_exists(role_dir / "transcript.txt"),
@@ -796,7 +799,7 @@ def build_video_fact_recovery_payload(
     model: str,
     role: str,
     analysis: dict[str, Any],
-    visual_inputs: list[dict[str, str]],
+    visual_inputs: list[dict[str, Any]],
     current_facts: dict[str, Any],
     target_stages: list[str],
     api_url: str = "",
@@ -866,6 +869,87 @@ def build_video_fact_recovery_payload(
                         }
                     ],
                     "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    return payload
+
+
+def build_video_fact_coverage_audit_payload(
+    model: str,
+    role: str,
+    analysis: dict[str, Any],
+    visual_inputs: list[dict[str, Any]],
+    target_stages: list[str] | None = None,
+    api_url: str = "",
+    budget: ResourceBudget | None = None,
+) -> dict[str, Any]:
+    """Build an independent Stage1 coverage pass.
+
+    The pass receives the source modalities and the declarative stage registry,
+    but never receives the primary evidence units or primary stage conclusions.
+    It may return candidate observations and slot coverage; the pipeline merges
+    them append-only and computes the final gate.  It never returns severity or
+    comparison fields.
+    """
+    payload = build_video_fact_payload(
+        model,
+        role,
+        analysis,
+        visual_inputs,
+        api_url=api_url,
+        budget=budget,
+    )
+    targets = [str(stage).strip().upper()[:2] for stage in (target_stages or stage_codes()) if str(stage).strip()]
+    target_text = ", ".join(dict.fromkeys(targets)) or "S1-S6"
+    payload["messages"][0]["content"] = (
+        "你是 Flayr Stage1 的独立证据覆盖审计器。只输出严格 JSON，不输出 Markdown。"
+        "你不能看到 primary Stage1 事实，也不能比较 creator 与 benchmark。"
+        "你的任务是重新扫描当前这一条视频，按给定的 S1-S6 required signals 检查是否存在被漏抽的关键事实。"
+        "只记录原子事实、时间、信道和覆盖状态，不输出 severity、差距、建议、商业优先级或报告结论。"
+        "如果看到新的事实，放入 candidate_evidence_units；没有确定事实不要猜测。"
+    )
+    user_content = payload["messages"][1]["content"]
+    if isinstance(user_content, list) and user_content and isinstance(user_content[0], dict):
+        user_content[0]["text"] += (
+            "\n\n## 独立覆盖审计合同（优先于上方示例输出）\n"
+            f"只审计这些阶段：{target_text}。每个目标阶段都必须返回一条 stages 记录；没有证据也必须返回。\n"
+            "coverage=complete 只表示这一阶段的 required signals 已按素材完整搜索；是否发现事实由 status 表示，不能仅因没有发现就省略完整搜索。"
+            "如果素材、时间区间或响应预算不足，写 coverage=partial/unknown 和 status=unknown。"
+            "status=found 表示本次审计直接发现至少一个候选事实；status=clear 表示完整搜索后未发现该阶段 required signals；"
+            "两者都不能直接替代代码生成的 stage qualification。\n"
+            "## 输出 JSON\n"
+            + json.dumps(
+                {
+                    "version": 1,
+                    "status": "completed|partial|failed|unknown",
+                    "independence": "separate_request_same_model",
+                    "candidate_evidence_units": [
+                        {
+                            "id": "新的唯一 ID，例如 C_A1；不能复用已有事实 ID",
+                            "time_range": "真实时间范围",
+                            "information": "直接观察到的事实",
+                            "voiceover": "仅窗口安全口播中的原句，没有则留空",
+                            "voiceover_zh": "中文翻译，没有则留空",
+                            "visual_fact": "直接看到的画面事实",
+                            "subtitle_fact": "直接读到的字幕，没有则留空",
+                            "audio_fact": "直接听到的音频事实，没有则写无",
+                            "evidence_strength": "direct|explicit|inferred|absent",
+                            "functions": [],
+                        }
+                    ],
+                    "stages": {
+                        "S1": {
+                            "status": "found|clear|conflict|unknown",
+                            "coverage": "complete|partial|unknown",
+                            "evidence_ids": ["本次审计新发现的候选事实 ID"],
+                            "observed_signals": ["required/optional signal id"],
+                            "missing_signals": [],
+                            "reason": "只写覆盖和事实观察，不写 severity",
+                        }
+                    },
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -959,7 +1043,7 @@ def build_video_identity_payload(
     model: str,
     role: str,
     analysis: dict[str, Any],
-    visual_inputs: list[dict[str, str]],
+    visual_inputs: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """为 scope 预检提取最小产品身份，不替代完整单视频事实抽取。"""
     info = analysis.get("videos", {}).get(role, {})
@@ -1117,12 +1201,23 @@ S2_START_CUES = [
 
 
 def build_s1_boundary_hint_block(analysis: dict[str, Any] | None, facts: dict[str, Any]) -> str:
-    """用窗口安全口播时间线给 Stage2 一个 S1/S2 边界候选。"""
+    """为旧结果提供边界提示；active Stage1 只允许消费已资格化事实。
+
+    原始转写是采集层材料，不是 Stage2 的第二事实源。active 合同下如果这里
+    继续把它直接塞进比较 payload，模型就能绕过 S1/S2 的资格闸门，用未资格化
+    的口播重新判断阶段。因此 active 结果只保留事实视图，边界由锁定事实决定。
+    """
     if not analysis:
         return ""
+    active_roles = {
+        role
+        for role in ("creator", "benchmark")
+        if isinstance(facts.get(role), dict)
+        and facts[role].get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+    }
     videos = analysis.get("videos") if isinstance(analysis.get("videos"), dict) else {}
     lines = [
-        "## S1/S2 边界候选（代码从窗口安全口播时间线 + facts 提取，仅辅助裁边界）",
+        "## S1/S2 边界候选（只可使用已资格化 Stage1 事实）",
         "按 structure_library_full.md：S1 是抢夺注意力，S2 是从 Hook 自然过渡到产品。",
         "若候选处下一句已经开始承接/揭晓/否定转正/第三方推荐，即使产品实物或产品名还没出现，也优先视为 S2 起点。",
     ]
@@ -1133,6 +1228,11 @@ def build_s1_boundary_hint_block(analysis: dict[str, Any] | None, facts: dict[st
             continue
         lines.append("")
         lines.append(f"- {role}:")
+        if role in active_roles:
+            lines.append("  - active Stage1：不附带原始/未资格化转写；请只依据 stage_evidence_units[S1/S2] 的锁定事实确定边界。")
+            lines.append("  - 若对应阶段 readiness 不是 present/absent，不得用口播猜测补齐边界。")
+            wrote_any = True
+            continue
         segments = [
             segment
             for segment in read_timed_transcript_segments(info)
@@ -1681,12 +1781,14 @@ def build_llm_comparison_payload(
             "unknown/conflict 必须保留为低置信或待核验，不能改写成 absent，也不能用 functions 自行补回。"
             "stage_analysis 的 evidence_ids 必须来自同侧对应阶段的 stage_evidence_units，并优先来自该阶段的 stage_evidence_checks；"
             "如果阶段资格不足，明确写 support_status=unknown 或 low，不得为了填满字段而创造事实。",
+            "每个阶段引用的事实还必须在顶层 stage_evidence_links 中登记：stage_id、role、evidence_id、relation(primary/supporting/contradicting)、linking_reason、confidence(high/medium/low/unknown)。"
+            "stage_evidence_links 只能解释如何消费已锁定事实，不能创建或改写 evidence_unit；缺少明确链接理由时不要把猜测写成高置信。",
             "## 各视频证据组织模式（判断时必须尊重）",
             speech_mode_block,
             "## 输出要求",
             "只输出严格 JSON，不要 Markdown。字段必须使用 references/analysis-output-schema.json 的字段名。",
             "顶层 comparison_contract 必须原样回填已锁定合同；comparison_eligibility 可省略，由代码派生兼容视图。",
-            "必须输出：one_line_verdict, one_line_summary, executive_summary, holistic_assessment（每维独立）, key_conclusions（1-5 条消费者视角）, comparison_contract, product_visibility, category_profile, product_profile, loop_closure, s3_s4_relationship, promise_chain, video_understanding, stage_analysis[6], improvements（1-5 条，按 GMV 杠杆排序）。",
+            "必须输出：one_line_verdict, one_line_summary, executive_summary, holistic_assessment（每维独立）, key_conclusions（1-5 条消费者视角）, comparison_contract, product_visibility, category_profile, product_profile, loop_closure, s3_s4_relationship, promise_chain, video_understanding, stage_evidence_links, stage_analysis[6], improvements（1-5 条，按 GMV 杠杆排序）。",
             "stage_analysis 每项必须含：stage, time_range, benchmark_time_range, creator_time_range, core_question, creator_module_id, benchmark_module_id, module_fit, module_fit_reason, task_completion, gap_type, gap_summary, voice_performance, benchmark_summary, benchmark_key_message, benchmark_evidence_ids, benchmark_visual_evidence, benchmark_support_status, benchmark_has_effect_demo, benchmark_has_usage_demo, benchmark_quote, benchmark_quote_zh, creator_summary, creator_key_message, creator_evidence_ids, creator_visual_evidence, creator_support_status, creator_has_effect_demo, creator_has_usage_demo, creator_quote, creator_quote_zh, creator_multimodal, benchmark_multimodal, gap, evidence, severity, creator_execution, benchmark_execution, painpoint_relevance, stage_standard_delivery。severity 只作模型参考，最终等级由代码 resolver 按确定性 floor/ceiling 约束收口。",
             "creator_multimodal 与 benchmark_multimodal 必须按上方跨模态合同输出；integrated_effect 是各渠道组合后的净效果，不是最弱渠道结果，也不是四维等权计数。",
             hook_field_req,
@@ -2300,7 +2402,7 @@ def extract_comparison_context(analysis_input: str) -> str:
 def build_llm_payload(
     model: str,
     analysis_input: str,
-    visual_inputs: list[dict[str, str]] | None = None,
+    visual_inputs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """通用对比分析 payload。"""
     user_content: str | list[dict[str, Any]]
@@ -2456,6 +2558,7 @@ def build_llm_repair_payload(
                     "如果原始输出缺少 improvements（如 JSON 被截断），必须基于 stage_analysis 的差距分析补充 1-5 条。"
                     "severity 是本轮模型参考判断，不要为了凑分布强行改写；只有显式、可追溯事实才能触发 resolver 的 floor/ceiling 约束，缺失、unknown 或 uncertain 不触发。"
                     "必须保留 video_understanding 证据事实清单。stage_analysis 必须严格按 S1、S2、S3、S4、S5、S6 顺序输出六项；阶段必须保留 benchmark_time_range、creator_time_range、证据引用、核心信息、画面证据和 support_status；达人话术必须保留本地语言和中文翻译。"
+                    "stage_evidence_links 必须为每个阶段引用登记 stage_id、role、evidence_id、relation、linking_reason、confidence；只能链接已锁定 Stage1 事实，不得创建、改写或移动 evidence_unit。"
                     "每个阶段引用的事实单元时间必须与阶段时间相交；缺少独立内容的阶段保留 unknown/待复核并留空引用，不得创建新的 Stage1 事实单元。"
                     "修复 evidence_ids 时必须保持阶段归属：stage 的 benchmark/creator_evidence_ids，以及每个嵌套 stage flag 的 evidence_ids，"
                     "只能引用对应侧、时间与该阶段 time_range 相交的已锁定 evidence_unit；嵌套 flag 的 evidence_ids 必须是该阶段主 evidence_ids 的子集。"
