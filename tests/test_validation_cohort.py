@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.flayr_core.validation_cohort import (
+    SOURCE_CONTRACT_FILES,
     build_cohort_lock,
     spend_cohort_lock,
     sha256_file,
@@ -18,6 +19,17 @@ from scripts.flayr_core.validation_cohort import (
 
 
 class ValidationCohortTest(unittest.TestCase):
+    def test_source_contract_covers_adr_and_production_finalization_surface(self) -> None:
+        required = {
+            "references/ADR006.md",
+            "scripts/flayr_core/finalization/__init__.py",
+            "scripts/flayr_core/finalization/contracts.py",
+            "scripts/flayr_core/finalization/facade.py",
+            "scripts/flayr_core/llm/pipeline.py",
+            "scripts/flayr_core/llm/stage_review_contract.py",
+        }
+        self.assertTrue(required.issubset(set(SOURCE_CONTRACT_FILES)))
+
     def _use_validation_root(self, root: Path) -> None:
         patcher = patch.dict(os.environ, {"FLAYR_VALIDATION_ROOT": str(root)})
         patcher.start()

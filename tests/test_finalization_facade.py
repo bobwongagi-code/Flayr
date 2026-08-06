@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import unittest
+from unittest.mock import patch
 
 from scripts.flayr_core.finalization import (
     LegacyPhaseCCandidateSet,
@@ -13,10 +14,27 @@ from scripts.flayr_core.finalization import (
     legacy_terminal_projection,
 )
 from scripts.flayr_core.finalization.facade import _to_legacy_resolution_for_equivalence
+from scripts.flayr_core.finalization.facade import resolve
 from scripts.flayr_core.postprocess.derive import SeverityConstraint, resolve_severity
 
 
 class FinalizationFacadeTests(unittest.TestCase):
+    def test_production_resolve_is_an_exact_legacy_delegation(self) -> None:
+        result = {"stage_analysis": []}
+        analysis = {"mode": "compare"}
+        activation_evidence = object()
+
+        with patch(
+            "scripts.flayr_core.postprocess.derive.derive_severity_from_facts"
+        ) as derive:
+            resolve(result, analysis, activation_evidence=activation_evidence)
+
+        derive.assert_called_once_with(
+            result,
+            analysis,
+            activation_evidence=activation_evidence,
+        )
+
     def test_legacy_resolution_projection_is_lossless(self) -> None:
         legacy = resolve_severity(
             "small",
