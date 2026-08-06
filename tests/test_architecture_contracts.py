@@ -55,6 +55,7 @@ from flayr_core.llm.payload import (
     build_comparison_eligibility_payload,
     build_improvement_reconciliation_payload,
     build_llm_comparison_payload,
+    build_llm_payload,
     build_llm_repair_payload,
     full_analysis_output_fields,
     build_stage_review_payload,
@@ -3470,6 +3471,17 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertNotIn("开头的背书/认证类内容按钩子算", comparison_text)
         self.assertNotIn("只归入 S2", repair_text)
         self.assertNotIn("产品名/卖点/认证", review_text)
+
+    def test_analysis_prompts_do_not_impose_uncontracted_evidence_count_caps(self) -> None:
+        comparison = build_llm_comparison_payload("test", "input", {}, {"videos": {}})
+        comparison_text = json.dumps(comparison, ensure_ascii=False)
+        repair_text = json.dumps(build_llm_repair_payload("test", "{}", "error", "input"), ensure_ascii=False)
+        fallback_text = json.dumps(build_llm_payload("test", "input", []), ensure_ascii=False)
+
+        for text in (comparison_text, repair_text, fallback_text):
+            self.assertNotIn("3 到 6 个关键 evidence_units", text)
+            self.assertNotIn("任何列表最多 3 条", text)
+        self.assertIn("不得用固定条数截断 Stage1 evidence_units", comparison_text)
 
     def test_comparison_input_excludes_raw_transcript_contents(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

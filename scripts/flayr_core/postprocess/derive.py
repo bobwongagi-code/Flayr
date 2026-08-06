@@ -30,7 +30,11 @@ from ..evidence_states import (
     s2_hard_fact_snapshot,
 )
 from ..multimodal import channel_requirement_for, has_multimodal_assessment, multimodal_execution
-from ..stage_evidence_contracts import STAGE_EVIDENCE_CONTRACT_VERSION, qualified_stage_evidence_ids
+from ..stage_evidence_contracts import (
+    STAGE_EVIDENCE_CONTRACT_VERSION,
+    qualified_stage_evidence_ids,
+    stage_evidence_readiness,
+)
 from .calibration import TrustedS4ActivationEvidence, validate_s4_large_floor_activation_evidence
 
 _STAGE_RE = re.compile(r"(S[1-6])")
@@ -661,6 +665,18 @@ def _has_active_stage_evidence_contract(result: dict[str, Any], roles: tuple[str
     )
 
 
+def _active_stage_readiness(result: dict[str, Any], stage_code: str) -> dict[str, str]:
+    """Return active Stage1 readiness without changing legacy compatibility."""
+    understanding = result.get("video_understanding") if isinstance(result, dict) else None
+    readiness: dict[str, str] = {}
+    for role in ("creator", "benchmark"):
+        side = understanding.get(role) if isinstance(understanding, dict) else None
+        if not isinstance(side, dict) or side.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+            continue
+        readiness[role] = stage_evidence_readiness(side, stage_code)
+    return readiness
+
+
 def _constraint_evaluation(rule: str, status: str, reason: str, **extra: Any) -> dict[str, Any]:
     supplied_reason_code = extra.pop("reason_code", None)
     default_reason_codes = {
@@ -1107,11 +1123,29 @@ def _derive_one(
     if stage_id == "S5":
         rule = "S5_no_trust_ceiling"
         creator, benchmark = _pair_flags(stage, "s5")
+        active_readiness = _active_stage_readiness(facts, "S5")
+        unresolved_roles = [
+            role for role, status in active_readiness.items()
+            if status not in {"present", "absent"}
+        ]
         b_endorsement = (endorsement or {}).get("benchmark") or _NO_ENDORSEMENT
         c_endorsement = (endorsement or {}).get("creator") or _NO_ENDORSEMENT
         if creator is None or benchmark is None:
             skip(rule, "missing_field", "S5 trust flag 缺失。")
-        elif not b_endorsement.available or not c_endorsement.available:
+        elif unresolved_roles:
+            skip(
+                rule,
+                "stage_evidence_unresolved",
+                f"S5证据资格未完成，不能把未采到或冲突的来源证据当作明确缺失：{','.join(unresolved_roles)}",
+                evidence_ids=[],
+            )
+        elif (
+            (not b_endorsement.available or not c_endorsement.available)
+            and not (
+                bool(active_readiness)
+                and all(status == "absent" for status in active_readiness.values())
+            )
+        ):
             skip(rule, "missing_field", "S5 Stage1 背书观察字段缺失。")
         elif _required_bool_state(creator, ("exists", "independent_trust_purpose", "duplicates_other_stage")) != "explicit" or _required_bool_state(benchmark, ("exists", "independent_trust_purpose", "duplicates_other_stage")) != "explicit":
             skip(rule, "uncertain_fact", "S5 信任事实不完整，不能把 unknown 当作无背书。")
@@ -1197,38 +1231,57 @@ def _derive_one(
         trace["conflict"] = {"floor": resolved["floor"], "ceiling": resolved["ceiling"]}
 
     # 执行分仍可作为离线审计信息，但明确不再进入 severity resolver。
-    observed = None
-    helper = {
-        "S1": _s1_hook_exec,
-        "S2": _s2_contract_exec,
-        "S3": _s3_usage_exec,
-        "S4": _s4_effect_exec,
-        "S5": _s5_trust_exec,
-        "S6": _s6_cta_exec,
-    }.get(stage_id)
-    if helper is not None:
-        try:
-            observed = helper(stage)
-        except Exception:
-            observed = None
-    if not isinstance(observed, dict):
-        creator_exec = stage.get("creator_execution")
-        benchmark_exec = stage.get("benchmark_execution")
-        if isinstance(creator_exec, (int, float)) and not isinstance(creator_exec, bool) and isinstance(benchmark_exec, (int, float)) and not isinstance(benchmark_exec, bool):
-            observed = {"creator_exec": float(creator_exec), "bench_exec": float(benchmark_exec)}
-    if isinstance(observed, dict):
-        creator_observed = observed.get("creator_exec")
-        benchmark_observed = observed.get("bench_exec")
-        if has_multimodal_assessment(stage):
-            creator_observed = multimodal_execution(stage_id, stage, "creator", creator_observed)
-            benchmark_observed = multimodal_execution(stage_id, stage, "benchmark", benchmark_observed)
+    # active Stage1 合同下，资格未知/冲突意味着输入事实未闭合；不能把
+    # Stage2 的旧 flag 或模型自报 execution 当成确定数字继续展示。
+    active_readiness = _active_stage_readiness(facts, stage_id)
+    unresolved_readiness = {
+        role: status
+        for role, status in active_readiness.items()
+        if status not in {"present", "absent"}
+    }
+    if unresolved_readiness:
         trace["execution_observation"] = {
-            "creator": creator_observed,
-            "benchmark": benchmark_observed,
+            "creator": None,
+            "benchmark": None,
             "source": "diagnostic_only",
+            "status": "stage_evidence_unresolved",
+            "stage_evidence_readiness": unresolved_readiness,
         }
-        trace["derived_creator_execution"] = creator_observed
-        trace["derived_benchmark_execution"] = benchmark_observed
+        trace["derived_creator_execution"] = None
+        trace["derived_benchmark_execution"] = None
+    else:
+        observed = None
+        helper = {
+            "S1": _s1_hook_exec,
+            "S2": _s2_contract_exec,
+            "S3": _s3_usage_exec,
+            "S4": _s4_effect_exec,
+            "S5": _s5_trust_exec,
+            "S6": _s6_cta_exec,
+        }.get(stage_id)
+        if helper is not None:
+            try:
+                observed = helper(stage)
+            except Exception:
+                observed = None
+        if not isinstance(observed, dict):
+            creator_exec = stage.get("creator_execution")
+            benchmark_exec = stage.get("benchmark_execution")
+            if isinstance(creator_exec, (int, float)) and not isinstance(creator_exec, bool) and isinstance(benchmark_exec, (int, float)) and not isinstance(benchmark_exec, bool):
+                observed = {"creator_exec": float(creator_exec), "bench_exec": float(benchmark_exec)}
+        if isinstance(observed, dict):
+            creator_observed = observed.get("creator_exec")
+            benchmark_observed = observed.get("bench_exec")
+            if has_multimodal_assessment(stage):
+                creator_observed = multimodal_execution(stage_id, stage, "creator", creator_observed)
+                benchmark_observed = multimodal_execution(stage_id, stage, "benchmark", benchmark_observed)
+            trace["execution_observation"] = {
+                "creator": creator_observed,
+                "benchmark": benchmark_observed,
+                "source": "diagnostic_only",
+            }
+            trace["derived_creator_execution"] = creator_observed
+            trace["derived_benchmark_execution"] = benchmark_observed
     if has_multimodal_assessment(stage):
         trace["multimodal_integration"] = {
             "channel_requirement": channel_requirement_for(stage_id),

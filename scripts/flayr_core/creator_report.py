@@ -21,6 +21,7 @@ from .report import (
     select_referenced_frames,
     stage_display_names,
 )
+from .stage_evidence_contracts import STAGE_EVIDENCE_CONTRACT_VERSION
 from .resources import ResourceBudget, ResourceBudgetExceeded, ResourceLimits
 from .report_metadata import build_report_metadata
 from .semantic_model import SemanticAnalysis
@@ -112,7 +113,7 @@ def build_creator_report_data(
     for index, stage in enumerate(raw_stages, start=1):
         code, name = stage_display_names(stage.get("stage", ""), index)
         creator_range = _safe_text(stage.get("creator_time_range"))
-        units = referenced_evidence_units(stage.get("creator_evidence_ids"), creator_understanding)
+        units = referenced_evidence_units(stage.get("creator_evidence_ids"), creator_understanding, code)
         observation = _stage_observation(stage, units)
         insufficient = bool(stage.get("insufficient_evidence")) or code in low_confidence_codes
         if not observation and not units:
@@ -122,7 +123,16 @@ def build_creator_report_data(
         if linked_id and linked_id not in {item.get("id") for item in experiments}:
             linked_id = ""
 
-        frames = select_referenced_frames(creator_info, units, creator_range)
+        active_contract = (
+            isinstance(creator_understanding, dict)
+            and creator_understanding.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+        )
+        frames = select_referenced_frames(
+            creator_info,
+            units,
+            creator_range,
+            allow_fallback=not active_contract or bool(units),
+        )
         frame = _frame_payload(frames[0] if frames else None, assets, name)
         local_quote, translated_quote = evidence_quotes(units)
         quote = _first_text(local_quote, stage.get("creator_quote"), translated_quote, stage.get("creator_quote_zh"))
@@ -206,6 +216,7 @@ def _build_experiments(
         source_units = referenced_evidence_units(
             source_stage.get("creator_evidence_ids"),
             creator_understanding,
+            target_stage,
         )
         observation = _first_text(
             raw.get("observation"),

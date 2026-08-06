@@ -133,8 +133,8 @@ def _stage_payload(
         severity = "unknown"
     else:
         severity = severity_value(stage.get("severity")) or "skip"
-    creator_units = referenced_evidence_units(stage.get("creator_evidence_ids"), creator_understanding)
-    benchmark_units = referenced_evidence_units(stage.get("benchmark_evidence_ids"), benchmark_understanding)
+    creator_units = referenced_evidence_units(stage.get("creator_evidence_ids"), creator_understanding, code)
+    benchmark_units = referenced_evidence_units(stage.get("benchmark_evidence_ids"), benchmark_understanding, code)
     gap = _first_text(
         _join_text(stage.get("gap_summary")),
         stage.get("gap"),
@@ -181,7 +181,11 @@ def _improvement_payload(item: dict[str, Any], rank: int, benchmark_understandin
         action = f"{action} 建议话术：{script}"
     benchmark = _first_text(item.get("benchmark_reference"))
     benchmark_range = _safe_text(item.get("benchmark_time_range"))
-    units = referenced_evidence_units(item.get("benchmark_evidence_ids"), benchmark_understanding)
+    units = referenced_evidence_units(
+        item.get("benchmark_evidence_ids"),
+        benchmark_understanding,
+        item.get("target_stage"),
+    )
     facts = _join_text(
         [
             _first_text(unit.get("information"), unit.get("visual_fact"), unit.get("subtitle_fact"))

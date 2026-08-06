@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import copy
 import re
 from pathlib import Path
 from typing import Any
@@ -720,7 +721,7 @@ def normalize_stage_standard_delivery(value: Any) -> str | None:
     该阶段双方是否有效达到本阶段的『本品到位标准』（锚点按阶段查，见 prompt 对照表）。
     先作为事实收集，暂不参与 derive 卡分；缺失/不合法返回 None。"""
     text = str(value or "").strip().lower()
-    return text if text in {"benchmark_only", "creator_only", "both", "none"} else None
+    return text if text in {"benchmark_only", "creator_only", "both", "none", "unknown"} else None
 
 
 def normalize_bool_flag(value: Any) -> bool:
@@ -1029,7 +1030,8 @@ def normalize_video_understanding(value: Any) -> dict[str, Any]:
                 item.get("stage_evidence_checks"), valid_ids
             ),
             "evidence_budget_exceeded": bool(item.get("evidence_budget_exceeded") is True),
-            "stage1_recovery": item.get("stage1_recovery") if isinstance(item.get("stage1_recovery"), dict) else {},
+            # Recovery 状态由 pipeline 在事实合并后写入；模型回显的同名字段不具备控制权。
+            "stage1_recovery": {},
         }
     return normalized
 
@@ -1130,7 +1132,11 @@ def adapt_misnested_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
     return adapted
 
 
-def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
+def normalize_analysis_result(
+    result: dict[str, Any],
+    *,
+    trusted_stage1_recovery: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """把 LLM dict 归一为 schema 规范结构；缺字段或阶段数不对会抛 SystemExit。"""
     result = adapt_misnested_analysis_result(result)
     try:
@@ -1270,6 +1276,14 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
                 key_conclusions.append(text)
         key_conclusions = key_conclusions[:5]
 
+    normalized_video_understanding = normalize_video_understanding(result.get("video_understanding"))
+    # The extraction pipeline writes this metadata after the model response is
+    # normalized.  Restore only that explicitly supplied, code-owned copy;
+    # arbitrary model fields were discarded by normalize_video_understanding.
+    for role, metadata in (trusted_stage1_recovery or {}).items():
+        if role in normalized_video_understanding and isinstance(metadata, dict):
+            normalized_video_understanding[role]["stage1_recovery"] = copy.deepcopy(metadata)
+
     return {
         "one_line_verdict": str(result.get("one_line_verdict") or "").strip(),
         "one_line_summary": executive_summary,
@@ -1288,7 +1302,7 @@ def normalize_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
         "loop_closure": normalize_loop_closure(result.get("loop_closure")),
         "s3_s4_relationship": normalize_s3_s4_relationship(result.get("s3_s4_relationship")),
         "promise_chain": normalize_promise_chain(result.get("promise_chain")),
-        "video_understanding": normalize_video_understanding(result.get("video_understanding")),
+        "video_understanding": normalized_video_understanding,
         "stage_analysis": normalized_stages,
         "improvements": normalized_improvements,
     }
@@ -1577,7 +1591,8 @@ def normalize_video_fact_result(role: str, result: dict[str, Any], analysis: dic
             result.get("stage_evidence_contract_version")
         ),
         "evidence_budget_exceeded": bool(result.get("evidence_budget_exceeded") is True),
-        "stage1_recovery": result.get("stage1_recovery") if isinstance(result.get("stage1_recovery"), dict) else {},
+        # Recovery 状态由 pipeline 在事实合并后写入；模型回显的同名字段不具备控制权。
+        "stage1_recovery": {},
     }
     for index, unit in enumerate(units, start=1):
         if not isinstance(unit, dict):

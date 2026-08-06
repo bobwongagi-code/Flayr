@@ -7,6 +7,7 @@ coverage gates, and offline audits all consume the same stage vocabulary.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Any
 
@@ -380,6 +381,29 @@ def _unit_strengths(units_by_id: dict[str, dict[str, Any]], evidence_ids: list[s
     ]
 
 
+def _budget_recovery_allows_qualification(side: Any, stage_code: str) -> bool:
+    """Keep a budget-truncated extraction out of every downstream evidence view.
+
+    The recovery metadata is written by the pipeline, not accepted from the
+    model response.  Keeping this guard below the public qualification helper
+    prevents a new consumer from accidentally treating a partial extraction as
+    complete merely because its stage check looks valid.
+    """
+    if not isinstance(side, dict) or side.get("evidence_budget_exceeded") is not True:
+        return True
+    recovery = side.get("stage1_recovery")
+    if not isinstance(recovery, dict) or recovery.get("source") != "pipeline":
+        return False
+    if recovery.get("status") not in {"applied", "applied_with_unresolved"}:
+        return False
+    unresolved = {
+        str(value).strip().upper()[:2]
+        for value in recovery.get("unresolved_stages") or []
+        if str(value).strip()
+    }
+    return stage_code not in unresolved
+
+
 def _stage_check_issues(
     contract: StageEvidenceContract,
     check: Any,
@@ -463,6 +487,8 @@ def _stage_check_issues(
 def qualified_stage_evidence_ids(side: Any, stage: Any, *, allow_inferred: bool = False) -> set[str]:
     """Return IDs qualified by the locked unit facts, never inferred from functions."""
     stage_code = normalize_stage_code(stage) or ""
+    if not _budget_recovery_allows_qualification(side, stage_code):
+        return set()
     check = stage_evidence_check_map(side).get(stage_code)
     if not isinstance(check, dict) or check.get("status") != "present":
         return set()
@@ -483,8 +509,267 @@ def qualified_stage_evidence_ids(side: Any, stage: Any, *, allow_inferred: bool 
     }
 
 
-def stage_evidence_recovery_targets(side: Any) -> list[str]:
-    """Stages that need one bounded pre-lock re-observation pass."""
+def qualified_stage_evidence_units(side: Any, stages: list[Any] | set[Any] | None = None) -> list[dict[str, Any]]:
+    """Return locked observation records that are qualified for at least one stage.
+
+    This is the safe bridge for derived metrics that do not belong to one
+    stage, such as product visibility.  Active contracts use the union of
+    stage-qualified IDs; legacy artifacts retain their historical raw path.
+    """
+    if not isinstance(side, dict):
+        return []
+    units = [item for item in side.get("evidence_units") or [] if isinstance(item, dict)]
+    if side.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+        return units
+    selected = {
+        normalize_stage_code(stage)
+        for stage in (stages or stage_codes())
+        if normalize_stage_code(stage) in stage_codes()
+    }
+    allowed: set[str] = set()
+    for stage in selected:
+        allowed.update(qualified_stage_evidence_ids(side, stage))
+    return [unit for unit in units if str(unit.get("id") or "").strip() in allowed]
+
+
+def stage_evidence_readiness(side: Any, stage: Any) -> str:
+    """Return whether a stage may feed deterministic downstream relations.
+
+    ``present`` requires the same locked qualification used by the resolver;
+    ``absent`` is a valid complete negative observation. ``unknown`` and
+    ``conflict`` remain non-actionable instead of being collapsed into absent.
+    Legacy results return ``legacy`` so callers can retain their compatibility
+    path without weakening the active contract.
+    """
+    if not isinstance(side, dict) or side.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+        return "legacy"
+    stage_code = normalize_stage_code(stage)
+    contract = stage_evidence_contract(stage_code)
+    check = stage_evidence_check_map(side).get(stage_code or "")
+    if contract is None or not isinstance(check, dict):
+        return "unknown"
+    if not _budget_recovery_allows_qualification(side, stage_code):
+        return "unknown"
+    status = check.get("status")
+    issues = _stage_check_issues(contract, check, _evidence_units_by_id(side))
+    if status == "present":
+        return "present" if not issues and qualified_stage_evidence_ids(side, stage_code) else "unknown"
+    if status == "absent":
+        return "absent" if not issues else "unknown"
+    if status in {"unknown", "conflict"}:
+        return status
+    return "unknown"
+
+
+def _filter_evidence_references(value: Any, allowed_ids: set[str]) -> Any:
+    """Filter nested evidence references while preserving non-evidence facts."""
+    if isinstance(value, dict):
+        filtered: dict[str, Any] = {}
+        for key, nested in value.items():
+            key_text = str(key)
+            if key_text == "evidence_ids" or key_text.endswith("_evidence_ids"):
+                if isinstance(nested, list):
+                    filtered[key] = [item for item in nested if str(item).strip() in allowed_ids]
+                elif isinstance(nested, dict):
+                    filtered[key] = {
+                        nested_key: [item for item in nested_value if str(item).strip() in allowed_ids]
+                        if isinstance(nested_value, list)
+                        else _filter_evidence_references(nested_value, allowed_ids)
+                        for nested_key, nested_value in nested.items()
+                    }
+                else:
+                    filtered[key] = nested
+                continue
+            filtered[key] = _filter_evidence_references(nested, allowed_ids)
+        return filtered
+    if isinstance(value, list):
+        return [_filter_evidence_references(item, allowed_ids) for item in value]
+    return value
+
+
+def _stage_units_for_side(
+    side: dict[str, Any],
+    qualified_by_stage: dict[str, set[str]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Return full observation records partitioned by the stage that qualified them."""
+    units_by_id = _evidence_units_by_id(side)
+    return {
+        stage: [
+            copy.deepcopy(units_by_id[evidence_id])
+            for evidence_id in sorted(ids)
+            if evidence_id in units_by_id
+        ]
+        for stage, ids in qualified_by_stage.items()
+    }
+
+
+def stage_analysis_stage_context(
+    stage: Any,
+    video_understanding: Any,
+    stage_code_value: Any,
+) -> dict[str, Any]:
+    """Build a phase-review context without exposing unqualified stage claims.
+
+    The current stage result is not an evidence source.  Phase C needs the
+    target window and the qualified IDs for orientation, but it must not see
+    stale summaries or nested flags that could make an old conclusion look
+    like a newly verified fact.
+    """
+    if not isinstance(stage, dict):
+        return {}
+    code = normalize_stage_code(stage_code_value or stage.get("stage")) or ""
+    context: dict[str, Any] = {
+        "stage": stage.get("stage") or code,
+        "time_range": stage.get("time_range"),
+        "creator_time_range": stage.get("creator_time_range"),
+        "benchmark_time_range": stage.get("benchmark_time_range"),
+        "core_question": stage.get("core_question"),
+        "analysis_evidence_scope": "qualified_stage_evidence_only",
+    }
+    sides = video_understanding if isinstance(video_understanding, dict) else {}
+    for role in ("creator", "benchmark"):
+        side = sides.get(role) if isinstance(sides.get(role), dict) else {}
+        readiness = stage_evidence_readiness(side, code)
+        allowed = sorted(qualified_stage_evidence_ids(side, code)) if readiness == "present" else []
+        context[f"{role}_stage_evidence_readiness"] = readiness
+        context[f"{role}_evidence_ids"] = allowed
+    return context
+
+
+# These fields are useful audit observations, but they are not themselves a
+# stage qualification.  Exposing them in an active analysis payload would let
+# a downstream model infer a stage conclusion from an unqualified summary or
+# checklist even after the canonical evidence gate has returned unknown.
+_UNQUALIFIED_ANALYSIS_OBSERVATION_FIELDS = (
+    "content_summary",
+    "communication_strategy",
+    "selling_point_observations",
+    "variant_decision_rule",
+    "attention_scan_audit",
+    "attention_competitors",
+    "gate_observation_status",
+    "evidence_checklist",
+    "structure_event_checks",
+)
+
+
+def _stage_analysis_side_view(side: Any, target_stages: set[str] | None) -> dict[str, Any]:
+    """Build the only Stage1 view that downstream judgment may consume."""
+    if not isinstance(side, dict):
+        return {}
+    view = copy.deepcopy(side)
+    if side.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+        view["analysis_evidence_scope"] = "legacy_raw"
+        return view
+
+    selected_stages = target_stages or set(stage_codes())
+    qualified_by_stage = {
+        stage: qualified_stage_evidence_ids(side, stage)
+        for stage in selected_stages
+        if stage in stage_codes()
+    }
+    readiness_by_stage = {
+        stage: stage_evidence_readiness(side, stage)
+        for stage in selected_stages
+        if stage in stage_codes()
+    }
+    allowed_ids = set().union(*qualified_by_stage.values()) if qualified_by_stage else set()
+    stage_units = _stage_units_for_side(side, qualified_by_stage)
+    view["stage_evidence_units"] = stage_units
+    # Keep a small ID/time index for compatibility.  Full observation content
+    # is only exposed inside the stage-scoped map above, so a consumer cannot
+    # accidentally treat a qualified S4 record as an unscoped S3 fact.
+    view["evidence_units"] = [
+        {
+            "id": unit.get("id"),
+            "time_range": unit.get("time_range"),
+            "evidence_strength": unit.get("evidence_strength"),
+            "qualified_stages": sorted(
+                stage for stage, ids in qualified_by_stage.items()
+                if str(unit.get("id") or "") in ids
+            ),
+        }
+        for unit in side.get("evidence_units") or []
+        if isinstance(unit, dict) and str(unit.get("id") or "").strip() in allowed_ids
+    ]
+    view = _filter_evidence_references(view, allowed_ids)
+    for field in _UNQUALIFIED_ANALYSIS_OBSERVATION_FIELDS:
+        view.pop(field, None)
+    projected_checks = []
+    for check in view.get("stage_evidence_checks") or []:
+        if not isinstance(check, dict):
+            continue
+        projected = dict(check)
+        code = normalize_stage_code(projected.get("stage"))
+        readiness = readiness_by_stage.get(code or "")
+        if readiness in {"unknown", "conflict"}:
+            # The model's signal checklist is only a qualification claim.  If
+            # the referenced observations fail the canonical gate, retaining
+            # those signal names would let a downstream model infer the stage
+            # conclusion without a qualified evidence unit.
+            projected.update(
+                {
+                    "status": readiness,
+                    "coverage": "unknown",
+                    "evidence_ids": [],
+                    "observed_signals": [],
+                    "missing_signals": [],
+                    "observed_disqualifiers": [],
+                    "evidence_strength": None,
+                    "reason": "代码资格校验未通过，Stage2 不得将该阶段视为已采到证据。",
+                }
+            )
+        projected_checks.append(projected)
+    view["stage_evidence_checks"] = projected_checks
+    view["qualified_stage_evidence_ids"] = {
+        stage: sorted(ids)
+        for stage, ids in qualified_by_stage.items()
+    }
+    view["stage_evidence_readiness"] = readiness_by_stage
+    view["analysis_evidence_scope"] = "qualified_stage_evidence_only"
+    view["analysis_evidence_stages"] = sorted(selected_stages)
+    return view
+
+
+def stage_analysis_evidence_view(value: Any, target_stages: list[Any] | set[Any] | None = None) -> Any:
+    """Return a non-authoritative, qualification-filtered view for downstream models.
+
+    The persisted Stage1 result remains the audit record.  This separate view
+    prevents Stage2/Phase C payloads from using raw units that a stage check did
+    not qualify.  Legacy results intentionally retain their old raw view for
+    compatibility and are marked so callers can keep the legacy audit path.
+    """
+    if not isinstance(value, dict):
+        return {}
+    normalized_targets = {
+        normalize_stage_code(stage)
+        for stage in (target_stages or [])
+        if normalize_stage_code(stage) in stage_codes()
+    }
+    selected = normalized_targets or None
+    roles = [role for role in ("benchmark", "creator") if isinstance(value.get(role), dict)]
+    if roles:
+        view = copy.deepcopy(value)
+        for role in roles:
+            view[role] = _stage_analysis_side_view(value[role], selected)
+        return view
+    if value.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+        return _stage_analysis_side_view(value, selected)
+    view = copy.deepcopy(value)
+    view["analysis_evidence_scope"] = "legacy_raw"
+    return view
+
+
+def stage_evidence_recovery_targets(side: Any, *, include_budget: bool = True) -> list[str]:
+    """Stages that need one bounded pre-lock re-observation pass.
+
+    ``evidence_budget_exceeded`` is a video-wide signal.  It cannot identify a
+    single stage safely, so it deliberately opens one bounded pass for the
+    complete registry rather than silently locking a potentially incomplete
+    observation set.
+    """
+    if include_budget and isinstance(side, dict) and side.get("evidence_budget_exceeded") is True:
+        return list(stage_codes())
     targets: list[str] = []
     units_by_id = _evidence_units_by_id(side)
     for contract in STAGE_EVIDENCE_CONTRACTS:

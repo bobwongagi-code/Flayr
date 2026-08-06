@@ -149,6 +149,7 @@ AUDIT_REASON_CODES = frozenset(
         "evidence_strength_inferred",
         "evidence_strength_absent",
         "evidence_strength_invalid",
+        "stage_evidence_unresolved",
         "precondition_missing",
         "repair_incomplete",
         "state_hard_fact_conflict",

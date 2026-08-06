@@ -34,6 +34,7 @@ from ..llm.parse import S5_SOURCE_STATUSES, is_effective_voiceover, normalize_s5
 from ..stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
     qualified_stage_evidence_ids,
+    stage_evidence_readiness,
 )
 from .utils import (
     adjacent_review_range,
@@ -56,6 +57,14 @@ def _stage_contract_allowed_ids(result: dict[str, Any], role: str, stage_code: s
     if not isinstance(side, dict) or side.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
         return None
     return qualified_stage_evidence_ids(side, stage_code)
+
+
+def _stage_contract_readiness(result: dict[str, Any], role: str, stage_code: str) -> str:
+    understanding = result.get("video_understanding") if isinstance(result, dict) else None
+    side = understanding.get(role) if isinstance(understanding, dict) else None
+    if not isinstance(side, dict) or side.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+        return "legacy"
+    return stage_evidence_readiness(side, stage_code)
 
 def bind_timed_transcript_quotes(result: dict[str, Any], analysis: dict[str, Any]) -> None:
     """用 SRT 时间戳重新校对每个阶段的 quote，并清除已知的"视觉证据"占位。"""
@@ -124,6 +133,15 @@ def align_stage_flag_evidence(result: dict[str, Any]) -> None:
             if not isinstance(flag, dict):
                 continue
             flag_ids = [str(value) for value in flag.get("evidence_ids", []) if str(value).strip()]
+            if allowed_stage_ids is not None:
+                flag_ids = [value for value in flag_ids if value in allowed_stage_ids]
+                flag["evidence_ids"] = flag_ids
+                if flag_name == "s5":
+                    flag["trust_source_evidence_ids"] = [
+                        str(value)
+                        for value in flag.get("trust_source_evidence_ids") or []
+                        if str(value).strip() in allowed_stage_ids
+                    ]
             flag_units = [
                 unit
                 for unit in units
@@ -630,6 +648,24 @@ def validate_s3_s4_hard_fact_consistency(result: dict[str, Any]) -> None:
                     "reason_code": "evidence_temporal_mismatch",
                     "temporal_conflicts": temporal_conflicts,
                 }
+    # The hard-fact check is mechanical, but its output must not look like a
+    # usable positive/negative fact while Stage1 qualification is unresolved.
+    # Keep the original flags untouched for audit; downstream code sees an
+    # explicit unknown marker and therefore cannot turn missing collection
+    # into a false observation.
+    for role in ("creator", "benchmark"):
+        for stage_code in ("S3", "S4"):
+            readiness = _stage_contract_readiness(result, role, stage_code)
+            if readiness not in {"legacy", "present", "absent"}:
+                state_checks[f"{role}_{stage_code.lower()}"] = {
+                    "status": "stage_evidence_unresolved",
+                    "reason_code": "stage_evidence_unresolved",
+                    "reason": (
+                        f"{stage_code} Stage1 证据资格为 {readiness}；"
+                        "硬事实仅保留审计，不参与下游推导。"
+                    ),
+                    "stage_evidence_readiness": readiness,
+                }
     for stage in (s3, s4):
         postprocess_state = stage.setdefault("_postprocess_state", {})
         if isinstance(postprocess_state, dict):
@@ -639,7 +675,7 @@ def validate_s3_s4_hard_fact_consistency(result: dict[str, Any]) -> None:
                 if key.endswith("_s3") or key.endswith("_s4")
             }
             for key, check in checks.items():
-                if check.get("status") == "incomplete":
+                if check.get("status") in {"incomplete", "stage_evidence_unresolved"}:
                     continue
                 flag = s3.get(key) if key.endswith("_s3") else s4.get(key)
                 fields = s3_fields if key.endswith("_s3") else s4_fields
@@ -653,8 +689,14 @@ def reconcile_s3_s4_evidence_coherence(result: dict[str, Any]) -> None:
     validate_s3_s4_hard_fact_consistency(result)
 
 
-def bind_improvement_benchmark_reference(item: dict[str, Any], stage: dict[str, Any]) -> None:
+def bind_improvement_benchmark_reference(
+    item: dict[str, Any],
+    stage: dict[str, Any],
+    allowed_evidence_ids: set[str] | None = None,
+) -> None:
     evidence_ids = [str(value) for value in stage.get("benchmark_evidence_ids", []) if str(value).strip()]
+    if allowed_evidence_ids is not None:
+        evidence_ids = [value for value in evidence_ids if value in allowed_evidence_ids]
     item["benchmark_evidence_ids"] = evidence_ids
     time_range = str(stage.get("benchmark_time_range") or "").strip()
     stage_name = str(stage.get("stage") or "").strip()
@@ -711,6 +753,15 @@ def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
     if len(stages) < 6:
         return
     cta = stages[5]
+    readiness_by_role = {
+        role: _stage_contract_readiness(result, role, "S6")
+        for role in ("benchmark", "creator")
+    }
+    unresolved_roles = [
+        role for role, readiness in readiness_by_role.items()
+        if readiness not in {"legacy", "present", "absent"}
+    ]
+    active_without_evidence = False
     for role, code in (("benchmark", "B"), ("creator", "C")):
         quote = str(cta.get(f"{role}_quote") or "")
         flag = cta.get(f"{role}_s6") if isinstance(cta.get(f"{role}_s6"), dict) else {}
@@ -722,17 +773,6 @@ def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
             flag.get("soft_purchase_invitation_met") is True
             and flag.get("offer_or_incentive_clear") is True
         )
-        if flag.get("exists") is True and not has_direct_or_path and not has_valid_soft_invitation:
-            # S6 的“软促单”必须同时有面向观众的购买邀请和明确利益点。
-            # 单纯总结效果、展示产品或暗示值得购买不是 CTA，不能留给 derive 当作有效促单。
-            flag["exists"] = False
-            flag["soft_purchase_invitation_met"] = False
-            flag["module_fit_met"] = False
-            flag["ending_position_met"] = False
-            flag["evidence_ids"] = []
-            previous_reason = str(flag.get("cta_reason") or "").strip()
-            reason = "未见明确下单/路径，且不满足“购买邀请+利益点”的软促单定义，按无 CTA 处理。"
-            flag["cta_reason"] = f"{previous_reason} {reason}".strip()
         units = result.get("video_understanding", {}).get(role, {}).get("evidence_units", [])
         allowed_stage_ids = _stage_contract_allowed_ids(result, role, "S6")
         flag_ids = [str(value) for value in flag.get("evidence_ids", []) if str(value).strip()]
@@ -743,9 +783,28 @@ def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
             unit for unit in units
             if isinstance(unit, dict) and str(unit.get("id")) in flag_ids and "_NO_CTA" not in str(unit.get("id"))
         ]
-        if allowed_stage_ids is not None and not referenced:
+        if readiness_by_role[role] == "absent":
             cta[f"{role}_evidence_ids"] = []
             continue
+        if readiness_by_role[role] == "present" and flag.get("exists") is True and not referenced:
+            cta[f"{role}_evidence_ids"] = []
+            active_without_evidence = True
+            continue
+        if readiness_by_role[role] not in {"legacy", "present"}:
+            cta[f"{role}_evidence_ids"] = []
+            continue
+        if flag.get("exists") is True and not has_direct_or_path and not has_valid_soft_invitation:
+            # S6 的“软促单”必须同时有面向用户的购买邀请和明确利益点。
+            # 只有在 Stage1 资格已完成、且确实有可核验引用时，才允许把模型 flag
+            # 确定性降级为无 CTA；证据未知时不能借 repair 伪造结论。
+            flag["exists"] = False
+            flag["soft_purchase_invitation_met"] = False
+            flag["module_fit_met"] = False
+            flag["ending_position_met"] = False
+            flag["evidence_ids"] = []
+            previous_reason = str(flag.get("cta_reason") or "").strip()
+            reason = "未见明确下单/路径，且不满足“购买邀请+利益点”的软促单定义，按无 CTA 处理。"
+            flag["cta_reason"] = f"{previous_reason} {reason}".strip()
         referenced_text = json.dumps(referenced, ensure_ascii=False)
         has_positive_flag = (
             flag.get("exists") is True
@@ -774,6 +833,9 @@ def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
                 cta[f"{role}_support_status"] = "voice_only" if cta[f"{role}_quote"] else "visual_only"
             units[:] = [unit for unit in units if str(unit.get("id") or "") != f"{code}_NO_CTA"]
             continue
+        if readiness_by_role[role] != "legacy":
+            cta[f"{role}_evidence_ids"] = []
+            continue
         unit_id = f"{code}_NO_CTA"
         placeholder = {
             "id": unit_id,
@@ -793,9 +855,22 @@ def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
         cta[f"{role}_visual_evidence"] = [placeholder["visual_fact"]]
         cta[f"{role}_support_status"] = "visual_only"
 
+    if unresolved_roles or active_without_evidence:
+        blocked = ", ".join(
+            f"{role}:{readiness_by_role[role]}"
+            for role in ("benchmark", "creator")
+            if readiness_by_role[role] not in {"legacy", "present", "absent"}
+        )
+        cta["gap"] = f"S6 的 Stage1 证据资格未完成（{blocked or '存在有效 flag 但无资格化引用'}），不输出 CTA 差距判断。"
+        cta["gap_summary"] = [cta["gap"]]
+        cta["evidence"] = []
+        return
+
     def has_valid_cta(role: str) -> bool:
         flag = cta.get(f"{role}_s6")
         if not isinstance(flag, dict) or flag.get("exists") is not True:
+            return False
+        if readiness_by_role[role] == "present" and not cta.get(f"{role}_evidence_ids"):
             return False
         return (
             flag.get("direct_order_met") is True
@@ -959,6 +1034,7 @@ def reconcile_s5_trust_sources(result: dict[str, Any], source_signals_required: 
         units = understanding.get(role, {}).get("evidence_units", [])
         units = units if isinstance(units, list) else []
         allowed_stage_ids = _stage_contract_allowed_ids(result, role, "S5")
+        readiness = _stage_contract_readiness(result, role, "S5")
         if allowed_stage_ids is not None:
             flag["evidence_ids"] = [
                 str(value) for value in flag.get("evidence_ids") or []
@@ -968,6 +1044,26 @@ def reconcile_s5_trust_sources(result: dict[str, Any], source_signals_required: 
                 str(value) for value in flag.get("trust_source_evidence_ids") or []
                 if str(value).strip() in allowed_stage_ids
             ]
+            units = [
+                unit for unit in units
+                if isinstance(unit, dict) and str(unit.get("id") or "").strip() in allowed_stage_ids
+            ]
+        if readiness not in {"legacy", "present", "absent"}:
+            flag["trust_source_evidence_ids"] = []
+            flag["_s5_source_status"] = "unknown"
+            valid_roles[role] = None
+            reconciled.append({
+                "role": role,
+                "basis": str(flag.get("trust_basis") or "unknown"),
+                "status": f"stage_evidence_{readiness}",
+                "reason": "Stage1 阶段证据资格未完成，不读取原始单元推导 S5 来源状态。",
+            })
+            continue
+        if readiness == "absent":
+            flag["trust_source_evidence_ids"] = []
+            flag["_s5_source_status"] = "explicit_absent"
+            valid_roles[role] = False
+            continue
         source_status, source_ids = _s5_source_status(flag, units)
         basis = str(flag.get("trust_basis") or "unknown")
         has_valid_source = (
@@ -1042,9 +1138,14 @@ def reconcile_s5_trust_sources(result: dict[str, Any], source_signals_required: 
 def ground_stage_visual_evidence(result: dict[str, Any]) -> None:
     """把每个 stage 的 visual_evidence 与所引用 evidence_unit 的 visual/subtitle_fact 对齐。"""
     understanding = result.get("video_understanding", {})
-    for stage in result.get("stage_analysis", []):
+    for index, stage in enumerate(result.get("stage_analysis", []), start=1):
+        if not isinstance(stage, dict):
+            continue
         for role in ("benchmark", "creator"):
             references = {str(value) for value in stage.get(f"{role}_evidence_ids", [])}
+            allowed_stage_ids = _stage_contract_allowed_ids(result, role, f"S{index}")
+            if allowed_stage_ids is not None:
+                references &= allowed_stage_ids
             units = understanding.get(role, {}).get("evidence_units", [])
             facts: list[str] = []
             for unit in units:
@@ -1073,8 +1174,31 @@ def ground_improvement_evidence(result: dict[str, Any]) -> None:
             continue
         stage = improvement_reference_stage(item, stages)
         if stage:
-            bind_improvement_benchmark_reference(item, stage)
-        bind_improvement_base_material(item, creator_units)
+            stage_index = next((index for index, candidate in enumerate(stages) if candidate is stage), None)
+            benchmark_allowed = (
+                _stage_contract_allowed_ids(result, "benchmark", f"S{stage_index + 1}")
+                if stage_index is not None
+                else None
+            )
+            creator_allowed = (
+                _stage_contract_allowed_ids(result, "creator", f"S{stage_index + 1}")
+                if stage_index is not None
+                else None
+            )
+            bind_improvement_benchmark_reference(item, stage, benchmark_allowed)
+        else:
+            creator_allowed = set() if _stage_contract_active(result, "creator") else None
+            if _stage_contract_active(result, "benchmark"):
+                item["benchmark_evidence_ids"] = []
+                item["benchmark_reference"] = "无可资格化的标杆阶段证据；需先完成 Stage1 复核。"
+        scoped_creator_units = creator_units
+        if creator_allowed is not None:
+            scoped_creator_units = [
+                unit
+                for unit in creator_units
+                if isinstance(unit, dict) and str(unit.get("id") or "") in creator_allowed
+            ]
+        bind_improvement_base_material(item, scoped_creator_units)
 
 
 def improvement_reference_stage(item: dict[str, Any], stages: list[Any]) -> dict[str, Any] | None:
@@ -1108,12 +1232,25 @@ def improvement_reference_stage(item: dict[str, Any], stages: list[Any]) -> dict
 
 # region fill ----------------------------------------------------------------
 
-def _stage_reference_ids(stage: dict[str, Any], role: str) -> set[str]:
-    return {
+def _stage_contract_active(result: dict[str, Any], role: str) -> bool:
+    understanding = result.get("video_understanding") if isinstance(result, dict) else None
+    side = understanding.get(role) if isinstance(understanding, dict) else None
+    return isinstance(side, dict) and side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+
+
+def _stage_reference_ids(result: dict[str, Any], stage: dict[str, Any], role: str) -> set[str]:
+    references = {
         str(value).strip()
         for value in stage.get(f"{role}_evidence_ids") or []
         if str(value).strip()
     }
+    if _stage_contract_active(result, role):
+        stage_code = str(stage.get("stage") or "").strip().upper()[:2]
+        references &= qualified_stage_evidence_ids(
+            (result.get("video_understanding") or {}).get(role, {}),
+            stage_code,
+        )
+    return references
 
 
 def _stage_review_range_from_facts(
@@ -1142,7 +1279,7 @@ def _stage_review_range_from_facts(
             if item in units_by_id and parse_time_range_seconds(units_by_id[item].get("time_range"), None) is not None
         ]
 
-    current_units = timed_units(_stage_reference_ids(stage, role))
+    current_units = timed_units(_stage_reference_ids(result, stage, role))
     if current_units:
         ranges = [parse_time_range_seconds(unit.get("time_range"), None) for unit in current_units]
         start = min(item[0] for item in ranges if item is not None)
@@ -1153,7 +1290,7 @@ def _stage_review_range_from_facts(
     before: dict[str, Any] | None = None
     before_end: float | None = None
     for previous_stage in reversed(stages[:stage_index]):
-        previous_ids = _stage_reference_ids(previous_stage, role)
+        previous_ids = _stage_reference_ids(result, previous_stage, role)
         candidates = timed_units(previous_ids)
         if candidates:
             before = max(
@@ -1167,7 +1304,7 @@ def _stage_review_range_from_facts(
     future_candidates: list[dict[str, Any]] = []
     seen_before = {str(before.get("id"))} if before else set()
     for future_stage in stages[stage_index + 1 :]:
-        future_ids = _stage_reference_ids(future_stage, role)
+        future_ids = _stage_reference_ids(result, future_stage, role)
         future_candidates.extend(unit for unit in timed_units(future_ids) if str(unit.get("id")) not in seen_before)
     if before_end is not None:
         after = min(

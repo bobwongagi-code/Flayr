@@ -11,6 +11,7 @@ from typing import Any
 from .analysis_model import AnalysisResult
 from .artifacts import format_seconds, parse_timestamp_seconds, select_frame_near_timestamp, select_frames_for_time_range
 from .resources import ResourceBudget, ResourceBudgetExceeded, ResourceLimits, encode_file_data_url
+from .stage_evidence_contracts import STAGE_EVIDENCE_CONTRACT_VERSION, qualified_stage_evidence_ids, stage_codes
 from .utils import write_text
 
 
@@ -255,8 +256,16 @@ def role_cells(
     assets: ReportAssetContext,
 ) -> list[str]:
     """返回一个角色的 4 个段落 cell：核心结论 / 口播证据 / 画面截图 / 画面证据。"""
-    units = referenced_evidence_units(stage.get(f"{prefix}_evidence_ids", []), understanding)
-    frames = select_referenced_frames(info, units, time_range)
+    units = referenced_evidence_units(
+        stage.get(f"{prefix}_evidence_ids", []),
+        understanding,
+        stage.get("stage"),
+    )
+    active_contract = (
+        isinstance(understanding, dict)
+        and understanding.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+    )
+    frames = select_referenced_frames(info, units, time_range, allow_fallback=not active_contract or bool(units))
     quote, quote_zh = evidence_quotes(units)
     visual_evidence = list(
         dict.fromkeys(
@@ -648,9 +657,22 @@ def stage_display_names(stage_name: Any, index: int) -> tuple[str, str]:
     return short, text or f"阶段 {index}"
 
 
-def referenced_evidence_units(ids: Any, understanding: dict[str, Any]) -> list[dict[str, Any]]:
+def referenced_evidence_units(
+    ids: Any,
+    understanding: dict[str, Any],
+    stage_code: Any = None,
+) -> list[dict[str, Any]]:
     references = {str(value) for value in ids} if isinstance(ids, list) else set()
     units = understanding.get("evidence_units", []) if isinstance(understanding, dict) else []
+    if isinstance(understanding, dict) and understanding.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+        normalized_stage = str(stage_code or "").strip().upper()[:2]
+        if normalized_stage in stage_codes():
+            references &= qualified_stage_evidence_ids(understanding, normalized_stage)
+        else:
+            qualified: set[str] = set()
+            for code in stage_codes():
+                qualified.update(qualified_stage_evidence_ids(understanding, code))
+            references &= qualified
     return [unit for unit in units if isinstance(unit, dict) and str(unit.get("id")) in references]
 
 
@@ -658,6 +680,8 @@ def select_referenced_frames(
     info: dict[str, Any],
     units: list[dict[str, Any]],
     fallback_range: str,
+    *,
+    allow_fallback: bool = True,
 ) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -667,7 +691,9 @@ def select_referenced_frames(
             if path not in seen:
                 selected.append(frame)
                 seen.add(path)
-    return selected[:3] or select_frames_for_time_range(info, fallback_range, limit=3)
+    if selected:
+        return selected[:3]
+    return select_frames_for_time_range(info, fallback_range, limit=3) if allow_fallback else []
 
 
 def evidence_visual_facts(units: list[dict[str, Any]]) -> list[str]:

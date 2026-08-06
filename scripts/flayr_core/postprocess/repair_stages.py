@@ -16,7 +16,11 @@ from typing import Any
 from ..artifacts import format_seconds, parse_time_range_seconds, parse_timestamp_seconds
 from ..evidence_states import S1_HOOK_FLOOR_FIELDS, hard_fact_fingerprint
 from ..stage_catalog import stage_tuples
-from ..stage_evidence_contracts import STAGE_EVIDENCE_CONTRACT_VERSION, qualified_stage_evidence_ids
+from ..stage_evidence_contracts import (
+    STAGE_EVIDENCE_CONTRACT_VERSION,
+    qualified_stage_evidence_ids,
+    stage_evidence_readiness,
+)
 from ..transcript import read_timed_transcript_segments
 
 STAGES = stage_tuples()
@@ -352,6 +356,12 @@ def infer_boundary_from_evidence(role: str, result: dict[str, Any]) -> dict[str,
     if s1_ids is not None or s2_ids is not None:
         if not s1_ids or not s2_ids:
             return None
+        # The boundary helper is a downstream consumer too.  Once the active
+        # contract exists, do not let an unrelated raw unit become the
+        # predecessor/successor that determines the S1 -> S2 transition.
+        units = [unit for unit in units if str(unit.get("id") or "") in (s1_ids | s2_ids)]
+        if len(units) < 2:
+            return None
     previous = units[0]
     for current in units[1:4]:
         parsed = parse_time_range_seconds(current.get("time_range"), None)
@@ -565,6 +575,34 @@ def apply_comparison_eligibility(result: dict[str, Any]) -> None:
     """按阶段比较合同限制差距结论，不用整体商品关系替阶段作答。"""
     contract = result.get("comparison_contract") or result.get("comparison_eligibility")
     if not isinstance(contract, dict):
+        understanding = result.get("video_understanding")
+        if not isinstance(understanding, dict):
+            return
+        for stage in result.get("stage_analysis", []):
+            if not isinstance(stage, dict):
+                continue
+            code = stage_code(stage)
+            readiness: dict[str, str] = {}
+            unresolved: list[str] = []
+            for role in ("creator", "benchmark"):
+                facts = understanding.get(role)
+                if isinstance(facts, dict) and facts.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+                    readiness[role] = stage_evidence_readiness(facts, code)
+                    if readiness[role] not in {"present", "absent"}:
+                        unresolved.append(f"{role}:{readiness[role]}")
+            if not unresolved:
+                continue
+            stage["comparison_contract"] = {
+                "status": "not_comparable",
+                "evidence_readiness": readiness,
+            }
+            stage["comparison_status"] = "not_directly_comparable"
+            stage["comparison_reason"] = (
+                f"Stage1证据资格未完成（{', '.join(unresolved)}），禁止输出阶段差距。"
+            )
+            trace = stage.get("severity_derivation")
+            if isinstance(trace, dict):
+                trace["direct_product_comparison_eligible"] = False
         return
     from ..llm.parse import normalize_comparison_contract
 
@@ -585,6 +623,27 @@ def apply_comparison_eligibility(result: dict[str, Any]) -> None:
         status = str(stage_contract.get("status") or "not_comparable")
         reason = str(stage_contract.get("basis") or default_reason).strip()
         stage["comparison_contract"] = dict(stage_contract)
+        readiness: dict[str, str] = {}
+        unresolved: list[str] = []
+        for role in ("creator", "benchmark"):
+            facts = result.get("video_understanding", {}).get(role, {})
+            if isinstance(facts, dict) and facts.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+                readiness[role] = stage_evidence_readiness(facts, code)
+                if readiness[role] not in {"present", "absent"}:
+                    unresolved.append(f"{role}:{readiness[role]}")
+            else:
+                readiness[role] = "legacy"
+        stage["comparison_contract"]["evidence_readiness"] = readiness
+        if unresolved:
+            stage["model_comparison_status"] = status
+            stage["comparison_status"] = "not_directly_comparable"
+            stage["comparison_reason"] = (
+                f"Stage1 证据资格未完成（{', '.join(unresolved)}），原比较合同仅保留审计，不能输出阶段差距。"
+            )
+            trace = stage.get("severity_derivation")
+            if isinstance(trace, dict):
+                trace["direct_product_comparison_eligible"] = False
+            continue
         if status == "direct":
             stage["comparison_basis"] = "product_direct"
             stage.pop("comparison_status", None)
@@ -738,8 +797,11 @@ def role_stage_text(stage: dict[str, Any], role: str) -> str:
 
 def role_has_positive_cta(result: dict[str, Any], role: str) -> bool:
     units = result.get("video_understanding", {}).get(role, {}).get("evidence_units", [])
+    allowed_ids = _qualified_stage_ids(role, result, "S6")
     for unit in units if isinstance(units, list) else []:
         if not isinstance(unit, dict):
+            continue
+        if allowed_ids is not None and str(unit.get("id") or "") not in allowed_ids:
             continue
         if "_NO_CTA" in str(unit.get("id") or ""):
             continue

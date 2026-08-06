@@ -9,7 +9,12 @@ from __future__ import annotations
 from typing import Any
 
 from ..artifacts import parse_time_range_seconds
-from ..stage_evidence_contracts import STAGE_EVIDENCE_CONTRACT_VERSION, qualified_stage_evidence_ids
+from ..stage_evidence_contracts import (
+    STAGE_EVIDENCE_CONTRACT_VERSION,
+    qualified_stage_evidence_ids,
+    stage_codes,
+    stage_evidence_readiness,
+)
 from .commercial_priority import (
     COMMERCIAL_PRIORITY_SCHEMA_VERSION,
     classify_painpoint_relevance,
@@ -116,16 +121,35 @@ def _proof_plan(result: dict[str, Any]) -> dict[str, Any]:
     return plan if plan.get("valid") is True else {}
 
 
-def _dominant_selling_point(side: dict[str, Any]) -> dict[str, Any] | None:
+def _dominant_selling_point(
+    side: dict[str, Any],
+    allowed_evidence_ids: set[str] | None = None,
+) -> dict[str, Any] | None:
     observations = side.get("selling_point_observations") if isinstance(side.get("selling_point_observations"), list) else []
-    candidates = [item for item in observations if isinstance(item, dict) and str(item.get("candidate_id") or "").strip()]
+    candidates = []
+    for item in observations:
+        if not isinstance(item, dict) or not str(item.get("candidate_id") or "").strip():
+            continue
+        if allowed_evidence_ids is not None:
+            evidence_ids = {
+                str(value).strip()
+                for value in item.get("evidence_ids") or []
+                if str(value).strip()
+            }
+            if not evidence_ids.intersection(allowed_evidence_ids):
+                continue
+        candidates.append(item)
     if not candidates:
         return None
     return max(candidates, key=lambda item: max(float(item.get("visual_share") or 0), float(item.get("speech_share") or 0)))
 
 
-def _selling_side_status(side: dict[str, Any], anchor_id: str) -> tuple[str, dict[str, Any] | None]:
-    dominant = _dominant_selling_point(side)
+def _selling_side_status(
+    side: dict[str, Any],
+    anchor_id: str,
+    allowed_evidence_ids: set[str] | None = None,
+) -> tuple[str, dict[str, Any] | None]:
+    dominant = _dominant_selling_point(side, allowed_evidence_ids)
     if not dominant or not anchor_id:
         return "unknown", dominant
     if str(dominant.get("candidate_id") or "") == anchor_id:
@@ -137,9 +161,38 @@ def _selling_point_finding(result: dict[str, Any], creator: dict[str, Any], benc
     plan = _proof_plan(result)
     profile = result.get("product_profile") if isinstance(result.get("product_profile"), dict) else {}
     anchor_id = str(plan.get("primary_candidate_id") or plan.get("s4_anchor_candidate_id") or "")
-    creator_status, dominant = _selling_side_status(creator, anchor_id)
-    benchmark_status, _ = _selling_side_status(benchmark, anchor_id)
-    evidence_ids = list((dominant or {}).get("evidence_ids") or [])
+    readiness_blocked = []
+    for role, side in (("creator", creator), ("benchmark", benchmark)):
+        if side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+            readiness_blocked.extend(
+                f"{role}:{stage}"
+                for stage in ("S2", "S3", "S4")
+                if stage_evidence_readiness(side, stage) not in {"present", "absent"}
+            )
+    if readiness_blocked:
+        return _finding(
+            "selling_point_route", "unknown", "unknown", "unknown", "unknown",
+            f"Stage1 阶段证据资格未完成（{', '.join(readiness_blocked)}），暂不判断卖点路线。",
+            "不据此改动 S2-S4 判断。", "先完成对应阶段事实采集或定向复核。", [], [], "low",
+        )
+    qualified_ids_by_role: dict[str, set[str] | None] = {}
+    for role, side in (("creator", creator), ("benchmark", benchmark)):
+        if side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+            allowed: set[str] = set()
+            for stage_code in ("S2", "S3", "S4"):
+                allowed.update(qualified_stage_evidence_ids(side, stage_code))
+            qualified_ids_by_role[role] = allowed
+        else:
+            qualified_ids_by_role[role] = None
+    creator_status, dominant = _selling_side_status(
+        creator, anchor_id, qualified_ids_by_role["creator"]
+    )
+    benchmark_status, _ = _selling_side_status(
+        benchmark, anchor_id, qualified_ids_by_role["benchmark"]
+    )
+    evidence_ids = [str(value) for value in (dominant or {}).get("evidence_ids") or [] if str(value).strip()]
+    if qualified_ids_by_role["creator"] is not None:
+        evidence_ids = [value for value in evidence_ids if value in qualified_ids_by_role["creator"]]
     source = str(plan.get("selection_source") or "model_category_default")
     confidence = str(plan.get("anchor_confidence") or "low")
     stages = _stage_map(result)
@@ -187,27 +240,87 @@ def _variant_side_status(side: dict[str, Any], mode: str) -> tuple[str, list[str
     if status.get("variant_focus") != "complete":
         return "unknown", [], []
     units = [item for item in side.get("evidence_units") or [] if isinstance(item, dict)]
+    active_contract = side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+    qualified_core_ids: set[str] = set()
+    if active_contract:
+        readiness = {
+            stage_code: stage_evidence_readiness(side, stage_code)
+            for stage_code in ("S2", "S3", "S4")
+        }
+        if any(value not in {"present", "absent"} for value in readiness.values()):
+            return "unknown", [], []
+        for stage_code in ("S2", "S3", "S4"):
+            qualified_core_ids.update(qualified_stage_evidence_ids(side, stage_code))
+        # Variant focus is a product/comparison observation, but its stage
+        # consequences must still be grounded in qualified S2-S4 facts.  Raw
+        # units outside that set cannot make a side look single-focus or
+        # ambiguous after the stage contract has been activated.
+        if not qualified_core_ids:
+            return "unknown", [], []
+        raw_variant_units = [
+            unit
+            for unit in units
+            if unit.get("variant_ids")
+        ]
+        raw_variant_ids = {
+            str(unit.get("id") or "").strip()
+            for unit in raw_variant_units
+            if str(unit.get("id") or "").strip()
+        }
+        if raw_variant_ids - qualified_core_ids:
+            # A raw observation outside the qualified S2-S4 evidence set may
+            # change the focus conclusion.  It is unknown, not proof of a
+            # single-focus video, until that observation is qualified or
+            # explicitly ruled out by a complete Stage1 contract.
+            return "unknown", [], []
+        units = [unit for unit in units if str(unit.get("id") or "") in qualified_core_ids]
     variant_ids = list(dict.fromkeys(v for unit in units for v in unit.get("variant_ids") or [] if str(v).strip()))
     if not units:
         return "unknown", [], []
     if len(variant_ids) <= 1:
         return "single_focus", [], variant_ids
     rule = side.get("variant_decision_rule") if isinstance(side.get("variant_decision_rule"), dict) else {}
+    if active_contract:
+        raw_rule_evidence_ids = {
+            str(value).strip()
+            for value in rule.get("evidence_ids") or []
+            if str(value).strip()
+        }
+        if raw_rule_evidence_ids - qualified_core_ids:
+            return "unknown", [], variant_ids
     explicit_units = [unit for unit in units if unit.get("variant_relation_mode") == "explicit_comparison"]
-    explained = rule.get("speech_explains_choice") is True or any(
-        unit.get("comparison_purpose_explicit") is True for unit in explicit_units
+    explicit_units = [
+        unit for unit in units
+        if unit.get("variant_relation_mode") == "explicit_comparison"
+        and (not active_contract or str(unit.get("id") or "") in qualified_core_ids)
+    ]
+    rule_evidence_ids = {str(value).strip() for value in rule.get("evidence_ids") or [] if str(value).strip()}
+    explained = (
+        any(
+            unit.get("comparison_purpose_explicit") is True
+            for unit in explicit_units
+        )
+        or (
+            rule.get("speech_explains_choice") is True
+            and (not active_contract or bool(rule_evidence_ids & qualified_core_ids))
+        )
     )
-    evidence_ids = list(rule.get("evidence_ids") or [])
-    evidence_ids.extend(str(unit.get("id") or "") for unit in units if len(unit.get("variant_ids") or []) >= 2)
-    active_contract = side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
-    qualified_core_ids: set[str] = set()
     if active_contract:
         for stage_code in ("S2", "S3", "S4"):
             qualified_core_ids.update(qualified_stage_evidence_ids(side, stage_code))
-        # A variant can be present in raw observations while its core-stage
-        # ownership is unresolved.  That is not evidence of a broken focus.
-        if not qualified_core_ids:
-            return "unknown", evidence_ids, variant_ids
+        evidence_ids = [
+            str(value) for value in rule.get("evidence_ids") or []
+            if str(value).strip() in qualified_core_ids
+        ]
+        evidence_ids.extend(
+            str(unit.get("id") or "")
+            for unit in units
+            if len(unit.get("variant_ids") or []) >= 2
+            and str(unit.get("id") or "") in qualified_core_ids
+        )
+    else:
+        evidence_ids = list(rule.get("evidence_ids") or [])
+        evidence_ids.extend(str(unit.get("id") or "") for unit in units if len(unit.get("variant_ids") or []) >= 2)
     if explained:
         return "explained_comparison", evidence_ids, variant_ids
     ambiguous_core = any(
@@ -256,7 +369,41 @@ def _attention_side_status(side: dict[str, Any], mode: str) -> tuple[str, list[s
     status = side.get("gate_observation_status") if isinstance(side.get("gate_observation_status"), dict) else {}
     if status.get("attention_scan") != "complete":
         return "unknown", [], 0.0
-    competitors = [item for item in side.get("attention_competitors") or [] if isinstance(item, dict)]
+    active_contract = side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+    allowed_evidence_ids: set[str] | None = None
+    if active_contract:
+        allowed_evidence_ids = set().union(
+            *(qualified_stage_evidence_ids(side, stage_code) for stage_code in stage_codes())
+        )
+        if not allowed_evidence_ids:
+            return "unknown", [], 0.0
+    raw_competitors = [item for item in side.get("attention_competitors") or [] if isinstance(item, dict)]
+    competitors = []
+    unresolved_observation = False
+    for item in raw_competitors:
+        if allowed_evidence_ids is not None:
+            evidence_ids = {
+                str(value).strip()
+                for value in item.get("evidence_ids") or []
+                if str(value).strip()
+            }
+            if not evidence_ids.intersection(allowed_evidence_ids):
+                unresolved_observation = True
+                continue
+            item = dict(item)
+            item["evidence_ids"] = sorted(evidence_ids.intersection(allowed_evidence_ids))
+        competitors.append(item)
+    if allowed_evidence_ids is not None:
+        attention_audit = side.get("attention_scan_audit")
+        audit_ids = {
+            str(value).strip()
+            for value in attention_audit.get("evidence_ids") or []
+            if str(value).strip()
+        } if isinstance(attention_audit, dict) else set()
+        if audit_ids and not audit_ids.intersection(allowed_evidence_ids):
+            unresolved_observation = True
+    if unresolved_observation:
+        return "unknown", [], 0.0
     if not competitors:
         return ("clean" if mode != "unknown" else "unknown"), [], 0.0
     relevant = [item for item in competitors if item.get("participates_in_product_task") is False and item.get("high_salience") is True]
@@ -268,7 +415,7 @@ def _attention_side_status(side: dict[str, Any], mode: str) -> tuple[str, list[s
     persistent = [item for item in relevant if item.get("persistent_motion") is True]
     if not persistent:
         return "clean", evidence_ids, 0.0
-    total_duration = _side_duration(side)
+    total_duration = _side_duration(side, allowed_evidence_ids)
     occupied = _ranges_duration([value for item in persistent for value in item.get("time_ranges") or []])
     share = min(1.0, occupied / total_duration) if total_duration > 0 else 0.0
     occluding_ranges = [
@@ -329,8 +476,10 @@ def _ranges_duration(ranges: list[Any]) -> float:
     return sum(end - start for start, end in merged)
 
 
-def _side_duration(side: dict[str, Any]) -> float:
+def _side_duration(side: dict[str, Any], allowed_evidence_ids: set[str] | None = None) -> float:
     units = [item for item in side.get("evidence_units") or [] if isinstance(item, dict)]
+    if allowed_evidence_ids is not None:
+        units = [item for item in units if str(item.get("id") or "") in allowed_evidence_ids]
     ends = []
     for item in units:
         parsed = parse_time_range_seconds(item.get("time_range"), None)
@@ -352,11 +501,16 @@ def _stage_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def _stages_for_evidence(result: dict[str, Any], evidence_ids: list[str]) -> list[str]:
     evidence_set = set(evidence_ids)
+    creator = (result.get("video_understanding") or {}).get("creator", {})
+    active_contract = isinstance(creator, dict) and creator.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
     affected = []
     for code, stage in _stage_map(result).items():
-        if evidence_set & set(stage.get("creator_evidence_ids") or []):
+        refs = set(stage.get("creator_evidence_ids") or [])
+        if active_contract:
+            refs &= qualified_stage_evidence_ids(creator, code)
+        if evidence_set & refs:
             affected.append(code)
-    return affected or (["S3", "S4"] if evidence_ids else [])
+    return affected if active_contract else (affected or (["S3", "S4"] if evidence_ids else []))
 
 
 def _annotate_global_causes(result: dict[str, Any], findings: list[dict[str, Any]]) -> None:

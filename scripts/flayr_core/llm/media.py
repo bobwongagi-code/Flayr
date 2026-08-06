@@ -25,6 +25,7 @@ from .api import (
     image_to_data_url,
 )
 from ..resources import ResourceBudget
+from ..stage_evidence_contracts import stage_analysis_evidence_view
 
 
 def select_role_visual_inputs(info: dict[str, Any], role: str, image_limit: int) -> list[dict[str, str]]:
@@ -181,9 +182,29 @@ def build_evidence_sensory_inputs(
     content: list[dict[str, Any]] = []
     standalone_audio = can_send_standalone_audio(api_url, model)
     videos = analysis.get("videos", {})
+    facts = stage_analysis_evidence_view(facts)
     for role in ("benchmark", "creator"):
         role_facts = facts.get(role) or {}
-        units = role_facts.get("evidence_units") or []
+        stage_units = role_facts.get("stage_evidence_units")
+        if isinstance(stage_units, dict):
+            units_by_id: dict[str, dict[str, Any]] = {}
+            qualified_stages: dict[str, set[str]] = {}
+            for stage, stage_items in stage_units.items():
+                for unit in stage_items or []:
+                    if not isinstance(unit, dict):
+                        continue
+                    unit_id = str(unit.get("id") or "").strip()
+                    if not unit_id:
+                        continue
+                    units_by_id.setdefault(unit_id, unit)
+                    qualified_stages.setdefault(unit_id, set()).add(str(stage))
+            units = []
+            for unit_id, unit in units_by_id.items():
+                prepared = dict(unit)
+                prepared["qualified_stages"] = sorted(qualified_stages.get(unit_id, set()))
+                units.append(prepared)
+        else:
+            units = role_facts.get("evidence_units") or []
         info = videos.get(role) or {}
         audio_path = Path(str(info.get("work_dir") or "")) / "audio.wav"
         duration = info.get("duration_seconds")
@@ -193,7 +214,8 @@ def build_evidence_sensory_inputs(
             start = float(unit["start"])
             end = float(unit["end"])
             clipped_range = f"{start:.2f}s - {end:.2f}s"
-            label = f"{role} {uid} @ {clipped_range}"
+            stage_label = ",".join(unit.get("qualified_stages") or [])
+            label = f"{role} {uid} [{stage_label or 'legacy'}] @ {clipped_range}"
             frames = select_frames_for_time_range(info, clipped_range, limit=frames_per_unit)
             for fr in frames:
                 frame_path = resolve_artifact_path(info, fr.get("path"), require_file=True, require_root=True)

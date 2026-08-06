@@ -20,6 +20,11 @@ import re
 from typing import Any
 
 from ..stage_ownership import CERTIFICATION_PATTERN, contains_certification
+from ..stage_evidence_contracts import (
+    STAGE_EVIDENCE_CONTRACT_VERSION,
+    qualified_stage_evidence_ids,
+    stage_evidence_readiness,
+)
 
 
 def _is_empty_time_range(text: str) -> bool:
@@ -52,25 +57,53 @@ def _reconcile_role_certification(
     evidence_key = f"{role}_evidence_ids"
     visual_key = f"{role}_visual_evidence"
 
-    # 认证常与产品引出同框出现，但功能是外部背书。扫描全阶段，不能只读原 S5。
-    cert_quote, cert_zh, cert_time = "", "", ""
-    for stage in stages:
-        candidate = str(stage.get(quote_key) or "")
-        if contains_certification(candidate):
-            cert_quote = candidate
-            cert_zh = str(stage.get(quote_zh_key) or "")
-            cert_time = str(stage.get(time_key) or "")
-            break
-    has_cert_anywhere = bool(cert_quote) or any(
-        contains_certification(json.dumps({k: v for k, v in stage.items() if k.startswith(role)}, ensure_ascii=False))
-        for stage in stages
-    )
-    if not has_cert_anywhere:
-        return
-
     understanding = result.get("video_understanding", {}).get(role, {})
     units = understanding.get("evidence_units", []) if isinstance(understanding, dict) else []
     if not isinstance(units, list):
+        return
+    active_contract = (
+        isinstance(understanding, dict)
+        and understanding.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+    )
+
+    # 新合同只允许迁移已经由 Stage1 资格化的 S5 证据；没有资格化证据时
+    # 不能凭阶段文本创建一个“认证事实”单元，否则会把下游推断写回 Stage1。
+    cert_id = ""
+    if active_contract:
+        if stage_evidence_readiness(understanding, "S5") != "present":
+            return
+        allowed_ids = qualified_stage_evidence_ids(understanding, "S5")
+        cert_unit = next(
+            (
+                unit for unit in units
+                if isinstance(unit, dict)
+                and str(unit.get("id") or "").strip() in allowed_ids
+                and contains_certification(json.dumps(unit, ensure_ascii=False))
+            ),
+            None,
+        )
+        if not isinstance(cert_unit, dict):
+            return
+        cert_id = str(cert_unit.get("id") or "").strip()
+        cert_quote = str(cert_unit.get("voiceover") or "").strip()
+        cert_zh = str(cert_unit.get("voiceover_zh") or "").strip()
+        cert_time = str(cert_unit.get("time_range") or "").strip()
+        has_cert_anywhere = True
+    else:
+        # 认证常与产品引出同框出现，但功能是外部背书。扫描全阶段，不能只读原 S5。
+        cert_quote, cert_zh, cert_time = "", "", ""
+        for stage in stages:
+            candidate = str(stage.get(quote_key) or "")
+            if contains_certification(candidate):
+                cert_quote = candidate
+                cert_zh = str(stage.get(quote_zh_key) or "")
+                cert_time = str(stage.get(time_key) or "")
+                break
+        has_cert_anywhere = bool(cert_quote) or any(
+            contains_certification(json.dumps({k: v for k, v in stage.items() if k.startswith(role)}, ensure_ascii=False))
+            for stage in stages
+        )
+    if not has_cert_anywhere:
         return
     cert_visual = "口播/字幕提及第三方认证背书；当前关键帧未必可核验认证标记。"
     # S5 若无有效时间，用认证出现的时间，保证 cert 单元与 S5 时间相交。
@@ -78,19 +111,20 @@ def _reconcile_role_certification(
     if cert_time and _is_empty_time_range(s5_time):
         s5_time = cert_time
         trust[time_key] = s5_time
-    cert_id = f"{role[0].upper()}_CERT_S5"
-    units[:] = [unit for unit in units if str(unit.get("id")) != cert_id]
-    units.append(
-        {
-            "id": cert_id,
-            "time_range": s5_time or cert_time,
-            "information": f"{role_label}展示第三方机构认证（KKM/Halal 等）作为信任背书。",
-            "voiceover": cert_quote,
-            "voiceover_zh": cert_zh,
-            "visual_fact": cert_visual,
-            "subtitle_fact": "",
-        }
-    )
+    if not active_contract:
+        cert_id = f"{role[0].upper()}_CERT_S5"
+        units[:] = [unit for unit in units if str(unit.get("id")) != cert_id]
+        units.append(
+            {
+                "id": cert_id,
+                "time_range": s5_time or cert_time,
+                "information": f"{role_label}展示第三方机构认证（KKM/Halal 等）作为信任背书。",
+                "voiceover": cert_quote,
+                "voiceover_zh": cert_zh,
+                "visual_fact": cert_visual,
+                "subtitle_fact": "",
+            }
+        )
     # evidence_id 始终追加 cert_id（安全）。
     trust[evidence_key] = list(
         dict.fromkeys([*[i for i in trust.get(evidence_key, []) if "_NO_" not in str(i)], cert_id])
@@ -121,12 +155,18 @@ def _reconcile_role_certification(
         trust[support_key] = "voice_only"
 
     # 指向认证内容的 evidence_unit id（含刚建的 B_CERT_S5），用于从非 S5 阶段剥离引用。
-    cert_unit_ids = {
-        str(unit.get("id"))
-        for unit in units
-        if isinstance(unit, dict)
-        and contains_certification(json.dumps(unit, ensure_ascii=False))
-    }
+    # active contract 下只能使用已资格化的认证单元；未资格化单元即使文本里
+    # 出现“认证”，也不能成为跨阶段清理的依据，否则会把 Stage1 未确认的
+    # 观察当成确定事实消费。
+    if active_contract:
+        cert_unit_ids = {cert_id}
+    else:
+        cert_unit_ids = {
+            str(unit.get("id"))
+            for unit in units
+            if isinstance(unit, dict)
+            and contains_certification(json.dumps(unit, ensure_ascii=False))
+        }
     for index, stage in enumerate(stages):
         if index == 4:
             continue
@@ -169,11 +209,22 @@ def discard_unreferenced_certification_claims(result: dict[str, Any]) -> None:
     """阶段文本提到认证或评论但其引用的 evidence_unit 未承载该信息时，删除该主张。"""
     understanding = result.get("video_understanding", {})
     proof_pattern = r"KKM|KKMA|认证|kelulusan|证书|检测报告|用户评论|用户评价|用户反馈|晒单|用户证言|testimoni|testimonial"
-    for stage in result.get("stage_analysis", []):
+    for stage_index, stage in enumerate(result.get("stage_analysis", []), start=1):
         stage_source_parts = []
+        stage_evidence_blocked = False
         for role in ("benchmark", "creator"):
             units = understanding.get(role, {}).get("evidence_units", [])
             references = {str(value) for value in stage.get(f"{role}_evidence_ids", [])}
+            side = understanding.get(role, {}) if isinstance(understanding, dict) else {}
+            if side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+                stage_code = f"S{stage_index}"
+                # Unknown/conflict means the observation is not available for
+                # this repair.  Do not turn an uncollected stage into an
+                # unsupported-claim/explicit-absence conclusion.
+                if stage_evidence_readiness(side, stage_code) not in {"present", "absent"}:
+                    stage_evidence_blocked = True
+                    continue
+                references &= qualified_stage_evidence_ids(side, stage_code)
             referenced = [unit for unit in units if isinstance(unit, dict) and str(unit.get("id")) in references]
             source_text = json.dumps(referenced, ensure_ascii=False)
             stage_source_parts.append(source_text)
@@ -204,6 +255,8 @@ def discard_unreferenced_certification_claims(result: dict[str, Any]) -> None:
                 removed = True
             if removed:
                 stage[visual_key].append("当前引用画面未验证额外背书信息。")
+        if stage_evidence_blocked:
+            continue
         if not re.search(proof_pattern, "\n".join(stage_source_parts), flags=re.IGNORECASE):
             scrub_unreferenced_proof_language(stage, proof_pattern)
 

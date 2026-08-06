@@ -13,6 +13,12 @@ import re
 from typing import Any
 
 from ..proposition_contract import build_product_proposition_contract, stage_allowed_ids
+from ..stage_evidence_contracts import (
+    STAGE_EVIDENCE_CONTRACT_VERSION,
+    qualified_stage_evidence_ids,
+    stage_codes,
+    stage_evidence_readiness,
+)
 
 
 S1_S2_COMPATIBILITY: dict[str, set[str]] = {
@@ -162,6 +168,14 @@ def _stage_flag(stages: list[Any], stage_id: str, role: str) -> dict[str, Any] |
     return value if isinstance(value, dict) else None
 
 
+def _role_stage_readiness(result: dict[str, Any], role: str) -> tuple[bool, dict[str, str]]:
+    facts = (result.get("video_understanding") or {}).get(role, {})
+    active = isinstance(facts, dict) and facts.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+    if not active:
+        return False, {stage: "legacy" for stage in stage_codes()}
+    return True, {stage: stage_evidence_readiness(facts, stage) for stage in stage_codes()}
+
+
 def _flag_claims_product_anchor(stage_id: str, flag: dict[str, Any] | None) -> bool:
     """判断 flag 是否声称该阶段已经命中产品锚点，只用于缺引用审计。"""
     if not isinstance(flag, dict):
@@ -197,6 +211,13 @@ def _relationship_consistency_warnings(
     if not isinstance(relationship, dict):
         return
     for role in ("creator", "benchmark"):
+        active, readiness = _role_stage_readiness(result, role)
+        blocked = [stage for stage in ("S3", "S4") if active and readiness.get(stage) not in {"present", "absent"}]
+        if str(relationship.get(f"{role}_relationship") or "unknown") == "trust_substitutes_effect" and active:
+            if readiness.get("S5") not in {"present", "absent"}:
+                blocked.append("S5")
+        if blocked:
+            continue
         value = str(relationship.get(f"{role}_relationship") or "unknown")
         s3 = _stage_flag(stages, "S3", role) or {}
         s4 = _stage_flag(stages, "S4", role) or {}
@@ -241,6 +262,16 @@ def materialize_proposition_trace(result: dict[str, Any]) -> None:
     profile = result.get("product_profile") if isinstance(result.get("product_profile"), dict) else {}
     trace: dict[str, Any] = {"version": "1.0", "roles": {}}
     for role in ("creator", "benchmark"):
+        active_evidence, evidence_readiness = _role_stage_readiness(result, role)
+        role_facts = (
+            (result.get("video_understanding") or {}).get(role, {})
+            if isinstance(result.get("video_understanding"), dict)
+            else {}
+        )
+
+        def stage_is_actionable(stage_id: str) -> bool:
+            return not active_evidence or evidence_readiness.get(stage_id) in {"present", "absent"}
+
         role_stages: dict[str, Any] = {}
         for stage_id in STAGE_FLAG_SUFFIX:
             flag = _stage_flag(stages, stage_id, role)
@@ -248,11 +279,17 @@ def materialize_proposition_trace(result: dict[str, Any]) -> None:
             allowed = stage_allowed_ids(contract, stage_id)
             valid = [value for value in references if value in allowed]
             invalid = [value for value in references if value not in allowed]
+            raw_evidence_ids = [str(value) for value in (flag or {}).get("evidence_ids") or [] if str(value).strip()]
+            if active_evidence:
+                evidence_ids = sorted(qualified_stage_evidence_ids(role_facts, stage_id))
+            else:
+                evidence_ids = raw_evidence_ids
             role_stages[stage_id] = {
                 "proposition_ids": references,
                 "valid_ids": valid,
                 "invalid_ids": invalid,
-                "evidence_ids": [str(value) for value in (flag or {}).get("evidence_ids") or [] if str(value).strip()],
+                "evidence_ids": evidence_ids,
+                "evidence_readiness": evidence_readiness.get(stage_id, "legacy"),
             }
             if invalid:
                 _append_qa_warning(
@@ -266,11 +303,13 @@ def materialize_proposition_trace(result: dict[str, Any]) -> None:
                 )
 
         def ids(stage_id: str) -> set[str]:
-            return set(role_stages[stage_id]["valid_ids"])
+            return set(role_stages[stage_id]["valid_ids"]) if stage_is_actionable(stage_id) else set()
 
         s1_s2_shared = sorted(ids("S1") & ids("S2"))
         s2 = _stage_flag(stages, "S2", role) or {}
-        if s1_s2_shared:
+        if not stage_is_actionable("S1") or not stage_is_actionable("S2"):
+            s1_s2_status = "unknown"
+        elif s1_s2_shared:
             s1_s2_status = "same_claim_handoff"
         elif s2.get("handoff_met") is True and ids("S1") and ids("S2"):
             s1_s2_status = "functional_handoff_without_shared_id"
@@ -283,7 +322,9 @@ def materialize_proposition_trace(result: dict[str, Any]) -> None:
         for proof_id in ids("S4"):
             s3_s4_matches.update(ids("S3") & proof_links.get(proof_id, set()))
         s4 = _stage_flag(stages, "S4", role) or {}
-        if s3_s4_matches:
+        if not stage_is_actionable("S3") or not stage_is_actionable("S4"):
+            s3_s4_status = "unknown"
+        elif s3_s4_matches:
             s3_s4_status = "same_claim_proven"
         elif ids("S3") and ids("S4") and s4.get("process_linked_effect") is True:
             s3_s4_status = "functional_link_without_contract_relation"
@@ -295,7 +336,9 @@ def materialize_proposition_trace(result: dict[str, Any]) -> None:
         upstream = ids("S1") | ids("S2") | ids("S3") | ids("S4") | ids("S5")
         recalled = sorted(upstream & ids("S6"))
         s6 = _stage_flag(stages, "S6", role) or {}
-        if recalled:
+        if not all(stage_is_actionable(stage) for stage in stage_codes()):
+            s6_status = "unknown"
+        elif recalled:
             s6_status = "value_recalled"
         elif s6.get("product_value_recalled") is True:
             s6_status = "claimed_without_shared_id"
@@ -318,12 +361,16 @@ def materialize_proposition_trace(result: dict[str, Any]) -> None:
                         _stage_flag(stages, "S3", role),
                         _stage_flag(stages, "S4", role),
                         profile,
+                        evidence_readiness=evidence_readiness if active_evidence else None,
                     )["status"],
                     "s2_ids": sorted(ids("S2")),
                     "s3_ids": sorted(ids("S3")),
                 },
                 "S3_to_S4": {"status": s3_s4_status, "matched_selling_ids": sorted(s3_s4_matches)},
-                "S5_support": {"status": "supported_claims" if ids("S5") else "none", "claim_ids": sorted(ids("S5"))},
+                "S5_support": {
+                    "status": "unknown" if not stage_is_actionable("S5") else ("supported_claims" if ids("S5") else "none"),
+                    "claim_ids": sorted(ids("S5")),
+                },
                 "S6_recall": {"status": s6_status, "recalled_ids": recalled},
             },
         }
@@ -409,12 +456,27 @@ def _selling_point_chain_state(
     s3: dict[str, Any] | None,
     s4: dict[str, Any] | None,
     product_profile: dict[str, Any] | None = None,
+    evidence_readiness: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """审计 S2→S4 卖点链，不改变阶段 severity。
 
     S2 仍只管产品引出；卖点链审计把"产品身份清楚但卖点没有被过程/效果证明"
     单独暴露，避免把 S3/S4 的问题回填成 S2。
     """
+    if evidence_readiness:
+        unresolved = [
+            stage for stage in ("S2", "S3", "S4")
+            if evidence_readiness.get(stage) not in {"present", "absent"}
+        ]
+        if unresolved:
+            return {
+                "status": "unknown",
+                "s2_ready": None,
+                "s3_core_process_ready": None,
+                "s4_effect_ready": None,
+                "reason": f"Stage1 证据资格未完成：{', '.join(unresolved)}，不据此宣称卖点链已断裂或闭环。",
+            }
+
     s2_ready = isinstance(s2, dict) and (
         s2.get("product_identity_clear") is True
         and s2.get("product_role_clear") is True
@@ -426,7 +488,13 @@ def _selling_point_chain_state(
         and s3.get("mouth_only_or_static") is not True
         and s3.get("result_only_without_process") is not True
     )
+    if evidence_readiness and evidence_readiness.get("S2") == "absent":
+        s2_ready = False
+    if evidence_readiness and evidence_readiness.get("S3") == "absent":
+        s3_ready = False
     s4_ready = _valid_s4_output(s4, product_profile)
+    if evidence_readiness and evidence_readiness.get("S4") == "absent":
+        s4_ready = False
     if not s2_ready:
         status = "broken_at_s2"
         reason = "产品身份或解决方案角色不清，卖点链无法启动"
@@ -468,38 +536,73 @@ def materialize_cross_stage_inputs(result: dict[str, Any], analysis: dict[str, A
         "roles": {},
     }
     for role in ("creator", "benchmark"):
+        active_evidence, evidence_readiness = _role_stage_readiness(result, role)
         s1 = stages[0].get(f"{role}_hook") if isinstance(stages[0], dict) else None
         s2 = stages[1].get(f"{role}_s2") if isinstance(stages[1], dict) else None
         s3 = stages[2].get(f"{role}_s3") if isinstance(stages[2], dict) else None
         s4 = stages[3].get(f"{role}_s4") if isinstance(stages[3], dict) else None
         s6 = stages[5].get(f"{role}_s6") if isinstance(stages[5], dict) else None
+        s1_ready = not active_evidence or evidence_readiness.get("S1") in {"present", "absent"}
+        s2_ready = not active_evidence or evidence_readiness.get("S2") in {"present", "absent"}
+        s3_ready = not active_evidence or evidence_readiness.get("S3") in {"present", "absent"}
+        s4_ready = not active_evidence or evidence_readiness.get("S4") in {"present", "absent"}
+        s6_ready = not active_evidence or evidence_readiness.get("S6") in {"present", "absent"}
 
-        compat = _computed_s1_s2_compatible(
-            (s1 or {}).get("type") if isinstance(s1, dict) else None,
-            (s2 or {}).get("module_type") if isinstance(s2, dict) else None,
-        )
+        compat = None
+        if not active_evidence or all(
+            evidence_readiness.get(stage) in {"present", "absent"}
+            for stage in ("S1", "S2")
+        ):
+            compat = _computed_s1_s2_compatible(
+                (s1 or {}).get("type") if isinstance(s1, dict) else None,
+                (s2 or {}).get("module_type") if isinstance(s2, dict) else None,
+            )
         if isinstance(s2, dict) and compat is not None:
             s2["computed_s1_s2_compatible"] = compat
 
-        s4_available = _valid_s4_output(s4 if isinstance(s4, dict) else None, profile)
+        if active_evidence and evidence_readiness.get("S4") not in {"present", "absent"}:
+            s4_available = None
+        else:
+            s4_available = _valid_s4_output(s4 if isinstance(s4, dict) else None, profile)
         if isinstance(s6, dict) and s6.get("module_type") == "D":
-            s6["computed_depends_on_valid_s4"] = s4_available
+            s6["computed_depends_on_valid_s4"] = s4_available if s6_ready else None
+
+        if not s1_ready:
+            resolved_s1_hook_type, resolved_hook_anchor = "unknown", None
+        else:
+            resolved_s1_hook_type = (s1 or {}).get("type") if isinstance(s1, dict) else "unknown"
+            resolved_hook_anchor = (s1 or {}).get("anchors_proposition") if isinstance(s1, dict) else None
+        if not s2_ready:
+            resolved_s2_role = "unknown"
+        else:
+            resolved_s2_role = (s2 or {}).get("module_type") if isinstance(s2, dict) else "unknown"
+        resolved_core_selling_points = (
+            (s3 or {}).get("demonstrated_selling_points") if isinstance(s3, dict) else []
+        ) if s3_ready else []
+        resolved_s4_validity = s4_available if s4_ready else None
 
         state["roles"][role] = {
-            "resolved_s1_hook_type": (s1 or {}).get("type") if isinstance(s1, dict) else "unknown",
-            "resolved_hook_anchor": (s1 or {}).get("anchors_proposition") if isinstance(s1, dict) else None,
-            "resolved_s2_role": (s2 or {}).get("module_type") if isinstance(s2, dict) else "unknown",
+            "resolved_s1_hook_type": resolved_s1_hook_type,
+            "resolved_hook_anchor": resolved_hook_anchor,
+            "resolved_s2_role": resolved_s2_role,
             "computed_s1_s2_compatible": compat,
-            "resolved_core_selling_points_shown": (s3 or {}).get("demonstrated_selling_points") if isinstance(s3, dict) else [],
-            "resolved_s4_effect_validity": s4_available,
-            "s4_output_available": s4_available,
+            "stage_evidence_readiness": evidence_readiness or {stage: "legacy" for stage in stage_codes()},
+            "resolved_core_selling_points_shown": resolved_core_selling_points,
+            "resolved_s4_effect_validity": resolved_s4_validity,
+            "s4_output_available": resolved_s4_validity,
             "selling_point_chain": _selling_point_chain_state(
                 s2 if isinstance(s2, dict) else None,
                 s3 if isinstance(s3, dict) else None,
                 s4 if isinstance(s4, dict) else None,
                 profile,
+                evidence_readiness=evidence_readiness if active_evidence else None,
             ),
         }
+        for index, stage in enumerate(stages, start=1):
+            if isinstance(stage, dict):
+                readiness_view = stage.setdefault("stage1_evidence_readiness", {})
+                if isinstance(readiness_view, dict):
+                    readiness_view[role] = evidence_readiness.get(f"S{index}", "legacy")
     result["cross_stage_state"] = state
     materialize_proposition_trace(result)
 
@@ -601,18 +704,39 @@ def materialize_quality_audits(result: dict[str, Any], analysis: dict[str, Any] 
         if not suffix:
             continue
         absolute[stage_id] = {}
+        role_readiness = {
+            role: _role_stage_readiness(result, role)
+            for role in ("creator", "benchmark")
+        }
         for role in ("creator", "benchmark"):
             flag = stage.get(f"{role}_{suffix}")
-            status, reason = _absolute_status(stage_id, flag if isinstance(flag, dict) else None)
+            active_evidence, evidence_readiness = role_readiness[role]
+            readiness = evidence_readiness.get(stage_id, "legacy")
+            if active_evidence and readiness not in {"present", "absent"}:
+                status, reason = "unknown", f"Stage1 {stage_id} 证据资格为 {readiness}，不输出绝对质量结论"
+            elif active_evidence and readiness == "absent":
+                status, reason = (
+                    ("not_applicable", f"Stage1 {stage_id} 已完成观察，未发现该阶段合同所需事实")
+                    if stage_id == "S5"
+                    else ("missing", f"Stage1 {stage_id} 已完成观察，未发现该阶段合同所需事实")
+                )
+            else:
+                status, reason = _absolute_status(stage_id, flag if isinstance(flag, dict) else None)
             stage[f"{role}_absolute_status"] = status
             stage[f"{role}_absolute_reason"] = reason
             absolute[stage_id][role] = {"status": status, "reason": reason}
 
+        unresolved_role = any(
+            active_evidence and evidence_readiness.get(stage_id) not in {"present", "absent"}
+            for active_evidence, evidence_readiness in role_readiness.values()
+        )
         delivered = {
             role: absolute[stage_id][role]["status"] in {"complete", "soft_trust"}
             for role in ("creator", "benchmark")
         }
-        if delivered["creator"] and delivered["benchmark"]:
+        if unresolved_role:
+            computed_delivery = "unknown"
+        elif delivered["creator"] and delivered["benchmark"]:
             computed_delivery = "both"
         elif delivered["benchmark"]:
             computed_delivery = "benchmark_only"
@@ -622,7 +746,7 @@ def materialize_quality_audits(result: dict[str, Any], analysis: dict[str, Any] 
             computed_delivery = "none"
         stage["computed_stage_standard_delivery"] = computed_delivery
         declared_delivery = str(stage.get("stage_standard_delivery") or "").strip()
-        if declared_delivery in {"benchmark_only", "creator_only", "both", "none"} and declared_delivery != computed_delivery:
+        if declared_delivery in {"benchmark_only", "creator_only", "both", "none", "unknown"} and declared_delivery != computed_delivery:
             # 模型声明只作审计保留，最终展示和下游消费必须以已归一的结构化 flags 为准。
             stage["model_stage_standard_delivery"] = declared_delivery
         stage["stage_standard_delivery"] = computed_delivery
@@ -633,10 +757,17 @@ def materialize_quality_audits(result: dict[str, Any], analysis: dict[str, Any] 
         for role in ("creator", "benchmark"):
             stage = stages[4]
             flag = stage.get(f"{role}_s5")
-            text = _side_stage_text(stage, role)
-            matched = _matches_any(text, anchors)
-            if isinstance(flag, dict) and flag.get("product_relevance_met") is True:
-                matched = True
+            active_evidence, evidence_readiness = _role_stage_readiness(result, role)
+            readiness = evidence_readiness.get("S5", "legacy")
+            if active_evidence and readiness not in {"present", "absent"}:
+                matched = None
+            elif active_evidence and readiness == "absent":
+                matched = False
+            else:
+                text = _side_stage_text(stage, role)
+                matched = _matches_any(text, anchors)
+                if isinstance(flag, dict) and flag.get("product_relevance_met") is True:
+                    matched = True
             audit[role] = {
                 "trust_anchor_matched": matched,
                 "duplicate_stage_source": "other_stage" if isinstance(flag, dict) and flag.get("duplicates_other_stage") is True else "none",
@@ -650,10 +781,17 @@ def materialize_quality_audits(result: dict[str, Any], analysis: dict[str, Any] 
         for role in ("creator", "benchmark"):
             stage = stages[5]
             flag = stage.get(f"{role}_s6")
-            text = _side_stage_text(stage, role)
-            matched = _matches_any(text, anchors)
-            if isinstance(flag, dict) and (flag.get("product_value_recalled") is True or flag.get("module_fit_met") is True):
-                matched = True
+            active_evidence, evidence_readiness = _role_stage_readiness(result, role)
+            readiness = evidence_readiness.get("S6", "legacy")
+            if active_evidence and readiness not in {"present", "absent"}:
+                matched = None
+            elif active_evidence and readiness == "absent":
+                matched = False
+            else:
+                text = _side_stage_text(stage, role)
+                matched = _matches_any(text, anchors)
+                if isinstance(flag, dict) and (flag.get("product_value_recalled") is True or flag.get("module_fit_met") is True):
+                    matched = True
             audit[role] = {
                 "cta_anchor_matched": matched,
                 "absolute_missing_reason": stage.get(f"{role}_absolute_reason") if stage.get(f"{role}_absolute_status") == "missing" else "",

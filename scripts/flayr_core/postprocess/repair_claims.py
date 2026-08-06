@@ -18,6 +18,7 @@ from ..artifacts import (
     parse_time_range_seconds,
     parse_timestamp_seconds,
 )
+from ..stage_evidence_contracts import qualified_stage_evidence_units
 
 
 # region downgrade -----------------------------------------------------------
@@ -52,7 +53,7 @@ def derive_product_visibility(result: dict[str, Any], analysis: dict[str, Any]) 
     优雅降级：缺时长或一个出镜标记都没有时不覆盖，沿用模型估算值，避免误判为产品全程缺席。
     """
     creator = result.get("video_understanding", {}).get("creator", {})
-    units = creator.get("evidence_units", []) if isinstance(creator, dict) else []
+    units = qualified_stage_evidence_units(creator) if isinstance(creator, dict) else []
     raw_duration = analysis.get("videos", {}).get("creator", {}).get("duration_seconds")
     duration = parse_timestamp_seconds(raw_duration)
     if duration is None or duration <= 0:

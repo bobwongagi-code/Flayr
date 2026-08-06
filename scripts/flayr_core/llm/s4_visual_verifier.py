@@ -17,6 +17,7 @@ from ..postprocess.repair import validate_s3_s4_hard_fact_consistency, stabilize
 from ..utils import write_json, write_text
 from .api import call_llm_api, extract_chat_completion_text, image_to_data_url, video_to_data_url
 from .parse import normalize_demo_flag, normalize_s4_effect_salience, normalize_s4_effect_type, parse_json_text
+from ..stage_evidence_contracts import STAGE_EVIDENCE_CONTRACT_VERSION, qualified_stage_evidence_ids, stage_evidence_readiness
 
 
 TEMPORAL_REVIEW_FPS = 3.0
@@ -178,6 +179,14 @@ def build_s4_visual_verifier_payload(
 
 def _visual_verifier_skip_reason(result: dict[str, Any]) -> str:
     """同任务结构对标可直接复核共同任务；其余只消费通过合同校验的直接视觉合同。"""
+    for role in ("creator", "benchmark"):
+        side = (result.get("video_understanding") or {}).get(role, {})
+        if not isinstance(side, dict) or side.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+            continue
+        for stage_code in ("S3", "S4"):
+            readiness = stage_evidence_readiness(side, stage_code)
+            if readiness not in {"present", "absent"}:
+                return f"{role} {stage_code} 的 Stage1 证据资格为 {readiness}，不能启动独立视觉复核。"
     if _stage_is_structural(result, "S4"):
         return ""
     profile = result.get("product_profile") if isinstance(result.get("product_profile"), dict) else {}
@@ -220,6 +229,10 @@ def apply_s4_visual_verifier_result(
     s3 = _s3_stage(result)
     applied = False
     for role in ("creator", "benchmark"):
+        side = (result.get("video_understanding") or {}).get(role, {})
+        active_contract = isinstance(side, dict) and side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+        if active_contract and any(stage_evidence_readiness(side, code) != "present" for code in ("S3", "S4")):
+            continue
         patch = verifier_result.get(role)
         s4_flag = s4.get(f"{role}_s4")
         if not isinstance(patch, dict):
@@ -378,6 +391,10 @@ def _collect_stage_frames(
     }
     flag = stage.get(f"{role}_{flag_name}") if isinstance(stage.get(f"{role}_{flag_name}"), dict) else {}
     ids = [str(value) for value in (flag.get("evidence_ids") or stage.get(f"{role}_evidence_ids") or []) if str(value).strip()]
+    side = (result.get("video_understanding") or {}).get(role, {})
+    if isinstance(side, dict) and side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+        stage_code = str(stage.get("stage") or "").strip().upper()[:2]
+        ids = [value for value in ids if value in qualified_stage_evidence_ids(side, stage_code)]
     frames: list[dict[str, str]] = []
     used_paths: set[str] = set()
     for evidence_id in ids:

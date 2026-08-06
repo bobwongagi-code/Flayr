@@ -37,7 +37,9 @@ from ..multimodal import (
 )
 from ..stage_ownership import CERTIFICATION_OWNER_STAGE, contains_certification, is_certification_owner_stage
 from ..stage_evidence_contracts import (
+    STAGE_EVIDENCE_CONTRACT_VERSION,
     qualified_stage_evidence_ids,
+    stage_evidence_readiness,
     stage_evidence_check_map,
     stage_evidence_contract_issues,
 )
@@ -92,6 +94,26 @@ def _available_evidence_ids(result: dict[str, Any], role: str) -> set[str]:
     }
 
 
+def _nested_stage_evidence_ids(value: Any) -> set[str]:
+    """Collect nested source references without treating proposition IDs as evidence IDs."""
+    refs: set[str] = set()
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if str(key).endswith("evidence_ids"):
+                if isinstance(nested, list):
+                    refs.update(str(item).strip() for item in nested if str(item).strip())
+                elif isinstance(nested, dict):
+                    for items in nested.values():
+                        if isinstance(items, list):
+                            refs.update(str(item).strip() for item in items if str(item).strip())
+            elif isinstance(nested, (dict, list)):
+                refs.update(_nested_stage_evidence_ids(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            refs.update(_nested_stage_evidence_ids(nested))
+    return refs
+
+
 def _validate_structured_flag_evidence_ids(
     result: dict[str, Any],
     role: str,
@@ -124,6 +146,17 @@ def _validate_structured_flag_evidence_ids(
     missing = [value for value in normalized if value not in available]
     if missing:
         errors.append(f"{key}.evidence_ids 引用了不存在的 Stage1 证据：{', '.join(missing)}")
+    understanding = result.get("video_understanding") if isinstance(result, dict) else None
+    side = understanding.get(role) if isinstance(understanding, dict) else None
+    if isinstance(side, dict) and side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+        stage_code = f"S{str(flag_name).strip().upper()[-1]}"
+        qualified = qualified_stage_evidence_ids(side, stage_code)
+        outside_qualification = sorted(set(normalized) - qualified)
+        if outside_qualification:
+            errors.append(
+                f"{key}.evidence_ids 必须属于 Stage1 已资格化的 {stage_code} 证据："
+                + ", ".join(outside_qualification)
+            )
     if stage is not None:
         stage_references = stage.get(f"{role}_evidence_ids")
         if isinstance(stage_references, list):
@@ -176,7 +209,11 @@ def validate_evidence_alignment(result: dict[str, Any]) -> None:
         for role in ("benchmark", "creator"):
             references = stage.get(f"{role}_evidence_ids", [])
             side = understanding.get(role, {}) if isinstance(understanding.get(role), dict) else {}
-            stage_check = stage_evidence_check_map(side).get(expected_stage) if side.get("stage_evidence_contract_version") == 1 else None
+            stage_check = (
+                stage_evidence_check_map(side).get(expected_stage)
+                if side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+                else None
+            )
             contract_status = stage_check.get("status") if isinstance(stage_check, dict) else None
             if not references and contract_status not in {"absent", "unknown", "conflict"}:
                 raise SystemExit(f"S{index} 缺少 {role}_evidence_ids，结论无法对应证据。")
@@ -217,7 +254,7 @@ def validate_stage_evidence_qualification(result: dict[str, Any]) -> None:
         role: side
         for role in ("benchmark", "creator")
         if isinstance((side := understanding.get(role)), dict)
-        and side.get("stage_evidence_contract_version") == 1
+        and side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
     }
     if not active_sides:
         return
@@ -226,23 +263,41 @@ def validate_stage_evidence_qualification(result: dict[str, Any]) -> None:
         if issues:
             raise SystemExit(f"{role} Stage1 阶段证据合同无效：" + "；".join(issues))
         checks = stage_evidence_check_map(side)
+        nested_errors: list[str] = []
         for index, stage in enumerate(result.get("stage_analysis", []), start=1):
             stage_code = f"S{index}"
             check = checks.get(stage_code) or {}
-            status = check.get("status")
+            readiness = stage_evidence_readiness(side, stage_code)
             references = [str(value) for value in stage.get(f"{role}_evidence_ids") or [] if str(value).strip()]
             qualified = qualified_stage_evidence_ids(side, stage_code)
-            if status == "present" and not (set(references) & qualified):
+            if readiness == "present" and (not references or set(references) - qualified):
                 raise SystemExit(
                     f"{stage_code} {role} 阶段引用没有命中 Stage1 已资格化证据，"
                     "不能用 functions 或自由文本补回。"
                 )
-            if status == "absent" and references:
+            if readiness == "absent" and references:
                 raise SystemExit(f"{stage_code} {role} 已确认 absent 时不得继续引用阶段证据。")
-            if status in {"unknown", "conflict"} and references:
+            if readiness in {"unknown", "conflict"} and references:
                 raise SystemExit(
-                    f"{stage_code} {role} 阶段证据仍为 {status}，不得把未资格化证据作为阶段结论引用。"
+                    f"{stage_code} {role} 阶段证据仍为 {readiness}，不得把未资格化证据作为阶段结论引用。"
                 )
+            nested_references: set[str] = set()
+            for key, value in stage.items():
+                if key.startswith(f"{role}_") and isinstance(value, dict):
+                    nested_references.update(_nested_stage_evidence_ids(value))
+            if readiness != "present" and nested_references:
+                nested_errors.append(
+                    f"{stage_code} {role} 的嵌套阶段证据资格为 {readiness}，不得继续引用："
+                    + ", ".join(sorted(nested_references))
+                )
+            outside_nested = sorted(nested_references - qualified)
+            if outside_nested:
+                nested_errors.append(
+                    f"{stage_code} {role} 的嵌套引用不属于 Stage1 已资格化证据："
+                    + ", ".join(outside_nested)
+                )
+        if nested_errors:
+            raise SystemExit("Stage1 嵌套证据资格无效：" + "；".join(nested_errors))
 
 
 def validate_analysis_dimensions(result: dict[str, Any]) -> None:
@@ -945,7 +1000,7 @@ def validate_multimodal_assessments(result: dict[str, Any], analysis: dict[str, 
             # 还可引用 Stage1 已锁定为同阶段功能的其它单元；否则摘要只选一帧时会把真实
             # 的声音/画面证据误报成“跨阶段”。没有 functions 的旧结果仍只认主引用。
             role_understanding = understanding.get(role) if isinstance(understanding.get(role), dict) else {}
-            if role_understanding.get("stage_evidence_contract_version") == 1:
+            if role_understanding.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
                 locked_stage_refs = qualified_stage_evidence_ids(role_understanding, stage_id)
             else:
                 locked_stage_refs = {
@@ -954,7 +1009,7 @@ def validate_multimodal_assessments(result: dict[str, Any], analysis: dict[str, 
                     if isinstance(unit, dict)
                     and stage_functions[stage_id] in {str(value) for value in unit.get("functions") or []}
                 }
-            allowed_refs = stage_refs | locked_stage_refs
+            allowed_refs = locked_stage_refs if role_understanding.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION else stage_refs | locked_stage_refs
             for channel in MULTIMODAL_CHANNELS:
                 impact = impacts.get(channel)
                 if impact not in MULTIMODAL_IMPACTS:

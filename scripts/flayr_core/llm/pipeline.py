@@ -33,6 +33,7 @@ from ..utils import write_json, write_text
 from ..analysis_model import ANALYSIS_RESULT_CONTRACT, AnalysisResult, schema_sha256
 from ..stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
+    qualified_stage_evidence_ids,
     stage_codes,
     stage_evidence_contract_issues,
     stage_evidence_recovery_targets,
@@ -105,7 +106,7 @@ from ..postprocess.validate import (
 
 
 # 修改 build_video_fact_payload 的语义合同后必须递增，避免旧 facts 与新判断规则混用。
-VIDEO_FACT_CACHE_SCHEMA_VERSION = 10
+VIDEO_FACT_CACHE_SCHEMA_VERSION = 11
 PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION = 2
 CACHE_RECORD_SCHEMA_VERSION = 1
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -327,14 +328,23 @@ def finalize_analysis_result(
     audit = PostprocessAudit() if artifact_dir is not None else None
     raw_snapshot = copy.deepcopy(result)
 
+    trusted_stage1_recovery: dict[str, dict[str, Any]] = {}
     if locked_video_understanding:
         before = copy.deepcopy(result) if audit is not None else None
         result["video_understanding"] = locked_video_understanding
+        for role in ("benchmark", "creator"):
+            side = locked_video_understanding.get(role)
+            metadata = side.get("stage1_recovery") if isinstance(side, dict) else None
+            if isinstance(metadata, dict) and metadata.get("source") == "pipeline":
+                trusted_stage1_recovery[role] = metadata
         if audit is not None:
             audit.record(before, result, "pipeline.lock_video_understanding")
 
     before_normalize = copy.deepcopy(result) if audit is not None else None
-    normalized = normalize_analysis_result(result)
+    normalized = normalize_analysis_result(
+        result,
+        trusted_stage1_recovery=trusted_stage1_recovery,
+    )
     if audit is not None:
         audit.record(before_normalize, normalized, "pipeline.normalize_analysis_result")
     audio_assessment = analysis.get("audio_assessment") if isinstance(analysis, dict) else {}
@@ -1346,7 +1356,13 @@ def detect_low_confidence_stages(result: dict[str, Any]) -> list[str]:
         severity = str(stage.get("severity") or "").strip().lower()
         if not code or severity not in {"large", "medium"}:
             continue
+        creator_side = result.get("video_understanding", {}).get("creator", {})
         ids = [str(value) for value in stage.get("creator_evidence_ids", [])]
+        if (
+            isinstance(creator_side, dict)
+            and creator_side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+        ):
+            ids = [value for value in ids if value in qualified_stage_evidence_ids(creator_side, code)]
         has_placeholder = any(_PLACEHOLDER_EVIDENCE_RE.search(item) for item in ids)
         unit_visual = " ".join(str(creator_units.get(item, {}).get("visual_fact", "")) for item in ids)
         stage_visual = " ".join(str(value) for value in stage.get("creator_visual_evidence", []))
@@ -1467,6 +1483,9 @@ def detect_unreferenced_visual_event_stages(
             if not entries:
                 continue
             referenced_ids = {str(value) for value in stage.get(f"{role}_evidence_ids", [])}
+            side = video_understanding.get(role) if isinstance(video_understanding.get(role), dict) else {}
+            if side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+                referenced_ids &= qualified_stage_evidence_ids(side, code)
             referenced_units = [
                 unit for unit_id, unit in units_by_role[role].items() if unit_id in referenced_ids
             ]
@@ -1575,7 +1594,6 @@ def _validate_stage_review_patches(
         raise SystemExit("Phase C review returned no stage_patches.")
 
     allowed = {stage_code(code) for code in allowed_stage_codes}
-    available_ids = _phase_c_available_evidence_ids(locked_video_understanding)
     available_units = _phase_c_available_evidence_units(locked_video_understanding)
     current_stages = {
         stage_code(stage.get("stage")): stage
@@ -1615,7 +1633,7 @@ def _validate_stage_review_patches(
         _validate_phase_c_patch_evidence_ids(
             code,
             fields,
-            available_ids,
+            _phase_c_available_evidence_ids(locked_video_understanding, code),
             available_units,
             target_stage=current_stages.get(code),
         )
@@ -1628,12 +1646,17 @@ def _validate_stage_review_patches(
     return patches_by_code
 
 
-def _phase_c_available_evidence_ids(facts: dict[str, Any]) -> dict[str, set[str]]:
+def _phase_c_available_evidence_ids(facts: dict[str, Any], stage_code_value: str | None = None) -> dict[str, set[str]]:
     return {
         role: {
             str(unit.get("id"))
             for unit in ((facts.get(role) or {}).get("evidence_units") or [])
             if isinstance(unit, dict) and str(unit.get("id") or "").strip()
+            and (
+                (facts.get(role) or {}).get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION
+                or stage_code_value is None
+                or str(unit.get("id")) in qualified_stage_evidence_ids(facts.get(role), stage_code_value)
+            )
         }
         for role in ("creator", "benchmark")
     }
@@ -2220,15 +2243,35 @@ def _maybe_recover_video_facts(
     visual_inputs: list[dict[str, str]],
 ) -> dict[str, Any]:
     """Run at most one bounded Stage1 recovery pass before facts are locked."""
-    targets = stage_evidence_recovery_targets(facts)
+    recovery_meta = facts.get("stage1_recovery") if isinstance(facts.get("stage1_recovery"), dict) else {}
+    if (
+        recovery_meta.get("source") == "pipeline"
+        and recovery_meta.get("status") in {"applied", "applied_with_unresolved"}
+    ):
+        return facts
+    budget_flag = facts.get("evidence_budget_exceeded") is True
+    structural_targets = stage_evidence_recovery_targets(facts, include_budget=False)
+    targets = list(stage_codes()) if budget_flag else structural_targets
     contract_issues = stage_evidence_contract_issues(facts, require_version=True)
+    trigger_reasons: list[str] = []
+    if budget_flag:
+        trigger_reasons.append("evidence_budget_exceeded")
+    if structural_targets:
+        trigger_reasons.append("stage_evidence_incomplete")
+    if contract_issues:
+        trigger_reasons.append("stage_evidence_contract_invalid")
     if not targets and not contract_issues:
-        facts.setdefault("stage1_recovery", {"status": "not_needed", "target_stages": []})
+        facts.setdefault(
+            "stage1_recovery",
+            {"source": "pipeline", "status": "not_needed", "target_stages": []},
+        )
         return facts
     if args.llm_dry_run:
         facts["stage1_recovery"] = {
+            "source": "pipeline",
             "status": "deferred_dry_run",
             "target_stages": targets or list(stage_codes()),
+            "trigger_reasons": trigger_reasons,
         }
         return facts
 
@@ -2266,9 +2309,10 @@ def _maybe_recover_video_facts(
     unresolved_stages = [
         stage
         for stage in target_stages
-        if stage in stage_evidence_recovery_targets(merged)
+        if stage in stage_evidence_recovery_targets(merged, include_budget=False)
     ]
     merged["stage1_recovery"] = {
+        "source": "pipeline",
         "status": "applied_with_unresolved" if unresolved_stages else "applied",
         "target_stages": target_stages,
         "unresolved_stages": unresolved_stages,
@@ -2276,6 +2320,11 @@ def _maybe_recover_video_facts(
         if isinstance(recovery.get("candidate_evidence_units"), list)
         else 0,
         "contract_issues_before_recovery": contract_issues,
+        "trigger_reasons": trigger_reasons,
+        "budget_flag_before_recovery": budget_flag,
+        "budget_status": "resolved_for_stage_qualification" if budget_flag and not unresolved_stages else (
+            "unresolved" if budget_flag else "not_flagged"
+        ),
     }
     final_issues = stage_evidence_contract_issues(merged, require_version=True)
     if final_issues:
@@ -2352,6 +2401,22 @@ def _merge_video_fact_recovery(
                 "missing_signals": [],
                 "observed_disqualifiers": [],
                 "reason": "恢复响应中同一阶段出现多个资格判断，需重新观察。",
+            }
+    # A recovery response is a replacement for every requested stage, not a
+    # best-effort patch.  If a target is omitted, fail closed instead of
+    # retaining the old (possibly budget-truncated) qualification.
+    for stage in target_stages:
+        normalized_stage = str(stage).strip().upper()[:2]
+        if normalized_stage and normalized_stage not in replacement_by_stage:
+            replacement_by_stage[normalized_stage] = {
+                "stage": normalized_stage,
+                "status": "unknown",
+                "coverage": "unknown",
+                "evidence_ids": [],
+                "observed_signals": [],
+                "missing_signals": [],
+                "observed_disqualifiers": [],
+                "reason": "恢复响应未返回该目标阶段，不能沿用恢复前的资格判断。",
             }
     if blocked_candidate_ids:
         for item in replacement_by_stage.values():

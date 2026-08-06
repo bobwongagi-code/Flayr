@@ -21,6 +21,9 @@ from ..stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
     qualified_stage_evidence_ids,
     stage_evidence_contract_prompt,
+    stage_analysis_evidence_view,
+    stage_analysis_stage_context,
+    stage_codes,
 )
 from ..structure_modules import stage1_event_catalog
 from ..stage_ownership import (
@@ -231,6 +234,9 @@ def build_comparison_eligibility_payload(model: str, facts: dict[str, Any]) -> d
         "不同产品再判 substitution_relation：strong_substitute 必须同时满足同一消费者任务、同一作用对象、同一目标结果、"
         "同一次购买决策可二选一，并且不是互补品/上下游步骤；partial_substitute=只共享部分任务或结果；none=任务或结果不同。"
         "使用机制不同不妨碍强替代，例如防水胶与防水胶带都用于同一裂缝止漏任务。\n"
+        "evidence_units 这里只是 ID/时间索引；每个阶段的完整观察只能从 stage_evidence_units[S1-S6] 读取。"
+        "阶段结论只能使用对应 stage 的 qualified_stage_evidence_ids，不能把其他阶段的内容横向借用。"
+        "阶段资格为空、unknown 或 conflict 时必须输出 uncertain/not_comparable，不能把证据未采集解释为 absent。\n"
         "stage_eligibility 对 S1-S6 每个阶段输出 status=direct|structural|not_applicable|not_comparable：同品家族全部 direct；"
         "强/部分替代只能 structural 或不比较。S1 需共享目标用户/痛点/购买任务；S2 需共享问题-解决方案角色；"
         "S3 需共享使用任务，只比较过程表达完整度而非机制天然优劣；S4 需共享目标结果和可观察证明维度；"
@@ -259,29 +265,67 @@ def build_comparison_eligibility_payload(model: str, facts: dict[str, Any]) -> d
 
 def _compact_comparison_facts(value: Any) -> dict[str, Any]:
     """保留阶段资格所需的事实，去掉帧、音频与冗长审计字段。"""
+    source_value = value if isinstance(value, dict) else {}
+    active_contract = source_value.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+    value = stage_analysis_evidence_view(source_value)
     value = value if isinstance(value, dict) else {}
     units = []
     for unit in value.get("evidence_units", []):
         if not isinstance(unit, dict):
             continue
-        units.append(
-            {
-                "id": unit.get("id"),
-                "time_range": unit.get("time_range"),
-                "information": unit.get("information"),
-                "functions": unit.get("functions"),
-                "voiceover_zh": unit.get("voiceover_zh"),
-                "visual_evidence": unit.get("visual_evidence"),
-                "trust_source_type": unit.get("trust_source_type"),
-            }
-        )
+        compact_unit = {
+            "id": unit.get("id"),
+            "time_range": unit.get("time_range"),
+            "evidence_strength": unit.get("evidence_strength"),
+            "qualified_stages": unit.get("qualified_stages") or [],
+        }
+        if not active_contract:
+            # Legacy comparison runs predate the stage qualification contract.
+            # Preserve their old fact-summary compatibility instead of making
+            # an old result silently look empty.  Active runs remain closed
+            # world and expose only the ID/time index here.
+            for key in ("information", "voiceover_zh", "visual_fact", "subtitle_fact"):
+                if key in unit:
+                    compact_unit[key] = unit.get(key)
+        units.append(compact_unit)
+    stage_units: dict[str, list[dict[str, Any]]] = {}
+    for stage, stage_items in (value.get("stage_evidence_units") or {}).items():
+        compact_items: list[dict[str, Any]] = []
+        for unit in stage_items or []:
+            if not isinstance(unit, dict):
+                continue
+            compact_items.append(
+                {
+                    "id": unit.get("id"),
+                    "time_range": unit.get("time_range"),
+                    "information": unit.get("information"),
+                    "voiceover_zh": unit.get("voiceover_zh"),
+                    "visual_fact": unit.get("visual_fact"),
+                    "subtitle_fact": unit.get("subtitle_fact"),
+                    "audio_fact": unit.get("audio_fact"),
+                    "visual_evidence": unit.get("visual_evidence"),
+                    "evidence_strength": unit.get("evidence_strength"),
+                    "trust_source_type": unit.get("trust_source_type"),
+                }
+            )
+        stage_units[str(stage)] = compact_items
+    qualified = {
+        # Recompute against the authoritative source, not the view's compact
+        # ID/time index.  Channel qualification (for example S4 visual proof)
+        # needs the full locked unit fields that the analysis view intentionally
+        # withholds from its flat compatibility index.
+        stage: sorted(qualified_stage_evidence_ids(source_value, stage))
+        for stage in stage_codes()
+    }
     return {
         "product_identity": value.get("product_identity") or {},
         "content_summary": value.get("content_summary") or "",
         "evidence_units": units,
+        "stage_evidence_units": stage_units,
         "structure_event_checks": value.get("structure_event_checks") or [],
         "stage_evidence_contract_version": value.get("stage_evidence_contract_version"),
         "stage_evidence_checks": value.get("stage_evidence_checks") or [],
+        "qualified_stage_evidence_ids": qualified,
         "evidence_checklist": value.get("evidence_checklist") or [],
     }
 
@@ -322,17 +366,25 @@ def build_improvement_reconciliation_payload(
     understanding = result.get("video_understanding") if isinstance(result.get("video_understanding"), dict) else {}
     for role in ("creator", "benchmark"):
         referenced: set[str] = set()
+        role_facts = understanding.get(role) if isinstance(understanding.get(role), dict) else {}
         for stage in stages:
-            referenced.update(str(value) for value in stage.get(f"{role}_evidence_ids", []) if str(value).strip())
-            flag = next(
-                (
-                    value
-                    for key, value in stage.items()
-                    if key.startswith(f"{role}_") and isinstance(value, dict)
-                ),
-                {},
-            )
-            referenced.update(str(value) for value in flag.get("evidence_ids", []) if str(value).strip())
+            stage_code = str(stage.get("stage") or "").strip().upper()[:2]
+            stage_refs = {
+                str(value)
+                for value in stage.get(f"{role}_evidence_ids", [])
+                if str(value).strip()
+            }
+            suffix = "hook" if stage_code == "S1" else stage_code.lower()
+            flag = stage.get(f"{role}_{suffix}")
+            if isinstance(flag, dict):
+                stage_refs.update(
+                    str(value)
+                    for value in flag.get("evidence_ids", [])
+                    if str(value).strip()
+                )
+            if role_facts.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+                stage_refs &= qualified_stage_evidence_ids(role_facts, stage_code)
+            referenced.update(stage_refs)
         units = ((understanding.get(role) or {}).get("evidence_units") or []) if isinstance(understanding.get(role), dict) else []
         evidence[role] = [unit for unit in units if isinstance(unit, dict) and str(unit.get("id")) in referenced]
 
@@ -360,6 +412,7 @@ def build_improvement_reconciliation_payload(
         "每个缺失阶段输出一项，target_stage 必须来自 missing_large_stages。"
         "建议必须解决该阶段 flags 暴露的真实缺口，并围绕本品命题；参考标杆的功能意图，不能照抄标杆话术。"
         "所有事实、时间和 evidence id 只能来自输入；creator_script 使用达人视频的本地语言，creator_script_zh 给中文。"
+        "若某个目标阶段没有 Stage1 资格化证据，输入中的该侧 referenced_evidence_units 为空；不得用其他阶段或未资格化单元补写。"
         "若达人本人或素材条件不适合改造参考，明确写 base_frame_suitability=no_suitable_frame，不得伪造画面。\n"
         f"每项必须含字段：{fields}。\n"
         "只输出严格 JSON：{\"improvements\":[...]}。\n\n"
@@ -617,7 +670,7 @@ def build_video_fact_payload(
                             "evidence_ids": [f"{code}1"],
                         }
                     ],
-                    "stage_evidence_contract_version": 1,
+                    "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
                     "stage_evidence_checks": [
                         {
                             "stage": "S1",
@@ -812,7 +865,7 @@ def build_video_fact_recovery_payload(
                             "reason": "只写资格事实",
                         }
                     ],
-                    "stage_evidence_contract_version": 1,
+                    "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -1189,10 +1242,24 @@ def find_early_evidence_for_role(role: str, facts: dict[str, Any]) -> dict[str, 
 
 def get_role_evidence_units(role: str, facts: dict[str, Any]) -> list[dict[str, Any]]:
     prefix = "C" if role == "creator" else "B"
+    direct = facts.get(role) if isinstance(facts.get(role), dict) else {}
+    stage_units = facts.get("stage_evidence_units") if isinstance(facts, dict) else None
+    if not isinstance(stage_units, dict):
+        stage_units = direct.get("stage_evidence_units") if isinstance(direct, dict) else None
+    if isinstance(stage_units, dict):
+        by_id: dict[str, dict[str, Any]] = {}
+        for stage_items in stage_units.values():
+            for unit in stage_items or []:
+                if not isinstance(unit, dict):
+                    continue
+                unit_id = str(unit.get("id") or "").strip()
+                if unit_id.startswith(prefix):
+                    by_id.setdefault(unit_id, unit)
+        if by_id:
+            return list(by_id.values())
     units = facts.get("evidence_units") if isinstance(facts.get("evidence_units"), list) else []
     role_units = [unit for unit in units if isinstance(unit, dict) and str(unit.get("id") or "").startswith(prefix)]
     if not role_units:
-        direct = facts.get(role) if isinstance(facts.get(role), dict) else {}
         role_units = direct.get("evidence_units") if isinstance(direct.get("evidence_units"), list) else []
     if not role_units:
         videos = facts.get("videos") if isinstance(facts.get("videos"), dict) else {}
@@ -1269,12 +1336,13 @@ def build_llm_comparison_payload(
     从而给出更准的 severity 和对比结论。感官素材不可用于新增/改写事实。
     """
     context = extract_comparison_context(analysis_input)
+    analysis_facts = stage_analysis_evidence_view(facts)
     commercial_framework = read_text_if_exists(ROOT / "references" / "commercial-judgement-framework.md")
     target_market = str(((analysis or {}).get("product") or {}).get("target_market") or "auto")
     market_knowledge = render_market_knowledge(target_market)
     qa_rules = read_text_if_exists(ROOT / "QA-RULES.md")
     speech_mode_block = render_speech_mode_block(analysis or {})
-    s1_boundary_hint_block = build_s1_boundary_hint_block(analysis, facts)
+    s1_boundary_hint_block = build_s1_boundary_hint_block(analysis, analysis_facts)
     # Step-0 品地基注入：已确立则作为 S1-S6 判断的尺子直接采用，模型不再另起炉灶现编（防"现编标尺又自评"）。
     fnd = (analysis or {}).get("product_foundation") or {}
     foundation_block = ""
@@ -1606,12 +1674,12 @@ def build_llm_comparison_payload(
             "## QA-RULES.md 自检契约（输出前必须自检）",
             qa_rules,
             "## 已校验单视频事实清单（唯一事实来源）",
-            json.dumps(facts, ensure_ascii=False, indent=2),
+            json.dumps(analysis_facts, ensure_ascii=False, indent=2),
             "## Stage1 阶段资格使用规则",
             "stage_evidence_checks 是 Stage1 对每个阶段的资格投影，不是比较结论。"
             "只有 status=present 且 evidence_strength=direct/explicit 的证据，才能支持该阶段的确定性事实判断；"
             "unknown/conflict 必须保留为低置信或待核验，不能改写成 absent，也不能用 functions 自行补回。"
-            "stage_analysis 的 evidence_ids 必须来自同侧 evidence_units，并优先来自该阶段的 stage_evidence_checks；"
+            "stage_analysis 的 evidence_ids 必须来自同侧对应阶段的 stage_evidence_units，并优先来自该阶段的 stage_evidence_checks；"
             "如果阶段资格不足，明确写 support_status=unknown 或 low，不得为了填满字段而创造事实。",
             "## 各视频证据组织模式（判断时必须尊重）",
             speech_mode_block,
@@ -1649,11 +1717,11 @@ def build_llm_comparison_payload(
             "painpoint_relevance 只能取 benchmark_only、creator_only、both、none 四选一：该阶段双方内容是否命中 category_profile.painpoints 中的核心决策因素——只有标杆命中/只有达人命中/双方都命中/双方都未命中。按内容功能判断（讲没讲到、演没演到核心痛点），不要求字面用词一致。它只供 commercial_priorities 做同一 severity tier 内的商业相关性排序；缺失或未知不等同于 none，也不参与 severity。",
             "category_profile 必须含：category_name（品类名）, price_tier（low|mid|high 客单价档）, decision_threshold（impulse|considered）, drive_type（emotional|functional|mixed）, painpoints（该品类目标消费者最在意的决策因素关键词，每个痛点同时给中文和本地语两种表述放进同一数组，共 6-16 个词条）。只报品类事实与世界知识，不做权重判断。",
             "打分前必须先输出 product_profile 产品商业 DNA（这是 S1-S6 打分的尺子，先立尺再量）：visualizable、physical_task、hook_proposition、core_selling_points、usage_context、short_video_proof_plan（先列全部候选卖点，再按可视展示空间→功能中心性→理解成本选出一个 S4 anchor，并把其他卖点分流到 S2/S3/S5；不是给产品删卖点）、proof_contract（只引用该 anchor）、core_visual_proposition（旧兼容字段）、visual_proof_points（S4 多视觉证明点；primary 是选中 anchor 的单一可测信号，secondary 是同一 S4 anchor 的补充画面，不能替代 primary）、proof_mode、effect_requires_process、visual_diff_dimensions、trust_multipliers、shooting_requirement、confidence。只报产品事实与品类世界知识。visualizable=no 时 S4 不强求视觉命题，把判断重心放到 S5 信任放大与达人可信度。",
-            "每阶段输出 stage_standard_delivery（benchmark_only|creator_only|both|none）：该阶段双方是否有效达到本阶段的『本品到位标准』（见下条对照表锚点）。做到/展示到才算，仅口头讲到不算。先作为事实输出，暂不参与推导。",
+            "每阶段输出 stage_standard_delivery（benchmark_only|creator_only|both|none|unknown）：Stage1 阶段证据资格未完成时必须填 unknown，不能把证据未知写成 none；否则按本品到位标准判断。做到/展示到才算，仅口头讲到不算。先作为事实输出，暂不参与推导。",
             "S1-S6 执行分统一三层判：阶段目标(core_question) → 用了什么做法(module_id/module_fit) → 该做法在【本品】上到位没(execution)。'到位'按阶段查本品锚点、核心目标为主轴次要元素不补偿弱核心；本轮已接入的阶段锚点——S4 效果呈现→锚 visual_proof_points.primary（旧结果回退 core_visual_proposition）；S5 信任放大→锚 trust_multipliers：硬信任（第三方认证/检测/临床/仪器实测/官方背书）有效呈现可达 2，软信任（真实好评/社会认同/向往式对比/使用记录/达人自用）算信任但封顶 1（软不如硬），自述功效/纯参数不算；位置优先——视频开头的此类背书内容算 S1 钩子（留人）、结尾算 S6 CTA，不要按语义把开头/结尾的背书塞进 S5；判'用没用且呈现有效'非'口头说没说'，口播孤证或标志一闪而过最高 0.5；S6 促单→到位=把 structure_library S6 五型各自【适配条件】套上本品特征 category_profile + 命题 product_profile；S1 钩子→到位=把 structure_library S1 七型各自【适配条件】套上本品特征 category_profile + hook_proposition；S2 产品引出→到位=引出自然 + 承接 S1 钩子 + 引出产品身份；S3 使用过程→主轴锚 core_selling_points + 场景层 usage_context：到位=真实使用过程中把核心卖点'演示出来'被看见，场景再丰富人员再多样、卖点没在过程落地仍判弱。打分后必须对 2 分（出色档）做 GMV 推动力核验——仅阶段功能完成且呈现到位还不够，必须确认该侧在该阶段的输出能实际推动观众向购买靠近一步——否则该侧执行分封顶 1。具体判据（两侧各自独立核验）：S1 钩子——不仅留人，还要让观众对被留后看到的内容产生明确的产品期待（留住了但没引出产品好奇心封顶 1）；S2 产品引出——不仅说清是什么，还要与 S1 的痛点/场景形成因果联结，因为问题所以需要这个产品（产品被指名但不构成解决问题封顶 1）；S3 使用过程——不仅演示真实动作，还要让观众在动作中自然感知到卖点成立、产生信心（完成动作但卖点被掩盖封顶 1）；S4 效果呈现——不仅拍出变化，还要让变化与产品之间的因果关系可信（before/after 存在但归因链路不成立封顶 1）；S5 信任——背书须能与本品的购买决策直接关联（弱关联背书信其存在但不封顶，最高 1）；S6 CTA——不仅要给出购买指令，还要与前面建立的产品价值和欲望形成闭环（孤立喊下单封顶 1）。信息量大≠有说服力，动作完成≠打动观众。注意：核验的是 2 分是否成立，0/0.5/1 不受此约束。",
             "improvements 每项必须含：title,target_stage,gmv_impact,gap_type,time_range,creator_time_range,benchmark_time_range,problem,benchmark_reference,benchmark_evidence_ids,suggestion,actions,gmv_reason,evidence,creator_script,creator_script_zh,base_frame_suitability,best_base_frame_time,base_frame_evidence_id,base_frame_reason,expected_effect,priority。",
             "可额外输出 top-level low_confidence_stages，数组元素只能是 S1-S6；只有当该阶段现有帧/音频不足以支撑 severity 时才填写，最多 2 个。",
-            "除 stage_analysis、improvements、video_understanding.evidence_units、low_confidence_stages 和 category_profile.painpoints 外，所有数组最多 1 条。所有描述字段最多一句且不超过 40 个汉字。video_understanding 必须原样使用事实清单，不得新增、改写或跨视频移动 evidence_units。",
+            "各数组遵循各自字段合同的明确上限；没有明确上限时不得为了简洁擅自截断，尤其不能截断 Stage1 evidence_units、阶段引用或能证明因果链的事实。不得为凑数重复拆分。所有描述字段最多一句且不超过 40 个汉字。video_understanding 必须原样使用事实清单，不得新增、改写或跨视频移动 evidence_units。",
         ]
     )
     user_text = apply_certification_ownership_policy(user_text)
@@ -1671,7 +1739,7 @@ def build_llm_comparison_payload(
     if analysis is not None:
         sensory = build_evidence_sensory_inputs(
             analysis,
-            facts,
+            analysis_facts,
             api_url=api_url,
             model=model,
             budget=budget,
@@ -1752,10 +1820,12 @@ def build_stage_review_payload(
     这是一次性回看，不允许模型继续索要素材；事实清单仍是唯一事实源。
     """
     target_codes = normalize_stage_codes(stage_codes)[:2]
+    analysis_facts = stage_analysis_evidence_view(facts, target_codes)
     native_audio = bool((analysis.get("audio_assessment") or {}).get("native_audio_analysis", True))
     target_stages = [
-        stage for stage in current_result.get("stage_analysis", [])
-        if stage_code(stage.get("stage")) in target_codes
+        stage_analysis_stage_context(stage, facts, stage_code(stage.get("stage")))
+        for stage in current_result.get("stage_analysis", [])
+        if isinstance(stage, dict) and stage_code(stage.get("stage")) in target_codes
     ]
     stage_update_example: dict[str, Any] = {
         "stage": "S4 效果呈现",
@@ -2081,7 +2151,7 @@ def build_stage_review_payload(
                     "## 当前阶段判断",
                     json.dumps(target_stages, ensure_ascii=False, indent=2),
                     "## 已校验单视频事实清单（唯一事实来源）",
-                    json.dumps(facts, ensure_ascii=False, indent=2),
+                    json.dumps(analysis_facts, ensure_ascii=False, indent=2),
                 ]
             ),
         }
@@ -2276,7 +2346,8 @@ def build_llm_payload(
                     "分析必须严格遵循输入中的三步分析流程：第一步，整体感知并输出 one_line_verdict、holistic_assessment，不引用具体证据；"
                     "第二步，输出 product_visibility，并将事实证据映射到 structure_library_full.md 的 S1-S6 语义阶段、官方模块编号、模块适配性和真实时间边界；"
                     "第三步，输出 loop_closure，并基于被引用证据比较 gap_type 和提升点。"
-                    "输出必须精炼：每个视频列出 3 到 6 个关键 evidence_units；任何 evidence、visual_evidence、gap_summary 或 actions 数组最多 3 条；"
+                    "输出必须精炼，但不得用固定条数截断 Stage1 evidence_units、阶段引用或能证明因果链的事实；"
+                    "各数组遵循各自字段合同的明确上限，没有明确上限时按覆盖完整性输出，不为凑数重复拆分；"
                     "每个描述字段最多一句，improvements 按 GMV 杠杆排序输出 1-5 条；视频值得改的点确实多就给 3-5 条，确实只有 1-2 个 GMV 杠杆点就给 1-2 条，不要为凑数编造。"
                     "禁止重复同一判断，禁止为了描述缺失而枚举不存在的音效、卡点、镜头或功能；缺失内容用一句“未发现对应证据”概括。"
                     "不要把 0~3s、3~6s 等参考时间当作固定切片。"
@@ -2285,7 +2356,7 @@ def build_llm_payload(
                     "没有有效口播时，必须以可见画面与字幕为核心，不得把音乐或推测写成信息。"
                     "每个阶段必须引用 video_understanding 中的 evidence_ids，并写 visual_evidence 和 support_status："
                     "口播与画面共同支持为 supported；口播提及但画面不能验证为 voice_only；仅画面/字幕承载信息为 visual_only；两者矛盾为 conflict。"
-                    "阶段引用的事实时间必须与该阶段时间相交；若某阶段确实不存在独立内容，仍应建立该时间段的 evidence_unit，明确说明未发现对应口播或画面，而不是借用其他阶段事实。"
+                    "阶段引用的事实时间必须与该阶段时间相交；若某阶段没有足够独立证据，必须保留该阶段为 unknown/待复核并留空引用，不能为了填满阶段创建占位事实，也不能借用其他阶段事实。"
                     "模型输入不包含原始 transcript.srt 或原始词级索引；口播窗口归因只能使用窗口安全口播时间线。没有词级时间戳时必须标记时间粒度不足或调整阶段边界。"
                     "不得写某张画面展示了认证、成分或效果，除非附带关键帧中实际可见。"
                     "只可把请求中实际附带的关键帧视为已观察画面；未被附图覆盖的时段不得臆造镜头内容，应写为画面证据不足待复核。"
@@ -2360,7 +2431,15 @@ def build_llm_repair_payload(
     locked_facts_block = ""
     native_audio = bool(((analysis or {}).get("audio_assessment") or {}).get("native_audio_analysis", True))
     if locked_video_understanding:
-        locked_facts_block = json.dumps(locked_video_understanding, ensure_ascii=False, indent=2)
+        # The finalizer preserves the locked raw facts itself.  The repair
+        # model only needs the qualification-filtered analysis view; exposing
+        # the raw list here would let it reason from facts that the target
+        # stage never qualified.
+        locked_facts_block = json.dumps(
+            stage_analysis_evidence_view(locked_video_understanding),
+            ensure_ascii=False,
+            indent=2,
+        )
     foundation = (analysis or {}).get("product_foundation") or {}
     brand = (analysis or {}).get("brand_proposition") or {}
     repair_contract = build_product_proposition_contract(foundation, brand)
@@ -2377,7 +2456,7 @@ def build_llm_repair_payload(
                     "如果原始输出缺少 improvements（如 JSON 被截断），必须基于 stage_analysis 的差距分析补充 1-5 条。"
                     "severity 是本轮模型参考判断，不要为了凑分布强行改写；只有显式、可追溯事实才能触发 resolver 的 floor/ceiling 约束，缺失、unknown 或 uncertain 不触发。"
                     "必须保留 video_understanding 证据事实清单。stage_analysis 必须严格按 S1、S2、S3、S4、S5、S6 顺序输出六项；阶段必须保留 benchmark_time_range、creator_time_range、证据引用、核心信息、画面证据和 support_status；达人话术必须保留本地语言和中文翻译。"
-                    "每个阶段引用的事实单元时间必须与阶段时间相交；缺少独立内容的阶段也要提供该时段的无对应内容事实单元。"
+                    "每个阶段引用的事实单元时间必须与阶段时间相交；缺少独立内容的阶段保留 unknown/待复核并留空引用，不得创建新的 Stage1 事实单元。"
                     "修复 evidence_ids 时必须保持阶段归属：stage 的 benchmark/creator_evidence_ids，以及每个嵌套 stage flag 的 evidence_ids，"
                     "只能引用对应侧、时间与该阶段 time_range 相交的已锁定 evidence_unit；嵌套 flag 的 evidence_ids 必须是该阶段主 evidence_ids 的子集。"
                     "相邻阶段的事实不能为了支撑语义跨阶段借用，也不得移动阶段时间范围；如果相邻事实更符合语义，必须按当前阶段窗口内事实重判，不能引用相邻阶段 ID。"
@@ -2400,7 +2479,8 @@ def build_llm_repair_payload(
                     "修复 improvements 时也必须遵循达人框架约束、卖点适配权重和标杆功能意图转译，不得把 benchmark_reference 直接改写成 suggestion。"
                     "健康品类建议不得声称调节激素、改善月经、治疗症状或虚构优惠。建议话术必须重新设计，不得复制标杆原句。"
                     "输出必须精炼，每个描述字段最多一句，improvements 按 GMV 杠杆排序保留 1-5 条；不要为凑数编造。"
-                    "任何列表最多 3 条；不要枚举或重复不存在的音效、镜头或功能，缺失证据只写一句概括。"
+                    "各列表遵循字段合同的明确上限；没有明确上限时不要为了简洁截断事实。"
+                    "不要枚举或重复不存在的音效、镜头或功能，缺失证据只写一句概括。"
                     "保留原分析含义，但补齐缺失字段、修正字段类型和 JSON 语法。"
                     "S5 修复硬规则：若 trust_source_evidence_ids 为空，或 Stage1 没有带同类 trust_source_signals 与 trust_source_reference 的来源，不得保留 authority/traceable_data/independent_user/social_consensus/process_transparency 任何独立信任 basis；仅有产品/来源自述时改为 trust_basis=product_claim，否则改为 trust_basis=none 或 unknown，并同步 exists=false、independent_trust_purpose=false、trust_source_evidence_ids=[]、proposition_ids=[]。"
                 ),
@@ -2413,7 +2493,7 @@ def build_llm_repair_payload(
                         analysis_input[:12000],
                         "校验错误：",
                         error_message,
-                        "已锁定单视频事实清单（唯一事实源，补字段只能引用这里，不得新增/改写 evidence_units）：",
+                        "已锁定单视频事实清单的阶段分析视图（原始审计清单不向修复模型开放；补字段只能引用这里，不得新增/改写 evidence_units）：",
                         locked_facts_block[:24000] if locked_facts_block else "（未提供 locked facts；只能修 JSON 结构，不得补事实依据）",
                         "本品命题引用合同（proposition_ids 只能引用对应阶段 allowed_ids；合同为空时保留原引用或填空数组，不得新造 ID）：",
                         repair_contract_block,
