@@ -101,7 +101,11 @@ def _run_variant(
         "evaluation_role": args.evaluation_role,
     }
     if variant == "evidence_grounded":
-        return run_compact_evaluation(**common, gt_stages=gt_stages)
+        return run_compact_evaluation(
+            **common,
+            gt_stages=gt_stages,
+            max_stage_evidence_ids=args.max_stage_evidence_ids,
+        )
     if variant == "severity_only":
         return run_severity_only_evaluation(**common, gt_stages=gt_stages, scaffold=False)
     if variant == "severity_scaffold":
@@ -140,6 +144,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--request-timeout-seconds", type=int, default=600)
     parser.add_argument(
+        "--max-stage-evidence-ids",
+        type=int,
+        default=None,
+        help="仅用于 evidence_grounded 的单变量上限实验；默认使用合同值4。",
+    )
+    parser.add_argument(
         "--no-images",
         action="store_true",
         help="Judgment variants only: omit stage-frame attachments; raw-video extraction uses original videos.",
@@ -151,6 +161,10 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.request_timeout_seconds < 60 or args.request_timeout_seconds > 1800:
         raise SystemExit("--request-timeout-seconds must be between 60 and 1800")
+    if args.max_stage_evidence_ids is not None and not 1 <= args.max_stage_evidence_ids <= 16:
+        raise SystemExit("--max-stage-evidence-ids must be between 1 and 16")
+    if args.max_stage_evidence_ids is not None and args.variant != "evidence_grounded":
+        raise SystemExit("--max-stage-evidence-ids is only valid with --variant evidence_grounded")
     manifest = _read_manifest(args.manifest.expanduser().resolve())
     api_key_args = SimpleNamespace(
         llm_api_key_env=args.api_key_env,
@@ -173,6 +187,11 @@ def main() -> int:
             gt_stages = load_gt_stages(args.gt_path, sample["sample_id"])
         preflight.append((sample, bundle, gt_stages))
 
+    contract_limits = contract_limits_for_variant(
+        "visual_extraction" if args.variant == "visual_extraction" else args.variant
+    )
+    if args.max_stage_evidence_ids is not None and args.variant == "evidence_grounded":
+        contract_limits["max_stage_evidence_ids"] = args.max_stage_evidence_ids
     summary: dict[str, Any] = {
         "schema_version": 1,
         "evaluation_role": args.evaluation_role,
@@ -185,12 +204,7 @@ def main() -> int:
         }[args.evaluation_role],
         "models": list(args.models),
         "source_commit": current_code_commit(),
-        "contract_limits": {
-            **contract_limits_for_variant(
-                "visual_extraction" if args.variant == "visual_extraction" else args.variant
-            ),
-            "output_budget": args.output_budget,
-        },
+        "contract_limits": {**contract_limits, "output_budget": args.output_budget},
         "samples": [],
     }
     for sample, bundle, gt_stages in preflight:

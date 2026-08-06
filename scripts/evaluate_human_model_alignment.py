@@ -40,9 +40,25 @@ from flayr_core.utils import write_json  # noqa: E402
 
 STAGE_CODES = tuple(stage.code for stage in DEFAULT_STAGES)
 ROLE_NAMES = ("creator", "benchmark")
+ALIGNMENT_SCHEMA_VERSION = 2
+ALIGNMENT_PROTOCOL = "human_model_alignment_v2"
 GT_GAPS = frozenset({"none", "small", "medium", "large", "uncertain"})
 SCORABLE_GAPS = frozenset({"none", "small", "medium", "large"})
 SCORABLE_RELATIONS = frozenset({"benchmark_better", "creator_better", "tie"})
+QUALITY_FIELDS = ("subject", "visibility", "composition", "completion", "proof", "causal_link")
+S3_QUALITY_FIELDS = ("subject", "visibility", "composition", "completion")
+S4_QUALITY_FIELDS = ("visibility", "proof", "causal_link")
+
+ALIGNMENT_METRIC_DEFINITIONS = {
+    "gap_accuracy": "语义差距准确率；排除 legacy severity-only 无法表达 GT=none 的合同表达缺口",
+    "contract_aware_gap_accuracy": "合同感知差距准确率；将 legacy severity-only 对 GT=none 的表达缺口计为不可表达错误",
+    "contract_representation_gap_rate": "GT 有效格中，模型旧 severity-only 合同无法表达 none 的比例",
+    "relation_accuracy": "仅在 GT relation 与模型 relation 均可解析时计算的方向准确率",
+    "exact_direction_and_gap_accuracy": "方向和差距大小同时正确的准确率",
+    "gt_large_recall": "GT=large 且模型产物可用于语义比较的格中，模型正确识别 large 的比例",
+    "temporal_stage_recall_proxy": "人工 key_events 与模型 evidence_units 按角色、阶段和时间重叠匹配的召回代理",
+    "temporal_stage_precision_proxy": "模型有效 evidence_units 中与人工 key_events 匹配的精确率代理；不代表语义真实",
+}
 
 
 def _safe_component(value: str) -> str:
@@ -146,8 +162,14 @@ def _empty_denominator() -> dict[str, int]:
         "gt_invalid_cells": 0,
         "model_available_cells": 0,
         "model_failed_or_missing_cells": 0,
+        "gt_scorable_gap_cells": 0,
+        "gt_scorable_relation_cells": 0,
         "scored_gap_cells": 0,
         "scored_relation_cells": 0,
+        "semantic_gap_cells": 0,
+        "contract_representation_gap_cells": 0,
+        "prediction_unavailable_gap_cells": 0,
+        "prediction_unavailable_relation_cells": 0,
         "gt_relation_missing_cells": 0,
         "gt_relation_uncertain_cells": 0,
         "gt_relation_invalid_cells": 0,
@@ -209,8 +231,10 @@ def score_judgment(
             denominator["gt_invalid_cells"] += 1
         else:
             denominator["gt_labeled_cells"] += 1
+            if gap in SCORABLE_GAPS:
+                denominator["gt_scorable_gap_cells"] += 1
             if relation in SCORABLE_RELATIONS:
-                pass
+                denominator["gt_scorable_relation_cells"] += 1
             elif relation == "uncertain":
                 denominator["gt_relation_uncertain_cells"] += 1
             elif relation is None:
@@ -247,24 +271,36 @@ def score_judgment(
         denominator["model_available_cells"] += 1
         predicted_gap = prediction.get("gap_magnitude")
         predicted_relation = prediction.get("relation")
+        gt_gap_available = gap in SCORABLE_GAPS
         gap_available = predicted_gap in SCORABLE_GAPS
         relation_available = (
             relation not in SCORABLE_RELATIONS or predicted_relation in SCORABLE_RELATIONS
         )
         if predicted_gap in SCORABLE_GAPS and gap in SCORABLE_GAPS:
             denominator["scored_gap_cells"] += 1
-        gap_correct = predicted_gap == gap
+        representation_gap = bool(prediction.get("legacy_severity_only") and gap == "none")
+        semantic_gap_comparable = bool(
+            gt_gap_available and gap_available and not representation_gap
+        )
+        if semantic_gap_comparable:
+            denominator["semantic_gap_cells"] += 1
+        if representation_gap:
+            denominator["contract_representation_gap_cells"] += 1
+        if gt_gap_available and not gap_available:
+            denominator["prediction_unavailable_gap_cells"] += 1
+        gap_correct = predicted_gap == gap if gt_gap_available and gap_available else None
         if relation in SCORABLE_RELATIONS:
             if predicted_relation in SCORABLE_RELATIONS:
                 denominator["scored_relation_cells"] += 1
                 relation_correct = predicted_relation == relation
             else:
+                denominator["prediction_unavailable_relation_cells"] += 1
                 relation_correct = None
         else:
             relation_correct = None
-        if prediction.get("legacy_severity_only") and gap == "none":
+        if representation_gap:
             error_class = "contract_representation_gap"
-        elif not gap_available or not relation_available:
+        elif (gt_gap_available and not gap_available) or not relation_available:
             error_class = "prediction_unavailable"
         elif relation in SCORABLE_RELATIONS and not relation_correct and not gap_correct:
             error_class = "direction_and_magnitude_error"
@@ -285,6 +321,9 @@ def score_judgment(
                 "confidence": prediction.get("confidence"),
                 "predicted_gap_available": gap_available,
                 "predicted_relation_available": relation_available,
+                "gt_gap_scorable": gt_gap_available,
+                "contract_representation_gap": representation_gap,
+                "semantic_gap_comparable": semantic_gap_comparable,
                 "gap_correct": gap_correct,
                 "relation_correct": relation_correct,
                 "error_class": error_class,
@@ -300,18 +339,37 @@ def score_judgment(
     scored_relation = [row for row in rows if row.get("relation_correct") is not None]
     exact_rows = [
         row
-        for row in rows
-        if row.get("relation_correct") is not None
-        and row.get("gt_gap_magnitude") in SCORABLE_GAPS
-        and row.get("predicted_gap_magnitude") in SCORABLE_GAPS
+        for row in scored_gap
+        if row.get("relation_correct") is not None and row.get("semantic_gap_comparable")
     ]
     return {
         "artifact_status": artifact_status,
         "denominator": denominator,
         "metrics": {
+            # ``gap_accuracy`` is deliberately the semantic metric. Legacy
+            # severity-only rows that cannot express GT=none are excluded
+            # from it and exposed separately below.
             "gap_accuracy": (
+                sum(row.get("gap_correct") is True for row in scored_gap if row.get("semantic_gap_comparable"))
+                / sum(row.get("semantic_gap_comparable") is True for row in scored_gap)
+                if any(row.get("semantic_gap_comparable") for row in scored_gap)
+                else None
+            ),
+            "contract_aware_gap_accuracy": (
                 sum(row.get("gap_correct") is True for row in scored_gap) / len(scored_gap)
                 if scored_gap
+                else None
+            ),
+            "semantic_gap_accuracy_excluding_representation_gap": (
+                sum(row.get("gap_correct") is True for row in scored_gap if row.get("semantic_gap_comparable"))
+                / sum(row.get("semantic_gap_comparable") is True for row in scored_gap)
+                if any(row.get("semantic_gap_comparable") for row in scored_gap)
+                else None
+            ),
+            "contract_representation_gap_rate": (
+                sum(row.get("contract_representation_gap") is True for row in rows)
+                / sum(row.get("status") == "labeled" for row in rows)
+                if any(row.get("status") == "labeled" for row in rows)
                 else None
             ),
             "relation_accuracy": (
@@ -493,6 +551,13 @@ def score_extraction(
                 if isinstance(function, str)
             }
         ]
+        quality_fields = (
+            S3_QUALITY_FIELDS
+            if stage_code == "S3"
+            else S4_QUALITY_FIELDS
+            if stage_code == "S4"
+            else QUALITY_FIELDS
+        )
         stage_metrics[stage_code] = {
             "required_event_count": len(stage_events),
             "scored_event_count": len(stage_events) if artifact_completed else 0,
@@ -514,8 +579,9 @@ def score_extraction(
             ),
             "quality_counts": _quality_counts(
                 stage_units,
-                ("subject", "visibility", "composition", "completion", "proof", "causal_link"),
+                quality_fields,
             ),
+            "quality_fields": list(quality_fields),
         }
     return {
         "artifact_status": artifact_status,
@@ -610,6 +676,134 @@ def _sample_record(
     }
 
 
+def _operational_summary(selected: list[dict[str, Any]], key: str) -> dict[str, Any]:
+    """Summarize artifact availability without treating it as semantic quality."""
+    metadata = [
+        record.get(key, {}).get("artifact", {})
+        for record in selected
+        if isinstance(record.get(key), dict)
+        and isinstance(record.get(key, {}).get("artifact"), dict)
+    ]
+    requested = [item for item in metadata if item.get("status") != "not_requested"]
+    status_counts: dict[str, int] = {}
+    failure_class_counts: dict[str, int] = {}
+    contract_error_code_counts: dict[str, int] = {}
+    for item in requested:
+        status = str(item.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if status != "completed":
+            failure_class = str(item.get("failure_class") or "unspecified")
+            failure_class_counts[failure_class] = failure_class_counts.get(failure_class, 0) + 1
+        for code in item.get("contract_error_codes", []) if isinstance(item.get("contract_error_codes"), list) else []:
+            normalized = str(code).strip()
+            if normalized:
+                contract_error_code_counts[normalized] = contract_error_code_counts.get(normalized, 0) + 1
+    return {
+        "requested_artifacts": len(requested),
+        "completed_artifacts": sum(item.get("status") == "completed" for item in requested),
+        "failed_or_missing_artifacts": sum(item.get("status") != "completed" for item in requested),
+        "status_counts": dict(sorted(status_counts.items())),
+        "failure_class_counts": dict(sorted(failure_class_counts.items())),
+        "contract_error_code_counts": dict(sorted(contract_error_code_counts.items())),
+    }
+
+
+def _aggregate_judgment_stage_metrics(judgment_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for stage_code in STAGE_CODES:
+        rows = [
+            row
+            for score in judgment_rows
+            for row in score.get("rows", [])
+            if row.get("stage") == stage_code
+        ]
+        semantic_gap_rows = [row for row in rows if row.get("semantic_gap_comparable")]
+        contract_aware_gap_rows = [
+            row
+            for row in rows
+            if row.get("gt_gap_magnitude") in SCORABLE_GAPS
+            and row.get("predicted_gap_magnitude") in SCORABLE_GAPS
+        ]
+        relation_rows = [row for row in rows if row.get("relation_correct") is not None]
+        exact_rows = [row for row in semantic_gap_rows if row.get("relation_correct") is not None]
+        large_rows = [row for row in rows if row.get("gt_gap_magnitude") == "large"]
+        large_scored_rows = [row for row in large_rows if row.get("semantic_gap_comparable")]
+        status_counts: dict[str, int] = {}
+        error_counts: dict[str, int] = {}
+        for row in rows:
+            status = str(row.get("status") or "unknown")
+            status_counts[status] = status_counts.get(status, 0) + 1
+            error_class = str(row.get("error_class") or "unknown")
+            error_counts[error_class] = error_counts.get(error_class, 0) + 1
+        result[stage_code] = {
+            "cell_count": len(rows),
+            "status_counts": dict(sorted(status_counts.items())),
+            "contract_aware_gap_cells": len(contract_aware_gap_rows),
+            "contract_aware_gap_correct_cells": sum(row.get("gap_correct") is True for row in contract_aware_gap_rows),
+            "contract_aware_gap_accuracy": (
+                sum(row.get("gap_correct") is True for row in contract_aware_gap_rows)
+                / len(contract_aware_gap_rows)
+                if contract_aware_gap_rows
+                else None
+            ),
+            "semantic_gap_cells": len(semantic_gap_rows),
+            "semantic_gap_correct_cells": sum(row.get("gap_correct") is True for row in semantic_gap_rows),
+            "semantic_gap_accuracy": (
+                sum(row.get("gap_correct") is True for row in semantic_gap_rows)
+                / len(semantic_gap_rows)
+                if semantic_gap_rows
+                else None
+            ),
+            "contract_representation_gap_cells": sum(
+                row.get("error_class") == "contract_representation_gap" for row in rows
+            ),
+            "relation_cells": len(relation_rows),
+            "relation_correct_cells": sum(row.get("relation_correct") is True for row in relation_rows),
+            "relation_accuracy": (
+                sum(row.get("relation_correct") is True for row in relation_rows) / len(relation_rows)
+                if relation_rows
+                else None
+            ),
+            "exact_direction_and_gap_cells": len(exact_rows),
+            "exact_direction_and_gap_correct_cells": sum(
+                row.get("gap_correct") is True and row.get("relation_correct") is True
+                for row in exact_rows
+            ),
+            "exact_direction_and_gap_accuracy": (
+                sum(row.get("gap_correct") is True and row.get("relation_correct") is True for row in exact_rows)
+                / len(exact_rows)
+                if exact_rows
+                else None
+            ),
+            "gt_large_cells": len(large_rows),
+            "gt_large_scored_cells": len(large_scored_rows),
+            "gt_large_unavailable_cells": len(large_rows) - len(large_scored_rows),
+            "gt_large_correct_cells": sum(row.get("gap_correct") is True for row in large_scored_rows),
+            "gt_large_missed_cells": sum(row.get("gap_correct") is not True for row in large_scored_rows),
+            "gt_large_recall": (
+                sum(row.get("gap_correct") is True for row in large_scored_rows) / len(large_scored_rows)
+                if large_scored_rows
+                else None
+            ),
+            "error_class_counts": dict(sorted(error_counts.items())),
+        }
+    return result
+
+
+def _merge_stage_quality_counts(stage_scores: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    merged: dict[str, dict[str, int]] = {field: {} for field in QUALITY_FIELDS}
+    for score in stage_scores:
+        source = score.get("quality_counts") if isinstance(score, dict) else None
+        if not isinstance(source, dict):
+            continue
+        for field, values in source.items():
+            if field not in merged or not isinstance(values, dict):
+                continue
+            for value, count in values.items():
+                merged[field][str(value)] = merged[field].get(str(value), 0) + int(count)
+    return {field: dict(sorted(values.items())) for field, values in merged.items() if values}
+
+
 def aggregate_model(records: list[dict[str, Any]], model: str) -> dict[str, Any]:
     selected = [record for record in records if record.get("model") == model]
     judgment_rows = [record["judgment"]["score"] for record in selected]
@@ -626,6 +820,7 @@ def aggregate_model(records: list[dict[str, Any]], model: str) -> dict[str, Any]
         and row.get("gt_gap_magnitude") in SCORABLE_GAPS
         and row.get("predicted_gap_magnitude") in SCORABLE_GAPS
     ]
+    semantic_gap_rows = [row for row in gap_rows if row.get("semantic_gap_comparable")]
     relation_rows = [
         row
         for score in judgment_rows
@@ -673,24 +868,59 @@ def aggregate_model(records: list[dict[str, Any]], model: str) -> dict[str, Any]
             ),
             "unit_count": units,
             "quality_coverage": quality_coverage_numerator / units if units else 0.0,
+            "quality_counts": _merge_stage_quality_counts(stage_scores),
         }
+    judgment_stage_metrics = _aggregate_judgment_stage_metrics(judgment_rows)
+    error_class_counts = {
+        error_class: sum(
+            row.get("error_class") == error_class
+            for score in judgment_rows
+            for row in score["rows"]
+        )
+        for error_class in sorted(
+            {
+                str(row.get("error_class"))
+                for score in judgment_rows
+                for row in score["rows"]
+            }
+        )
+    }
     return {
         "model": model,
         "sample_count": len(selected),
         "judgment": {
             "denominator": judgment_denominator,
-            "gap_accuracy": sum(row.get("gap_correct") is True for row in gap_rows) / len(gap_rows) if gap_rows else None,
-            "relation_accuracy": sum(row.get("relation_correct") is True for row in relation_rows) / len(relation_rows) if relation_rows else None,
-            "exact_direction_and_gap_accuracy": (
-                sum(row.get("gap_correct") is True and row.get("relation_correct") is True for row in exact_rows)
-                / len(exact_rows)
-                if exact_rows
+            "gap_accuracy": (
+                sum(row.get("gap_correct") is True for row in semantic_gap_rows) / len(semantic_gap_rows)
+                if semantic_gap_rows
                 else None
             ),
-            "error_class_counts": {
-                error_class: sum(row.get("error_class") == error_class for score in judgment_rows for row in score["rows"])
-                for error_class in sorted({str(row.get("error_class")) for score in judgment_rows for row in score["rows"]})
-            },
+            "contract_aware_gap_accuracy": (
+                sum(row.get("gap_correct") is True for row in gap_rows) / len(gap_rows)
+                if gap_rows
+                else None
+            ),
+            "semantic_gap_accuracy_excluding_representation_gap": (
+                sum(row.get("gap_correct") is True for row in semantic_gap_rows) / len(semantic_gap_rows)
+                if semantic_gap_rows
+                else None
+            ),
+            "contract_representation_gap_rate": (
+                sum(row.get("contract_representation_gap") is True for score in judgment_rows for row in score["rows"])
+                / judgment_denominator["gt_labeled_cells"]
+                if judgment_denominator["gt_labeled_cells"]
+                else None
+            ),
+            "relation_accuracy": sum(row.get("relation_correct") is True for row in relation_rows) / len(relation_rows) if relation_rows else None,
+            "exact_direction_and_gap_accuracy": (
+                sum(row.get("gap_correct") is True and row.get("relation_correct") is True for row in exact_rows if row.get("semantic_gap_comparable"))
+                / sum(row.get("semantic_gap_comparable") is True for row in exact_rows)
+                if any(row.get("semantic_gap_comparable") for row in exact_rows)
+                else None
+            ),
+            "stage_metrics": judgment_stage_metrics,
+            "error_class_counts": error_class_counts,
+            "operational": _operational_summary(selected, "judgment"),
         },
         "extraction": {
             "denominator": extraction_denominator,
@@ -710,6 +940,7 @@ def aggregate_model(records: list[dict[str, Any]], model: str) -> dict[str, Any]
                 else None
             ),
             "stage_metrics": stage_metrics,
+            "operational": _operational_summary(selected, "extraction"),
         },
     }
 
@@ -754,8 +985,8 @@ def main() -> int:
         for model in args.models:
             records.append(_sample_record(sample_id, labels, sample, extraction_root, judgment_root, model))
     output = {
-        "schema_version": 1,
-        "protocol": "human_model_alignment_v1",
+        "schema_version": ALIGNMENT_SCHEMA_VERSION,
+        "protocol": ALIGNMENT_PROTOCOL,
         "evaluation_role": args.evaluation_role,
         "promotion_eligible": False,
         "gt_loaded": True,
@@ -771,6 +1002,7 @@ def main() -> int:
             "denominator_rule": "exclude not_applicable, uncertain, missing, and invalid GT cells from semantic accuracy; count model failures separately",
             "extraction_matching_rule": "role + stage function + positive time overlap; semantic truth is not proven by this proxy",
         },
+        "metric_definitions": ALIGNMENT_METRIC_DEFINITIONS,
         "models": list(args.models),
         "records": records,
         "aggregate": [aggregate_model(records, model) for model in args.models],

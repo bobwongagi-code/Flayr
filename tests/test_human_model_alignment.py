@@ -81,6 +81,63 @@ class HumanModelAlignmentTests(unittest.TestCase):
         labels["S2"] = {"status": "labeled", "gap_magnitude": "none", "relation": "tie"}
         score = score_judgment(legacy, labels, artifact_status="completed")
         self.assertEqual(score["metrics"]["error_class_counts"]["contract_representation_gap"], 1)
+        self.assertIsNone(score["metrics"]["gap_accuracy"])
+        self.assertEqual(score["metrics"]["contract_aware_gap_accuracy"], 0.0)
+        self.assertEqual(score["denominator"]["contract_representation_gap_cells"], 1)
+
+    def test_legacy_representation_gap_is_excluded_from_exact_metric(self) -> None:
+        legacy = {
+            "stage_judgments": [
+                {
+                    "stage": "S2 产品引出",
+                    "severity": "small",
+                    "relation": "tie",
+                    "confidence": "high",
+                }
+            ]
+        }
+        labels = {stage: {"status": "missing", "gap_magnitude": None, "relation": None} for stage in ("S1", "S2", "S3", "S4", "S5", "S6")}
+        labels["S2"] = {"status": "labeled", "gap_magnitude": "none", "relation": "tie"}
+        score = score_judgment(legacy, labels, artifact_status="completed")
+        self.assertIsNone(score["metrics"]["exact_direction_and_gap_accuracy"])
+        self.assertEqual(score["metrics"]["relation_accuracy"], 1.0)
+
+    def test_aggregate_exposes_stage_large_gap_recall_and_operational_status(self) -> None:
+        labels = {stage: {"status": "missing", "gap_magnitude": None, "relation": None} for stage in ("S1", "S2", "S3", "S4", "S5", "S6")}
+        labels["S4"] = {"status": "labeled", "gap_magnitude": "large", "relation": "benchmark_better"}
+        result = {
+            "stage_judgments": [
+                {
+                    "stage": "S4 效果呈现",
+                    "gap_magnitude": "medium",
+                    "relation": "benchmark_better",
+                    "confidence": "high",
+                }
+            ]
+        }
+        score = score_judgment(result, labels, artifact_status="completed")
+        aggregate = aggregate_model(
+            [
+                {
+                    "model": "m",
+                    "judgment": {
+                        "artifact": {"status": "completed"},
+                        "score": score,
+                    },
+                    "extraction": {
+                        "artifact": {"status": "not_requested"},
+                        "score": score_extraction(None, {}, artifact_status="not_requested"),
+                    },
+                }
+            ],
+            "m",
+        )
+        s4 = aggregate["judgment"]["stage_metrics"]["S4"]
+        self.assertEqual(s4["gt_large_cells"], 1)
+        self.assertEqual(s4["gt_large_missed_cells"], 1)
+        self.assertEqual(s4["gt_large_recall"], 0.0)
+        self.assertEqual(aggregate["judgment"]["operational"]["completed_artifacts"], 1)
+        self.assertEqual(aggregate["extraction"]["operational"]["requested_artifacts"], 0)
 
     def test_model_abstention_is_not_counted_as_semantic_error(self) -> None:
         result = _judgment_result()

@@ -371,6 +371,24 @@ class CompactEvalContractTests(unittest.TestCase):
             self.assertTrue(any("exceeds max_stage_evidence_ids=4" in error for error in errors))
             self.assertTrue(any("contains duplicate IDs" in error for error in errors))
 
+    def test_stage_evidence_limit_override_is_explicit_and_does_not_change_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = load_frozen_compact_bundle(_write_bundle(Path(tmp)), include_images=False)
+            bundle.allowed_evidence_ids["creator"]["S1"].update({f"C{index}" for index in range(1, 6)})
+            bundle.allowed_evidence_ids["benchmark"]["S1"].update({f"B{index}" for index in range(1, 6)})
+            result = _result()
+            result["stage_judgments"][0]["creator"]["evidence_ids"] = [f"C{index}" for index in range(1, 6)]
+            result["stage_judgments"][0]["benchmark"]["evidence_ids"] = [f"B{index}" for index in range(1, 6)]
+            self.assertTrue(any("max_stage_evidence_ids=4" in error for error in validate_compact_result(result, bundle)))
+            self.assertEqual(validate_compact_result(result, bundle, max_stage_evidence_ids=8), [])
+            payload = build_compact_eval_payload(
+                "qwen3.6-plus",
+                bundle,
+                output_budget=4096,
+                max_stage_evidence_ids=8,
+            )
+            self.assertIn("每侧每阶段最多引用 8 个 evidence_ids", payload["messages"][0]["content"])
+
     def test_gt_loader_keeps_none_na_and_direction_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "gt.json"

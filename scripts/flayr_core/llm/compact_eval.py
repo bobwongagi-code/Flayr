@@ -75,6 +75,14 @@ FACT_QUALITY_FIELDS = {
 }
 
 
+def _stage_evidence_id_limit(value: int | None) -> int:
+    """Resolve an isolated-contract limit without changing the production default."""
+    limit = COMPACT_MAX_EVIDENCE_IDS if value is None else value
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 16:
+        raise CompactEvaluationError("max_stage_evidence_ids must be an integer between 1 and 16")
+    return limit
+
+
 def contract_limits_for_variant(variant: str) -> dict[str, int]:
     """Return every numeric response limit enforced by the isolated contract."""
     limits = {"output_budget": COMPACT_OUTPUT_BUDGET}
@@ -697,8 +705,10 @@ def build_compact_eval_payload(
     *,
     output_budget: int = COMPACT_OUTPUT_BUDGET,
     output_budget_field: str = "max_tokens",
+    max_stage_evidence_ids: int | None = None,
 ) -> dict[str, Any]:
     """Build the same small response contract for every model under test."""
+    evidence_id_limit = _stage_evidence_id_limit(max_stage_evidence_ids)
     response_shape = {
         "schema_version": COMPACT_EVAL_SCHEMA_VERSION,
         "stage_judgments": [
@@ -728,7 +738,7 @@ def build_compact_eval_payload(
         "每侧 observation_state 只能是 none、partial、complete、uncertain。"
         "evidence_ids 只能引用同侧、对应阶段事实清单中已经存在的 ID；没有明确证据时填空数组。"
         "不能把标杆事实复制成达人事实，也不能用相邻阶段 ID 补足当前阶段。"
-        f"每侧每阶段最多引用 {COMPACT_MAX_EVIDENCE_IDS} 个 evidence_ids；超过这个数量会被合同拒绝。"
+        f"每侧每阶段最多引用 {evidence_id_limit} 个 evidence_ids；超过这个数量会被合同拒绝。"
         "不要输出 product foundation、improvements、建议话术、长篇摘要或任何额外字段。"
         "若视觉证据与事实包无法确定，填 uncertain，不要猜测。"
         f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
@@ -754,8 +764,10 @@ def build_model_independent_payload(
     *,
     output_budget: int = COMPACT_OUTPUT_BUDGET,
     output_budget_field: str = "max_tokens",
+    max_stage_evidence_ids: int | None = None,
 ) -> dict[str, Any]:
     """Build the frozen protocol's model-independent comparison contract."""
+    evidence_id_limit = _stage_evidence_id_limit(max_stage_evidence_ids)
     response_shape = {
         "schema_version": MODEL_INDEPENDENT_SCHEMA_VERSION,
         "overall": {
@@ -797,7 +809,7 @@ def build_model_independent_payload(
         "每侧 observation_state 只能是 none、partial、complete、uncertain。"
         "evidence_ids 只能引用同侧、对应阶段事实清单中已经存在的 ID；没有明确证据时填空数组。"
         "不能把标杆事实复制成达人事实，也不能用相邻阶段 ID 补足当前阶段。"
-        f"每侧最多引用 {COMPACT_MAX_EVIDENCE_IDS} 个 evidence_ids；每条 reason 和 rationale 都必须是可核对的事实依据，"
+        f"每侧每阶段最多引用 {evidence_id_limit} 个 evidence_ids；每条 reason 和 rationale 都必须是可核对的事实依据，"
         "不要输出隐藏推理过程、报告、improvements、derive 结果或任何额外字段。输出前检查所有 evidence_ids 的阶段归属，并确保整个 JSON 最后以一个完整的右花括号结束。"
         f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
     )
@@ -816,8 +828,14 @@ def build_model_independent_payload(
     )
 
 
-def validate_model_independent_result(result: Any, bundle: FrozenCompactBundle) -> list[str]:
+def validate_model_independent_result(
+    result: Any,
+    bundle: FrozenCompactBundle,
+    *,
+    max_stage_evidence_ids: int | None = None,
+) -> list[str]:
     """Validate the independent comparison contract without semantic repair."""
+    evidence_id_limit = _stage_evidence_id_limit(max_stage_evidence_ids)
     if not isinstance(result, dict):
         return ["result must be an object"]
     errors: list[str] = []
@@ -903,6 +921,7 @@ def validate_model_independent_result(result: Any, bundle: FrozenCompactBundle) 
                 stage_code=stage_code,
                 allowed_ids=bundle.allowed_evidence_ids,
                 path=f"{path}.creator",
+                max_stage_evidence_ids=evidence_id_limit,
             )
         )
         errors.extend(
@@ -912,6 +931,7 @@ def validate_model_independent_result(result: Any, bundle: FrozenCompactBundle) 
                 stage_code=stage_code,
                 allowed_ids=bundle.allowed_evidence_ids,
                 path=f"{path}.benchmark",
+                max_stage_evidence_ids=evidence_id_limit,
             )
         )
     return errors
@@ -1077,6 +1097,7 @@ def _validate_side(
     stage_code: str,
     allowed_ids: dict[str, set[str]],
     path: str,
+    max_stage_evidence_ids: int = COMPACT_MAX_EVIDENCE_IDS,
 ) -> list[str]:
     if not isinstance(value, dict):
         return [f"{path} must be an object"]
@@ -1095,9 +1116,9 @@ def _validate_side(
     if not isinstance(evidence_ids, list) or any(not isinstance(item, str) or not item.strip() for item in evidence_ids):
         errors.append(f"{path}.evidence_ids must be a list of non-empty strings")
         evidence_ids = []
-    if len(evidence_ids) > COMPACT_MAX_EVIDENCE_IDS:
+    if len(evidence_ids) > max_stage_evidence_ids:
         errors.append(
-            f"{path}.evidence_ids exceeds max_stage_evidence_ids={COMPACT_MAX_EVIDENCE_IDS}"
+            f"{path}.evidence_ids exceeds max_stage_evidence_ids={max_stage_evidence_ids}"
         )
     if len(set(evidence_ids)) != len(evidence_ids):
         errors.append(f"{path}.evidence_ids contains duplicate IDs")
@@ -1115,8 +1136,14 @@ def _validate_side(
     return errors
 
 
-def validate_compact_result(result: Any, bundle: FrozenCompactBundle) -> list[str]:
+def validate_compact_result(
+    result: Any,
+    bundle: FrozenCompactBundle,
+    *,
+    max_stage_evidence_ids: int | None = None,
+) -> list[str]:
     """Return deterministic contract errors; never repair a compact result."""
+    evidence_id_limit = _stage_evidence_id_limit(max_stage_evidence_ids)
     if not isinstance(result, dict):
         return ["result must be an object"]
     errors: list[str] = []
@@ -1155,8 +1182,26 @@ def validate_compact_result(result: Any, bundle: FrozenCompactBundle) -> list[st
             stage_code = _stage_code(str(item.get("stage") or ""))
         except CompactEvaluationError:
             continue
-        errors.extend(_validate_side(item.get("creator"), role="creator", stage_code=stage_code, allowed_ids=bundle.allowed_evidence_ids, path=f"{path}.creator"))
-        errors.extend(_validate_side(item.get("benchmark"), role="benchmark", stage_code=stage_code, allowed_ids=bundle.allowed_evidence_ids, path=f"{path}.benchmark"))
+        errors.extend(
+            _validate_side(
+                item.get("creator"),
+                role="creator",
+                stage_code=stage_code,
+                allowed_ids=bundle.allowed_evidence_ids,
+                path=f"{path}.creator",
+                max_stage_evidence_ids=evidence_id_limit,
+            )
+        )
+        errors.extend(
+            _validate_side(
+                item.get("benchmark"),
+                role="benchmark",
+                stage_code=stage_code,
+                allowed_ids=bundle.allowed_evidence_ids,
+                path=f"{path}.benchmark",
+                max_stage_evidence_ids=evidence_id_limit,
+            )
+        )
     return errors
 
 
@@ -1840,6 +1885,7 @@ def _run_isolated_evaluation(
     request_timeout_seconds: int,
     gt_stages: dict[str, str] | None = None,
     diagnostics: Any = None,
+    max_stage_evidence_ids: int | None = None,
 ) -> dict[str, Any]:
     if evaluation_role not in EVALUATION_ROLES:
         raise CompactEvaluationError(f"unsupported evaluation_role: {evaluation_role}")
@@ -1859,6 +1905,9 @@ def _run_isolated_evaluation(
     ):
         (output_dir / stale_name).unlink(missing_ok=True)
     decision_scope = DECISION_SCOPE_BY_ROLE[evaluation_role]
+    contract_limits = contract_limits_for_variant(variant)
+    if max_stage_evidence_ids is not None and variant in {"evidence_grounded", "model_independent"}:
+        contract_limits["max_stage_evidence_ids"] = _stage_evidence_id_limit(max_stage_evidence_ids)
     metadata = {
         "evaluation_role": evaluation_role,
         "decision_scope": decision_scope,
@@ -1880,10 +1929,7 @@ def _run_isolated_evaluation(
         "input_mode": bundle.input_mode,
         "output_budget_field": output_budget_field,
         "output_budget": output_budget,
-        "contract_limits": {
-            **contract_limits_for_variant(variant),
-            "output_budget": output_budget,
-        },
+        "contract_limits": {**contract_limits, "output_budget": output_budget},
         "request_retry_policy": {"outer_attempts": 1, "transport_retries": 0},
         "request_timeout_seconds": request_timeout_seconds,
         "image_count": len(bundle.visual_inputs),
@@ -2031,6 +2077,7 @@ def run_compact_evaluation(
     request_timeout_seconds: int = 600,
     gt_stages: dict[str, str] | None = None,
     evaluation_role: str = "model_calibration",
+    max_stage_evidence_ids: int | None = None,
 ) -> dict[str, Any]:
     """Run the original evidence-grounded compact contract in isolation."""
     payload = build_compact_eval_payload(
@@ -2038,6 +2085,7 @@ def run_compact_evaluation(
         bundle,
         output_budget=output_budget,
         output_budget_field=output_budget_field,
+        max_stage_evidence_ids=max_stage_evidence_ids,
     )
     return _run_isolated_evaluation(
         model=model,
@@ -2046,7 +2094,11 @@ def run_compact_evaluation(
         api_url=api_url,
         api_key_args=api_key_args,
         payload=payload,
-        validator=lambda value: validate_compact_result(value, bundle),
+        validator=lambda value: validate_compact_result(
+            value,
+            bundle,
+            max_stage_evidence_ids=max_stage_evidence_ids,
+        ),
         task_role=COMPACT_EVAL_ROLE,
         evaluation_role=evaluation_role,
         variant="evidence_grounded",
@@ -2058,6 +2110,7 @@ def run_compact_evaluation(
         request_timeout_seconds=request_timeout_seconds,
         gt_stages=gt_stages,
         diagnostics=diagnose_compact_evidence_references,
+        max_stage_evidence_ids=max_stage_evidence_ids,
     )
 
 
@@ -2072,6 +2125,7 @@ def run_model_independent_evaluation(
     output_budget_field: str = "max_tokens",
     request_timeout_seconds: int = 600,
     evaluation_role: str = "model_calibration",
+    max_stage_evidence_ids: int | None = None,
 ) -> dict[str, Any]:
     """Run the frozen protocol's model-independent judgment layer."""
     payload = build_model_independent_payload(
@@ -2079,6 +2133,7 @@ def run_model_independent_evaluation(
         bundle,
         output_budget=output_budget,
         output_budget_field=output_budget_field,
+        max_stage_evidence_ids=max_stage_evidence_ids,
     )
     return _run_isolated_evaluation(
         model=model,
@@ -2087,7 +2142,11 @@ def run_model_independent_evaluation(
         api_url=api_url,
         api_key_args=api_key_args,
         payload=payload,
-        validator=lambda value: validate_model_independent_result(value, bundle),
+        validator=lambda value: validate_model_independent_result(
+            value,
+            bundle,
+            max_stage_evidence_ids=max_stage_evidence_ids,
+        ),
         task_role=MODEL_INDEPENDENT_ROLE,
         evaluation_role=evaluation_role,
         variant="model_independent",
@@ -2099,6 +2158,7 @@ def run_model_independent_evaluation(
         request_timeout_seconds=request_timeout_seconds,
         gt_stages=None,
         diagnostics=diagnose_compact_evidence_references,
+        max_stage_evidence_ids=max_stage_evidence_ids,
     )
 
 

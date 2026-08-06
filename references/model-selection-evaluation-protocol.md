@@ -9,7 +9,7 @@
 1. **数据协议不统一。** 新 7 组使用 `human_initial` 的临时 severity 投影，`none` 被映射为 `small`；历史标签没有完整的方向字段。旧的单一 severity 分数不能区分“标杆更好”“达人更好”“双方持平”和“无实质差距”。
 2. **判断层仍可能混入抽取误差。** 原有 `model_independent` 结果是“模型自己抽事实，再基于自己的事实判断”，它不是纯 judgment-only。抽取和判断必须分别留存，不能只看最终 severity。
 3. **S4 是结构性弱点。** 已有共同样本中，人工标为 large 的 S4 没有被两个模型正确识别；这应先按“证据结构/效果证明不足”诊断，不能归结为单纯档位偏差。
-4. **S5 的错误是混合类型。** Qwen3.6 的 0/5 不是同一种错误，其中同时存在方向错误、档位错误和评估口径差异。以后不能只报告一个二元准确率。
+4. **S5 的错误是混合类型。** 旧报告中的 Qwen3.6“0/5”不是同一种错误，其中同时存在方向错误、档位错误和评估口径差异；v2 重评分进一步确认其中有 `not_applicable` 与 legacy 合同表达缺口。以后不能只报告一个二元准确率。
 5. **运行完整性独立于语义准确率。** 合同失败、截断和超时不能静默折算为 0 分，也不能从报告中消失；它们必须进入单独的 operational denominator。
 6. **抽取合同存在人为上限风险。** 当前评估合同明确记录每阶段最多 4 个引用、每侧最多 12 个抽取单元、文本长度上限和输出预算。任何修改上限都必须做单变量对照实验，不能事后从失败样本反推模型能力。
 
@@ -17,13 +17,36 @@
 
 ## 已有结果的正确解读
 
-当前能复核的配对结果应分层阅读：
+旧报告里的分数必须与当前 v2 重评分分开保存，不能把旧 projection 当成当前语义结论。
+
+### 旧 projection（仅作历史对照）
 
 | 人工 GT / 样本层 | Qwen3.6 | Qwen3.7 | 解释 |
 |---|---:|---:|---|
 | 新 7 组、38 个有效阶段格 | 20/38 = 52.63% | 17/38 = 44.74% | 相对干净的临时 GT 子集，但不是 blind promotion 证据 |
 | 共同 9 组、50 个有效阶段格 | 24/50 = 48.00% | 22/50 = 44.00% | 4 个 S5 `not_applicable` 格已排除，方向标签仍不完整 |
-| S4 中 GT=`large` 的 6 个格 | 两个模型均未命中 | 两个模型均未命中 | 结构性失败信号，不能被整体均值掩盖 |
+| S4 中 GT=`large` 的 6 个格 | 两个模型均未命中 | 两个模型均未命中 | 结构性失败信号，不能被整体均值掩盖；该表使用旧 severity projection |
+
+### v2 合同重评分（2026-08-06）
+
+输入是同一批 9 组共同样本、54 个阶段格，其中 4 个 `not_applicable`，50 个 GT 有效格。
+其中 36 个格可以进行语义差距比较，14 个格是旧 severity-only 结果无法表达 GT=`none` 的合同表达缺口。
+
+| 指标 | Qwen3.6 | Qwen3.7 | 解释 |
+|---|---:|---:|---|
+| 语义差距准确率 | 16/36 = 44.44% | 12/36 = 33.33% | 排除 14 个合同表达缺口后的当前可比结果 |
+| 合同感知差距准确率 | 16/50 = 32.00% | 12/50 = 24.00% | 把旧合同无法表达 `none` 计为不可表达错误 |
+| 合同表达缺口 | 14/50 = 28.00% | 14/50 = 28.00% | 旧 artifact 的结构限制，不是模型语义错误 |
+| 方向准确率 | 不可计算 | 不可计算 | 9 组 GT 没有可评分 `stage_relations` |
+
+v2 输出协议为 `human_model_alignment_v2`。因此，48.00%/44.00% 仍可作为旧 projection
+的历史参照，但当前根因分析和后续模型比较应使用语义差距准确率、合同表达缺口和运行状态
+三个维度，不能只引用一个 topline 百分比。
+
+S4 的结构性问题在 v2 中仍然清晰：6 个 GT=`large` 的格全部被两个模型漏掉；Qwen3.6
+在 S4 的 7 个语义可比格中命中 1 个，Qwen3.7 命中 0 个。S5 的旧“0/5”也不能继续
+作为单一结论引用：在当前 GT 中 4 个格是 `not_applicable`，剩余 5 个里 2 个属于旧
+合同表达缺口，因此语义可比的分母是 3；Qwen3.6 为 0/3，Qwen3.7 为 1/3。
 
 新 7 组的配对检验 `p≈0.549` 只能表示当前样本不足以区分两个模型，不能表示两个模型等价。共同 9 组的合计分数也不能直接用于生产选型，因为 GT 协议尚未完成冻结，且旧 artifact 与新合同版本并存。
 
@@ -48,6 +71,11 @@
 5. **最后才谈选型。** 只有 fresh blind cohort 同时满足事实召回、方向/大小准确率、S3/S4 结构指标、运行完整性、成本和稳定性门槛，才允许设计 promotion；当前脚本永久写 `promotion_eligible: false`。
 
 历史 v1 artifact 可以用于诊断和兼容读取，但不能与 v2 artifact 静默合并成“当前模型表现”。需要重新运行的地方必须显式标记 schema、source commit、source identity 和协议 hash。
+
+当前 9 组重评分中的 `carslan-b0`、`tashadiyana` 仍来自旧 calibration severity 标签，缺少
+完整 `human_initial` 和 `stage_relations`；它们只能用于兼容性/差距大小诊断，不能被误写成
+完全同协议的 blind GT。`youkoubo-c0/S3` 与 `are_xie/S5` 的永久回归 fixture 仍需在
+`clean_current` 输入上完成明确的重新核验；本次评分合同修复不会替代那项 fixture 复核。
 
 ## 冻结链路
 
@@ -81,6 +109,10 @@ stage_relations = benchmark_better | creator_better | tie | uncertain
 非负且 `start < end` 的秒数区间；`expected_state=absent` 的事件必须带有 `terms_any`，
 用于统计模型是否错误地声称该事实存在。
 
+`stage_relations` 只描述“哪一侧更好/是否持平”的最终比较方向；它不替代 evidence_id 的
+阶段归属、时间重叠或 `evidence_temporal_mismatch` 检查。后者仍是证据事实层的独立时序
+诊断，两者是互补关系，不是同一字段的两种写法。
+
 ### 阶段标签
 
 新评估使用两个独立轴：
@@ -111,9 +143,12 @@ S3 重点看 `subject`、`visibility`、`composition`、`completion`；S4 重点
 
 ### Judgment
 
-- `gap_accuracy`：只在 GT 为有效 `none/small/medium/large`、模型有可解析 gap 的格子计算。
+- `gap_accuracy`：v2 语义差距准确率；只在 GT 为有效 `none/small/medium/large`、模型有可解析 gap，且不是 legacy severity-only 无法表达 `none` 的格子计算。
+- `contract_aware_gap_accuracy`：合同感知差距准确率；保留所有可解析的 GT/模型 gap，并把 legacy severity-only 对 GT=`none` 的格子作为合同表达错误。
+- `contract_representation_gap_rate`：GT 有效格中，模型结果因旧 severity-only 合同无法表达 `none` 的比例。
 - `relation_accuracy`：只在 GT 提供合法 relation、模型提供合法 relation 的格子计算。
 - `exact_direction_and_gap_accuracy`：只在两个轴都可评分的格子中计算方向和大小同时正确。
+- 每阶段输出 `semantic_gap_accuracy`、`relation_accuracy`、错误类型分布和 `gt_large_recall`；`gt_large_unavailable_cells` 单独记录模型失败或不可解析，不把它静默算成漏判。
 - `direction_error`：方向错、大小对。
 - `magnitude_error`：大小错、方向对或 GT 未提供方向。
 - `direction_and_magnitude_error`：两个轴都错。
@@ -136,6 +171,10 @@ S3 重点看 `subject`、`visibility`、`composition`、`completion`；S4 重点
 
 它们只能说明阶段/时间覆盖，不能证明文本语义真实。真正的语义精确率仍需人工复核。工具同时输出每阶段事实质量覆盖率及 S3/S4 的字段分布。
 
+S3 的阶段质量诊断重点是 `subject`、`visibility`、`composition`、`completion`；S4 的重点是
+`visibility`、`proof`、`causal_link`。这些质量字段用于定位抽取事实的缺口，不替代人工阶段
+差距标签。
+
 模型失败、合同失败或缺失产物不会进入抽取召回/精确率的可评分分母；它们只计入 `model_failure_or_missing`，全部人工事件仍保留在 `required_key_events` 中供审计。
 
 ## 合同上限
@@ -148,7 +187,11 @@ S3 重点看 `subject`、`visibility`、`composition`、`completion`；S4 重点
 - 每条抽取 `information` 最多 240 字；
 - reason、rationale、decision basis 的字符上限。
 
-提高 4 或 12 之前，必须做同一输入、同一模型参数、只改变上限的对照，并同时报告样本级失败率和单条错误率。旧结果不因新合同自动重写或重新判定。
+当前生产/评估默认仍是每阶段每侧最多 4 个 `evidence_ids`。脚本支持显式传入
+`--max-stage-evidence-ids 8` 作为诊断实验参数，但这不会改变默认值，也不能与旧结果混用。
+4→8 实验必须使用同一输入、同一模型参数，只改变上限，并同时报告样本级合同失败率、单条
+引用错误率、新增引用的事实覆盖情况和判断结果变化；在实验完成前，不得据此修改生产默认值。
+提高 12 也遵循同一原则。旧结果不因新合同自动重写或重新判定。
 
 ## Promotion 边界
 

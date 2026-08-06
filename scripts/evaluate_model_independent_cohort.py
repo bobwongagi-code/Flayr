@@ -224,6 +224,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="max_completion_tokens",
     )
     parser.add_argument("--request-timeout-seconds", type=int, default=600)
+    parser.add_argument(
+        "--max-stage-evidence-ids",
+        type=int,
+        default=None,
+        help="仅用于4→8等单变量引用上限实验；默认使用合同值4。",
+    )
     return parser
 
 
@@ -231,10 +237,15 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.request_timeout_seconds < 60 or args.request_timeout_seconds > 1800:
         raise SystemExit("--request-timeout-seconds must be between 60 and 1800")
+    if args.max_stage_evidence_ids is not None and not 1 <= args.max_stage_evidence_ids <= 16:
+        raise SystemExit("--max-stage-evidence-ids must be between 1 and 16")
     manifest = _read_manifest(args.manifest.expanduser().resolve())
     raw_root = args.raw_root.expanduser().resolve()
     output_root = args.output_root.expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
+    contract_limits = contract_limits_for_variant("model_independent")
+    if args.max_stage_evidence_ids is not None:
+        contract_limits["max_stage_evidence_ids"] = args.max_stage_evidence_ids
     write_json(
         output_root / "protocol_metadata.json",
         {
@@ -251,10 +262,7 @@ def main() -> int:
             "output_budget": args.output_budget,
             "output_budget_field": args.output_budget_field,
             "judgment_schema_version": MODEL_INDEPENDENT_SCHEMA_VERSION,
-            "contract_limits": {
-                **contract_limits_for_variant("model_independent"),
-                "output_budget": args.output_budget,
-            },
+            "contract_limits": {**contract_limits, "output_budget": args.output_budget},
             "api_endpoint_identity": args.api_url,
             "source_commit": current_code_commit(),
         },
@@ -282,10 +290,7 @@ def main() -> int:
         "models": list(args.models),
         "source_commit": current_code_commit(),
         "judgment_schema_version": MODEL_INDEPENDENT_SCHEMA_VERSION,
-        "contract_limits": {
-            **contract_limits_for_variant("model_independent"),
-            "output_budget": args.output_budget,
-        },
+        "contract_limits": {**contract_limits, "output_budget": args.output_budget},
         "samples": [],
     }
     for sample, base_bundle, source_identity in preflight:
@@ -380,6 +385,7 @@ def main() -> int:
                     output_budget_field=args.output_budget_field,
                     request_timeout_seconds=args.request_timeout_seconds,
                     evaluation_role=args.evaluation_role,
+                    max_stage_evidence_ids=args.max_stage_evidence_ids,
                 )
                 sample_record["results"].append(
                     {
