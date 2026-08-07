@@ -1037,6 +1037,24 @@ def normalize_video_understanding(
                 "functions": normalize_functions(unit.get("functions")),
             }
             normalized_unit.update(normalize_variant_unit_fields(unit))
+            if (
+                allow_trusted_pipeline_metadata
+                and item.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+            ):
+                # A locked Stage1 fact may deliberately preserve ``missing``
+                # (rather than infer ``explicit_absent``) and may retain an
+                # invalid variant shape for audit. The normalized container
+                # loses the raw-field-presence information used to derive
+                # those values, so preserve the already-locked parser result
+                # or a second normalization would change the frozen hash.
+                for field in (
+                    "trust_source_status",
+                    "primary_variant_id",
+                    "variant_attribution_confident",
+                    "variant_data_valid",
+                ):
+                    if field in unit:
+                        normalized_unit[field] = copy.deepcopy(unit[field])
             normalized_units.append(normalized_unit)
         valid_ids = {unit["id"] for unit in normalized_units}
         raw_gate_status = item.get("gate_observation_status") if isinstance(item.get("gate_observation_status"), dict) else {}
@@ -1083,6 +1101,16 @@ def normalize_video_understanding(
             # Recovery 状态由 pipeline 在事实合并后写入；模型回显的同名字段不具备控制权。
             "stage1_recovery": {},
         }
+        if (
+            allow_trusted_pipeline_metadata
+            and item.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+            and isinstance(raw_gate_status, dict)
+        ):
+            # ``gate_observation_status`` is a snapshot of the Stage1 scan,
+            # not a fresh judgment over a later append-only recovery ledger.
+            # Recomputing it from candidate units can change a locked hash
+            # when those candidates intentionally omit optional gate fields.
+            normalized[role]["gate_observation_status"] = copy.deepcopy(raw_gate_status)
     for role, metadata in (trusted_stage1_acquisition or {}).items():
         if role in normalized and isinstance(metadata, dict):
             normalized[role]["stage1_acquisition"] = copy.deepcopy(metadata)
@@ -1209,12 +1237,42 @@ def normalize_analysis_result(
     stage_analysis = result["stage_analysis"]
     improvements = result["improvements"]
     executive_summary = str(result.get("one_line_summary") or result.get("executive_summary") or "").strip()
+    comparison_eligibility = normalize_comparison_eligibility(
+        result.get("comparison_contract") or result.get("comparison_eligibility")
+    )
+    stage_eligibility = comparison_eligibility.get("stage_eligibility")
+    stage_eligibility = stage_eligibility if isinstance(stage_eligibility, dict) else {}
 
     normalized_stages = []
     for index, item in enumerate(stage_analysis):
         if not isinstance(item, dict):
             raise SystemExit("Each stage_analysis item must be an object.")
         stage_name, _default_range, core_question = STAGES[index]
+        stage_code = f"S{index + 1}"
+        stage_scope = stage_eligibility.get(stage_code)
+        stage_scope_status = (
+            str(stage_scope.get("status") or "").strip().lower()
+            if isinstance(stage_scope, dict)
+            else ""
+        )
+        segmented_result = result.get("stage2_pipeline_version") == "segmented_stage_v1"
+        if stage_scope_status == "not_applicable":
+            comparison_status = "not_applicable"
+            model_comparison_status = stage_scope_status
+        elif stage_scope_status == "not_comparable":
+            comparison_status = "not_directly_comparable"
+            model_comparison_status = stage_scope_status
+        elif segmented_result:
+            # In the segmented contract, comparison scope is a pipeline-owned
+            # decision. A model cannot close a direct/structural stage by
+            # returning a similarly named field and thereby bypass the
+            # evidence handoff gate.
+            comparison_status = ""
+            model_comparison_status = ""
+        else:
+            # Preserve legacy result compatibility for non-segmented imports.
+            comparison_status = str(item.get("comparison_status") or "").strip().lower()
+            model_comparison_status = str(item.get("model_comparison_status") or "").strip().lower()
         # Stage-specific ranges are evidence, not presentation defaults. Missing
         # or malformed ranges remain empty and are rejected by time coherence
         # validation instead of being silently assigned a catalog window.
@@ -1267,9 +1325,21 @@ def normalize_analysis_result(
                 ),
                 "analysis_status": normalize_choice(
                     item.get("analysis_status"),
-                    {"grounded", "handoff_loss", "evidence_blocked", "unknown"},
+                    {
+                        "grounded",
+                        "handoff_loss",
+                        "evidence_blocked",
+                        "not_comparable",
+                        "not_applicable",
+                        "unknown",
+                    },
                     "unknown",
                 ),
+                # Code-owned comparison scope survives normalization so the
+                # finalizer can replay an already-normalized segmented result
+                # without turning a closed stage back into a handoff failure.
+                "comparison_status": comparison_status,
+                "model_comparison_status": model_comparison_status,
                 "relation": normalize_choice(
                     item.get("relation"),
                     {"creator_better", "benchmark_better", "equivalent", "uncertain"},
@@ -1389,9 +1459,7 @@ def normalize_analysis_result(
         "comparison_contract": normalize_comparison_contract(
             result.get("comparison_contract") or result.get("comparison_eligibility")
         ),
-        "comparison_eligibility": normalize_comparison_eligibility(
-            result.get("comparison_contract") or result.get("comparison_eligibility")
-        ),
+        "comparison_eligibility": comparison_eligibility,
         "product_visibility": normalize_product_visibility(result.get("product_visibility")),
         "category_profile": normalize_category_profile(result.get("category_profile")),
         "product_profile": normalize_product_profile(result.get("product_profile")),

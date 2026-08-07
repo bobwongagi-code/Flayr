@@ -97,6 +97,11 @@ _RUN_OUTPUT_FILES = frozenset(
         "raw_model_response.json",
         "report.html",
         "validated_normalized_result.json",
+        "stage1_to_stage2_handoff.json",
+        "stage_group_S1_S2.json",
+        "stage_group_S3_S4.json",
+        "stage_group_S5.json",
+        "stage_group_S6.json",
     }
 )
 _RUN_OUTPUT_PREFIXES = (

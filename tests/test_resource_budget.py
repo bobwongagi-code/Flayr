@@ -16,6 +16,9 @@ from flayr_core.utils import cleanup_stale_temp_entries, run_command
 
 
 class ResourceBudgetTests(unittest.TestCase):
+    def test_default_llm_budget_covers_frozen_segmented_path(self) -> None:
+        self.assertEqual(ResourceLimits().max_llm_calls, 32)
+
     def test_limits_reject_nonfinite_values(self) -> None:
         with self.assertRaises(ValueError):
             ResourceLimits(max_total_wall_time=math.nan)

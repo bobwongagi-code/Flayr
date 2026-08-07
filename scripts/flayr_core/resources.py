@@ -70,7 +70,12 @@ class ResourceLimits:
     max_source_duration: float = 600.0
     max_extracted_frames: int = 1500
     max_ocr_calls: int = 80
-    max_llm_calls: int = 20
+    # The frozen segmented path needs up to 19 nominal calls (foundation,
+    # both Stage1-A extractions, four Stage1-B groups per side, bounded
+    # recovery, eligibility, four Stage2 groups, and synthesis). Leave room
+    # for a small number of transport retries without allowing an unbounded
+    # retry storm; upload, cost, and wall-clock limits remain independent.
+    max_llm_calls: int = 32
     max_single_request_bytes: int = 64 * MIB
     max_total_uploaded_bytes: int = 256 * MIB
     max_download_bytes: int = 128 * MIB

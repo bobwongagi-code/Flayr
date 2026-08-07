@@ -413,6 +413,67 @@ def _clear_segmented_unresolved_severity(
             trace["status"] = str(stage.get("analysis_status") or "evidence_blocked")
 
 
+def _reproject_segmented_stage_results(
+    result: dict[str, Any],
+    facts: dict[str, Any],
+    comparison_eligibility: dict[str, Any] | None,
+) -> None:
+    """Rebuild code-owned Stage2 projections from locked Stage1 facts.
+
+    A segmented result can enter through the live runner or through
+    ``--analysis-result-json``.  The latter may contain a pre-finalization
+    snapshot produced by an older build, so relying on the snapshot's copied
+    IDs/statuses would make finalization order-dependent.  Reproject only the
+    mechanical boundary fields; semantic fields remain the model's input to
+    ``_normalize_segmented_stage``.
+    """
+    if not isinstance(result, dict) or not isinstance(facts, dict):
+        return
+    if str(result.get("stage2_pipeline_version") or "").strip() != "segmented_stage_v1":
+        return
+    stages = result.get("stage_analysis")
+    if not isinstance(stages, list):
+        return
+    projected: list[Any] = []
+    for item in stages:
+        if not isinstance(item, dict):
+            projected.append(item)
+            continue
+        code = _segmented_stage_code(item.get("stage"))
+        if code not in _SEGMENTED_STAGE_NAMES:
+            projected.append(item)
+            continue
+        projected.append(
+            _normalize_segmented_stage(
+                item,
+                code,
+                facts,
+                comparison_eligibility,
+            )
+        )
+    result["stage_analysis"] = projected
+
+
+def _authoritative_segmented_comparison_contract(
+    analysis: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the current-run comparison scope before accepting an import.
+
+    ``analysis`` is produced by the code-owned preflight.  ``result`` may be
+    a model response or an externally supplied snapshot and is only a
+    compatibility fallback for legacy callers that do not carry preflight
+    metadata.
+    """
+    for source in (
+        analysis.get("comparison_eligibility") or analysis.get("comparison_contract"),
+        result.get("comparison_eligibility") or result.get("comparison_contract"),
+    ):
+        if isinstance(source, dict) and source:
+            return copy.deepcopy(source)
+    return {}
+
+
 def finalize_analysis_result(
     result: dict[str, Any],
     analysis: dict[str, Any],
@@ -426,6 +487,24 @@ def finalize_analysis_result(
         _write_raw_model_response(artifact_dir, result=result)
     audit = PostprocessAudit() if artifact_dir is not None else None
     raw_snapshot = copy.deepcopy(result)
+
+    segmented_pipeline = (
+        str(analysis.get("stage2_pipeline_version") or "").strip() == "segmented_stage_v1"
+        or str(result.get("stage2_pipeline_version") or "").strip() == "segmented_stage_v1"
+    )
+    analysis_comparison_contract = _authoritative_segmented_comparison_contract(analysis, result)
+    if (
+        segmented_pipeline
+        and isinstance(analysis_comparison_contract, dict)
+        and analysis_comparison_contract
+    ):
+        # The preflight contract belongs to the current run, not to a model
+        # response or an imported result file. Keep the result fields as a
+        # compatibility view, but replace them before reprojection and
+        # normalization so an external artifact cannot close or reopen a
+        # comparison scope.
+        result["comparison_contract"] = copy.deepcopy(analysis_comparison_contract)
+        result["comparison_eligibility"] = copy.deepcopy(analysis_comparison_contract)
 
     trusted_stage1_acquisition: dict[str, dict[str, Any]] = {}
     trusted_stage1_recovery: dict[str, dict[str, Any]] = {}
@@ -460,6 +539,19 @@ def finalize_analysis_result(
         if audit is not None:
             audit.record(before, result, "pipeline.lock_video_understanding")
 
+        # The same deterministic projection must run for live results and
+        # imported/offline snapshots.  Otherwise a snapshot created before a
+        # comparison-scope fix can lose code-owned IDs and fail in finalization
+        # even though the locked Stage1 ledger is valid.
+        _reproject_segmented_stage_results(
+            result,
+            locked_video_understanding,
+            analysis_comparison_contract
+            or result.get("comparison_eligibility")
+            or result.get("comparison_contract")
+            or {},
+        )
+
     before_normalize = copy.deepcopy(result) if audit is not None else None
     normalized = normalize_analysis_result(
         result,
@@ -483,10 +575,7 @@ def finalize_analysis_result(
                     normalized_side["evidence_budget_exceeded"] = bool(
                         locked_side.get("evidence_budget_exceeded") is True
                     )
-    segmented = (
-        str(analysis.get("stage2_pipeline_version") or "").strip() == "segmented_stage_v1"
-        or str(normalized.get("stage2_pipeline_version") or "").strip() == "segmented_stage_v1"
-    )
+    segmented = segmented_pipeline or str(normalized.get("stage2_pipeline_version") or "").strip() == "segmented_stage_v1"
     if segmented:
         normalized["stage2_pipeline_version"] = "segmented_stage_v1"
         _status, unresolved = _refresh_segmented_pipeline_status(normalized)
@@ -925,6 +1014,71 @@ def _is_valid_foundation_cache(value: dict[str, Any]) -> bool:
     )
 
 
+def _video_fact_cache_stage1_coverage_issues(value: dict[str, Any]) -> list[str]:
+    """Validate a cached Stage1-C result without requiring global coverage.
+
+    Stage1-C is intentionally targeted.  A cache containing only the stages
+    selected for one bounded recovery is complete for that recovery, even
+    though the legacy ``stage1_coverage_audit_issues(side)`` helper quite
+    correctly rejects it when asked to prove all six stages.  Cache reuse must
+    also accept a typed unresolved recovery: retrying it would violate the
+    one-recovery budget and turn an honest limitation into repeated LLM calls.
+    """
+    if value.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+        return []
+    recovery = value.get("stage1_recovery")
+    recovery = recovery if isinstance(recovery, dict) else {}
+    status = str(recovery.get("status") or "").strip().lower()
+    if status == "not_needed":
+        return []
+    if status not in {"focused_recovery", "focused_recovery_with_unresolved"}:
+        return stage1_coverage_audit_issues(value)
+
+    valid_stages = set(stage_codes())
+    targets = list(dict.fromkeys(
+        code
+        for code in (normalize_stage_code(item) for item in recovery.get("target_stages") or [])
+        if code in valid_stages
+    ))
+    unresolved = set(
+        code
+        for code in (normalize_stage_code(item) for item in recovery.get("unresolved_stages") or [])
+        if code in valid_stages
+    )
+    issues: list[str] = []
+    if not targets:
+        issues.append("stage1_recovery_targets_missing")
+        return issues
+    if status == "focused_recovery" and unresolved:
+        issues.append("stage1_recovery_unresolved_metadata_mismatch")
+    if status == "focused_recovery_with_unresolved" and not unresolved:
+        issues.append("stage1_recovery_unresolved_stages_missing")
+
+    audit = normalize_stage1_coverage_audit(
+        value.get("stage1_coverage_audit"),
+        {
+            str(item.get("id") or "").strip()
+            for item in value.get("evidence_units") or []
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        },
+    )
+    audit_targets = set(audit.get("target_stages") or [])
+    if audit_targets != set(targets):
+        issues.append("stage1_recovery_audit_scope_mismatch")
+
+    for stage in targets:
+        stage_issues = stage1_coverage_audit_issues(value, stage)
+        if stage in unresolved:
+            # The unresolved stage must remain visibly unresolved.  A cache
+            # claiming unresolved while the audit is actually closed is
+            # metadata corruption, not a reason to silently promote it.
+            if not stage_issues:
+                issues.append(f"{stage}:stage1_recovery_unresolved_not_observed")
+        elif stage_issues:
+            issues.extend(stage_issues)
+    return list(dict.fromkeys(issues))
+
+
 def _is_valid_video_fact_cache(role: str, value: dict[str, Any], analysis: dict[str, Any]) -> bool:
     try:
         normalized = normalize_video_fact_result(
@@ -941,11 +1095,11 @@ def _is_valid_video_fact_cache(role: str, value: dict[str, Any], analysis: dict[
         qualification = value.get("stage1_qualification")
         if not isinstance(qualification, dict) or qualification.get("status") != "completed":
             return False
-        # An active cache without the independent semantic coverage pass is
-        # stale even if its primary stage checks look complete. Re-run the
-        # fact path instead of silently treating a model self-report as recall
-        # evidence.
-        if stage1_coverage_audit_issues(value):
+        # Stage1-C is a bounded targeted recovery, so validate its declared
+        # scope rather than requiring a second full-video audit.  A typed
+        # unresolved result is reusable too; re-running it would exceed the
+        # one-recovery budget and conceal the original limitation.
+        if _video_fact_cache_stage1_coverage_issues(value):
             return False
     return True
 
@@ -1099,6 +1253,7 @@ def _normalize_segmented_stage(
     raw: dict[str, Any],
     stage: str,
     facts: dict[str, Any],
+    comparison_eligibility: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project a small Stage2 judgment into the legacy report shape.
 
@@ -1107,6 +1262,15 @@ def _normalize_segmented_stage(
     are rebuilt from the qualified Stage1 ledger so a prompt violation cannot
     reclaim a code-owned field.
     """
+    stage_contract = (
+        comparison_eligibility.get("stage_eligibility", {}).get(stage)
+        if isinstance(comparison_eligibility, dict)
+        and isinstance(comparison_eligibility.get("stage_eligibility"), dict)
+        and isinstance(comparison_eligibility.get("stage_eligibility", {}).get(stage), dict)
+        else {}
+    )
+    comparison_status = str(stage_contract.get("status") or "").strip().lower()
+    scope_closed = comparison_status in {"not_comparable", "not_applicable"}
     output: dict[str, Any] = {
         "stage": _SEGMENTED_STAGE_NAMES[stage],
         "core_question": _SEGMENTED_STAGE_QUESTIONS[stage],
@@ -1115,6 +1279,15 @@ def _normalize_segmented_stage(
         "model_gap_magnitude": "uncertain",
         "judgment_reason": str(raw.get("judgment_reason") or raw.get("reason") or "").strip(),
     }
+    if scope_closed:
+        output["comparison_status"] = (
+            "not_applicable" if comparison_status == "not_applicable" else "not_directly_comparable"
+        )
+        output["model_comparison_status"] = comparison_status
+        output["judgment_reason"] = (
+            output["judgment_reason"]
+            or str(stage_contract.get("basis") or "该阶段不在当前比较合同范围内。").strip()
+        )
     role_ids: dict[str, list[str]] = {}
     readiness: dict[str, str] = {}
     for role in ("benchmark", "creator"):
@@ -1126,6 +1299,11 @@ def _normalize_segmented_stage(
         readiness[role] = current_readiness
         if current_readiness != "present":
             ids = []
+        elif scope_closed:
+            # Closed comparison scopes still expose the qualified Stage1
+            # ledger for audit. They must not depend on the model repeating
+            # IDs for a stage that is intentionally not being judged.
+            ids = sorted(qualified)
         role_ids[role] = list(dict.fromkeys(ids))
         units = _segmented_qualified_units(facts, role, stage, role_ids[role])
         output[key] = role_ids[role]
@@ -1155,11 +1333,18 @@ def _normalize_segmented_stage(
             "",
         )
 
-    missing_model_references = any(
+    missing_model_references = not scope_closed and any(
         readiness[role] == "present" and not role_ids[role]
         for role in ("benchmark", "creator")
     )
-    if missing_model_references:
+    if scope_closed:
+        output["relation"] = "uncertain"
+        output["model_gap_magnitude"] = "uncertain"
+        output["stage_state"] = "unknown"
+        output["analysis_status"] = (
+            "not_applicable" if comparison_status == "not_applicable" else "not_comparable"
+        )
+    elif missing_model_references:
         output["relation"] = "uncertain"
         output["model_gap_magnitude"] = "uncertain"
         output["stage_state"] = "unknown"
@@ -1242,19 +1427,6 @@ def _normalize_segmented_stage(
     return output
 
 
-def _segmented_unknown_stage(stage: str, reason: str) -> dict[str, Any]:
-    return _normalize_segmented_stage(
-        {
-            "stage": _SEGMENTED_STAGE_NAMES[stage],
-            "relation": "uncertain",
-            "model_gap_magnitude": "uncertain",
-            "judgment_reason": reason,
-        },
-        stage,
-        {"benchmark": {}, "creator": {}},
-    )
-
-
 def _deterministic_product_visibility(facts: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
     """Project product visibility from immutable creator facts, without LLM estimation."""
     side = facts.get("creator") if isinstance(facts.get("creator"), dict) else {}
@@ -1334,6 +1506,13 @@ def _segmented_stage_unresolved(stage_results: list[dict[str, Any]]) -> list[str
         if not isinstance(stage, dict):
             continue
         code = _segmented_stage_code(stage.get("stage"))
+        comparison_status = str(stage.get("comparison_status") or "").strip().lower()
+        if comparison_status in {"not_directly_comparable", "not_applicable"}:
+            # A closed comparison scope is an intentional terminal state, not
+            # a failed Stage2 handoff. It must remain explicit in the report,
+            # but should not make an otherwise complete segmented run appear
+            # degraded.
+            continue
         status = str(stage.get("analysis_status") or "unknown").strip().lower()
         stage_state = str(stage.get("stage_state") or "unknown").strip().lower()
         magnitude = str(stage.get("model_gap_magnitude") or "unknown").strip().lower()
@@ -1350,15 +1529,11 @@ def _segmented_stage_unresolved(stage_results: list[dict[str, Any]]) -> list[str
     return list(dict.fromkeys(unresolved))
 
 
-def run_segmented_stage_pipeline(
-    args: argparse.Namespace,
-    analysis: dict[str, Any],
-    analysis_input: str,
+def _build_stage1_to_stage2_handoff(
     facts: dict[str, Any],
-    run_dir: Path,
-    api_key: str,
+    analysis: dict[str, Any],
 ) -> dict[str, Any]:
-    """Run the frozen Stage2/Stage3 path without whole-object model repair."""
+    """Build the immutable, code-owned Stage1-to-Stage2 handoff record."""
     handoff: dict[str, Any] = {
         "version": "stage1_to_stage2_handoff_v1",
         "pipeline": "segmented_stage_v1",
@@ -1369,7 +1544,11 @@ def run_segmented_stage_pipeline(
         view = stage_analysis_evidence_view(side)
         projection = stage1_qualification_projection(side)
         video_info = analysis.get("videos", {}).get(role, {}) if isinstance(analysis.get("videos"), dict) else {}
-        preprocess_fingerprint = video_info.get("preprocess_fingerprint") if isinstance(video_info.get("preprocess_fingerprint"), dict) else {}
+        preprocess_fingerprint = (
+            video_info.get("preprocess_fingerprint")
+            if isinstance(video_info.get("preprocess_fingerprint"), dict)
+            else {}
+        )
         handoff["roles"][role] = {
             "ledger_ref": {
                 "version": side.get("evidence_set_version") or STAGE_EVIDENCE_SNAPSHOT_VERSION,
@@ -1395,12 +1574,92 @@ def run_segmented_stage_pipeline(
                 for stage in stage_codes()
             },
         }
+    return handoff
+
+
+def _stage1_to_stage2_handoff_issues(
+    handoff: dict[str, Any],
+    facts: dict[str, Any],
+    analysis: dict[str, Any],
+) -> list[str]:
+    """Check that the persisted handoff is a lossless projection of Stage1."""
+    if not isinstance(handoff, dict):
+        return ["handoff_not_object"]
+    roles = handoff.get("roles") if isinstance(handoff.get("roles"), dict) else {}
+    issues: list[str] = []
+    for role in ("benchmark", "creator"):
+        side = facts.get(role) if isinstance(facts.get(role), dict) else {}
+        actual = roles.get(role) if isinstance(roles.get(role), dict) else None
+        if actual is None:
+            issues.append(f"{role}:handoff_role_missing")
+            continue
+        view = stage_analysis_evidence_view(side)
+        expected = {
+            "ledger_ref": {
+                "version": side.get("evidence_set_version") or STAGE_EVIDENCE_SNAPSHOT_VERSION,
+                "sha256": side.get("evidence_set_sha256") or "",
+            },
+            "ledger_manifest": stage1_ledger_manifest(side),
+            "stage1_projection": stage1_qualification_projection(side),
+            "ledger_hash": side.get("evidence_set_sha256") or "",
+            "qualified_evidence_ids": view.get("qualified_stage_evidence_ids") or {},
+            "candidate_evidence_ids": view.get("candidate_evidence_ids_by_stage") or {},
+            "candidate_observations_by_stage": view.get("candidate_observations_by_stage") or {},
+            "stage_readiness": view.get("stage_evidence_readiness") or {},
+            "coverage_summary": {
+                stage: {
+                    "readiness": (view.get("stage_evidence_readiness") or {}).get(stage, "unknown"),
+                    "qualified_count": len((view.get("qualified_stage_evidence_ids") or {}).get(stage) or []),
+                    "candidate_count": len((view.get("candidate_evidence_ids_by_stage") or {}).get(stage) or []),
+                }
+                for stage in stage_codes()
+            },
+        }
+        for field, expected_value in expected.items():
+            if actual.get(field) != expected_value:
+                issues.append(f"{role}:handoff_field_mismatch:{field}")
+        video_info = analysis.get("videos", {}).get(role, {}) if isinstance(analysis.get("videos"), dict) else {}
+        fingerprint = video_info.get("preprocess_fingerprint") if isinstance(video_info.get("preprocess_fingerprint"), dict) else {}
+        expected_fingerprints = {
+            "source_video_sha256": _source_video_hash(analysis, role),
+            "preprocess_fingerprint_sha256": _stable_digest(fingerprint),
+        }
+        if actual.get("source_fingerprints") != expected_fingerprints:
+            issues.append(f"{role}:handoff_field_mismatch:source_fingerprints")
+    return list(dict.fromkeys(issues))
+
+
+def run_segmented_stage_pipeline(
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    analysis_input: str,
+    facts: dict[str, Any],
+    run_dir: Path,
+    api_key: str,
+) -> dict[str, Any]:
+    """Run the frozen Stage2/Stage3 path without whole-object model repair."""
+    handoff = _build_stage1_to_stage2_handoff(facts, analysis)
+    handoff_issues = _stage1_to_stage2_handoff_issues(handoff, facts, analysis)
     handoff["integrity"] = {
         "algorithm": "sha256",
-        "sha256": _stable_digest({"version": handoff["version"], "pipeline": handoff["pipeline"], "roles": handoff["roles"]}),
+        "sha256": _stable_digest(
+            {
+                "version": handoff["version"],
+                "pipeline": handoff["pipeline"],
+                "roles": handoff["roles"],
+                "validation_status": "failed" if handoff_issues else "passed",
+                "validation_issues": handoff_issues,
+            }
+        ),
+        "validation_status": "failed" if handoff_issues else "passed",
+        "validation_issues": handoff_issues,
         "preservation_target": "100% of Stage1 ledger IDs and hashes are represented in the handoff",
     }
     write_json(run_dir / "stage1_to_stage2_handoff.json", handoff)
+    if handoff_issues:
+        raise SystemExit(
+            "Stage1 到 Stage2 交接校验失败：" + ", ".join(handoff_issues)
+        )
     stage_results: list[dict[str, Any]] = []
     group_records: list[dict[str, Any]] = []
     any_group_failed = False
@@ -1431,7 +1690,11 @@ def run_segmented_stage_pipeline(
             }
             if set(by_code) != set(target):
                 raise SystemExit(f"阶段组 {label} 返回阶段不完整：期待 {target}，实际 {sorted(by_code)}")
-            projected = [_normalize_segmented_stage(by_code[code], code, facts) for code in target]
+            comparison_eligibility = _authoritative_segmented_comparison_contract(analysis, {})
+            projected = [
+                _normalize_segmented_stage(by_code[code], code, facts, comparison_eligibility)
+                for code in target
+            ]
             record.update({"status": "completed", "stages": target, "response_sha256": _stable_digest(parsed)})
             stage_results.extend(projected)
         except (OSError, ValueError, SystemExit, json.JSONDecodeError) as exc:
@@ -1442,6 +1705,7 @@ def run_segmented_stage_pipeline(
                     {"stage": _SEGMENTED_STAGE_NAMES[code], "relation": "uncertain", "model_gap_magnitude": "uncertain", "judgment_reason": f"阶段组调用失败：{exc}"},
                     code,
                     facts,
+                    _authoritative_segmented_comparison_contract(analysis, {}),
                 )
                 for code in target
             ]

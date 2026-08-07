@@ -13,7 +13,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from flayr_core.artifacts import parse_time_range_seconds
-from flayr_core.llm.parse import normalize_video_fact_result, normalize_video_understanding
+from flayr_core.llm.parse import (
+    normalize_analysis_result,
+    normalize_video_fact_result,
+    normalize_video_understanding,
+)
 from flayr_core.llm.pipeline import (
     _visual_input_timestamps,
     _mark_video_fact_coverage_audit_failed,
@@ -23,6 +27,11 @@ from flayr_core.llm.pipeline import (
     _materialize_stage_recovery_audit,
     _maybe_recover_video_facts,
     _normalize_segmented_stage,
+    _reproject_segmented_stage_results,
+    _authoritative_segmented_comparison_contract,
+    _build_stage1_to_stage2_handoff,
+    _stage1_to_stage2_handoff_issues,
+    _video_fact_cache_stage1_coverage_issues,
     _run_stage1_qualification,
     detect_low_confidence_stages,
 )
@@ -669,6 +678,169 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertNotEqual(projected["creator_summary"], "模型伪造的摘要")
         self.assertEqual(projected["severity"], "large")
         self.assertEqual(projected["model_severity"], "large")
+
+    def test_closed_comparison_scope_keeps_qualified_facts_without_model_references(self) -> None:
+        facts = {
+            "benchmark": self._active_side("B", "present"),
+            "creator": self._active_side("C", "present"),
+        }
+        projected = _normalize_segmented_stage(
+            {
+                "stage": "S6 CTA",
+                "stage_state": "completed",
+                "relation": "benchmark_better",
+                "model_gap_magnitude": "large",
+                "judgment_reason": "该阶段不可比",
+            },
+            "S6",
+            facts,
+            {
+                "stage_eligibility": {
+                    "S6": {
+                        "status": "not_comparable",
+                        "basis": "双方没有共同的信任材料合同",
+                    }
+                }
+            },
+        )
+
+        self.assertEqual(projected["comparison_status"], "not_directly_comparable")
+        self.assertEqual(projected["analysis_status"], "not_comparable")
+        self.assertEqual(projected["relation"], "uncertain")
+        self.assertEqual(projected["model_gap_magnitude"], "uncertain")
+        self.assertTrue(projected["benchmark_evidence_ids"])
+        self.assertTrue(projected["creator_evidence_ids"])
+
+    def test_segmented_normalization_does_not_trust_model_comparison_status(self) -> None:
+        result = normalize_analysis_result(
+            {
+                "stage2_pipeline_version": "segmented_stage_v1",
+                "comparison_eligibility": {
+                    "scope": "same_product",
+                    "stage_eligibility": {
+                        stage: {"status": "direct", "basis": "同一任务"}
+                        for stage in stage_codes()
+                    }
+                },
+                "stage_analysis": [
+                    {
+                        "stage": f"S{index}",
+                        "comparison_status": "not_directly_comparable",
+                        "model_comparison_status": "not_comparable",
+                        "stage_state": "unknown",
+                    }
+                    for index in range(1, 7)
+                ],
+                "improvements": [{"title": "fixture", "time_range": "0s - 1s"}],
+            }
+        )
+        self.assertTrue(all(
+            not stage.get("comparison_status")
+            and not stage.get("model_comparison_status")
+            for stage in result["stage_analysis"]
+        ))
+
+    def test_segmented_import_uses_current_run_comparison_contract(self) -> None:
+        result_contract = {
+            "stage_eligibility": {
+                stage: {"status": "not_comparable"}
+                for stage in stage_codes()
+            }
+        }
+        analysis_contract = {
+            "stage_eligibility": {
+                stage: {"status": "direct"}
+                for stage in stage_codes()
+            }
+        }
+        selected = _authoritative_segmented_comparison_contract(
+            {"comparison_eligibility": analysis_contract},
+            {"comparison_eligibility": result_contract},
+        )
+        self.assertEqual(
+            selected["stage_eligibility"]["S3"]["status"],
+            "direct",
+        )
+
+    def test_targeted_recovery_cache_scope_is_reusable_without_global_audit(self) -> None:
+        side = self._active_side("C", "present")
+        full_audit = side["stage1_coverage_audit"]
+        side["stage1_coverage_audit"] = {
+            **full_audit,
+            "target_stages": ["S6"],
+            "stages": {"S6": full_audit["stages"]["S6"]},
+        }
+        side["stage1_recovery"] = {
+            "source": "pipeline",
+            "status": "focused_recovery",
+            "target_stages": ["S6"],
+            "unresolved_stages": [],
+        }
+        self.assertTrue(stage1_coverage_audit_issues(side))
+        self.assertEqual(_video_fact_cache_stage1_coverage_issues(side), [])
+
+    def test_unresolved_targeted_recovery_cache_is_reusable_as_typed_unknown(self) -> None:
+        side = self._active_side("C")
+        full_audit = side["stage1_coverage_audit"]
+        unresolved_audit = copy.deepcopy(full_audit["stages"]["S6"])
+        unresolved_audit.update({"status": "unknown", "coverage": "unknown", "evidence_ids": []})
+        side["stage1_coverage_audit"] = {
+            **full_audit,
+            "status": "partial",
+            "target_stages": ["S6"],
+            "stages": {"S6": unresolved_audit},
+        }
+        side["stage1_recovery"] = {
+            "source": "pipeline",
+            "status": "focused_recovery_with_unresolved",
+            "target_stages": ["S6"],
+            "unresolved_stages": ["S6"],
+        }
+        self.assertEqual(_video_fact_cache_stage1_coverage_issues(side), [])
+
+    def test_reprojection_restores_code_owned_closed_stage_projection(self) -> None:
+        facts = {
+            "benchmark": self._active_side("B", "present"),
+            "creator": self._active_side("C", "present"),
+        }
+        result = {
+            "stage2_pipeline_version": "segmented_stage_v1",
+            "stage_analysis": [
+                {
+                    "stage": "S6 CTA",
+                    "stage_state": "completed",
+                    "relation": "benchmark_better",
+                    "model_gap_magnitude": "large",
+                    "judgment_reason": "不可比",
+                }
+            ],
+        }
+        _reproject_segmented_stage_results(
+            result,
+            facts,
+            {"stage_eligibility": {"S6": {"status": "not_comparable"}}},
+        )
+        stage = result["stage_analysis"][0]
+        self.assertEqual(stage["comparison_status"], "not_directly_comparable")
+        self.assertEqual(stage["analysis_status"], "not_comparable")
+        self.assertEqual(stage["relation"], "uncertain")
+        self.assertEqual(stage["benchmark_evidence_ids"], ["B6"])
+        self.assertEqual(stage["creator_evidence_ids"], ["C6"])
+
+    def test_stage1_to_stage2_handoff_is_lossless_and_tamper_detectable(self) -> None:
+        facts = {
+            "benchmark": self._active_side("B", "present"),
+            "creator": self._active_side("C", "present"),
+        }
+        analysis = self._analysis()
+        handoff = _build_stage1_to_stage2_handoff(facts, analysis)
+        self.assertEqual(_stage1_to_stage2_handoff_issues(handoff, facts, analysis), [])
+
+        handoff["roles"]["creator"]["ledger_manifest"]["units"].pop()
+        self.assertIn(
+            "creator:handoff_field_mismatch:ledger_manifest",
+            _stage1_to_stage2_handoff_issues(handoff, facts, analysis),
+        )
 
     def test_active_contract_rejects_forbidden_field_in_imported_side(self) -> None:
         side = self._active_side("C")
@@ -2812,6 +2984,46 @@ class StageEvidenceContractTests(unittest.TestCase):
         renormalized = normalize_video_understanding({"benchmark": side})["benchmark"]
         self.assertEqual(stage_evidence_sha256(renormalized), expected)
         self.assertEqual(stage_evidence_snapshot_issues(renormalized, expected_sha256=expected), [])
+
+    def test_locked_fact_derivations_survive_trusted_normalization(self) -> None:
+        side = normalize_video_understanding(
+            {"creator": self._active_side("C")},
+            allow_trusted_pipeline_metadata=True,
+        )["creator"]
+        side["evidence_budget_exceeded"] = False
+        side["stage1_acquisition"] = {}
+        side["stage1_qualification"] = {}
+        side["stage1_coverage_audit"] = {}
+        unit = side["evidence_units"][0]
+        unit["trust_source_status"] = "missing"
+        unit["variant_data_valid"] = False
+        side["gate_observation_status"] = {
+            "selling_point_route": "complete",
+            "variant_focus": "complete",
+            "attention_scan": "complete",
+        }
+        freeze_stage_evidence(side)
+        expected = side["evidence_set_sha256"]
+
+        renormalized = normalize_video_understanding(
+            {"creator": side},
+            trusted_stage1_acquisition={"creator": {}},
+            trusted_stage1_qualification={"creator": {}},
+            trusted_stage1_coverage_audit={"creator": {}},
+            allow_trusted_pipeline_metadata=True,
+        )["creator"]
+
+        self.assertEqual(renormalized["evidence_units"][0]["trust_source_status"], "missing")
+        self.assertFalse(renormalized["evidence_units"][0]["variant_data_valid"])
+        self.assertEqual(
+            renormalized["gate_observation_status"],
+            side["gate_observation_status"],
+        )
+        self.assertEqual(stage_evidence_sha256(renormalized), expected)
+        self.assertEqual(
+            stage_evidence_snapshot_issues(renormalized, expected_sha256=expected),
+            [],
+        )
 
     def test_active_boundary_hint_does_not_bypass_stage_gate_with_raw_transcript(self) -> None:
         side = self._active_side("C", "present")
