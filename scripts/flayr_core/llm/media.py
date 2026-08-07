@@ -7,12 +7,14 @@ image_url / input_audio / video_url 块；不写 prompt，不碰业务判断规�
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any
 
 from ..artifacts import (
     format_seconds,
     get_analysis_frame_entries,
     get_focus_frame_entries,
+    get_stage_frame_entries,
     parse_time_range_seconds,
     parse_timestamp_seconds,
     resolve_artifact_path,
@@ -44,9 +46,83 @@ def select_role_visual_inputs(info: dict[str, Any], role: str, image_limit: int)
                 "label": f"{role} {entry.get('stage') or entry.get('label', 'frame')}{marker} {frame.name}",
                 "data_url": image_to_data_url(frame),
                 "timestamp_seconds": entry.get("timestamp_seconds"),
+                "source_frame_timestamps": list(entry.get("source_frame_timestamps") or []),
             }
         )
     return selected[:image_limit]
+
+
+def select_stage_recovery_visual_inputs(
+    info: dict[str, Any],
+    role: str,
+    target_stages: list[str],
+    image_limit: int,
+) -> list[dict[str, Any]]:
+    """Select a bounded, stage-focused view for the one Stage1-C pass.
+
+    The initial extractor gets the canonical whole-video selection. Recovery
+    must use the stage-frame manifest instead of silently sending that same
+    selection and hoping a different instruction repairs the blind spot.
+    """
+    if image_limit <= 0:
+        return []
+    targets = {
+        stage
+        for value in target_stages
+        if (stage := _stage_token(value)) is not None
+    }
+    entries = [
+        entry
+        for entry in get_stage_frame_entries(info)
+        if (stage := _stage_token(entry.get("stage"))) in targets
+    ]
+    if not entries:
+        return select_role_visual_inputs(info, role, image_limit)
+
+    # Preserve temporal coverage across requested stages, with at most one
+    # extra frame for a remainder. Dedupe by path because stage boundaries can
+    # intentionally share a frame.
+    selected_entries: list[dict[str, Any]] = []
+    per_stage = max(1, image_limit // max(1, len(targets)))
+    for stage in sorted(targets):
+        stage_entries = [
+            entry
+            for entry in entries
+            if _stage_token(entry.get("stage")) == stage
+        ]
+        selected_entries.extend(sample_evenly(stage_entries, per_stage))
+    if len(selected_entries) < image_limit:
+        chosen = {str(entry.get("path") or "") for entry in selected_entries}
+        selected_entries.extend(
+            entry for entry in entries if str(entry.get("path") or "") not in chosen
+        )
+    selected_entries = selected_entries[:image_limit]
+    selected: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for entry in selected_entries:
+        frame = resolve_artifact_path(info, entry.get("path"), require_file=True, require_root=True)
+        if frame is None or str(frame) in seen_paths:
+            continue
+        seen_paths.add(str(frame))
+        timestamp = format_seconds(entry.get("timestamp_seconds")) if entry.get("timestamp_seconds") is not None else ""
+        marker = f" @ {timestamp}" if timestamp else ""
+        selected.append(
+            {
+                "role": role,
+                "path": str(frame),
+                "label": f"{role} Stage1-C {entry.get('stage') or 'stage'}{marker} {frame.name}",
+                "data_url": image_to_data_url(frame),
+                "timestamp_seconds": entry.get("timestamp_seconds"),
+                "source_frame_timestamps": list(entry.get("source_frame_timestamps") or []),
+            }
+        )
+    return selected[:image_limit]
+
+
+def _stage_token(value: Any) -> str | None:
+    """Extract one canonical stage token without trusting arbitrary labels."""
+    match = re.search(r"\bS([1-6])\b", str(value or "").upper())
+    return f"S{match.group(1)}" if match else None
 
 
 def get_llm_visual_candidates(info: dict[str, Any], limit: int) -> list[dict[str, Any]]:
@@ -56,18 +132,69 @@ def get_llm_visual_candidates(info: dict[str, Any], limit: int) -> list[dict[str
     timeline_limit = min(2, max(0, limit // 3))
     timeline_entries = get_timeline_view_entries(info)[:timeline_limit]
     remaining = max(0, limit - len(timeline_entries))
-    used = {str(entry.get("path") or "") for entry in timeline_entries}
-    frame_entries = [
-        entry for entry in get_llm_frame_candidates(info, remaining)
-        if str(entry.get("path") or "") not in used
-    ]
+    frame_entries = _uncovered_frame_candidates(info, remaining, timeline_entries)
     return timeline_entries + frame_entries
+
+
+def _uncovered_frame_candidates(
+    info: dict[str, Any],
+    limit: int,
+    timeline_entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Use the raw-frame budget for timeline regions not already visible.
+
+    Hook/CTA filmstrips already expose several timestamped frames. Selecting
+    first/last/focus anchors again would spend the small request budget on the
+    same endpoints and leave S2-S5 unseen. This selector keeps the overview
+    images and distributes the remaining raw frames across uncovered time.
+    """
+    if limit <= 0:
+        return []
+    covered: list[tuple[float, float]] = []
+    for item in timeline_entries:
+        start = parse_timestamp_seconds(item.get("start_seconds"))
+        end = parse_timestamp_seconds(item.get("end_seconds"))
+        if start is not None and end is not None and end >= start:
+            covered.append((start, end))
+    if not covered:
+        return get_llm_frame_candidates(info, limit)
+
+    unique: list[dict[str, Any]] = []
+    seen_timestamps: set[float] = set()
+    for entry in get_analysis_frame_entries(info):
+        timestamp = parse_timestamp_seconds(entry.get("timestamp_seconds"))
+        if timestamp is None or any(start <= timestamp <= end for start, end in covered):
+            continue
+        key = round(timestamp, 3)
+        if key in seen_timestamps:
+            continue
+        seen_timestamps.add(key)
+        unique.append(entry)
+    selected = sample_evenly(unique, limit)
+    if len(selected) >= limit:
+        return selected[:limit]
+
+    used = {str(entry.get("path") or "") for entry in selected}
+    for entry in get_llm_frame_candidates(info, limit):
+        path = str(entry.get("path") or "")
+        if path and path not in used:
+            selected.append(entry)
+            used.add(path)
+        if len(selected) >= limit:
+            break
+    return selected[:limit]
 
 
 def get_timeline_view_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
     evidence = info.get("video_evidence")
     views = evidence.get("timeline_views") if isinstance(evidence, dict) else None
     entries: list[dict[str, Any]] = []
+    canonical_timestamps: dict[str, float] = {}
+    for frame in get_analysis_frame_entries(info):
+        frame_path = resolve_artifact_path(info, frame.get("path"), require_file=True, require_root=True)
+        timestamp = parse_timestamp_seconds(frame.get("timestamp_seconds"))
+        if frame_path is not None and timestamp is not None:
+            canonical_timestamps[str(frame_path)] = timestamp
     if isinstance(views, list):
         for item in views:
             if not isinstance(item, dict):
@@ -75,11 +202,32 @@ def get_timeline_view_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
             path = str(item.get("path") or "")
             safe_path = resolve_artifact_path(info, path, require_file=True, require_root=True)
             if safe_path is not None:
+                start = parse_timestamp_seconds(item.get("start_seconds"))
+                end = parse_timestamp_seconds(item.get("end_seconds"))
+                source_timestamps: list[float] = []
+                frame_paths = item.get("frame_paths") if isinstance(item.get("frame_paths"), list) else []
+                for raw_frame_path in frame_paths:
+                    frame_path = resolve_artifact_path(
+                        info,
+                        raw_frame_path,
+                        require_file=True,
+                        require_root=True,
+                    )
+                    timestamp = canonical_timestamps.get(str(frame_path)) if frame_path is not None else None
+                    if timestamp is None:
+                        continue
+                    if start is not None and end is not None and not (start <= timestamp <= end):
+                        continue
+                    if timestamp not in source_timestamps:
+                        source_timestamps.append(timestamp)
                 entries.append(
                     {
                         "label": f"{item.get('label') or 'timeline'} timeline",
                         "path": str(safe_path),
                         "timestamp_seconds": None,
+                        "start_seconds": start,
+                        "end_seconds": end,
+                        "source_frame_timestamps": sorted(source_timestamps),
                     }
                 )
     if entries:

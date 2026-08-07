@@ -120,10 +120,19 @@ def build_field_sources(
     unresolved: list[str] = []
 
     for leaf_path in leaves[:MAX_FIELD_SOURCE_ENTRIES]:
+        final_value, final_exists = _value_at_pointer(final, leaf_path)
+        empty_container = final_exists and isinstance(final_value, (dict, list)) and not final_value
         candidates = [
             (index, change)
             for index, change in enumerate(changes)
-            if isinstance(change, dict) and _path_covers(str(change.get("path") or "/"), leaf_path)
+            if isinstance(change, dict)
+            and (
+                _path_covers(str(change.get("path") or "/"), leaf_path)
+                or (
+                    empty_container
+                    and str(change.get("path") or "/").startswith(f"{leaf_path}/")
+                )
+            )
         ]
         if candidates:
             _, change = max(
@@ -142,7 +151,6 @@ def build_field_sources(
             }
             continue
 
-        final_value, final_exists = _value_at_pointer(final, leaf_path)
         raw_value, raw_exists = _value_at_pointer(raw, leaf_path)
         normalized_value, normalized_exists = _value_at_pointer(normalized, leaf_path)
         if raw_exists and final_exists and raw_value == final_value:

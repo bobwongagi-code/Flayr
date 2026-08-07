@@ -118,6 +118,35 @@ def load_transcript_words(info: dict[str, Any]) -> list[dict[str, Any]]:
     return parse_transcript_words(path) if path is not None else []
 
 
+def transcript_words_for_range(
+    words: list[dict[str, Any]],
+    start_seconds: float,
+    end_seconds: float,
+) -> list[dict[str, Any]]:
+    """Return only word-timed speech that intersects one evidence window."""
+    if end_seconds <= start_seconds:
+        return []
+    return [
+        word
+        for word in words
+        if float(word.get("end_seconds", 0.0)) > start_seconds
+        and float(word.get("start_seconds", 0.0)) < end_seconds
+    ]
+
+
+def transcript_text_for_range(
+    words: list[dict[str, Any]],
+    start_seconds: float,
+    end_seconds: float,
+) -> str:
+    """Build the authoritative ASR text for one evidence time window."""
+    return " ".join(
+        str(word.get("text") or "").strip()
+        for word in transcript_words_for_range(words, start_seconds, end_seconds)
+        if str(word.get("text") or "").strip()
+    ).strip()
+
+
 def group_transcript_words(
     words: list[dict[str, Any]],
     *,

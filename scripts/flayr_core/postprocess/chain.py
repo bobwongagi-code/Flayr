@@ -133,6 +133,47 @@ def finalize_severity_after_repairs(
                 audit.run(normalized, rule, function, *args)
 
 
+def apply_segmented_postprocess_chain(
+    normalized: dict[str, Any],
+    analysis: dict[str, Any],
+    audit: PostprocessAudit | None = None,
+    activation_evidence: TrustedS4ActivationEvidence | None = None,
+) -> None:
+    """Apply only code-owned projections to the ADR-007 segmented result.
+
+    Stage2 group calls own a small set of semantic fields. Everything else is
+    derived here from the locked Stage1 ledger or from deterministic contracts.
+    The legacy chain is intentionally not reused: its repair helpers were
+    designed for the old whole-object response and may infer or fill fields
+    that the segmented contract deliberately leaves unknown.
+    """
+
+    def step(rule: str, function: Any, *args: Any) -> None:
+        if audit is None:
+            function(*args)
+        else:
+            audit.run(normalized, rule, function, *args)
+
+    step("postprocess.segmented.stamp_product_foundation", stamp_product_foundation, normalized, analysis)
+    step("postprocess.segmented.stamp_comparison_eligibility", stamp_comparison_eligibility, normalized, analysis)
+    step("postprocess.segmented.bind_timed_transcript_quotes", bind_timed_transcript_quotes, normalized, analysis)
+    step("postprocess.segmented.validate_transcript_attribution", validate_transcript_attribution, normalized, analysis)
+    step("postprocess.segmented.ground_stage_visual_evidence", ground_stage_visual_evidence, normalized)
+    step("postprocess.segmented.deduplicate_stage_quotes", deduplicate_stage_quotes, normalized)
+    step("postprocess.segmented.derive_product_visibility", derive_product_visibility, normalized, analysis)
+    step("postprocess.segmented.materialize_cross_stage_inputs", materialize_cross_stage_inputs, normalized, analysis)
+    step("postprocess.segmented.materialize_stage_evidence_gates", materialize_stage_evidence_gates, normalized)
+    finalize_severity_after_repairs(
+        normalized,
+        analysis,
+        audit=audit,
+        activation_evidence=activation_evidence,
+    )
+    step("postprocess.segmented.apply_comparison_eligibility", apply_comparison_eligibility, normalized)
+    step("postprocess.segmented.materialize_quality_audits", materialize_quality_audits, normalized, analysis)
+    step("postprocess.segmented.stabilize_improvement_priorities", stabilize_improvement_priorities, normalized)
+
+
 def apply_postprocess_chain(
     normalized: dict[str, Any],
     analysis: dict[str, Any],
@@ -150,9 +191,11 @@ def apply_postprocess_chain(
     step("postprocess.stamp_product_foundation", stamp_product_foundation, normalized, analysis)
     step("postprocess.stamp_comparison_eligibility", stamp_comparison_eligibility, normalized, analysis)
     step("postprocess.sanitize_promise_chain_scope", sanitize_promise_chain_scope, normalized)
+    # Canonical Stage1 evidence owns stage membership and quote timing. Bind
+    # that source before rejecting cross-window model-authored quotes.
+    step("postprocess.bind_timed_transcript_quotes", bind_timed_transcript_quotes, normalized, analysis)
     step("postprocess.validate_transcript_attribution", validate_transcript_attribution, normalized, analysis)
     step("postprocess.align_clear_commerce_evidence", align_clear_commerce_evidence, normalized)
-    step("postprocess.bind_timed_transcript_quotes", bind_timed_transcript_quotes, normalized, analysis)
     step("postprocess.reconcile_certification_ownership", reconcile_certification_ownership, normalized)
     step("postprocess.discard_unreferenced_certification_claims", discard_unreferenced_certification_claims, normalized)
     step("postprocess.align_timed_cta_from_transcript", align_timed_cta_from_transcript, normalized, analysis)

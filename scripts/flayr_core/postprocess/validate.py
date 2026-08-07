@@ -36,6 +36,7 @@ from ..multimodal import (
     MULTIMODAL_RELATIONS,
 )
 from ..stage_ownership import CERTIFICATION_OWNER_STAGE, contains_certification, is_certification_owner_stage
+from ..transcript import transcript_text_for_range
 from ..stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
     qualified_stage_evidence_ids,
@@ -92,6 +93,32 @@ def _available_evidence_ids(result: dict[str, Any], role: str) -> set[str]:
         for unit in units or []
         if isinstance(unit, dict) and str(unit.get("id") or "").strip()
     }
+
+
+def _stage_evidence_unresolved(result: dict[str, Any], role: str, stage_code: str) -> bool:
+    """Return whether an active Stage1 contract blocks this role/stage.
+
+    Explicit ``absent`` remains a closed fact and must still agree with the
+    Stage2 flag. Only unknown/conflict states suppress citation requirements,
+    because no publishable stage evidence exists for them by design.
+    """
+    understanding = result.get("video_understanding") if isinstance(result, dict) else None
+    side = understanding.get(role) if isinstance(understanding, dict) else None
+    if not isinstance(side, dict) or side.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+        return False
+    readiness = stage_evidence_readiness(side, stage_code)
+    if readiness in {"unknown", "conflict"}:
+        return True
+    # A segmented Stage2 group may retain one side's qualified IDs while the
+    # other side loses its formal reference. Do not require a fabricated time
+    # range for that missing side.
+    for stage in result.get("stage_analysis") or []:
+        if not isinstance(stage, dict):
+            continue
+        if str(stage.get("stage") or "").strip().upper().startswith(stage_code):
+            if stage.get("analysis_status") == "handoff_loss" and not stage.get(f"{role}_evidence_ids"):
+                return True
+    return False
 
 
 def _nested_stage_evidence_ids(value: Any) -> set[str]:
@@ -223,7 +250,8 @@ def validate_evidence_alignment(result: dict[str, Any]) -> None:
                 # references after the independent audit has failed; that
                 # case is blocked and is intentionally allowed to retain no
                 # publishable evidence references.
-                references_required = readiness == "present"
+                handoff_loss = str(stage.get("analysis_status") or "").strip().lower() == "handoff_loss"
+                references_required = readiness == "present" and not handoff_loss
             else:
                 references_required = contract_status not in {"absent", "unknown", "conflict"}
             if not references and references_required:
@@ -281,10 +309,15 @@ def validate_stage_evidence_qualification(result: dict[str, Any]) -> None:
             readiness = stage_evidence_readiness(side, stage_code)
             references = [str(value) for value in stage.get(f"{role}_evidence_ids") or [] if str(value).strip()]
             qualified = qualified_stage_evidence_ids(side, stage_code)
-            if readiness == "present" and (not references or set(references) - qualified):
+            handoff_loss = str(stage.get("analysis_status") or "").strip().lower() == "handoff_loss"
+            if readiness == "present" and not handoff_loss and (not references or set(references) - qualified):
                 raise SystemExit(
                     f"{stage_code} {role} 阶段引用没有命中 Stage1 已资格化证据，"
                     "不能用 functions 或自由文本补回。"
+                )
+            if readiness == "present" and handoff_loss and (set(references) - qualified):
+                raise SystemExit(
+                    f"{stage_code} {role} handoff_loss 仍包含未资格化证据，不能保留。"
                 )
             if readiness == "absent" and references:
                 raise SystemExit(f"{stage_code} {role} 已确认 absent 时不得继续引用阶段证据。")
@@ -690,7 +723,7 @@ def validate_s2_contract_flags(result: dict[str, Any], analysis: dict[str, Any])
             errors.append(f"S2 {key}.end_seconds 必须大于等于 start_seconds")
         if not str(flag.get("handoff_reason") or "").strip():
             errors.append(f"S2 {key}.handoff_reason 不能为空")
-        if not flag.get("evidence_ids"):
+        if flag.get("exists") is True and not _stage_evidence_unresolved(result, role, "S2") and not flag.get("evidence_ids"):
             errors.append(f"S2 {key}.evidence_ids 不能为空")
     if errors:
         raise SystemExit("S2 产品引出契约 flag 输出不完整：" + "；".join(errors))
@@ -719,7 +752,8 @@ def validate_s3_usage_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
             continue
         if evidence_state_required and flag.get("usage_evidence_state") not in S3_USAGE_EVIDENCE_STATES:
             errors.append(f"S3 {key}.usage_evidence_state 必须是 none/partial/complete/uncertain")
-        if evidence_state_required and not stage_flag_has_absent_evidence_state("S3", flag):
+        evidence_unresolved = _stage_evidence_unresolved(result, role, "S3")
+        if evidence_state_required and not evidence_unresolved and not stage_flag_has_absent_evidence_state("S3", flag):
             errors.extend(_validate_structured_flag_evidence_ids(result, role, "s3", flag, stage=s3))
         for bool_key in (
             "exists",
@@ -775,7 +809,7 @@ def validate_s3_usage_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
             or flag.get("real_usage_met") is True
             or flag.get("core_selling_point_visible") is True
         )
-        if needs_evidence and not flag.get("evidence_ids"):
+        if needs_evidence and not evidence_unresolved and not flag.get("evidence_ids"):
             errors.append(f"S3 {key}.evidence_ids 不能为空")
     if errors:
         raise SystemExit("S3 使用过程 flag 输出不完整：" + "；".join(errors))
@@ -804,7 +838,8 @@ def validate_s4_effect_flags(result: dict[str, Any], analysis: dict[str, Any]) -
         effect_type = str(flag.get("effect_type") or "").strip()
         effect_state = str(flag.get("effect_evidence_state") or "").strip()
         effect_absent = stage_flag_has_absent_evidence_state("S4", flag)
-        if evidence_state_required and not effect_absent:
+        evidence_unresolved = _stage_evidence_unresolved(result, role, "S4")
+        if evidence_state_required and not evidence_unresolved and not effect_absent:
             errors.extend(_validate_structured_flag_evidence_ids(result, role, "s4", flag, stage=s4))
         for bool_key in (
             "effect_visible",
@@ -838,7 +873,7 @@ def validate_s4_effect_flags(result: dict[str, Any], analysis: dict[str, Any]) -
         if not str(flag.get("effect_reason") or "").strip():
             errors.append(f"S4 {key}.effect_reason 不能为空")
         needs_evidence = flag.get("effect_visible") is True or effect_type not in {"", "none", "unknown"}
-        if needs_evidence and not flag.get("evidence_ids"):
+        if needs_evidence and not evidence_unresolved and not flag.get("evidence_ids"):
             errors.append(f"S4 {key}.evidence_ids 不能为空")
     if errors:
         raise SystemExit("S4 效果因果 flag 输出不完整：" + "；".join(errors))
@@ -893,7 +928,8 @@ def validate_s5_trust_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
         source_ids = flag.get("trust_source_evidence_ids")
         if source_signals_required and not isinstance(source_ids, list):
             errors.append(f"S5 {key}.trust_source_evidence_ids 必须是数组")
-        if source_signals_required and str(flag.get("trust_basis") or "") in valid_bases:
+        evidence_unresolved = _stage_evidence_unresolved(result, role, "S5")
+        if source_signals_required and not evidence_unresolved and str(flag.get("trust_basis") or "") in valid_bases:
             unit_map = {
                 str(unit.get("id") or ""): (
                     set(unit.get("trust_source_signals") or []),
@@ -920,7 +956,7 @@ def validate_s5_trust_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
         if not str(flag.get("trust_reason") or "").strip():
             errors.append(f"S5 {key}.trust_reason 不能为空")
         needs_evidence = flag.get("exists") is not False and str(flag.get("trust_evidence_type") or "unknown") not in {"none", "unknown"}
-        if needs_evidence and not flag.get("evidence_ids"):
+        if needs_evidence and not evidence_unresolved and not flag.get("evidence_ids"):
             errors.append(f"S5 {key}.evidence_ids 不能为空")
     if errors:
         raise SystemExit("S5 信任放大 flag 输出不完整：" + "；".join(errors))
@@ -974,7 +1010,11 @@ def validate_s6_cta_flags(result: dict[str, Any], analysis: dict[str, Any]) -> N
             errors.append(f"S6 {key}.end_seconds 必须大于等于 start_seconds")
         if not str(flag.get("cta_reason") or "").strip():
             errors.append(f"S6 {key}.cta_reason 不能为空")
-        if flag.get("exists") is not False and not flag.get("evidence_ids"):
+        if (
+            flag.get("exists") is not False
+            and not _stage_evidence_unresolved(result, role, "S6")
+            and not flag.get("evidence_ids")
+        ):
             errors.append(f"S6 {key}.evidence_ids 不能为空")
     if errors:
         raise SystemExit("S6 CTA flag 输出不完整：" + "；".join(errors))
@@ -1030,6 +1070,7 @@ def validate_multimodal_assessments(result: dict[str, Any], analysis: dict[str, 
                     and stage_functions[stage_id] in {str(value) for value in unit.get("functions") or []}
                 }
             allowed_refs = locked_stage_refs if role_understanding.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION else stage_refs | locked_stage_refs
+            evidence_unresolved = _stage_evidence_unresolved(result, role, stage_id)
             for channel in MULTIMODAL_CHANNELS:
                 impact = impacts.get(channel)
                 if impact not in MULTIMODAL_IMPACTS:
@@ -1038,7 +1079,7 @@ def validate_multimodal_assessments(result: dict[str, Any], analysis: dict[str, 
                 if not isinstance(refs, list):
                     errors.append(f"{stage_id} {key}.channel_evidence_ids.{channel} 必须是数组")
                     continue
-                if impact in evidential_impacts and not refs:
+                if impact in evidential_impacts and not evidence_unresolved and not refs:
                     errors.append(f"{stage_id} {key}.{channel} 声称有影响但没有证据")
                 missing = [str(item) for item in refs if str(item) not in allowed_refs]
                 if missing:
@@ -1129,6 +1170,12 @@ def validate_stage_time_coherence(result: dict[str, Any]) -> None:
         ranges: dict[str, tuple[float, float]] = {}
         for index, stage in enumerate(result.get("stage_analysis", []), start=1):
             label = str(stage.get("stage") or "")
+            stage_code = f"S{index}"
+            if _stage_evidence_unresolved(result, role, stage_code):
+                # Unknown/conflict has no publishable stage evidence and must
+                # not be forced to invent a non-zero time range. Other
+                # validators already ensure it carries no citations.
+                continue
             time_range = stage.get(f"{role}_time_range")
             parsed = parse_time_range_seconds(time_range, None)
             if parsed is None:
@@ -1136,7 +1183,7 @@ def validate_stage_time_coherence(result: dict[str, Any]) -> None:
             start, end = parsed
             if end <= start:
                 raise SystemExit(f"{label} 的 {role}_time_range 无法形成有效时间段：{time_range}")
-            ranges[f"S{index}"] = (start, end)
+            ranges[stage_code] = (start, end)
 
         if "S2" in ranges and "S3" in ranges and len(result.get("stage_analysis", [])) >= 2:
             s2_start, s2_end = ranges["S2"]
@@ -1243,15 +1290,8 @@ def validate_transcript_attribution(result: dict[str, Any], analysis: dict[str, 
                 continue
             window_start, window_end = stage_range
             window_text = normalized_transcript_text(
-                " ".join(
-                    str(word.get("text") or "")
-                    for word in words
-                    if float(word.get("end_seconds", 0.0)) > window_start
-                    and float(word.get("start_seconds", 0.0)) < window_end
-                )
+                transcript_text_for_range(words, window_start, window_end)
             )
-            if not window_text:
-                continue
             references = {str(value) for value in stage.get(f"{role}_evidence_ids", [])}
             units = result.get("video_understanding", {}).get(role, {}).get("evidence_units", [])
             referenced_units = [

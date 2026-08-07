@@ -117,6 +117,14 @@
         "errors": ["采集或边界能力的机器可读问题"],
         "note": "Stage1 的 absent 只有在相关采集通道闭合后才可进入后续分析。"
       },
+      "stage1_qualification": {
+        "source": "pipeline",
+        "status": "completed | failed | deferred_dry_run。Stage1-B 对锁定原子事实的独立资格投影状态。",
+        "contract_version": 4,
+        "stage_codes": ["S1", "S2", "S3", "S4", "S5", "S6"],
+        "evidence_id_count": "Stage1-B 读取的锁定原子事实数量。",
+        "failure_reason": "资格投影失败时的机器可读原因；不得替代 unknown。"
+      },
       "selling_point_observations": [
         {
           "id": "SP1",
@@ -140,14 +148,15 @@
         "variant_focus": "complete | unknown",
         "attention_scan": "complete | unknown"
       },
-      "stage_evidence_contract_version": 3,
+      "stage_evidence_contract_version": 4,
       "stage1_coverage_audit": {
-        "version": 1,
+        "version": 2,
         "source": "pipeline",
-        "status": "completed | partial | failed | unknown。代码保存独立覆盖扫描的运行状态。",
-        "independence": "separate_request_same_model",
+        "status": "completed | partial | failed | unknown。代码保存一次 Stage1-C 定向补观察的投影状态。",
+        "independence": "focused_stage_recovery_v1",
+        "target_stages": ["本次定向补观察请求的阶段；未包含的阶段不属于本次投影范围"],
         "stages": "S1-S6 各自的 found | clear | conflict | unknown、coverage、候选 evidence_ids 和观察信号；由 pipeline 归一化，模型不能回写最终字段。",
-        "errors": ["覆盖审计的机器可读错误"]
+        "errors": ["定向补观察的机器可读错误"]
       },
       "evidence_set_version": 1,
       "evidence_set_sha256": "Stage1 全部不可变观察与资格投影的代码摘要；由 pipeline 写入，Stage2/Repair 不得改写。",
@@ -248,6 +257,14 @@
         "errors": ["采集或边界能力的机器可读问题"],
         "note": "Stage1 的 absent 只有在相关采集通道闭合后才可进入后续分析。"
       },
+      "stage1_qualification": {
+        "source": "pipeline",
+        "status": "completed | failed | deferred_dry_run。Stage1-B 对锁定原子事实的独立资格投影状态。",
+        "contract_version": 4,
+        "stage_codes": ["S1", "S2", "S3", "S4", "S5", "S6"],
+        "evidence_id_count": "Stage1-B 读取的锁定原子事实数量。",
+        "failure_reason": "资格投影失败时的机器可读原因；不得替代 unknown。"
+      },
       "selling_point_observations": [],
       "variant_decision_rule": {
         "speech_explains_choice": "true | false | null。",
@@ -260,14 +277,15 @@
         "variant_focus": "complete | unknown",
         "attention_scan": "complete | unknown"
       },
-      "stage_evidence_contract_version": 3,
+      "stage_evidence_contract_version": 4,
       "stage1_coverage_audit": {
-        "version": 1,
+        "version": 2,
         "source": "pipeline",
-        "status": "completed | partial | failed | unknown。代码保存独立覆盖扫描的运行状态。",
-        "independence": "separate_request_same_model",
+        "status": "completed | partial | failed | unknown。代码保存一次 Stage1-C 定向补观察的投影状态。",
+        "independence": "focused_stage_recovery_v1",
+        "target_stages": ["本次定向补观察请求的阶段；未包含的阶段不属于本次投影范围"],
         "stages": "S1-S6 各自的 found | clear | conflict | unknown、coverage、候选 evidence_ids 和观察信号；由 pipeline 归一化，模型不能回写最终字段。",
-        "errors": ["覆盖审计的机器可读错误"]
+        "errors": ["定向补观察的机器可读错误"]
       },
       "evidence_set_version": 1,
       "evidence_set_sha256": "Stage1 全部不可变观察与资格投影的代码摘要；由 pipeline 写入，Stage2/Repair 不得改写。",
@@ -827,6 +845,14 @@
     "shooting_requirement": "卖点需要什么拍摄条件才能显现。例：效果细微需正面强光 + 面部特写；wide shot 或暗光下拍不出即视为无效展示。",
     "dna_source": "library | operator | model_inferred。DNA 来源标记，postprocess 填；模型现推为 model_inferred。",
     "confidence": "high | low。模型对该 DNA 判断的置信度；小众品/本地新奇特品类宜标 low。"
+  },
+  "stage2_pipeline_status": "completed | degraded | failed。由分阶段调用编排器写入，不由模型决定。",
+  "stage2_pipeline_version": "segmented_stage_v1 | legacy。生产新路径必须为 segmented_stage_v1。",
+  "segmented_pipeline": {
+    "version": "segmented_stage_v1",
+    "status": "completed | degraded | failed",
+    "stage_groups": "四个独立 Stage2 阶段组的状态、响应摘要和失败原因。",
+    "synthesis_status": "completed | failed"
   },
   "improvements": [
     {

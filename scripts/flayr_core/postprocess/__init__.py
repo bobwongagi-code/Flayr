@@ -12,6 +12,14 @@
 让调用方一眼看出函数来自哪个职责层。
 """
 
-from .chain import apply_postprocess_chain, finalize_severity_after_repairs
+from .chain import (
+    apply_postprocess_chain,
+    apply_segmented_postprocess_chain,
+    finalize_severity_after_repairs,
+)
 
-__all__ = ["apply_postprocess_chain", "finalize_severity_after_repairs"]
+__all__ = [
+    "apply_postprocess_chain",
+    "apply_segmented_postprocess_chain",
+    "finalize_severity_after_repairs",
+]

@@ -299,6 +299,19 @@ def _generate_reports_and_publish(
                 ),
             )
         elif args.mode in {"compare", "improve"} and analysis.get("analysis_run_state") == "degraded":
+            segmented = analysis.get("segmented_pipeline")
+            unresolved = (
+                segmented.get("unresolved_stages")
+                if isinstance(segmented, dict)
+                else []
+            )
+            reasons = list(analysis.get("degraded_flags") or [])
+            if unresolved:
+                reasons.append("Stage2 未闭合阶段：" + ",".join(str(item) for item in unresolved))
+            if not reasons:
+                reasons.append("分析链路已降级，不能发布 completed 成功标记。")
+            _mark_analysis_degraded(run_dir, analysis, reasons)
+            write_json(run_dir / "analysis.json", analysis)
             transition_run_state(
                 run_dir,
                 DEGRADED,
@@ -472,7 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--llm-image-limit",
         type=int,
         default=12,
-        help="Maximum total focus frames attached when --llm-include-images is used. Default: 12.",
+        help="Maximum visual inputs attached to each per-video fact request. Default: 12.",
     )
     parser.add_argument(
         "--translate-with-llm",

@@ -16,7 +16,12 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ..artifacts import format_seconds, parse_time_range_seconds, resolve_artifact_path
+from ..artifacts import (
+    format_seconds,
+    parse_time_range_seconds,
+    parse_timestamp_seconds,
+    resolve_artifact_path,
+)
 from ..evidence_states import (
     EVIDENCE_STATE_STRENGTHS,
     S3_USAGE_EVIDENCE_STATES,
@@ -40,6 +45,7 @@ from ..stage_evidence_contracts import (
     stage1_pipeline_owned_field_issues,
 )
 from ..structure_modules import canonical_module_id, stage1_event_catalog
+from ..transcript import load_transcript_words, transcript_text_for_range
 from .analysis_contract import AnalysisContractError, validate_raw_analysis_envelope
 from .json_codec import escape_unquoted_string_quotes, parse_json_text, remove_trailing_commas
 from .product_profile import normalize_category_profile, normalize_product_profile
@@ -984,6 +990,7 @@ def normalize_video_understanding(
     value: Any,
     *,
     trusted_stage1_acquisition: dict[str, dict[str, Any]] | None = None,
+    trusted_stage1_qualification: dict[str, dict[str, Any]] | None = None,
     trusted_stage1_coverage_audit: dict[str, dict[str, Any]] | None = None,
     allow_trusted_pipeline_metadata: bool = False,
 ) -> dict[str, Any]:
@@ -1060,6 +1067,7 @@ def normalize_video_understanding(
             # response cannot author or replay them; finalize_analysis_result
             # restores the trusted copies from the locked Stage1 handoff.
             "stage1_acquisition": {},
+            "stage1_qualification": {},
             "stage1_coverage_audit": {},
             "evidence_set_version": (
                 STAGE_EVIDENCE_SNAPSHOT_VERSION
@@ -1078,6 +1086,9 @@ def normalize_video_understanding(
     for role, metadata in (trusted_stage1_coverage_audit or {}).items():
         if role in normalized and isinstance(metadata, dict):
             normalized[role]["stage1_coverage_audit"] = copy.deepcopy(metadata)
+    for role, metadata in (trusted_stage1_qualification or {}).items():
+        if role in normalized and isinstance(metadata, dict):
+            normalized[role]["stage1_qualification"] = copy.deepcopy(metadata)
     return normalized
 
 
@@ -1182,6 +1193,7 @@ def normalize_analysis_result(
     *,
     trusted_stage1_acquisition: dict[str, dict[str, Any]] | None = None,
     trusted_stage1_recovery: dict[str, dict[str, Any]] | None = None,
+    trusted_stage1_qualification: dict[str, dict[str, Any]] | None = None,
     trusted_stage1_coverage_audit: dict[str, dict[str, Any]] | None = None,
     allow_trusted_pipeline_metadata: bool = False,
 ) -> dict[str, Any]:
@@ -1242,6 +1254,30 @@ def normalize_analysis_result(
                 "creator_quote_zh": str(item.get("creator_quote_zh") or "").strip(),
                 "gap": required_text(item, "gap"),
                 "evidence": normalize_evidence(item.get("evidence")),
+                # Segmented Stage2 owns these small semantic outputs. They are
+                # preserved as typed audit fields; links, severity and all
+                # other mechanical projections remain code-owned below.
+                "stage_state": normalize_choice(
+                    item.get("stage_state"),
+                    {"completed", "unknown", "conflict", "blocked"},
+                    "unknown",
+                ),
+                "analysis_status": normalize_choice(
+                    item.get("analysis_status"),
+                    {"grounded", "handoff_loss", "evidence_blocked", "unknown"},
+                    "unknown",
+                ),
+                "relation": normalize_choice(
+                    item.get("relation"),
+                    {"creator_better", "benchmark_better", "equivalent", "uncertain"},
+                    "uncertain",
+                ),
+                "model_gap_magnitude": normalize_choice(
+                    item.get("model_gap_magnitude"),
+                    {"none", "small", "medium", "large", "uncertain"},
+                    "uncertain",
+                ),
+                "judgment_reason": str(item.get("judgment_reason") or "").strip(),
                 "severity": normalize_severity(item.get("severity")),
                 # 模型直判快照（归一时定格）：Phase C 和其它再收口路径必须保留
                 # 已存在的模型基线，不能把上轮 derive 后的最终 severity 误作模型判断。
@@ -1327,6 +1363,7 @@ def normalize_analysis_result(
     normalized_video_understanding = normalize_video_understanding(
         result.get("video_understanding"),
         trusted_stage1_acquisition=trusted_stage1_acquisition,
+        trusted_stage1_qualification=trusted_stage1_qualification,
         trusted_stage1_coverage_audit=trusted_stage1_coverage_audit,
         allow_trusted_pipeline_metadata=allow_trusted_pipeline_metadata,
     )
@@ -1362,6 +1399,11 @@ def normalize_analysis_result(
         "stage_evidence_links": stage_evidence_links,
         "stage_analysis": normalized_stages,
         "improvements": normalized_improvements,
+        "stage2_pipeline_status": str(result.get("stage2_pipeline_status") or "completed").strip().lower(),
+        "stage2_pipeline_version": str(result.get("stage2_pipeline_version") or "").strip(),
+        "segmented_pipeline": copy.deepcopy(result.get("segmented_pipeline"))
+        if isinstance(result.get("segmented_pipeline"), dict)
+        else {},
     }
 
 
@@ -1594,6 +1636,8 @@ def normalize_structure_event_checks(value: Any, valid_ids: set[str]) -> list[di
                     "coverage": "unknown",
                     "present": None,
                     "evidence_ids": [],
+                    "observed_signals": [],
+                    "missing_signals": [],
                 }
             )
             continue
@@ -1668,10 +1712,12 @@ def normalize_video_fact_result(
         "evidence_budget_exceeded": bool(result.get("evidence_budget_exceeded") is True),
         # This is code-owned from preprocessing metadata; the model cannot set it.
         "stage1_acquisition": {},
+        "stage1_qualification": {},
         "stage1_coverage_audit": {},
         # Recovery 状态由 pipeline 在事实合并后写入；模型回显的同名字段不具备控制权。
         "stage1_recovery": {},
     }
+    duration = analysis.get("videos", {}).get(role, {}).get("duration_seconds")
     for index, unit in enumerate(units, start=1):
         if not isinstance(unit, dict):
             continue
@@ -1689,8 +1735,8 @@ def normalize_video_fact_result(
                 if text
             )
         normalized_unit = {
-                "id": normalized_fact_id(unit.get("id"), code, index),
-                "time_range": str(unit.get("time_range") or "").strip(),
+            "id": normalized_fact_id(unit.get("id"), code, index),
+            "time_range": normalize_fact_time_range(unit.get("time_range"), duration),
                 "information": information,
                 "voiceover": str(unit.get("voiceover") or "").strip(),
                 "voiceover_zh": str(unit.get("voiceover_zh") or "").strip(),
@@ -1733,6 +1779,34 @@ def normalize_video_fact_result(
     # This field is pipeline-owned and is restored by the extraction pipeline
     # after model-shaped normalization.  Never trust an LLM echo of it here.
     return normalized
+
+
+def normalize_fact_time_range(value: Any, duration: Any) -> str:
+    """Normalize only a display-precision overrun at the media endpoint.
+
+    Models commonly emit one decimal place while ffprobe supplies a more
+    precise duration (for example 53.8s for 53.766667s). Raw responses remain
+    archived; the normalized fact may clamp this <=50ms rounding difference.
+    The exact media endpoint is serialized so every downstream strict parser
+    accepts the normalized value. Larger overruns, reversed ranges, and
+    malformed values remain untouched so the evidence contract can reject
+    them.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return raw
+    parsed = parse_time_range_seconds(raw, duration)
+    if parsed is not None:
+        return raw
+    duration_seconds = parse_timestamp_seconds(duration)
+    unrestricted = parse_time_range_seconds(raw, None)
+    if duration_seconds is None or unrestricted is None:
+        return raw
+    start, end = unrestricted
+    if start <= duration_seconds < end <= duration_seconds + 0.051:
+        exact_endpoint = f"{duration_seconds:.6f}".rstrip("0").rstrip(".")
+        return f"{start:.2f}s - {exact_endpoint}s"
+    return raw
 
 
 def normalize_stage_evidence_contract_version(value: Any) -> int | None:
@@ -1804,11 +1878,26 @@ def validate_single_video_facts(role: str, facts: dict[str, Any], analysis: dict
 
     info = analysis.get("videos", {}).get(role, {})
     transcript = normalized_transcript_text(read_transcript_text(info))
+    transcript_words = load_transcript_words(info)
     other_role = "creator" if role == "benchmark" else "benchmark"
     other_transcript = normalized_transcript_text(read_transcript_text(analysis.get("videos", {}).get(other_role, {})))
     for unit in facts.get("evidence_units", []):
         quote = str(unit.get("voiceover") or "").strip()
         normalized_quote = normalized_transcript_text(quote)
+        unit_range = parse_time_range_seconds(unit.get("time_range"), None)
+        if transcript_words and unit_range is not None and normalized_quote and normalized_quote in transcript:
+            window_quote = transcript_text_for_range(transcript_words, *unit_range)
+            normalized_window_quote = normalized_transcript_text(window_quote)
+            if normalized_quote not in normalized_window_quote:
+                # Raw model output remains archived separately. The frozen
+                # Stage1 fact must carry only speech attributable to this
+                # evidence window; a full-video ASR segment cannot be locked
+                # into an early-stage unit merely because it belongs to the
+                # same video's transcript.
+                unit["voiceover"] = window_quote
+                unit["voiceover_zh"] = ""
+                quote = window_quote
+                normalized_quote = normalized_window_quote
         if quote and len(normalized_quote) >= 12 and normalized_quote not in transcript:
             if normalized_quote in other_transcript:
                 raise SystemExit(f"{role} fact {unit.get('id')} voiceover is from {other_role} transcript.")

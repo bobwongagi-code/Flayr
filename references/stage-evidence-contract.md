@@ -52,33 +52,29 @@ Stage1 还必须带一份代码生成的 `stage1_acquisition`。它只记录本�
 
 Stage1 不能输出或推导 `severity`、双方比较、差距、商业优先级、建议、报告结论或 `stage_evidence_links`。这些字段即使嵌套在别的对象中，也必须在 active contract 下拒绝，而不是静默丢弃。
 
-### C. 独立语义覆盖审计
+当前生产实现把 Stage1-A 和 Stage1-B 作为两个独立请求执行：Stage1-A 使用媒体输入，只产生原子观察；Stage1-B 是无媒体的只读资格投影，只读取已归一化的 `evidence_units` 和代码拥有的采集状态。Stage1-A 响应中的阶段资格字段不再作为权威输入；Stage1-B 失败时保留原子账本，并将阶段资格置为 `unknown`，再由一次有边界的 Stage1-C 决定是否需要补观察。
 
-`stage1_coverage_audit` 是管线自有的第二次扫描结果，不是模型可以回显的事实字段。它与 primary
-抽取使用同一份原始素材和同一份注册表，但不接收 primary 的 `evidence_units`、阶段判断或双方比较，
-避免“根据第一次漏掉的内容再解释第一次为什么没漏”的循环。它可以追加候选原子事实，但不能删除、改写
-或覆盖 primary 事实。
+### C. 定向缺口补观察
 
-审计对每个 S1-S6 返回：
+`stage1_coverage_audit` 保留为历史产物字段，但当前值是管线对一次 Stage1-C 定向补观察的代码投影，
+不再代表第二次全片 coverage audit。补观察只接收目标阶段、目标时间窗口和目标渠道的聚焦素材，并可看到
+只读的当前阶段摘要，不能修改或删除 primary `evidence_units`，也不能比较双方或输出下游判断。
 
-- `status=found`：本次独立扫描发现候选事实；
-- `status=clear`：在 `coverage=complete` 的完整扫描中没有发现该阶段 required signals；
-- `status=unknown`：素材、时间边界、通道或预算不足；
-- `status=conflict`：扫描结果自身存在无法闭合的冲突。
+只有以下情况才允许进入 Stage1-C：必需槽位为 `unknown`、候选事实的时间/渠道无法确认、决定性事实只在一侧
+出现且另一侧仍有可观察素材，或硬事实之间出现机械冲突。每个角色、每个阶段最多一次；补观察仍不足时保持
+`unknown` 或 `conflict`，不递归重试。
 
-只有 `coverage=complete` 才能让 `found/clear` 具有资格作用。审计发现候选时，必须把候选事实追加到同一
-个不可变 evidence set，再由代码重新运行 Stage1 qualification。审计与 primary 不一致时不由顺序决定：
+补观察返回候选原子事实和目标阶段资格，代码随后追加 Evidence Ledger、重新运行目标阶段投影，并生成
+`stage1_coverage_audit` 兼容投影：
 
-```text
-primary unknown + audit found + required signals complete -> 允许重新资格化
-primary absent  + audit found + required signals complete -> 允许重新资格化，但留下审计痕迹
-primary absent/present 与 audit 相反且无法闭合             -> conflict，阶段阻断
-audit clear/unknown/partial                                -> 不把未知转换成 absent
-```
+- `status=found` / `coverage=complete`：目标阶段已形成合格的 `present` 投影；
+- `status=clear` / `coverage=complete`：目标阶段已形成合格的 `absent` 投影；
+- `status=unknown` 或 `conflict`：补观察仍不能闭合，阶段保持阻断；
+- 未被本次补观察请求的阶段不属于该 projection 的适用范围，不得被当作 negative observation。
 
-这条规则是 S1-S6 共用的，不为 S4 或某个历史样本单独加例外。独立审计也不是“准确率自动提升器”：两次扫描
-都没有采到事实时，阶段仍然是 `unknown/blocked`；这会降低短期可用率，但保留了后续人工或重新采集的入口，
-避免在缺证据时生成看似确定的分析。
+候选事实始终保留在交接的 candidate lane 中，不得支撑 relation、gap、floor、ceiling 或最终 severity。没有缺口
+时，`stage1_recovery.status=not_needed`，不强制制造一次额外模型请求；这时由 primary Stage1 qualification
+和代码拥有的 acquisition checks 提供资格。该规则对 S1-S6 共用，不为 S4 或单个样本增加例外。
 
 ### B. 阶段资格投影
 
@@ -111,7 +107,7 @@ Stage1 完成后由代码对全部规范化观察字段、`stage1_acquisition`�
 
 模型的 `model_severity` 可以为了审计留存；它不等于 `grounded` 的最终结论。报告层遇到 `blocked` 显示“未分析/待核验”，不能把缺证据的模型档位当成真实 GT。
 
-`stage_evidence_gate.creator/benchmark.diagnostics` 是代码生成的解释字段。它只回答“为什么这一侧当前可用或被阻断”，不重新判断视频事实；`primary_unknown` 表示主抽取没有形成确定资格，`primary_qualification_gate` 表示阶段信号没有逐项绑定到本阶段原子证据或其他资格投影不成立，`acquisition_gate` 表示输入能力、覆盖或边界不闭合，`coverage_audit_gate` 表示独立覆盖审计不可用或与主投影不一致，`snapshot_invalid` 表示冻结摘要失效。报告和历史分析应按这些稳定代码统计，不应从自由文本 `reason` 反推根因。
+`stage_evidence_gate.creator/benchmark.diagnostics` 是代码生成的解释字段。它只回答“为什么这一侧当前可用或被阻断”，不重新判断视频事实；`primary_unknown` 表示主抽取没有形成确定资格，`primary_qualification_gate` 表示阶段信号没有逐项绑定到本阶段原子证据或其他资格投影不成立，`acquisition_gate` 表示输入能力、覆盖或边界不闭合，`coverage_audit_gate` 表示定向补观察不可用、仍未闭合或与主投影不一致，`snapshot_invalid` 表示冻结摘要失效。报告和历史分析应按这些稳定代码统计，不应从自由文本 `reason` 反推根因。
 
 阶段证据引用使用独立的 `stage_evidence_links[]`：
 
@@ -159,7 +155,7 @@ stage_id + role + evidence_id + relation + linking_reason + confidence
 4. **判断层**：只在 `grounded` 且比较合同允许的格子中比较 severity；方向错误、档位错误和口径差异分开统计。
 5. **解析层**：floor/ceiling 只对显式硬事实生效，记录触发、跳过、冲突和顺序无关性。
 
-同模型的独立覆盖审计只是一个有预算的漏采集防护，不是语义正确性的证明，也不能替代人工关键事实 GT。任何召回率、精确率、阶段准确率或模型选型结论，都必须在独立标注或 fresh blind cohort 上计算；9 个历史样本只能验证机制路径和错误分类，不能直接拟合新的阶段阈值。
+同模型的一次定向补观察只是一个有预算的漏采集防护，不是语义正确性的证明，也不能替代人工关键事实 GT。任何召回率、精确率、阶段准确率或模型选型结论，都必须在独立标注或 fresh blind cohort 上计算；9 个历史样本只能验证机制路径和错误分类，不能直接拟合新的阶段阈值。
 6. **产物层**：阶段链接完整性、证据哈希未变、报告没有把 `blocked` 显示成 severity。
 
-因此，某阶段准确率低时先问“证据有没有采到、覆盖审计是否闭合、是否被正确资格化”，再问“模型判断是否错”；某阶段准确率高时也要检查是否只是 `absent` 偏多、样本不适用、覆盖审计未真正触发或模型结论碰巧一致。任何一层没有闭合，都不能把最终数字解释成模型能力。
+因此，某阶段准确率低时先问“证据有没有采到、定向补观察是否闭合、是否被正确资格化”，再问“模型判断是否错”；某阶段准确率高时也要检查是否只是 `absent` 偏多、样本不适用、补观察未真正触发或模型结论碰巧一致。任何一层没有闭合，都不能把最终数字解释成模型能力。

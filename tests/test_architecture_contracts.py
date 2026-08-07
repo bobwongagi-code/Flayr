@@ -57,6 +57,8 @@ from flayr_core.llm.payload import (
     build_llm_comparison_payload,
     build_llm_payload,
     build_llm_repair_payload,
+    build_stage_group_judgment_payload,
+    build_stage_evidence_qualification_payload,
     full_analysis_output_fields,
     build_stage_review_payload,
     build_video_fact_payload,
@@ -78,6 +80,7 @@ from flayr_core.llm.parse import (
     normalize_video_understanding,
 )
 from flayr_core.multimodal import channel_requirement_for, multimodal_execution
+from flayr_core.stage_evidence_contracts import STAGE_EVIDENCE_CONTRACT_VERSION
 from flayr_core.llm.pipeline import preserve_valid_repair_sections
 from flayr_core.postprocess.proposition import materialize_cross_stage_inputs, materialize_quality_audits
 from flayr_core.postprocess.utils import parse_srt_timestamp, read_srt_segments
@@ -209,6 +212,21 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(severity["rule"], "postprocess.derive_severity")
         summary = sources["fields"]["/stage_analysis/0/summary"]
         self.assertEqual(summary["source_artifact"], "raw_model_response.json")
+
+    def test_field_sources_cover_container_emptied_by_deterministic_changes(self) -> None:
+        raw = {"improvements": [{"title": "one"}, {"title": "two"}]}
+        normalized = json.loads(json.dumps(raw))
+        final = {"improvements": []}
+        audit = PostprocessAudit()
+        audit.record(normalized, final, "postprocess.apply_comparison_eligibility")
+
+        sources = build_field_sources(raw, normalized, final, audit.changes)
+
+        self.assertEqual(sources["coverage"], "complete")
+        self.assertEqual(
+            sources["fields"]["/improvements"]["rule"],
+            "postprocess.apply_comparison_eligibility",
+        )
 
     def test_post_finalize_audit_updates_final_artifact_and_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -419,6 +437,31 @@ class ArchitectureContractTests(unittest.TestCase):
                 "benchmark_multimodal": self._multimodal("benchmark", compensation=False),
             }],
         }
+        validate_multimodal_assessments(result, {"multimodal_assessment_required": True})
+
+    def test_multimodal_gate_does_not_require_citations_from_unresolved_stage1(self) -> None:
+        creator = self._multimodal("creator", compensation=False)
+        benchmark = self._multimodal("benchmark", compensation=False)
+        for assessment in (creator, benchmark):
+            assessment["channel_evidence_ids"] = {
+                channel: [] for channel in ("visual", "speech", "text", "sound_rhythm")
+            }
+        result = {
+            "video_understanding": {
+                "creator": {"stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION},
+                "benchmark": {"stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION},
+            },
+            "stage_analysis": [
+                {
+                    "stage": "S1 Hook",
+                    "creator_evidence_ids": [],
+                    "benchmark_evidence_ids": [],
+                    "creator_multimodal": creator,
+                    "benchmark_multimodal": benchmark,
+                }
+            ],
+        }
+
         validate_multimodal_assessments(result, {"multimodal_assessment_required": True})
 
     def test_s3_multimodal_can_enhance_complete_process_but_not_replace_it(self) -> None:
@@ -3273,6 +3316,30 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIn("creator S2/S3", warnings[0])
 
+    def test_stage_time_coherence_does_not_require_ranges_for_blocked_evidence(self) -> None:
+        result = {
+            "stage_analysis": [
+                {
+                    "stage": f"S{index}",
+                    "creator_time_range": "0.0s - 0.0s",
+                    "benchmark_time_range": "0.0s - 0.0s",
+                }
+                for index in range(1, 7)
+            ]
+        }
+        with mock.patch(
+            "flayr_core.postprocess.validate._stage_evidence_unresolved",
+            return_value=True,
+        ):
+            validate_stage_time_coherence(result)
+
+    def test_stage_links_are_validated_after_deterministic_postprocess(self) -> None:
+        source = inspect.getsource(pipeline.finalize_analysis_result)
+        self.assertGreater(
+            source.index("stage_evidence_link_issues(normalized)"),
+            source.index("apply_postprocess_chain(normalized"),
+        )
+
     def test_json_codec_stays_compatible_with_parse_facade(self) -> None:
         from flayr_core.llm.parse import parse_json_text as parse_facade
 
@@ -3917,6 +3984,154 @@ class ArchitectureContractTests(unittest.TestCase):
             },
         )
         self.assertEqual(flash["parameters"]["language_hints"], ["ms"])
+
+    def test_segmented_pipeline_keeps_unknown_core_stages_degraded(self) -> None:
+        unresolved = pipeline._segmented_stage_unresolved(
+            [
+                {
+                    "stage": "S1 Hook",
+                    "analysis_status": "grounded",
+                    "stage_state": "unknown",
+                    "model_gap_magnitude": "medium",
+                },
+                {
+                    "stage": "S4 效果呈现",
+                    "analysis_status": "evidence_blocked",
+                    "stage_state": "unknown",
+                    "model_gap_magnitude": "uncertain",
+                },
+            ]
+        )
+        self.assertEqual(unresolved, ["S1", "S4"])
+        self.assertEqual(pipeline._segmented_text_items("一条完整理由"), ["一条完整理由"])
+        self.assertEqual(pipeline._segmented_text_items(["a", "b"]), ["a", "b"])
+
+    def test_stage_group_payload_requires_stage_state_and_excludes_whole_report_contract(self) -> None:
+        payload = build_stage_group_judgment_payload(
+            "test-model",
+            "input",
+            {},
+            {"videos": {}},
+            ["S1", "S2"],
+        )
+        text = payload["messages"][1]["content"][0]["text"]
+        self.assertIn("stage_state", text)
+        self.assertIn("stage_state 是必填语义字段", text)
+        self.assertNotIn('"improvements":', text)
+        self.assertNotIn('"commercial_priority":', text)
+        self.assertEqual(
+            [item.get("type") for item in payload["messages"][1]["content"] if isinstance(item, dict)],
+            ["text"],
+        )
+
+    def test_stage1_a_and_stage1_b_are_separate_contracts(self) -> None:
+        analysis = {
+            "product": {"name": "测试品"},
+            "videos": {"creator": {"duration_seconds": 12.0}},
+        }
+        primary = build_video_fact_payload(
+            "test-model",
+            "creator",
+            analysis,
+            [],
+            api_url="",
+        )
+        primary_text = json.dumps(primary, ensure_ascii=False)
+        self.assertIn("Stage1-A 原子事实合同", primary_text)
+        self.assertNotIn('"stage_evidence_checks": [', primary_text)
+        self.assertNotIn('"structure_event_checks": [', primary_text)
+
+        qualification = build_stage_evidence_qualification_payload(
+            "test-model",
+            "creator",
+            analysis,
+            {
+                "stage1_acquisition": {"status": "ready"},
+                "evidence_units": [
+                    {
+                        "id": "C1",
+                        "time_range": "0s - 2s",
+                        "information": "看到产品被拿起",
+                        "visual_fact": "手拿产品",
+                        "evidence_strength": "direct",
+                    }
+                ],
+            },
+        )
+        qualification_text = qualification["messages"][1]["content"][0]["text"]
+        self.assertIn("Stage1-B 阶段资格投影", qualification_text)
+        self.assertIn('"stage_evidence_checks"', qualification_text)
+        self.assertEqual(
+            [item.get("type") for item in qualification["messages"][1]["content"] if isinstance(item, dict)],
+            ["text"],
+        )
+
+    def test_segmented_finalizer_recomputes_status_and_removes_unknown_severity(self) -> None:
+        result = {
+            "stage2_pipeline_version": "segmented_stage_v1",
+            "stage2_pipeline_status": "completed",
+            "stage_analysis": [
+                {
+                    "stage": f"S{index}",
+                    "analysis_status": "grounded" if index != 4 else "evidence_blocked",
+                    "stage_state": "completed" if index != 4 else "unknown",
+                    "model_gap_magnitude": "medium" if index != 4 else "uncertain",
+                    "severity": "medium",
+                    "model_severity": "medium",
+                }
+                for index in range(1, 7)
+            ],
+            "segmented_pipeline": {
+                "stage_groups": [
+                    {"group": ["S1", "S2"], "status": "completed"},
+                    {"group": ["S3", "S4"], "status": "completed"},
+                    {"group": ["S5"], "status": "completed"},
+                    {"group": ["S6"], "status": "completed"},
+                ],
+                "synthesis_status": "completed",
+            },
+        }
+        status, unresolved = pipeline._refresh_segmented_pipeline_status(result)
+        pipeline._clear_segmented_unresolved_severity(result, unresolved)
+        self.assertEqual(status, "degraded")
+        self.assertEqual(unresolved, ["S4"])
+        self.assertEqual(result["stage2_pipeline_status"], "degraded")
+        self.assertIsNone(result["stage_analysis"][3]["severity"])
+        self.assertIsNone(result["stage_analysis"][3]["model_severity"])
+        self.assertEqual(result["stage_analysis"][0]["severity"], "medium")
+
+    def test_segmented_resolver_does_not_create_medium_for_unresolved_stage(self) -> None:
+        from flayr_core.postprocess.derive import derive_severity_from_facts
+
+        result = {
+            "stage2_pipeline_version": "segmented_stage_v1",
+            "stage_analysis": [{
+                "stage": "S4 效果呈现",
+                "analysis_status": "evidence_blocked",
+                "model_gap_magnitude": "uncertain",
+                "severity": "medium",
+                "model_severity": "medium",
+            }],
+        }
+        derive_severity_from_facts(result)
+        stage = result["stage_analysis"][0]
+        self.assertIsNone(stage["severity"])
+
+        grounded_but_unclosed = {
+            "stage2_pipeline_version": "segmented_stage_v1",
+            "stage_analysis": [{
+                "stage": "S1 Hook",
+                "analysis_status": "grounded",
+                "stage_state": "unknown",
+                "model_gap_magnitude": "medium",
+                "severity": "medium",
+                "model_severity": "medium",
+            }],
+        }
+        derive_severity_from_facts(grounded_but_unclosed)
+        self.assertIsNone(grounded_but_unclosed["stage_analysis"][0]["severity"])
+        self.assertIsNone(stage["model_severity"])
+        self.assertEqual(stage["severity_derivation"]["status"], "evidence_blocked")
 
     def test_online_asr_can_fallback_to_same_qwen_endpoint_key(self) -> None:
         args = SimpleNamespace(

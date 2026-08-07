@@ -66,11 +66,66 @@ def _stage_contract_readiness(result: dict[str, Any], role: str, stage_code: str
         return "legacy"
     return stage_evidence_readiness(side, stage_code)
 
+
+def _flag_claims_stage_evidence(flag_name: str, flag: dict[str, Any]) -> bool:
+    """Return whether a structured Stage2 flag makes a positive stage claim."""
+    if flag_name == "s3":
+        state = str(flag.get("usage_evidence_state") or "").strip().lower()
+        return state != "none" if state else flag.get("exists") is not False
+    if flag_name == "s4":
+        state = str(flag.get("effect_evidence_state") or "").strip().lower()
+        return state != "none" if state else flag.get("effect_visible") is True
+    return flag.get("exists") is True
+
 def bind_timed_transcript_quotes(result: dict[str, Any], analysis: dict[str, Any]) -> None:
-    """用 SRT 时间戳重新校对每个阶段的 quote，并清除已知的"视觉证据"占位。"""
-    videos = analysis.get("videos", {})
-    for stage in result.get("stage_analysis", []):
+    """Bind stage ranges and quotes to the locked Stage1 evidence set.
+
+    Active contracts must not retain a model-selected quote from outside the
+    stage window.  Stage1 qualification owns both stage membership and the
+    auditable time range, so the representative quote is selected from those
+    frozen units. Legacy results retain the historical placeholder cleanup.
+    """
+    _ = analysis
+    understanding = result.get("video_understanding") if isinstance(result, dict) else None
+    for index, stage in enumerate(result.get("stage_analysis", []), start=1):
+        if not isinstance(stage, dict):
+            continue
         for role in ("benchmark", "creator"):
+            side = understanding.get(role) if isinstance(understanding, dict) else None
+            if isinstance(side, dict) and side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+                readiness = stage_evidence_readiness(side, f"S{index}")
+                if readiness != "present":
+                    stage[f"{role}_quote"] = ""
+                    stage[f"{role}_quote_zh"] = ""
+                    continue
+                allowed_ids = qualified_stage_evidence_ids(side, f"S{index}")
+                units = [
+                    unit
+                    for unit in side.get("evidence_units") or []
+                    if isinstance(unit, dict) and str(unit.get("id") or "").strip() in allowed_ids
+                ]
+                timed_ranges = [
+                    parsed
+                    for unit in units
+                    if (parsed := parse_time_range_seconds(unit.get("time_range"), None)) is not None
+                ]
+                if timed_ranges:
+                    start = min(item[0] for item in timed_ranges)
+                    end = max(item[1] for item in timed_ranges)
+                    stage[f"{role}_time_range"] = (
+                        f"{format_seconds(start)} - {format_seconds(max(end, start + 0.5))}"
+                    )
+                spoken = next(
+                    (unit for unit in units if is_effective_voiceover(unit.get("voiceover"))),
+                    None,
+                )
+                if spoken is not None:
+                    stage[f"{role}_quote"] = str(spoken.get("voiceover") or "").strip()
+                    stage[f"{role}_quote_zh"] = str(spoken.get("voiceover_zh") or "").strip()
+                else:
+                    stage[f"{role}_quote"] = ""
+                    stage[f"{role}_quote_zh"] = ""
+                continue
             references = [str(value) for value in stage.get(f"{role}_evidence_ids", [])]
             if any("_NO_" in value for value in references):
                 stage[f"{role}_quote"] = ""
@@ -102,6 +157,13 @@ def align_stage_flag_evidence(result: dict[str, Any]) -> None:
             allowed_stage_ids = _stage_contract_allowed_ids(result, role, f"S{index}")
             if allowed_stage_ids is not None:
                 stage_ids = [value for value in stage_ids if value in allowed_stage_ids]
+                if not stage_ids and _stage_contract_readiness(result, role, f"S{index}") == "present":
+                    # Stage1 is the authority for evidence qualification.  A
+                    # Stage2 response may omit citation IDs even though its
+                    # positive fact is otherwise complete; restore only the
+                    # same-role, same-stage frozen IDs rather than asking a
+                    # repair call to rediscover or invent evidence.
+                    stage_ids = sorted(allowed_stage_ids)
                 stage[stage_key] = stage_ids
             # 多模态判断和阶段主结论消费同一批锁定事实。模型可能在 channel_evidence_ids
             # 引用同阶段真实单元，却漏把它同步到主 evidence_ids；只将同侧、真实且与阶段
@@ -166,7 +228,7 @@ def align_stage_flag_evidence(result: dict[str, Any]) -> None:
                     "supported" if is_effective_voiceover(primary.get("voiceover")) else "visual_only"
                 )
                 stage_ids = restored_ids
-            if stage_ids and not flag_ids:
+            if stage_ids and not flag_ids and _flag_claims_stage_evidence(flag_name, flag):
                 flag["evidence_ids"] = stage_ids
                 stage[f"{role}_support_status"] = "visual_only"
                 continue

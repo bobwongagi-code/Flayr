@@ -26,7 +26,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from ..artifacts import get_analysis_frame_entries, parse_time_range_seconds
+from ..artifacts import format_seconds, get_analysis_frame_entries, parse_time_range_seconds
 from ..evidence_states import stage_flag_allows_empty_evidence
 from ..multimodal import sanitize_audio_observations
 from ..utils import write_json, write_text
@@ -49,6 +49,9 @@ from ..stage_evidence_contracts import (
     stage_evidence_recovery_targets,
     stage_evidence_runtime_issues,
     stage_evidence_snapshot_issues,
+    stage_evidence_readiness,
+    stage_analysis_evidence_view,
+    normalize_stage_code,
     stage1_coverage_audit_issues,
     stage1_acquisition_issues,
     stage1_forbidden_field_issues,
@@ -82,11 +85,14 @@ from .payload import (
     build_llm_comparison_payload,
     build_llm_payload,
     build_llm_repair_payload,
+    build_stage_group_judgment_payload,
+    build_stage_synthesis_payload,
+    STAGE_JUDGMENT_GROUPS,
     build_product_foundation_payload,
     build_product_foundation_repair_payload,
     build_stage_review_payload,
-    build_video_fact_coverage_audit_payload,
     build_video_fact_recovery_payload,
+    build_stage_evidence_qualification_payload,
     build_video_identity_payload,
     build_video_fact_payload,
     load_brand_proposition,
@@ -98,9 +104,9 @@ from .stage_review_contract import (
     patch_fields_for_stage,
 )
 from .s4_visual_verifier import maybe_apply_s4_visual_verifier
-from .media import select_role_visual_inputs
+from .media import select_role_visual_inputs, select_stage_recovery_visual_inputs
 from ..finalization import facade as finalization_facade
-from ..postprocess import apply_postprocess_chain
+from ..postprocess import apply_postprocess_chain, apply_segmented_postprocess_chain
 from ..postprocess.audit import MAX_CHANGE_ENTRIES, PostprocessAudit, build_field_sources
 from ..postprocess.derive import critical_severity_stages
 from ..postprocess.global_diagnosis import materialize_global_diagnosis
@@ -126,7 +132,7 @@ from ..postprocess.validate import (
 
 
 # 修改 build_video_fact_payload 的语义合同后必须递增，避免旧 facts 与新判断规则混用。
-VIDEO_FACT_CACHE_SCHEMA_VERSION = 14
+VIDEO_FACT_CACHE_SCHEMA_VERSION = 24
 PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION = 2
 CACHE_RECORD_SCHEMA_VERSION = 1
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -325,13 +331,81 @@ def apply_finalized_analysis_result(
     AnalysisResult.from_mapping(normalized).project_into(analysis)
     if isinstance(phase_c_review, dict):
         analysis["phase_c_review"] = phase_c_review
-    analysis["improvements_status"] = "llm_completed"
-    analysis["analysis_run_state"] = "completed"
+    pipeline_status = str(normalized.get("stage2_pipeline_status") or "completed").strip().lower()
+    if pipeline_status in {"degraded", "failed"}:
+        analysis["improvements_status"] = "degraded"
+        analysis["analysis_run_state"] = "degraded"
+    else:
+        analysis["improvements_status"] = "llm_completed"
+        analysis["analysis_run_state"] = "completed"
     analysis["analysis_source"] = {
         "type": "large_model_json",
         "path": str(result_path),
         "merged_at": dt.datetime.now().isoformat(timespec="seconds"),
     }
+
+
+def _refresh_segmented_pipeline_status(result: dict[str, Any]) -> tuple[str, list[str]]:
+    """Recompute segmented run status from the persisted stage outcomes.
+
+    The status written by the live runner is only an input to finalization.  A
+    result can also enter through ``--analysis-result-json`` or an offline
+    replay, so the finalizer must derive the publishability decision again from
+    the four group records and the six projected stages.
+    """
+    stage_results = result.get("stage_analysis")
+    unresolved = _segmented_stage_unresolved(stage_results if isinstance(stage_results, list) else [])
+    pipeline = result.get("segmented_pipeline")
+    if not isinstance(pipeline, dict):
+        pipeline = {}
+        result["segmented_pipeline"] = pipeline
+    groups = pipeline.get("stage_groups")
+    group_statuses = {
+        str(item.get("status") or "").strip().lower()
+        for item in groups
+        if isinstance(item, dict)
+    } if isinstance(groups, list) else set()
+    required_groups = {"S1_S2", "S3_S4", "S5", "S6"}
+    observed_groups = {
+        "_".join(str(stage).strip().upper() for stage in item.get("group") or [])
+        for item in groups
+        if isinstance(item, dict)
+    } if isinstance(groups, list) else set()
+    metadata_incomplete = not required_groups.issubset(observed_groups)
+    synthesis_failed = str(pipeline.get("synthesis_status") or "").strip().lower() not in {"", "completed"}
+    current_status = str(result.get("stage2_pipeline_status") or pipeline.get("status") or "").strip().lower()
+    if current_status == "failed":
+        status = "failed"
+    elif unresolved or "failed" in group_statuses or metadata_incomplete or synthesis_failed:
+        status = "degraded"
+    else:
+        status = "completed"
+    pipeline["version"] = "segmented_stage_v1"
+    pipeline["unresolved_stages"] = unresolved
+    pipeline["status"] = status
+    result["stage2_pipeline_status"] = status
+    result["stage2_pipeline_version"] = "segmented_stage_v1"
+    return status, unresolved
+
+
+def _clear_segmented_unresolved_severity(
+    result: dict[str, Any],
+    unresolved_stages: list[str],
+) -> None:
+    """Prevent compatibility defaults from becoming conclusions for unknown stages."""
+    unresolved = set(unresolved_stages)
+    if not unresolved:
+        return
+    for stage in result.get("stage_analysis") or []:
+        if not isinstance(stage, dict) or _segmented_stage_code(stage.get("stage")) not in unresolved:
+            continue
+        stage["severity"] = None
+        stage["model_severity"] = None
+        trace = stage.get("severity_derivation")
+        if isinstance(trace, dict):
+            trace["severity"] = None
+            trace["model_severity"] = None
+            trace["status"] = str(stage.get("analysis_status") or "evidence_blocked")
 
 
 def finalize_analysis_result(
@@ -350,6 +424,7 @@ def finalize_analysis_result(
 
     trusted_stage1_acquisition: dict[str, dict[str, Any]] = {}
     trusted_stage1_recovery: dict[str, dict[str, Any]] = {}
+    trusted_stage1_qualification: dict[str, dict[str, Any]] = {}
     trusted_stage1_coverage_audit: dict[str, dict[str, Any]] = {}
     if locked_video_understanding:
         before = copy.deepcopy(result) if audit is not None else None
@@ -365,6 +440,12 @@ def finalize_analysis_result(
             metadata = side.get("stage1_recovery") if isinstance(side, dict) else None
             if isinstance(metadata, dict) and metadata.get("source") == "pipeline":
                 trusted_stage1_recovery[role] = metadata
+            qualification_metadata = side.get("stage1_qualification") if isinstance(side, dict) else None
+            if (
+                isinstance(qualification_metadata, dict)
+                and qualification_metadata.get("source") == "pipeline"
+            ):
+                trusted_stage1_qualification[role] = qualification_metadata
             audit_metadata = side.get("stage1_coverage_audit") if isinstance(side, dict) else None
             if (
                 isinstance(audit_metadata, dict)
@@ -379,9 +460,18 @@ def finalize_analysis_result(
         result,
         trusted_stage1_acquisition=trusted_stage1_acquisition,
         trusted_stage1_recovery=trusted_stage1_recovery,
+        trusted_stage1_qualification=trusted_stage1_qualification,
         trusted_stage1_coverage_audit=trusted_stage1_coverage_audit,
         allow_trusted_pipeline_metadata=bool(locked_video_understanding),
     )
+    segmented = (
+        str(analysis.get("stage2_pipeline_version") or "").strip() == "segmented_stage_v1"
+        or str(normalized.get("stage2_pipeline_version") or "").strip() == "segmented_stage_v1"
+    )
+    if segmented:
+        normalized["stage2_pipeline_version"] = "segmented_stage_v1"
+        _status, unresolved = _refresh_segmented_pipeline_status(normalized)
+        _clear_segmented_unresolved_severity(normalized, unresolved)
     if audit is not None:
         audit.record(before_normalize, normalized, "pipeline.normalize_analysis_result")
     audio_assessment = analysis.get("audio_assessment") if isinstance(analysis, dict) else {}
@@ -417,26 +507,31 @@ def finalize_analysis_result(
                 raise SystemExit(f"{role} Stage1 证据集未冻结或已损坏：" + "；".join(snapshot_issues))
             expected_stage1_hashes[role] = str(side.get("evidence_set_sha256") or "")
 
-    link_issues = stage_evidence_link_issues(normalized)
-    if link_issues:
-        raise SystemExit("Stage2 到 Stage1 的证据链接合同无效：" + "；".join(link_issues))
-
     validated_snapshot = copy.deepcopy(normalized)
     if artifact_dir is not None:
         write_json(artifact_dir / "validated_normalized_result.json", validated_snapshot)
 
-    apply_postprocess_chain(normalized, analysis, audit=audit)
-
-    # Resolution may prune a stage reference, but the immutable Stage1 unit
-    # itself must never be changed. Rebuild only the mutable link projection
-    # before the final link validation.
-    reconcile_stage_evidence_links(normalized)
+    if analysis.get("stage2_pipeline_version") == "segmented_stage_v1":
+        apply_segmented_postprocess_chain(normalized, analysis, audit=audit)
+    else:
+        apply_postprocess_chain(normalized, analysis, audit=audit)
 
     def audited_step(rule: str, function: Any, *args: Any) -> None:
         if audit is None:
             function(*args)
         else:
             audit.run(normalized, rule, function, *args)
+
+    # Stage flags and top-level references are deterministically aligned by the
+    # postprocess chain. The link list is a code-owned projection of those
+    # aligned references, so validate it only after rebuilding it here. Strict
+    # pre-chain validation would reject exactly the safe repairs this chain is
+    # responsible for and trigger an unnecessary full-model retry.
+    audited_step(
+        "postprocess.reconcile_stage_evidence_links",
+        reconcile_stage_evidence_links,
+        normalized,
+    )
 
     validate_evidence_alignment(normalized)
     validate_stage_ownership(normalized)
@@ -499,7 +594,19 @@ def finalize_analysis_result(
 def merge_analysis_result(analysis: dict[str, Any], result_path: Path, analysis_input: str) -> None:
     """把外部 analysis_result.json 经唯一处理链后合并入 analysis。"""
     result = json.loads(result_path.read_text(encoding="utf-8"))
+    segmented = str(result.get("stage2_pipeline_version") or "").strip() == "segmented_stage_v1"
+    if segmented:
+        analysis["stage2_pipeline_version"] = "segmented_stage_v1"
+        analysis["stage2_pipeline_status"] = str(result.get("stage2_pipeline_status") or "degraded").strip().lower()
+        analysis["stage_evidence_contract_required"] = True
     stages = result.get("stage_analysis") if isinstance(result.get("stage_analysis"), list) else []
+    if segmented:
+        # Older segmented artifacts may predate the Stage3 deterministic
+        # fallback and contain an empty improvements list.  Replays must not
+        # fail before the new finalizer can classify unresolved stages.
+        improvements = result.get("improvements")
+        if not isinstance(improvements, list) or not improvements:
+            result["improvements"] = _deterministic_improvement(stages)
     has_structured_s5 = any(
         isinstance(stage, dict)
         and str(stage.get("stage") or "").upper().startswith("S5")
@@ -514,7 +621,15 @@ def merge_analysis_result(analysis: dict[str, Any], result_path: Path, analysis_
     if artifact_dir is not None:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         _write_raw_model_response(artifact_dir, result=result, overwrite=True)
-    normalized = finalize_analysis_result(result, analysis, analysis_input)
+    if segmented:
+        normalized = finalize_analysis_result(
+            result,
+            analysis,
+            analysis_input,
+            locked_video_understanding=result.get("video_understanding"),
+        )
+    else:
+        normalized = finalize_analysis_result(result, analysis, analysis_input)
     if isinstance(phase_c_review, dict):
         normalized["phase_c_review"] = phase_c_review
         _refresh_final_derived_artifact(analysis, normalized, ("phase_c_review",))
@@ -793,6 +908,9 @@ def _is_valid_video_fact_cache(role: str, value: dict[str, Any], analysis: dict[
     if normalized.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
         if stage_evidence_snapshot_issues(value, require_snapshot=True):
             return False
+        qualification = value.get("stage1_qualification")
+        if not isinstance(qualification, dict) or qualification.get("status") != "completed":
+            return False
         # An active cache without the independent semantic coverage pass is
         # stale even if its primary stage checks look complete. Re-run the
         # fact path instead of silently treating a model self-report as recall
@@ -800,6 +918,455 @@ def _is_valid_video_fact_cache(role: str, value: dict[str, Any], analysis: dict[
         if stage1_coverage_audit_issues(value):
             return False
     return True
+
+
+_SEGMENTED_STAGE_NAMES = {
+    "S1": "S1 Hook",
+    "S2": "S2 产品引出",
+    "S3": "S3 使用过程",
+    "S4": "S4 效果呈现",
+    "S5": "S5 信任放大",
+    "S6": "S6 CTA",
+}
+_SEGMENTED_STAGE_QUESTIONS = {
+    "S1": "用户凭什么停下来",
+    "S2": "产品是否自然承接并成为解决方案",
+    "S3": "使用过程是否把核心卖点演示出来",
+    "S4": "目标效果是否被清楚且可信地证明",
+    "S5": "信任材料是否真实、相关且可追溯",
+    "S6": "用户是否知道下一步如何购买或行动",
+}
+_SEGMENTED_FLAG_REQUIRED_KEYS = {
+    "S1": ("exists", "type", "dims", "landing_met", "landing_reason", "window_evidence", "hook_boundary_seconds", "hook_boundary_reason", "s2_start_signal", "landing_window_leak", "anchors_proposition"),
+    "S2": ("exists", "merged_with_s3", "module_type", "handoff_met", "s1_s2_compatible", "product_identity_clear", "product_role_clear", "excluded_or_risky_module", "start_seconds", "end_seconds", "handoff_reason"),
+    "S3": ("exists", "module_type", "usage_evidence_state", "usage_process_visible", "result_only_without_process", "mouth_only_or_static", "real_usage_met", "core_selling_point_visible", "process_framing_met", "action_proof_met", "action_target_contact_met", "action_application_change_visible", "critical_action_continuity_met", "scene_mode", "usage_context_fit", "continuity_met", "richness_met", "single_scene_continuity_met", "single_scene_variation_met", "multi_scene_logic_met", "multi_scene_transition_met", "multi_scene_role_adaptation_met", "role_design_met", "role_interaction_met", "distinct_personas_met", "steps_clear_met", "pov_immersive_met", "fake_or_staged", "start_seconds", "end_seconds", "usage_reason"),
+    "S4": ("effect_type", "effect_evidence_state", "effect_visible", "effect_salience", "effect_proposition_matched", "comparison_control_met", "closeup_or_focus_met", "visual_difference_observed", "module_constraints_met", "effect_maximized", "requires_close_inspection", "effect_attribution_supported", "result_only_without_process", "process_linked_effect", "tamper_or_cut_risk", "effect_reason"),
+    "S5": ("exists", "module_type", "trust_evidence_type", "trust_basis", "trust_source_visible", "trust_source_credible", "trust_claim_specific", "product_relevance_met", "independent_trust_purpose", "duplicates_other_stage", "voice_only", "risky_or_unsupported", "start_seconds", "end_seconds", "trust_reason"),
+    "S6": ("exists", "module_type", "direct_order_met", "action_path_clear", "soft_purchase_invitation_met", "offer_or_incentive_clear", "price_anchor_met", "urgency_evidence_met", "gift_stack_met", "guarantee_clear_met", "urgency_met", "product_value_recalled", "module_fit_met", "ending_position_met", "depends_on_valid_s4", "compliance_risk", "start_seconds", "end_seconds", "cta_reason"),
+}
+
+
+def _segmented_stage_code(value: Any) -> str:
+    match = re.search(r"S[1-6]", str(value or "").upper())
+    return match.group(0) if match else ""
+
+
+def _segmented_text_items(value: Any, limit: int = 5) -> list[str]:
+    """Normalize bounded model text fields without iterating string characters."""
+    if isinstance(value, list):
+        items = [str(item).strip() for item in value if str(item).strip()]
+    elif str(value or "").strip():
+        items = [str(value).strip()]
+    else:
+        items = []
+    return items[:limit]
+
+
+def _segmented_evidence_range(facts: dict[str, Any], role: str, stage: str, ids: list[str]) -> str:
+    side = facts.get(role) if isinstance(facts.get(role), dict) else {}
+    units = {
+        str(unit.get("id") or ""): unit
+        for unit in side.get("evidence_units") or []
+        if isinstance(unit, dict)
+    }
+    parsed = [
+        parse_time_range_seconds(units[item].get("time_range"), None)
+        for item in ids
+        if item in units
+    ]
+    parsed = [item for item in parsed if item is not None]
+    if not parsed:
+        return ""
+    return f"{format_seconds(min(item[0] for item in parsed))} - {format_seconds(max(item[1] for item in parsed))}"
+
+
+def _segmented_complete_flag(value: Any, stage: str) -> bool:
+    if not isinstance(value, dict):
+        return False
+    required = _SEGMENTED_FLAG_REQUIRED_KEYS.get(stage, ())
+    if any(key not in value for key in required):
+        return False
+    if stage == "S1" and not isinstance(value.get("dims"), dict):
+        return False
+    return True
+
+
+def _normalize_segmented_stage(
+    raw: dict[str, Any],
+    stage: str,
+    facts: dict[str, Any],
+) -> dict[str, Any]:
+    """Project one model-owned stage judgment into the legacy report shape.
+
+    The projection is intentionally mechanical: evidence IDs are intersected
+    with the qualified Stage1 set and missing ranges are derived only from
+    those IDs. No candidate observation can become a formal reference here.
+    """
+    output = copy.deepcopy(raw)
+    output["stage"] = _SEGMENTED_STAGE_NAMES[stage]
+    output["core_question"] = _SEGMENTED_STAGE_QUESTIONS[stage]
+    role_ids: dict[str, list[str]] = {}
+    for role in ("benchmark", "creator"):
+        side = facts.get(role) if isinstance(facts.get(role), dict) else {}
+        qualified = qualified_stage_evidence_ids(side, stage)
+        key = f"{role}_evidence_ids"
+        ids = [str(item).strip() for item in raw.get(key) or [] if str(item).strip() in qualified]
+        readiness = stage_evidence_readiness(side, stage)
+        if readiness != "present":
+            ids = []
+        role_ids[role] = list(dict.fromkeys(ids))
+        output[key] = role_ids[role]
+        output[f"{role}_visual_evidence"] = _segmented_text_items(
+            raw.get(f"{role}_visual_evidence")
+        )
+        if not output.get(f"{role}_time_range") or parse_time_range_seconds(output.get(f"{role}_time_range"), None) is None:
+            output[f"{role}_time_range"] = _segmented_evidence_range(facts, role, stage, role_ids[role])
+
+    output["time_range"] = f"标杆 {output.get('benchmark_time_range') or '待复核'} / 达人 {output.get('creator_time_range') or '待复核'}"
+    readiness = {
+        role: stage_evidence_readiness(facts.get(role) if isinstance(facts.get(role), dict) else {}, stage)
+        for role in ("benchmark", "creator")
+    }
+    missing_model_references = any(
+        readiness[role] == "present" and not role_ids[role]
+        for role in ("benchmark", "creator")
+    )
+    if missing_model_references:
+        output["relation"] = "uncertain"
+        output["model_gap_magnitude"] = "uncertain"
+        output["stage_state"] = "unknown"
+        output["judgment_reason"] = (
+            str(raw.get("judgment_reason") or "").strip()
+            or "Stage2 未返回可核验的阶段证据 ID，未将候选事实升级为正式引用。"
+        )
+        output["analysis_status"] = "handoff_loss"
+    elif any(value != "present" for value in readiness.values()):
+        output["relation"] = "uncertain"
+        output["model_gap_magnitude"] = "uncertain"
+        output["stage_state"] = "unknown" if "conflict" not in readiness.values() else "conflict"
+        output["judgment_reason"] = (
+            str(raw.get("judgment_reason") or "").strip()
+            or f"Stage1 资格未闭合：benchmark={readiness['benchmark']}，creator={readiness['creator']}。"
+        )
+        output["analysis_status"] = "evidence_blocked"
+    else:
+        relation = str(raw.get("relation") or "").strip().lower()
+        output["relation"] = relation if relation in {"creator_better", "benchmark_better", "equivalent", "uncertain"} else "uncertain"
+        magnitude = str(raw.get("model_gap_magnitude") or raw.get("severity") or "").strip().lower()
+        output["model_gap_magnitude"] = magnitude if magnitude in {"none", "small", "medium", "large", "uncertain"} else "uncertain"
+        # Missing is an unknown semantic result, never an implicit success.
+        output["stage_state"] = str(raw.get("stage_state") or "unknown").strip().lower()
+        output["judgment_reason"] = str(raw.get("judgment_reason") or raw.get("reason") or "").strip()
+        output["analysis_status"] = "grounded"
+
+    output["gap_type"] = str(raw.get("gap_type") or "execution").strip().lower()
+    if output["gap_type"] not in {"structural", "execution", "resource"}:
+        output["gap_type"] = "execution"
+    gap_summary_items = _segmented_text_items(raw.get("gap_summary"))
+    output["gap_summary"] = gap_summary_items[:5] or [output["judgment_reason"] or "待基于阶段证据复核。"]
+    output["benchmark_summary"] = str(raw.get("benchmark_summary") or "").strip() or (
+        "该阶段证据未完成资格化，暂不形成正式标杆结论。" if not role_ids["benchmark"] else "标杆阶段证据已锁定，待补充文字摘要。"
+    )
+    output["creator_summary"] = str(raw.get("creator_summary") or "").strip() or (
+        "该阶段证据未完成资格化，暂不形成正式达人结论。" if not role_ids["creator"] else "达人阶段证据已锁定，待补充文字摘要。"
+    )
+    output["benchmark_key_message"] = str(raw.get("benchmark_key_message") or output["benchmark_summary"]).strip()
+    output["creator_key_message"] = str(raw.get("creator_key_message") or output["creator_summary"]).strip()
+    output["benchmark_support_status"] = str(raw.get("benchmark_support_status") or ("supported" if role_ids["benchmark"] else "visual_only"))
+    output["creator_support_status"] = str(raw.get("creator_support_status") or ("supported" if role_ids["creator"] else "visual_only"))
+    output["benchmark_quote"] = str(raw.get("benchmark_quote") or "").strip()
+    output["benchmark_quote_zh"] = str(raw.get("benchmark_quote_zh") or "").strip()
+    output["creator_quote"] = str(raw.get("creator_quote") or "").strip()
+    output["creator_quote_zh"] = str(raw.get("creator_quote_zh") or "").strip()
+    evidence_items = _segmented_text_items(raw.get("evidence"))
+    output["evidence"] = evidence_items[:5] or [output["judgment_reason"] or "阶段证据由代码交接。"]
+    output["gap"] = str(raw.get("gap") or output["judgment_reason"] or "阶段差距待复核。").strip()
+    output["model_severity"] = output["model_gap_magnitude"] if output["model_gap_magnitude"] in {"small", "medium", "large"} else "medium"
+    output["severity"] = output["model_severity"]
+    output["creator_module_id"] = str(raw.get("creator_module_id") or "unknown")
+    output["benchmark_module_id"] = str(raw.get("benchmark_module_id") or "unknown")
+    output["module_fit"] = str(raw.get("module_fit") or "unknown")
+    output["module_fit_reason"] = str(raw.get("module_fit_reason") or output["judgment_reason"] or "").strip()
+    output["task_completion"] = str(raw.get("task_completion") or "partial")
+    if output["task_completion"] not in {"complete", "partial", "missing"}:
+        output["task_completion"] = "partial"
+    output["voice_performance"] = raw.get("voice_performance") if isinstance(raw.get("voice_performance"), dict) else {"pace": "unknown", "energy": "unknown", "key_pause": False, "note": "由阶段证据交接。"}
+    output["benchmark_execution"] = raw.get("benchmark_execution")
+    output["creator_execution"] = raw.get("creator_execution")
+    output["painpoint_relevance"] = raw.get("painpoint_relevance")
+    output["stage_standard_delivery"] = raw.get("stage_standard_delivery") or "unknown"
+
+    # A nested structured flag is accepted only as a complete object. Partial
+    # semantic objects are worse than an explicit unknown because the existing
+    # resolver/validators would otherwise mistake omitted booleans for facts.
+    for role in ("benchmark", "creator"):
+        key = f"{role}_{stage.lower() if stage != 'S1' else 'hook'}"
+        value = raw.get(key)
+        if _segmented_complete_flag(value, stage):
+            output[key] = copy.deepcopy(value)
+        else:
+            output.pop(key, None)
+    return output
+
+
+def _segmented_unknown_stage(stage: str, reason: str) -> dict[str, Any]:
+    return _normalize_segmented_stage(
+        {
+            "stage": _SEGMENTED_STAGE_NAMES[stage],
+            "relation": "uncertain",
+            "model_gap_magnitude": "uncertain",
+            "judgment_reason": reason,
+        },
+        stage,
+        {"benchmark": {}, "creator": {}},
+    )
+
+
+def _deterministic_product_visibility(facts: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
+    """Project product visibility from immutable creator facts, without LLM estimation."""
+    side = facts.get("creator") if isinstance(facts.get("creator"), dict) else {}
+    duration = float((analysis.get("videos", {}).get("creator", {}) or {}).get("duration_seconds") or 0.0)
+    intervals: list[tuple[float, float]] = []
+    for unit in side.get("evidence_units") or []:
+        if not isinstance(unit, dict) or unit.get("product_visible") is not True:
+            continue
+        parsed = parse_time_range_seconds(unit.get("time_range"), duration or None)
+        if parsed is not None and parsed[1] > parsed[0]:
+            intervals.append(parsed)
+    intervals.sort()
+    merged: list[list[float]] = []
+    for start, end in intervals:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    total = sum(end - start for start, end in merged)
+    first = merged[0][0] if merged else 0.0
+    ratio = total / duration if duration > 0 else 0.0
+    return {
+        "first_appearance_sec": round(first, 3),
+        "total_screen_time_sec": round(total, 3),
+        "video_duration_sec": round(duration, 3),
+        "ratio": round(min(max(ratio, 0.0), 1.0), 6),
+        "estimation_note": "由代码从达人 Stage1 evidence_units 的 product_visible 标记合并区间计算。",
+    }
+
+
+def _deterministic_improvement(stage_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidates = [
+        item for item in stage_results
+        if isinstance(item, dict) and item.get("model_gap_magnitude") in {"large", "medium"}
+    ]
+    selected = candidates[0] if candidates else (stage_results[0] if stage_results else {})
+    stage = _segmented_stage_code(selected.get("stage")) or "S1"
+    return [{
+        "title": f"优先复核{stage}阶段证据",
+        "target_stage": stage,
+        "gmv_impact": "待基于完整阶段证据确认",
+        "gap_type": selected.get("gap_type") or "execution",
+        "time_range": selected.get("creator_time_range") or "",
+        "creator_time_range": selected.get("creator_time_range") or "",
+        "benchmark_time_range": selected.get("benchmark_time_range") or "",
+        "problem": selected.get("gap") or "阶段证据不足，暂不生成确定性建议。",
+        "benchmark_reference": selected.get("benchmark_summary") or "暂无合格标杆证据。",
+        "benchmark_evidence_ids": selected.get("benchmark_evidence_ids") or [],
+        "suggestion": "待阶段证据完成后再生成具体改进动作。",
+        "actions": ["补齐并复核该阶段关键证据"],
+        "gmv_reason": "避免把证据未知误写成业务缺陷。",
+        "evidence": selected.get("evidence") or [],
+        "priority": 1,
+    }]
+
+
+def _prepare_segmented_synthesis(raw: dict[str, Any] | None, stage_results: list[dict[str, Any]]) -> dict[str, Any]:
+    raw = raw if isinstance(raw, dict) else {}
+    result = copy.deepcopy(raw)
+    result.setdefault("one_line_verdict", "基于分阶段证据完成分析，部分字段需按阶段状态复核。")
+    result.setdefault("one_line_summary", result["one_line_verdict"])
+    result.setdefault("executive_summary", result["one_line_summary"])
+    result.setdefault("holistic_assessment", {})
+    result.setdefault("key_conclusions", [])
+    result.setdefault("loop_closure", {})
+    result.setdefault("s3_s4_relationship", {})
+    result.setdefault("promise_chain", {})
+    improvements = result.get("improvements") if isinstance(result.get("improvements"), list) else []
+    result["improvements"] = improvements[:5] or _deterministic_improvement(stage_results)
+    return result
+
+
+def _segmented_stage_unresolved(stage_results: list[dict[str, Any]]) -> list[str]:
+    """Return core stages that cannot support a completed run marker."""
+    unresolved: list[str] = []
+    for stage in stage_results:
+        if not isinstance(stage, dict):
+            continue
+        code = _segmented_stage_code(stage.get("stage"))
+        status = str(stage.get("analysis_status") or "unknown").strip().lower()
+        stage_state = str(stage.get("stage_state") or "unknown").strip().lower()
+        magnitude = str(stage.get("model_gap_magnitude") or "unknown").strip().lower()
+        # ``stage_state`` is a required semantic output.  A grounded evidence
+        # handoff is necessary but not sufficient: if the model did not close
+        # the stage judgment itself, relation/magnitude must not become a
+        # publishable conclusion through a compatibility default.
+        if code and (
+            status != "grounded"
+            or stage_state != "completed"
+            or magnitude == "uncertain"
+        ):
+            unresolved.append(code)
+    return list(dict.fromkeys(unresolved))
+
+
+def run_segmented_stage_pipeline(
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    analysis_input: str,
+    facts: dict[str, Any],
+    run_dir: Path,
+    api_key: str,
+) -> dict[str, Any]:
+    """Run the frozen Stage2/Stage3 path without whole-object model repair."""
+    handoff: dict[str, Any] = {
+        "version": "stage1_to_stage2_handoff_v1",
+        "pipeline": "segmented_stage_v1",
+        "roles": {},
+    }
+    for role in ("benchmark", "creator"):
+        side = facts.get(role) if isinstance(facts.get(role), dict) else {}
+        view = stage_analysis_evidence_view(side)
+        handoff["roles"][role] = {
+            "ledger_hash": side.get("evidence_set_sha256") or "",
+            "qualified_evidence_ids": view.get("qualified_stage_evidence_ids") or {},
+            "candidate_evidence_ids": view.get("candidate_evidence_ids_by_stage") or {},
+            "candidate_observations_by_stage": view.get("candidate_observations_by_stage") or {},
+            "stage_readiness": view.get("stage_evidence_readiness") or {},
+            "coverage_summary": {
+                stage: {
+                    "readiness": (view.get("stage_evidence_readiness") or {}).get(stage, "unknown"),
+                    "qualified_count": len((view.get("qualified_stage_evidence_ids") or {}).get(stage) or []),
+                    "candidate_count": len((view.get("candidate_evidence_ids_by_stage") or {}).get(stage) or []),
+                }
+                for stage in stage_codes()
+            },
+        }
+    write_json(run_dir / "stage1_to_stage2_handoff.json", handoff)
+    stage_results: list[dict[str, Any]] = []
+    group_records: list[dict[str, Any]] = []
+    any_group_failed = False
+    for group in STAGE_JUDGMENT_GROUPS:
+        label = "_".join(group)
+        target = list(group)
+        record: dict[str, Any] = {"group": target, "status": "pending", "stages": []}
+        request_path = run_dir / f"llm_stage_group_{label}_request.json"
+        response_path = run_dir / f"llm_stage_group_{label}_response.json"
+        try:
+            payload = build_stage_group_judgment_payload(
+                args.llm_model,
+                analysis_input,
+                facts,
+                analysis,
+                target,
+                api_url=args.llm_api_url,
+                budget=getattr(args, "_resource_budget", None),
+            )
+            write_json(request_path, payload)
+            response_text = fetch_json_completion(args, api_key, request_path, response_path)
+            parsed = parse_json_text(response_text)
+            raw_stages = parsed.get("stages") if isinstance(parsed, dict) and isinstance(parsed.get("stages"), list) else []
+            by_code = {
+                _segmented_stage_code(item.get("stage")): item
+                for item in raw_stages
+                if isinstance(item, dict) and _segmented_stage_code(item.get("stage")) in target
+            }
+            if set(by_code) != set(target):
+                raise SystemExit(f"阶段组 {label} 返回阶段不完整：期待 {target}，实际 {sorted(by_code)}")
+            projected = [_normalize_segmented_stage(by_code[code], code, facts) for code in target]
+            record.update({"status": "completed", "stages": target, "response_sha256": _stable_digest(parsed)})
+            stage_results.extend(projected)
+        except (OSError, ValueError, SystemExit, json.JSONDecodeError) as exc:
+            any_group_failed = True
+            record.update({"status": "failed", "error": str(exc)})
+            projected = [
+                _normalize_segmented_stage(
+                    {"stage": _SEGMENTED_STAGE_NAMES[code], "relation": "uncertain", "model_gap_magnitude": "uncertain", "judgment_reason": f"阶段组调用失败：{exc}"},
+                    code,
+                    facts,
+                )
+                for code in target
+            ]
+            stage_results.extend(projected)
+        group_records.append(record)
+        write_json(run_dir / f"stage_group_{label}.json", record)
+
+    synthesis_status = "completed"
+    synthesis: dict[str, Any] = {}
+    synthesis_request = run_dir / "llm_stage_synthesis_request.json"
+    synthesis_response = run_dir / "llm_stage_synthesis_response.json"
+    try:
+        payload = build_stage_synthesis_payload(args.llm_model, analysis_input, facts, stage_results, analysis)
+        write_json(synthesis_request, payload)
+        response_text = fetch_json_completion(args, api_key, synthesis_request, synthesis_response)
+        parsed = parse_json_text(response_text)
+        if not isinstance(parsed, dict):
+            raise SystemExit("Stage3 synthesis must be a JSON object")
+        synthesis = parsed
+    except (OSError, ValueError, SystemExit, json.JSONDecodeError) as exc:
+        synthesis_status = "failed"
+        synthesis = {"synthesis_error": str(exc)}
+        any_group_failed = True
+
+    synthesis = _prepare_segmented_synthesis(synthesis, stage_results)
+    unresolved_stages = _segmented_stage_unresolved(stage_results)
+    raw_bundle = {
+        "pipeline": "segmented_stage_v1",
+        "stage_groups": group_records,
+        "synthesis_status": synthesis_status,
+        "unresolved_stages": unresolved_stages,
+        "synthesis": synthesis,
+    }
+    _write_raw_model_response(run_dir, result=raw_bundle, overwrite=True)
+    analysis["stage2_pipeline_status"] = (
+        "degraded" if any_group_failed or unresolved_stages else "completed"
+    )
+    analysis["stage2_pipeline_version"] = "segmented_stage_v1"
+    analysis["stage_evidence_contract_required"] = True
+    analysis["evidence_state_required"] = False
+    analysis["multimodal_assessment_required"] = False
+    # Stage-specific flags are accepted only when the group returned a complete
+    # object. This prevents a partial semantic object from activating the old
+    # validator as a new source of truth.
+    for key in ("s1_hook_flags_required", "s2_flags_required", "s3_flags_required", "s4_flags_required", "s5_flags_required", "s6_flags_required"):
+        analysis[key] = False
+    foundation = analysis.get("product_foundation") if isinstance(analysis.get("product_foundation"), dict) else {}
+    result = {
+        "one_line_verdict": synthesis.get("one_line_verdict"),
+        "one_line_summary": synthesis.get("one_line_summary"),
+        "executive_summary": synthesis.get("executive_summary"),
+        "holistic_assessment": synthesis.get("holistic_assessment"),
+        "key_conclusions": synthesis.get("key_conclusions"),
+        "comparison_contract": analysis.get("comparison_contract") or {},
+        "comparison_eligibility": analysis.get("comparison_eligibility") or analysis.get("comparison_contract") or {},
+        "product_visibility": _deterministic_product_visibility(facts, analysis),
+        "category_profile": foundation.get("category_profile") or {},
+        "product_profile": foundation.get("product_profile") or {},
+        "loop_closure": synthesis.get("loop_closure") or {},
+        "s3_s4_relationship": synthesis.get("s3_s4_relationship") or {},
+        "promise_chain": synthesis.get("promise_chain") or {},
+        "video_understanding": facts,
+        "stage_evidence_links": [],
+        "stage_analysis": stage_results,
+        "improvements": synthesis.get("improvements") or _deterministic_improvement(stage_results),
+        "stage2_pipeline_version": "segmented_stage_v1",
+        "stage2_pipeline_status": analysis["stage2_pipeline_status"],
+        "segmented_pipeline": {
+            "version": "segmented_stage_v1",
+            "stage_groups": group_records,
+            "synthesis_status": synthesis_status,
+            "unresolved_stages": unresolved_stages,
+            "status": analysis["stage2_pipeline_status"],
+        },
+    }
+    return result
 
 
 def run_large_model_analysis(
@@ -840,29 +1407,36 @@ def run_large_model_analysis(
         if comparison_contract.get("overall_status") in {"not_comparable", "uncertain"}:
             _apply_non_comparable_result(analysis, facts, comparison_contract, run_dir)
             return None
-        analysis["s1_hook_flags_required"] = True
-        analysis["structured_relevance_required"] = True
-        analysis["s2_flags_required"] = True
-        analysis["s3_flags_required"] = True
-        analysis["s4_flags_required"] = True
-        # New structured state fields are required for severity-elevating floors.
-        # Legacy artifacts without this marker remain readable but cannot trigger
-        # the new floor rules.
-        analysis["evidence_state_required"] = True
-        analysis["stage_evidence_contract_required"] = True
-        analysis["s5_flags_required"] = True
-        analysis["s5_source_signals_required"] = True
-        analysis["s6_flags_required"] = True
-        analysis["multimodal_assessment_required"] = True
         analysis_input = analysis_input_path.read_text(encoding="utf-8")
-        payload = build_llm_comparison_payload(
-            args.llm_model,
+        # ADR-007 production path: Stage2 is four bounded judgment calls and
+        # Stage3 is a read-only synthesis. The legacy whole-object request and
+        # whole-object repair remain available only to explicit legacy imports.
+        segmented_result = run_segmented_stage_pipeline(
+            args,
+            analysis,
             analysis_input,
             facts,
-            analysis,
-            api_url=args.llm_api_url,
-            budget=getattr(args, "_resource_budget", None),
+            run_dir,
+            api_key,
         )
+        segmented_result["analysis_run_metadata"] = {
+            "llm_model": str(args.llm_model or ""),
+            "llm_api_url": str(args.llm_api_url or ""),
+            "multimodal_input": True,
+            "pipeline": "segmented_stage_v1",
+        }
+        normalized = finalize_analysis_result(
+            segmented_result,
+            analysis,
+            analysis_input,
+            locked_video_understanding=facts,
+        )
+        normalized["stage2_pipeline_status"] = analysis.get("stage2_pipeline_status", "completed")
+        normalized["stage2_pipeline_version"] = "segmented_stage_v1"
+        normalized["segmented_pipeline"] = segmented_result.get("segmented_pipeline", {})
+        result_path = run_dir / "analysis_result.json"
+        write_json(result_path, normalized)
+        return result_path, normalized
     else:
         facts = None
         payload = build_llm_payload(args.llm_model, analysis_input_path.read_text(encoding="utf-8"), [])
@@ -1606,9 +2180,9 @@ def payload_has_video(payload: dict[str, Any]) -> bool:
 def _visual_input_timestamps(visual_inputs: list[dict[str, Any]]) -> list[float]:
     """Return timestamps for the exact sampled images sent in this request.
 
-    Timeline overview images deliberately have no timestamp. They are useful
-    context, but cannot qualify a time-bounded positive visual fact by
-    themselves.
+    A timeline overview has no single timestamp, but its code-owned provenance
+    records every canonical source frame visibly embedded in that image. Only
+    those verified source timestamps may qualify a time-bounded visual fact.
     """
     values: list[float] = []
     for item in visual_inputs:
@@ -1617,6 +2191,12 @@ def _visual_input_timestamps(visual_inputs: list[dict[str, Any]]) -> list[float]
         timestamp = _finite_timestamp(item.get("timestamp_seconds"))
         if timestamp is not None and timestamp not in values:
             values.append(timestamp)
+        source_timestamps = item.get("source_frame_timestamps")
+        if isinstance(source_timestamps, list):
+            for raw_timestamp in source_timestamps:
+                source_timestamp = _finite_timestamp(raw_timestamp)
+                if source_timestamp is not None and source_timestamp not in values:
+                    values.append(source_timestamp)
     return sorted(values)
 
 
@@ -2247,6 +2827,104 @@ def has_product_foundation_anchor(analysis: dict[str, Any]) -> bool:
     return any("\u4e00" <= ch <= "\u9fff" for ch in name)
 
 
+def _run_stage1_qualification(
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    run_dir: Path,
+    api_key: str,
+    role: str,
+    facts: dict[str, Any],
+) -> dict[str, Any]:
+    """Run the independent Stage1-B projection over locked atomic facts.
+
+    A qualification failure is deliberately non-fatal to acquisition: the
+    ledger remains usable for diagnostics and the bounded Stage1-C recovery
+    can target the resulting unknown stages.
+    """
+    request_path = run_dir / f"llm_facts_{role}_qualification_request.json"
+    response_path = run_dir / f"llm_facts_{role}_qualification_response.json"
+    valid_ids = {
+        str(item.get("id") or "").strip()
+        for item in facts.get("evidence_units") or []
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    if args.llm_dry_run:
+        facts["stage1_qualification"] = {
+            "source": "pipeline",
+            "status": "deferred_dry_run",
+            "stage_codes": list(stage_codes()),
+        }
+        _block_stage_qualifications(
+            facts,
+            list(stage_codes()),
+            reason="Stage1-B 在 dry-run 中未执行，阶段资格保持未知。",
+        )
+        return facts
+    try:
+        payload = build_stage_evidence_qualification_payload(
+            args.llm_model,
+            role,
+            analysis,
+            facts,
+        )
+        write_json(request_path, payload)
+        response_text = fetch_json_completion(args, api_key, request_path, response_path)
+        response = parse_json_text(response_text)
+        if not isinstance(response, dict):
+            raise ValueError("Stage1-B qualification 必须返回 JSON object。")
+        allowed_keys = {"stage_evidence_contract_version", "stage_evidence_checks"}
+        extra_keys = sorted(set(response) - allowed_keys)
+        if extra_keys:
+            raise ValueError(
+                "Stage1-B qualification returned out-of-contract fields: "
+                + ", ".join(extra_keys)
+            )
+        if response.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+            raise ValueError("Stage1-B qualification 缺少匹配的 evidence contract version。")
+        if not isinstance(response.get("stage_evidence_checks"), list):
+            raise ValueError("Stage1-B qualification 的 stage_evidence_checks 必须是数组。")
+        checks = normalize_stage_evidence_checks(response["stage_evidence_checks"], valid_ids)
+        returned = {
+            normalize_stage_code(item.get("stage"))
+            for item in response["stage_evidence_checks"]
+            if isinstance(item, dict) and normalize_stage_code(item.get("stage"))
+        }
+        if returned != set(stage_codes()):
+            missing = sorted(set(stage_codes()) - returned)
+            extra = sorted(returned - set(stage_codes()))
+            raise ValueError(
+                "Stage1-B qualification 必须覆盖 S1-S6。"
+                + (f" missing={','.join(missing)}" if missing else "")
+                + (f" extra={','.join(extra)}" if extra else "")
+            )
+        facts["stage_evidence_checks"] = checks
+        facts["stage1_qualification"] = {
+            "source": "pipeline",
+            "status": "completed",
+            "contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage_codes": list(stage_codes()),
+            "evidence_id_count": len(valid_ids),
+        }
+    except (OSError, ValueError, RuntimeError, SystemExit) as exc:
+        safe_error = str(exc).strip()
+        if api_key and safe_error:
+            safe_error = safe_error.replace(api_key, "[REDACTED]")
+        _block_stage_qualifications(
+            facts,
+            list(stage_codes()),
+            reason="Stage1-B qualification 失败，阶段资格保持未知；Stage1-A 原子观察仍保留。",
+        )
+        facts["stage1_qualification"] = {
+            "source": "pipeline",
+            "status": "failed",
+            "contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage_codes": list(stage_codes()),
+            "evidence_id_count": len(valid_ids),
+            "failure_reason": safe_error[:500] or type(exc).__name__,
+        }
+    return facts
+
+
 def run_video_fact_extraction(
     args: argparse.Namespace,
     analysis: dict[str, Any],
@@ -2256,7 +2934,10 @@ def run_video_fact_extraction(
     """对每个 role 跑一次单视频事实抽取，写出 video_facts_{role}.json 并返回 dict。"""
     facts: dict[str, Any] = {}
     videos = analysis.get("videos", {})
-    per_role_limit = max(4, args.llm_image_limit // max(1, len(videos)))
+    # Benchmark and creator facts are extracted in separate requests. Dividing
+    # the image budget by the number of videos would halve each request's
+    # temporal coverage even though no request ever contains both sides.
+    per_role_limit = max(4, args.llm_image_limit)
     for role in ("benchmark", "creator"):
         if role not in videos:
             continue
@@ -2286,6 +2967,7 @@ def run_video_fact_extraction(
                     {"video_understanding": {role: cached}, "stage_analysis": []},
                     can_analyze_native_audio(args.llm_api_url, args.llm_model),
                 )
+            cached = _run_stage1_qualification(args, analysis, run_dir, api_key, role, cached)
             cached = _maybe_recover_video_facts(
                 args,
                 analysis,
@@ -2293,7 +2975,6 @@ def run_video_fact_extraction(
                 api_key,
                 role,
                 cached,
-                select_role_visual_inputs(videos[role], role, per_role_limit),
             )
             if isinstance(acquisition_manifest, dict):
                 cached["stage1_acquisition"] = acquisition_manifest
@@ -2339,6 +3020,14 @@ def run_video_fact_extraction(
                 )
             ),
         )
+        fact_result = _run_stage1_qualification(
+            args,
+            analysis,
+            run_dir,
+            api_key,
+            role,
+            fact_result,
+        )
         fact_result = _maybe_recover_video_facts(
             args,
             analysis,
@@ -2346,7 +3035,10 @@ def run_video_fact_extraction(
             api_key,
             role,
             fact_result,
-            visual_inputs,
+        )
+        sanitize_audio_observations(
+            {"video_understanding": {role: fact_result}, "stage_analysis": []},
+            can_analyze_native_audio(args.llm_api_url, args.llm_model),
         )
         fact_result["stage1_acquisition"] = build_stage1_acquisition_manifest(
             analysis,
@@ -2375,6 +3067,7 @@ def _merge_video_fact_coverage_audit(
     base: dict[str, Any],
     audit: dict[str, Any],
     analysis: dict[str, Any],
+    target_stages: list[str] | None = None,
 ) -> dict[str, Any]:
     """Append independent audit candidates and reconcile stage projections.
 
@@ -2400,10 +3093,22 @@ def _merge_video_fact_coverage_audit(
         for item in merged.get("evidence_units") or []
         if isinstance(item, dict) and str(item.get("id") or "").strip()
     }
+    raw_stage_map = audit.get("stages") if isinstance(audit.get("stages"), dict) else {}
+    valid_stage_codes = set(stage_codes())
+    requested_stages = list(dict.fromkeys(
+        code
+        for code in (
+            normalize_stage_code(item)
+            for item in (target_stages if target_stages is not None else raw_stage_map.keys())
+        )
+        if code in valid_stage_codes
+    ))
+    requested_stage_set = set(requested_stages)
     normalized_audit = normalize_stage1_coverage_audit(
         {
             **copy.deepcopy(audit),
             "source": "pipeline",
+            "target_stages": requested_stages,
             # The request boundary is code-owned.  Do not trust a model echo
             # to prove that this was a separate request.
             "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
@@ -2450,7 +3155,15 @@ def _merge_video_fact_coverage_audit(
             if str(value).strip() not in observed
         ]
         coverage = str(primary.get("coverage") or "unknown").strip().lower()
-        if audit_status == "found" and primary_status in {"absent", "unknown"}:
+        stage_was_requested = code in requested_stage_set
+        if stage_was_requested and audit_status == "found" and primary_status == "present":
+            # The primary pass already owns the atomic fact and its signal
+            # bindings.  A separate complete scan may close only the coverage
+            # dimension; it must not replace or rewrite the primary evidence.
+            audit_coverage = str(audit_item.get("coverage") or "unknown").strip().lower()
+            if audit_coverage == "complete":
+                coverage = "complete"
+        elif stage_was_requested and audit_status == "found" and primary_status in {"absent", "unknown"}:
             coverage = str(audit_item.get("coverage") or "unknown").strip().lower()
             if (
                 contract is not None
@@ -2461,14 +3174,14 @@ def _merge_video_fact_coverage_audit(
                 missing = []
             elif primary_status == "absent":
                 primary_status = "conflict"
-        elif audit_status == "clear" and primary_status == "unknown":
+        elif stage_was_requested and audit_status == "clear" and primary_status == "unknown":
             coverage = str(audit_item.get("coverage") or "unknown").strip().lower()
             if contract is not None and coverage == "complete":
                 primary_status = "absent"
                 missing = list(dict.fromkeys(
                     missing + list(contract.required_signals)
                 ))
-        elif audit_status in {"unknown", "conflict"} and primary_status in {"present", "absent"}:
+        elif stage_was_requested and audit_status in {"unknown", "conflict"} and primary_status in {"present", "absent"}:
             primary_status = "conflict"
 
         primary["stage"] = code
@@ -2484,7 +3197,7 @@ def _merge_video_fact_coverage_audit(
                 *[str(value).strip() for value in audit_item.get("invalid_signal_bindings") or [] if str(value).strip()],
             ]
         ))
-        if audit_status in {"unknown", "conflict"}:
+        if stage_was_requested and audit_status in {"unknown", "conflict"}:
             primary["reason"] = (
                 str(primary.get("reason") or "").strip()
                 + "；独立覆盖审计未能闭合。"
@@ -2492,7 +3205,7 @@ def _merge_video_fact_coverage_audit(
         merged_checks.append(primary)
 
         effective_audit_status = audit_status
-        if primary_status == "present" and audit_status == "clear":
+        if stage_was_requested and primary_status == "present" and audit_status == "clear":
             effective_audit_status = "conflict"
         audit_stages_out[code] = {
             "status": effective_audit_status,
@@ -2517,12 +3230,15 @@ def _merge_video_fact_coverage_audit(
     )
     if isinstance(base.get("stage1_acquisition"), dict):
         normalized["stage1_acquisition"] = copy.deepcopy(base["stage1_acquisition"])
+    if isinstance(base.get("stage1_qualification"), dict):
+        normalized["stage1_qualification"] = copy.deepcopy(base["stage1_qualification"])
     normalized["stage1_coverage_audit"] = normalize_stage1_coverage_audit(
         {
             "version": STAGE1_COVERAGE_AUDIT_VERSION,
             "source": "pipeline",
             "status": normalized_audit.get("status") or "unknown",
             "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
+            "target_stages": requested_stages,
             "stages": audit_stages_out,
             "errors": normalized_audit.get("errors") or [],
         },
@@ -2533,6 +3249,137 @@ def _merge_video_fact_coverage_audit(
         },
     )
     return normalized
+
+
+def _block_stage_qualifications(
+    facts: dict[str, Any],
+    target_stages: list[str],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """Fail closed only the affected stage projections, not their atomic facts."""
+    valid_ids = {
+        str(item.get("id") or "").strip()
+        for item in facts.get("evidence_units") or []
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    target_set = set(target_stages)
+    blocked_checks: list[dict[str, Any]] = []
+    for stage in stage_codes():
+        current = copy.deepcopy(stage_evidence_check_map(facts).get(stage) or {"stage": stage})
+        if stage in target_set:
+            current.update(
+                {
+                    "status": "unknown",
+                    "coverage": "unknown",
+                    "evidence_ids": [],
+                    "invalid_evidence_ids": [],
+                    "observed_signals": [],
+                    "missing_signals": [],
+                    "invalid_observed_signals": [],
+                    "invalid_missing_signals": [],
+                    "signal_bindings": {},
+                    "invalid_signal_bindings": [],
+                    "observed_disqualifiers": [],
+                    "invalid_observed_disqualifiers": [],
+                    "evidence_strength": None,
+                    "reason": reason,
+                }
+            )
+        blocked_checks.append(current)
+    facts["stage_evidence_checks"] = normalize_stage_evidence_checks(blocked_checks, valid_ids)
+    return facts
+
+
+def _materialize_stage_recovery_audit(
+    facts: dict[str, Any],
+    target_stages: list[str],
+    *,
+    errors: list[str] | None = None,
+) -> dict[str, Any]:
+    """Project one focused Stage1-C result into the legacy audit field.
+
+    ``stage1_coverage_audit`` is retained as an artifact name so old readers
+    can explain why a stage is blocked.  The active producer is deterministic:
+    it reads the post-recovery stage checks and never invents a second semantic
+    opinion.  This keeps the runtime gate useful while removing the old
+    same-media, full-video audit request from production.
+    """
+    valid_ids = {
+        str(item.get("id") or "").strip()
+        for item in facts.get("evidence_units") or []
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    requested = list(dict.fromkeys(
+        code
+        for code in (normalize_stage_code(value) for value in target_stages)
+        if code in set(stage_codes())
+    ))
+    checks = stage_evidence_check_map(facts)
+    structural_issues = stage_evidence_contract_issues(facts, require_version=True)
+    global_issues = [
+        issue
+        for issue in structural_issues
+        if issue.split(":", 1)[0] not in set(stage_codes())
+    ]
+    stages: dict[str, dict[str, Any]] = {}
+    unresolved: list[str] = []
+    for code in requested:
+        check = checks.get(code) if isinstance(checks.get(code), dict) else {}
+        stage_issues = [
+            issue for issue in structural_issues
+            if issue.split(":", 1)[0] == code
+        ]
+        stage_issues.extend(stage1_acquisition_issues(facts, code))
+        status = str(check.get("status") or "unknown").strip().lower()
+        if global_issues or stage_issues or status not in {"present", "absent"}:
+            audit_status = "conflict" if status == "conflict" else "unknown"
+            coverage = "unknown"
+            unresolved.append(code)
+        else:
+            audit_status = "found" if status == "present" else "clear"
+            coverage = "complete"
+        stage_ids = [
+            str(value).strip()
+            for value in check.get("evidence_ids") or []
+            if str(value).strip() in valid_ids
+        ]
+        stages[code] = {
+            "status": audit_status,
+            "coverage": coverage,
+            "evidence_ids": list(dict.fromkeys(stage_ids)),
+            "observed_signals": list(dict.fromkeys(
+                str(value).strip()
+                for value in check.get("observed_signals") or []
+                if str(value).strip()
+            )),
+            "missing_signals": list(dict.fromkeys(
+                str(value).strip()
+                for value in check.get("missing_signals") or []
+                if str(value).strip()
+            )),
+            "signal_bindings": copy.deepcopy(check.get("signal_bindings") or {}),
+            "invalid_signal_bindings": list(check.get("invalid_signal_bindings") or []),
+            "reason": str(check.get("reason") or "").strip(),
+        }
+    audit_errors = list(dict.fromkeys([
+        *(str(item).strip() for item in (errors or []) if str(item).strip()),
+        *(f"{code}:focused_recovery_unresolved" for code in unresolved),
+        *global_issues,
+    ]))
+    audit_status = "completed" if requested and not unresolved and not global_issues else "partial"
+    return normalize_stage1_coverage_audit(
+        {
+            "version": STAGE1_COVERAGE_AUDIT_VERSION,
+            "source": "pipeline",
+            "status": audit_status,
+            "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
+            "target_stages": requested,
+            "stages": stages,
+            "errors": audit_errors,
+        },
+        valid_ids,
+    )
 
 
 def _mark_video_fact_coverage_audit_failed(
@@ -2557,6 +3404,16 @@ def _mark_video_fact_coverage_audit_failed(
     if api_key and safe_error:
         safe_error = safe_error.replace(api_key, "[REDACTED]")
     safe_error = safe_error[:500] or type(error).__name__
+    _block_stage_qualifications(
+        facts,
+        target_stages,
+        reason="独立覆盖审计失败，阶段资格保持未知；原子观察仍保留在 evidence_units。",
+    )
+    valid_ids = {
+        str(item.get("id") or "").strip()
+        for item in facts.get("evidence_units") or []
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
     failed_stages = {
         stage: {
             "status": "unknown",
@@ -2575,14 +3432,11 @@ def _mark_video_fact_coverage_audit_failed(
             "source": "pipeline",
             "status": "failed",
             "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
+            "target_stages": list(target_stages),
             "stages": failed_stages,
             "errors": [f"{type(error).__name__}: {safe_error}"],
         },
-        {
-            str(item.get("id") or "").strip()
-            for item in facts.get("evidence_units") or []
-            if isinstance(item, dict) and str(item.get("id") or "").strip()
-        },
+        valid_ids,
     )
     facts["stage1_coverage_audit"] = audit
     facts["stage1_recovery"] = {
@@ -2601,6 +3455,47 @@ def _mark_video_fact_coverage_audit_failed(
     return facts
 
 
+def _mark_video_fact_recovery_failed(
+    facts: dict[str, Any],
+    *,
+    target_stages: list[str],
+    trigger_reasons: list[str],
+    contract_issues: list[str],
+    budget_flag: bool,
+    error: BaseException,
+    api_key: str,
+) -> dict[str, Any]:
+    """Record a failed focused recovery without losing primary observations."""
+    failed = _mark_video_fact_coverage_audit_failed(
+        facts,
+        target_stages=target_stages,
+        trigger_reasons=trigger_reasons,
+        contract_issues=contract_issues,
+        budget_flag=budget_flag,
+        error=error,
+        api_key=api_key,
+    )
+    failed["stage1_coverage_audit"] = _materialize_stage_recovery_audit(
+        failed,
+        target_stages,
+        errors=[f"focused_recovery_failed:{type(error).__name__}"],
+    )
+    recovery = failed.get("stage1_recovery") if isinstance(failed.get("stage1_recovery"), dict) else {}
+    recovery.update(
+        {
+            "status": "focused_recovery_with_unresolved",
+            "recovery_mode": "stage1_c_focused_once",
+            "audit_independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
+            "trigger_reasons": list(dict.fromkeys([
+                *[str(value) for value in trigger_reasons],
+                "focused_recovery_failed",
+            ])),
+        }
+    )
+    failed["stage1_recovery"] = recovery
+    return failed
+
+
 def _maybe_recover_video_facts(
     args: argparse.Namespace,
     analysis: dict[str, Any],
@@ -2608,31 +3503,49 @@ def _maybe_recover_video_facts(
     api_key: str,
     role: str,
     facts: dict[str, Any],
-    visual_inputs: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Run one bounded independent Stage1 coverage pass before facts lock.
+    """Run one bounded, stage-focused Stage1-C recovery before facts lock.
 
-    The pass doubles as recovery when the primary extraction reports a gap,
-    but it never receives the primary facts.  This prevents the common failure
-    mode where a second prompt merely rationalizes the first omission.
+    The pass receives only a read-only handoff and target-stage media windows;
+    it can append candidate observations and replace only target qualifications.
+    This prevents a second prompt from rationalizing the first omission or
+    silently re-running the full-video extractor.
     """
     recovery_meta = facts.get("stage1_recovery") if isinstance(facts.get("stage1_recovery"), dict) else {}
     if (
         recovery_meta.get("source") == "pipeline"
         and recovery_meta.get("status") in {
+            "focused_recovery",
+            "focused_recovery_with_unresolved",
+            # Read old artifacts without running a second recovery pass. New
+            # cache validation rejects their stale audit version; this branch
+            # only protects explicit offline imports.
             "coverage_audited",
             "coverage_audited_with_unresolved",
         }
     ):
         return facts
     budget_flag = facts.get("evidence_budget_exceeded") is True
+    contract_issues = stage_evidence_contract_issues(facts, require_version=True)
     primary_targets = stage_evidence_recovery_targets(
         facts,
         include_budget=False,
         include_coverage_audit=False,
     )
-    targets = list(stage_codes())
-    contract_issues = stage_evidence_contract_issues(facts, require_version=True)
+    issue_targets = [
+        issue.split(":", 1)[0]
+        for issue in contract_issues
+        if issue.split(":", 1)[0] in set(stage_codes())
+    ]
+    if budget_flag:
+        targets = list(stage_codes())
+    else:
+        targets = list(dict.fromkeys([*primary_targets, *issue_targets]))
+        if contract_issues and not targets:
+            # A global contract defect (for example an old contract version or
+            # duplicate IDs) has no safe stage-local target. One bounded pass
+            # is the narrowest honest recovery in that case.
+            targets = list(stage_codes())
     trigger_reasons: list[str] = []
     if budget_flag:
         trigger_reasons.append("evidence_budget_exceeded")
@@ -2640,6 +3553,17 @@ def _maybe_recover_video_facts(
         trigger_reasons.append("stage_evidence_incomplete")
     if contract_issues:
         trigger_reasons.append("stage_evidence_contract_invalid")
+    if not targets and not trigger_reasons:
+        facts["stage1_recovery"] = {
+            "source": "pipeline",
+            "status": "not_needed",
+            "target_stages": [],
+            "unresolved_stages": [],
+            "candidate_unit_count": 0,
+            "trigger_reasons": [],
+            "audit_independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
+        }
+        return facts
     if args.llm_dry_run:
         facts["stage1_recovery"] = {
             "source": "pipeline",
@@ -2649,14 +3573,22 @@ def _maybe_recover_video_facts(
         }
         return facts
 
-    request_path = run_dir / f"llm_facts_{role}_coverage_audit_request.json"
-    response_path = run_dir / f"llm_facts_{role}_coverage_audit_response.json"
+    request_path = run_dir / f"llm_facts_{role}_stage_recovery_request.json"
+    response_path = run_dir / f"llm_facts_{role}_stage_recovery_response.json"
     try:
-        payload = build_video_fact_coverage_audit_payload(
+        video_info = analysis.get("videos", {}).get(role, {}) if isinstance(analysis.get("videos"), dict) else {}
+        recovery_visual_inputs = select_stage_recovery_visual_inputs(
+            video_info if isinstance(video_info, dict) else {},
+            role,
+            targets,
+            image_limit=max(4, int(getattr(args, "llm_image_limit", 0) or 0)),
+        )
+        payload = build_video_fact_recovery_payload(
             args.llm_model,
             role,
             analysis,
-            visual_inputs,
+            recovery_visual_inputs,
+            stage_analysis_evidence_view(facts, targets),
             targets,
             api_url=args.llm_api_url,
             budget=getattr(args, "_resource_budget", None),
@@ -2665,32 +3597,48 @@ def _maybe_recover_video_facts(
         recovery_text = fetch_json_completion(args, api_key, request_path, response_path)
         recovery = parse_json_text(recovery_text)
         if not isinstance(recovery, dict):
-            raise ValueError("Stage1 coverage audit 必须返回 JSON object。")
+            raise ValueError("Stage1 focused recovery 必须返回 JSON object。")
         forbidden = stage1_forbidden_field_issues(recovery)
         pipeline_owned = stage1_pipeline_owned_field_issues(recovery)
         if forbidden:
             raise ValueError(
-                "Stage1 coverage audit returned downstream fields: " + ", ".join(forbidden)
+                "Stage1 focused recovery returned downstream fields: " + ", ".join(forbidden)
             )
         if pipeline_owned:
             raise ValueError(
-                "Stage1 coverage audit returned pipeline-owned fields: " + ", ".join(pipeline_owned)
+                "Stage1 focused recovery returned pipeline-owned fields: " + ", ".join(pipeline_owned)
             )
-        if recovery.get("version") != STAGE1_COVERAGE_AUDIT_VERSION:
-            raise ValueError("Stage1 coverage audit 缺少匹配的 audit version。")
+        if recovery.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+            raise ValueError("Stage1 focused recovery 缺少匹配的 evidence contract version。")
+        if not isinstance(recovery.get("candidate_evidence_units"), list):
+            raise ValueError("Stage1 focused recovery 的 candidate_evidence_units 必须是数组。")
+        if not isinstance(recovery.get("stage_evidence_checks"), list):
+            raise ValueError("Stage1 focused recovery 的 stage_evidence_checks 必须是数组。")
+        target_set = set(targets)
+        invalid_stages = [
+            str(item.get("stage") or "").strip()
+            for item in recovery.get("stage_evidence_checks")
+            if isinstance(item, dict) and str(item.get("stage") or "").strip()
+            and normalize_stage_code(item.get("stage")) is None
+        ]
+        if invalid_stages:
+            raise ValueError(
+                "Stage1 focused recovery returned invalid stages: "
+                + ", ".join(invalid_stages)
+            )
         returned_stages = {
-            str(stage).strip().upper()[:2]
-            for stage in (recovery.get("stages") or {}).keys()
-            if str(stage).strip()
+            normalize_stage_code(item.get("stage"))
+            for item in recovery.get("stage_evidence_checks")
+            if isinstance(item, dict) and normalize_stage_code(item.get("stage"))
         }
-        out_of_scope = sorted(stage for stage in returned_stages if stage and stage not in set(targets))
+        out_of_scope = sorted(stage for stage in returned_stages if stage not in target_set)
         if out_of_scope:
             raise ValueError(
-                "Stage1 coverage audit returned out-of-scope stages: "
+                "Stage1 focused recovery returned out-of-scope stages: "
                 + ", ".join(out_of_scope)
             )
     except (OSError, ValueError, RuntimeError, SystemExit) as exc:
-        return _mark_video_fact_coverage_audit_failed(
+        return _mark_video_fact_recovery_failed(
             facts,
             target_stages=targets,
             trigger_reasons=trigger_reasons,
@@ -2700,7 +3648,17 @@ def _maybe_recover_video_facts(
             api_key=api_key,
         )
 
-    merged = _merge_video_fact_coverage_audit(role, facts, recovery, analysis)
+    merged = _merge_video_fact_recovery(
+        role,
+        facts,
+        recovery,
+        analysis,
+        targets,
+    )
+    merged["stage1_coverage_audit"] = _materialize_stage_recovery_audit(
+        merged,
+        targets,
+    )
     unresolved_stages = [
         stage for stage in targets
         if stage in stage_evidence_recovery_targets(
@@ -2711,7 +3669,8 @@ def _maybe_recover_video_facts(
     ]
     merged["stage1_recovery"] = {
         "source": "pipeline",
-        "status": "coverage_audited_with_unresolved" if unresolved_stages else "coverage_audited",
+        "status": "focused_recovery_with_unresolved" if unresolved_stages else "focused_recovery",
+        "recovery_mode": "stage1_c_focused_once",
         "target_stages": targets,
         "unresolved_stages": unresolved_stages,
         "candidate_unit_count": len(recovery.get("candidate_evidence_units") or [])
@@ -2727,7 +3686,46 @@ def _maybe_recover_video_facts(
     }
     final_issues = stage_evidence_contract_issues(merged, require_version=True)
     if final_issues:
-        return _mark_video_fact_coverage_audit_failed(
+        affected_stages = sorted({
+            issue.split(":", 1)[0]
+            for issue in final_issues
+            if issue.split(":", 1)[0] in set(stage_codes())
+        })
+        unscoped_issues = [
+            issue
+            for issue in final_issues
+            if issue.split(":", 1)[0] not in set(stage_codes())
+        ]
+        if affected_stages and not unscoped_issues:
+            _block_stage_qualifications(
+                merged,
+                affected_stages,
+                reason="该阶段资格在定向补观察后仍不满足结构合同，保持未知；原子观察仍保留。",
+            )
+            merged["stage1_coverage_audit"] = _materialize_stage_recovery_audit(
+                merged,
+                targets,
+                errors=["focused_recovery_contract_invalid"],
+            )
+            recovery = merged.get("stage1_recovery") if isinstance(merged.get("stage1_recovery"), dict) else {}
+            unresolved = list(dict.fromkeys([
+                *[str(stage) for stage in recovery.get("unresolved_stages") or []],
+                *affected_stages,
+            ]))
+            recovery.update(
+                {
+                    "status": "focused_recovery_with_unresolved",
+                    "recovery_mode": "stage1_c_focused_once",
+                    "unresolved_stages": unresolved,
+                    "contract_issues_after_recovery": final_issues,
+                }
+            )
+            merged["stage1_recovery"] = recovery
+            remaining_issues = stage_evidence_contract_issues(merged, require_version=True)
+            if not remaining_issues:
+                return merged
+            final_issues = remaining_issues
+        return _mark_video_fact_recovery_failed(
             facts,
             target_stages=targets,
             trigger_reasons=trigger_reasons,
@@ -2753,6 +3751,7 @@ def _merge_video_fact_recovery(
     # model-shaped fact normalizer.  The caller restores the locked metadata
     # after the candidate observations have been normalized.
     existing_acquisition = copy.deepcopy(merged.pop("stage1_acquisition", None))
+    existing_qualification = copy.deepcopy(merged.pop("stage1_qualification", None))
     existing_coverage_audit = copy.deepcopy(merged.pop("stage1_coverage_audit", None))
     existing_units = merged.get("evidence_units") if isinstance(merged.get("evidence_units"), list) else []
     existing_ids = {
@@ -2862,6 +3861,8 @@ def _merge_video_fact_recovery(
     # recovery replaces only the requested factual observations.
     if isinstance(existing_acquisition, dict):
         normalized["stage1_acquisition"] = existing_acquisition
+    if isinstance(existing_qualification, dict):
+        normalized["stage1_qualification"] = existing_qualification
     if isinstance(existing_coverage_audit, dict):
         normalized["stage1_coverage_audit"] = existing_coverage_audit
     return normalized

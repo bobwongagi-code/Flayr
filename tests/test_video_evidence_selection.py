@@ -18,7 +18,12 @@ from flayr_core.artifacts import (  # noqa: E402
     select_frames_for_time_range,
 )
 from flayr_core.frame_selection import build_analysis_frame_manifest  # noqa: E402
-from flayr_core.llm.media import get_llm_frame_candidates  # noqa: E402
+from flayr_core.llm.media import (  # noqa: E402
+    get_llm_frame_candidates,
+    get_llm_visual_candidates,
+    get_timeline_view_entries,
+    select_stage_recovery_visual_inputs,
+)
 from flayr_core.subtitle_track import _merge_ocr_frame_entries  # noqa: E402
 from flayr_core.asr import extract_word_timestamps  # noqa: E402
 from flayr_core.video_evidence import (  # noqa: E402
@@ -179,6 +184,79 @@ class VideoEvidenceSelectionTests(unittest.TestCase):
             )
             self.assertIsNotNone(view)
             self.assertEqual(view["frame_paths"], [str(canonical.resolve())])
+
+    def test_timeline_request_provenance_uses_only_verified_canonical_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames_dir = root / "frames"
+            timeline_dir = root / "timeline_views"
+            frames_dir.mkdir()
+            timeline_dir.mkdir()
+            canonical = self._write_frame(frames_dir, "canonical.jpg", (20, 30, 40))
+            unlisted = self._write_frame(frames_dir, "unlisted.jpg", (80, 90, 100))
+            timeline = self._write_frame(timeline_dir, "hook.jpg", (10, 10, 10))
+            info = {
+                "work_dir": str(root),
+                "analysis_frames": [
+                    {
+                        "path": str(canonical),
+                        "timestamp_seconds": 1.0,
+                        "selection_reasons": ["first_frame"],
+                    }
+                ],
+                "video_evidence": {
+                    "timeline_views": [
+                        {
+                            "label": "hook",
+                            "path": str(timeline),
+                            "start_seconds": 0.0,
+                            "end_seconds": 2.0,
+                            "frame_paths": [str(canonical), str(unlisted)],
+                        }
+                    ]
+                },
+            }
+            entries = get_timeline_view_entries(info)
+            self.assertEqual(entries[0]["source_frame_timestamps"], [1.0])
+
+    def test_visual_candidates_spend_raw_budget_on_uncovered_timeline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames_dir = root / "frames"
+            timeline_dir = root / "timeline_views"
+            frames_dir.mkdir()
+            timeline_dir.mkdir()
+            frames = [
+                self._write_frame(frames_dir, f"frame_{index}.jpg", (index * 10, 20, 30))
+                for index in range(10)
+            ]
+            timeline = self._write_frame(timeline_dir, "hook.jpg", (10, 10, 10))
+            info = {
+                "work_dir": str(root),
+                "analysis_frames": [
+                    {
+                        "path": str(path),
+                        "timestamp_seconds": float(index),
+                        "selection_reasons": ["first_frame" if index == 0 else "density_floor"],
+                    }
+                    for index, path in enumerate(frames)
+                ],
+                "video_evidence": {
+                    "timeline_views": [
+                        {
+                            "label": "hook",
+                            "path": str(timeline),
+                            "start_seconds": 0.0,
+                            "end_seconds": 2.0,
+                            "frame_paths": [str(frames[0]), str(frames[1]), str(frames[2])],
+                        }
+                    ]
+                },
+            }
+            candidates = get_llm_visual_candidates(info, 4)
+            self.assertEqual(candidates[0]["source_frame_timestamps"], [0.0, 1.0, 2.0])
+            raw_timestamps = [item["timestamp_seconds"] for item in candidates[1:]]
+            self.assertEqual(raw_timestamps, [3.0, 6.0, 9.0])
 
     def test_timeline_transcript_prefers_word_window_over_coarse_segment(self) -> None:
         selected = select_timeline_transcript(
@@ -354,6 +432,60 @@ class VideoEvidenceSelectionTests(unittest.TestCase):
                     {"videos": {"benchmark": info, "creator": info}},
                 )
 
+    def test_stage_quote_cannot_hide_in_a_window_without_any_timed_words(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transcript_path = root / "transcript.txt"
+            transcript_path.write_text("later product explanation", encoding="utf-8")
+            words_path = root / "transcript.words.json"
+            words_path.write_text(
+                json.dumps(
+                    {
+                        "words": [
+                            {
+                                "start_seconds": 7.0,
+                                "end_seconds": 8.0,
+                                "text": "later product explanation",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            info = {
+                "work_dir": str(root),
+                "transcript_path": str(transcript_path),
+                "transcript_words_path": str(words_path),
+            }
+            result = {
+                "video_understanding": {
+                    role: {
+                        "evidence_units": [
+                            {
+                                "id": "B1" if role == "benchmark" else "C1",
+                                "voiceover": "later product explanation",
+                                "time_range": "0.0s - 2.0s",
+                            }
+                        ]
+                    }
+                    for role in ("benchmark", "creator")
+                },
+                "stage_analysis": [
+                    {
+                        "stage": "S1 Hook",
+                        "benchmark_time_range": "0.0s - 2.0s",
+                        "creator_time_range": "0.0s - 2.0s",
+                        "benchmark_evidence_ids": ["B1"],
+                        "creator_evidence_ids": ["C1"],
+                    }
+                ],
+            }
+            with self.assertRaisesRegex(SystemExit, "超出阶段时间窗口"):
+                validate_transcript_attribution(
+                    result,
+                    {"videos": {"benchmark": info, "creator": info}},
+                )
+
     def test_timeline_transcript_hides_coarse_full_video_segment(self) -> None:
         selected = select_timeline_transcript(
             [{"start_seconds": 0.12, "end_seconds": 50.74, "text": "full video transcript"}],
@@ -476,6 +608,31 @@ class VideoEvidenceSelectionTests(unittest.TestCase):
         ]
         stages = build_stage_frame_manifest(frames, 5)
         self.assertTrue(any("selection_reasons" in item for item in stages))
+
+    def test_stage_recovery_visual_inputs_only_include_requested_stages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames_dir = root / "frames"
+            frames_dir.mkdir()
+            s1 = self._write_frame(frames_dir, "s1.jpg", (20, 30, 40))
+            s3 = self._write_frame(frames_dir, "s3.jpg", (40, 50, 60))
+            s4 = self._write_frame(frames_dir, "s4.jpg", (60, 70, 80))
+            info = {
+                "work_dir": str(root),
+                "analysis_stage_frames": [
+                    {"stage": "S1", "path": str(s1), "timestamp_seconds": 1.0},
+                    {"stage": "S3", "path": str(s3), "timestamp_seconds": 3.0},
+                    {"stage": "S4", "path": str(s4), "timestamp_seconds": 4.0},
+                ],
+            }
+            selected = select_stage_recovery_visual_inputs(
+                info,
+                "creator",
+                ["S3", "malformed-stage"],
+                image_limit=4,
+            )
+            self.assertEqual([item["path"] for item in selected], [str(s3.resolve())])
+            self.assertTrue(all("Stage1-C S3" in item["label"] for item in selected))
 
     def test_ocr_frame_candidates_include_focus_frames_without_duplicates(self) -> None:
         info = {

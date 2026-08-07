@@ -22,11 +22,11 @@ from .artifacts import (
 from .transcript import current_transcript_segments_path, current_transcript_words_path
 
 
-STAGE_EVIDENCE_CONTRACT_VERSION = 3
+STAGE_EVIDENCE_CONTRACT_VERSION = 4
 STAGE_EVIDENCE_SNAPSHOT_VERSION = 1
 STAGE_EVIDENCE_GATE_VERSION = 1
-STAGE1_ACQUISITION_VERSION = 3
-STAGE1_COVERAGE_AUDIT_VERSION = 1
+STAGE1_ACQUISITION_VERSION = 4
+STAGE1_COVERAGE_AUDIT_VERSION = 2
 STAGE_EVIDENCE_STATES = ("present", "absent", "unknown", "conflict")
 STAGE_EVIDENCE_COVERAGE_STATES = ("complete", "partial", "unknown")
 STAGE_EVIDENCE_STRENGTHS = ("direct", "explicit", "inferred", "absent")
@@ -36,11 +36,17 @@ STAGE1_ACQUISITION_COVERAGE_STATES = ("full", "sampled", "partial", "none", "unk
 STAGE1_STAGE_COVERAGE_STATUSES = ("observed", "complete", "partial", "unknown")
 STAGE1_COVERAGE_AUDIT_RUN_STATUSES = ("completed", "partial", "failed", "unknown")
 STAGE1_COVERAGE_AUDIT_STATUSES = ("found", "clear", "conflict", "unknown")
-STAGE1_COVERAGE_AUDIT_INDEPENDENCE = "separate_request_same_model"
+# Kept under the historical field name for artifact compatibility.  The
+# active producer is no longer a second full-video coverage audit; it is the
+# code-owned projection of the single focused Stage1-C recovery pass.
+STAGE1_COVERAGE_AUDIT_INDEPENDENCE = "focused_stage_recovery_v1"
 STAGE_EVIDENCE_BINDING_STATUSES = ("supported", "missing", "unknown", "conflict")
 STAGE_EVIDENCE_LINK_RELATIONS = ("primary", "supporting", "contradicting")
 STAGE_EVIDENCE_LINK_CONFIDENCES = ("high", "medium", "low", "unknown")
 STAGE_EVIDENCE_LINK_SOURCES = ("model", "compatibility")
+S5_TRUST_SOURCE_SIGNALS = frozenset(
+    {"authority", "traceable_data", "independent_user", "social_consensus", "process_transparency"}
+)
 VISUAL_INPUT_TIMESTAMP_TOLERANCE_SECONDS = 0.05
 STAGE_EVIDENCE_GATE_STATUSES = (
     "grounded",
@@ -49,6 +55,14 @@ STAGE_EVIDENCE_GATE_STATUSES = (
     "not_comparable",
     "legacy",
 )
+_FUNCTION_TO_STAGE = {
+    "S1_hook": "S1",
+    "S2_intro": "S2",
+    "S3_usage": "S3",
+    "S4_effect": "S4",
+    "S5_trust": "S5",
+    "S6_cta": "S6",
+}
 
 # These are the normalized Stage1 observations and qualification projections.
 # ``stage1_recovery`` and the evidence-set metadata are pipeline bookkeeping;
@@ -71,6 +85,7 @@ STAGE1_IMMUTABLE_FIELDS = (
     "stage_evidence_checks",
     "evidence_budget_exceeded",
     "stage1_acquisition",
+    "stage1_qualification",
     "stage1_coverage_audit",
 )
 
@@ -108,6 +123,7 @@ STAGE1_FORBIDDEN_FIELDS = frozenset(
 STAGE1_PIPELINE_OWNED_FIELDS = frozenset(
     {
         "stage1_acquisition",
+        "stage1_qualification",
         "stage1_coverage_audit",
         "stage1_recovery",
         "evidence_set_version",
@@ -555,6 +571,15 @@ def normalize_stage1_coverage_audit(value: Any, valid_ids: set[str] | None = Non
     raw_stages = value.get("stages")
     if not isinstance(raw_stages, dict):
         raw_stages = value.get("stage_audits") if isinstance(value.get("stage_audits"), dict) else {}
+    raw_targets = value.get("target_stages")
+    target_stages = None
+    if isinstance(raw_targets, list):
+        valid_stage_codes = set(stage_codes())
+        target_stages = list(dict.fromkeys(
+            code
+            for code in (normalize_stage_code(item) for item in raw_targets)
+            if code in valid_stage_codes
+        ))
     normalized_stages: dict[str, dict[str, Any]] = {}
     for contract in STAGE_EVIDENCE_CONTRACTS:
         raw = raw_stages.get(contract.code) if isinstance(raw_stages, dict) else None
@@ -615,6 +640,9 @@ def normalize_stage1_coverage_audit(value: Any, valid_ids: set[str] | None = Non
         "source": str(value.get("source") or "").strip().lower(),
         "status": run_status,
         "independence": str(value.get("independence") or "unknown").strip().lower(),
+        # Pipeline-owned scope metadata. Omitted stages in a bounded audit are
+        # outside this pass, not negative observations.
+        "target_stages": target_stages,
         "stages": normalized_stages,
         "errors": [
             str(item).strip()
@@ -1015,6 +1043,29 @@ def reconcile_stage_evidence_links(value: Any) -> None:
         )
         prior = existing.get(key)
         rebuilt.append(copy.deepcopy(prior) if isinstance(prior, dict) else item)
+
+    # One atomic fact may support several stages, but it can have only one
+    # primary owner. Model-authored repair links frequently mark every reuse as
+    # primary; retain the first stage ownership and make later reuse explicitly
+    # supporting instead of producing a link contract that cannot validate.
+    primary_owners: set[tuple[str, str]] = set()
+    for item in rebuilt:
+        if str(item.get("relation") or "").strip().lower() != "primary":
+            continue
+        owner = (
+            str(item.get("role") or "").strip().lower(),
+            str(item.get("evidence_id") or "").strip(),
+        )
+        if owner not in primary_owners:
+            primary_owners.add(owner)
+            continue
+        item["relation"] = "supporting"
+        reason = str(item.get("linking_reason") or "").strip()
+        item["linking_reason"] = (
+            reason + "；代码按唯一主归属合同将跨阶段复用降为 supporting。"
+        ).strip("；")
+        item["confidence"] = "unknown"
+        item["source"] = "compatibility"
     value["stage_evidence_links"] = rebuilt
 
 
@@ -1283,6 +1334,14 @@ def materialize_stage_evidence_gates(result: Any) -> None:
             stage["analysis_reason"] = gate["reason"]
         elif gate["status"] in {"not_applicable", "not_comparable"}:
             stage["analysis_status"] = gate["status"]
+        elif stage.get("analysis_status") == "handoff_loss":
+            # A qualified Stage1 gate does not erase a Stage2 handoff failure.
+            # The code must preserve that distinction instead of presenting an
+            # evidence-free model judgment as grounded.
+            stage["analysis_reason"] = (
+                str(stage.get("judgment_reason") or "").strip()
+                or "Stage2 未返回可核验的正式证据引用。"
+            )
         else:
             stage["analysis_status"] = "grounded"
             stage.pop("analysis_reason", None)
@@ -1544,7 +1603,18 @@ def _unit_has_channel(unit: dict[str, Any], channel: str) -> bool:
         return bool(str(unit.get("subtitle_fact") or "").strip())
     if channel == "audio":
         value = str(unit.get("audio_fact") or "").strip().lower()
-        return bool(value and value not in {"无", "none", "unknown", "未评估"})
+        unavailable_markers = (
+            "当前模型未直接感知音轨",
+            "未评估语气、bgm或音效",
+            "audio was not provided",
+            "audio not provided",
+            "audio unavailable",
+        )
+        return bool(
+            value
+            and value not in {"无", "none", "unknown", "未评估"}
+            and not any(marker in value for marker in unavailable_markers)
+        )
     return False
 
 
@@ -1555,6 +1625,20 @@ def _unit_strengths(units_by_id: dict[str, dict[str, Any]], evidence_ids: list[s
         else None
         for evidence_id in evidence_ids
     ]
+
+
+def _unit_has_typed_s5_trust_source(unit: dict[str, Any]) -> bool:
+    """Return whether one atomic fact contains an auditable S5 source."""
+    signals = {
+        str(value).strip().lower()
+        for value in unit.get("trust_source_signals") or []
+        if str(value).strip()
+    }
+    return bool(
+        signals.intersection(S5_TRUST_SOURCE_SIGNALS)
+        and str(unit.get("trust_source_reference") or "").strip()
+        and str(unit.get("trust_source_status") or "").strip() == "explicit_present"
+    )
 
 
 def _budget_recovery_allows_qualification(side: Any, stage_code: str) -> bool:
@@ -1686,6 +1770,10 @@ def _stage_check_issues(
         elif any(strength not in {"direct", "explicit"} for strength in strengths):
             issues.append(f"{contract.code}:present_without_explicit_strength")
         referenced_units = [units_by_id[evidence_id] for evidence_id in evidence_ids if evidence_id in units_by_id]
+        if contract.code == "S5" and not any(
+            _unit_has_typed_s5_trust_source(unit) for unit in referenced_units
+        ):
+            issues.append("S5:present_without_typed_trust_source")
         if contract.channel_policy == "visual_required":
             if not any(_unit_has_channel(unit, "visual") for unit in referenced_units):
                 issues.append(f"{contract.code}:required_visual_channel_missing")
@@ -1815,24 +1903,41 @@ def stage1_acquisition_issues(side: Any, stage: Any) -> list[str]:
 
 
 def stage1_coverage_audit_issues(side: Any, stage: Any | None = None) -> list[str]:
-    """Validate the independent semantic-coverage pass for one or all stages.
+    """Validate the code-owned Stage1-C projection for one or all stages.
 
-    ``stage_evidence_checks`` is a primary model projection.  It cannot prove
-    that the model did not miss a required fact.  An active Stage1 result must
-    therefore carry a completed, pipeline-owned coverage audit before any
-    stage can be considered grounded.  This function is a runtime gate, not a
-    structural contract error: an unavailable audit blocks the affected stage
-    and does not invalidate otherwise well-formed facts for every other stage.
+    ``stage_evidence_checks`` is a primary model projection.  A focused
+    Stage1-C pass can append observations and replace only the requested stage
+    projections.  This historical field remains the persisted compatibility
+    projection for that recovery, but it is no longer evidence that a second
+    full-video audit ran.  This function is a runtime gate, not a structural
+    contract error: an unavailable audit blocks only the affected stage.
     """
     if not isinstance(side, dict):
         return ["coverage_audit_side_missing"]
     if side.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
         return []
+    recovery = side.get("stage1_recovery") if isinstance(side.get("stage1_recovery"), dict) else {}
+    if recovery.get("source") == "pipeline" and recovery.get("status") == "not_needed":
+        # The primary Stage1 projection and code-owned acquisition checks are
+        # already complete.  Stage1-C is optional in this case, so the
+        # historical audit field must not manufacture a second required pass.
+        return []
     audit = normalize_stage1_coverage_audit(
         side.get("stage1_coverage_audit"),
         set(_evidence_units_by_id(side)),
     )
-    codes = [normalize_stage_code(stage)] if stage is not None else list(stage_codes())
+    requested_code = normalize_stage_code(stage) if stage is not None else None
+    target_stages = audit.get("target_stages")
+    scoped_targets = (
+        {code for code in target_stages if code in set(stage_codes())}
+        if isinstance(target_stages, list)
+        else None
+    )
+    if requested_code is not None and scoped_targets is not None and requested_code not in scoped_targets:
+        return []
+    if requested_code is None and scoped_targets is not None and scoped_targets != set(stage_codes()):
+        return ["coverage_audit_scope_incomplete:" + ",".join(sorted(scoped_targets))]
+    codes = [requested_code] if requested_code is not None else list(stage_codes())
     issues: list[str] = []
     if audit.get("version") != STAGE1_COVERAGE_AUDIT_VERSION:
         return [f"{code}:coverage_audit_missing_or_old" for code in codes if code]
@@ -1840,8 +1945,6 @@ def stage1_coverage_audit_issues(side: Any, stage: Any | None = None) -> list[st
         return [f"{code}:coverage_audit_not_code_owned" for code in codes if code]
     if audit.get("independence") != STAGE1_COVERAGE_AUDIT_INDEPENDENCE:
         return [f"{code}:coverage_audit_independence_unverified" for code in codes if code]
-    if audit.get("status") != "completed":
-        return [f"{code}:coverage_audit_not_completed" for code in codes if code]
     stages = audit.get("stages") if isinstance(audit.get("stages"), dict) else {}
     checks = stage_evidence_check_map(side)
     for code in codes:
@@ -1858,6 +1961,8 @@ def stage1_coverage_audit_issues(side: Any, stage: Any | None = None) -> list[st
             continue
         if status in {"unknown", "conflict"} or coverage != "complete":
             issues.append(f"{code}:coverage_audit_scope_incomplete")
+            if audit.get("status") != "completed":
+                issues.append(f"{code}:coverage_audit_not_completed")
         check = checks.get(code)
         primary_status = check.get("status") if isinstance(check, dict) else "unknown"
         if primary_status == "present" and status != "found":
@@ -2142,6 +2247,7 @@ _UNQUALIFIED_ANALYSIS_OBSERVATION_FIELDS = (
 # model as a second, unqualified source of stage facts.
 _STAGE1_INTERNAL_ANALYSIS_FIELDS = (
     "stage1_acquisition",
+    "stage1_qualification",
     "stage1_coverage_audit",
     "stage1_recovery",
     "evidence_budget_exceeded",
@@ -2173,6 +2279,65 @@ def _stage_analysis_side_view(side: Any, target_stages: set[str] | None) -> dict
         if stage in stage_codes()
     }
     allowed_ids = set().union(*qualified_by_stage.values()) if qualified_by_stage else set()
+    units_by_id = _evidence_units_by_id(side)
+    candidate_ids_by_stage: dict[str, list[str]] = {}
+    candidate_observations_by_stage: dict[str, list[dict[str, Any]]] = {}
+    raw_checks = stage_evidence_check_map(side)
+    coverage_audit = side.get("stage1_coverage_audit") if isinstance(side.get("stage1_coverage_audit"), dict) else {}
+    coverage_audit_stages = (
+        coverage_audit.get("stages")
+        if isinstance(coverage_audit.get("stages"), dict)
+        else {}
+    )
+    for stage in sorted(selected_stages):
+        check = raw_checks.get(stage) if isinstance(raw_checks.get(stage), dict) else {}
+        candidate_ids = [
+            str(value).strip()
+            for value in check.get("evidence_ids") or []
+            if str(value).strip() and str(value).strip() not in qualified_by_stage.get(stage, set())
+        ]
+        # Independent coverage audits may discover a real observation but fail
+        # to bind it into the primary stage check. Keep that ID in the audit
+        # lane; otherwise the Stage1->Stage2 handoff silently loses precisely
+        # the candidate that recovery was meant to preserve.
+        audit_check = (
+            coverage_audit_stages.get(stage)
+            if isinstance(coverage_audit_stages.get(stage), dict)
+            else {}
+        )
+        candidate_ids.extend(
+            str(value).strip()
+            for value in audit_check.get("evidence_ids") or []
+            if str(value).strip() and str(value).strip() not in qualified_by_stage.get(stage, set())
+        )
+        # A unit can be a useful candidate even when the model failed to bind it
+        # to the stage check. Its function projection is only a recovery hint,
+        # never a qualification source.
+        for unit in side.get("evidence_units") or []:
+            if not isinstance(unit, dict):
+                continue
+            unit_id = str(unit.get("id") or "").strip()
+            functions = {str(value).strip() for value in unit.get("functions") or []}
+            if unit_id and stage in {
+                _FUNCTION_TO_STAGE.get(function, "") for function in functions
+            }:
+                if unit_id not in qualified_by_stage.get(stage, set()):
+                    candidate_ids.append(unit_id)
+        candidate_ids = list(dict.fromkeys(candidate_ids))
+        candidate_ids_by_stage[stage] = candidate_ids
+        candidate_observations_by_stage[stage] = [
+            {
+                "id": unit_id,
+                "time_range": units_by_id[unit_id].get("time_range"),
+                "information": units_by_id[unit_id].get("information"),
+                "visual_fact": units_by_id[unit_id].get("visual_fact"),
+                "voiceover": units_by_id[unit_id].get("voiceover"),
+                "evidence_strength": units_by_id[unit_id].get("evidence_strength"),
+                "functions": units_by_id[unit_id].get("functions"),
+            }
+            for unit_id in candidate_ids
+            if unit_id in units_by_id
+        ]
     stage_units = _stage_units_for_side(side, qualified_by_stage)
     view["stage_evidence_units"] = stage_units
     # Keep a small ID/time index for compatibility.  Full observation content
@@ -2226,6 +2391,11 @@ def _stage_analysis_side_view(side: Any, target_stages: set[str] | None) -> dict
         stage: sorted(ids)
         for stage, ids in qualified_by_stage.items()
     }
+    # Candidate observations survive the handoff as an audit/recovery lane.
+    # They are intentionally not merged into stage_evidence_units or the
+    # qualified ID set, so downstream judgment cannot cite them as facts.
+    view["candidate_evidence_ids_by_stage"] = candidate_ids_by_stage
+    view["candidate_observations_by_stage"] = candidate_observations_by_stage
     view["stage_evidence_readiness"] = readiness_by_stage
     view["analysis_evidence_scope"] = "qualified_stage_evidence_only"
     view["analysis_evidence_stages"] = sorted(selected_stages)

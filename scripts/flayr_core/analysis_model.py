@@ -107,6 +107,9 @@ ANALYSIS_PROJECTION_FIELDS = (
     "global_diagnosis",
     "commercial_priorities",
     "commercial_priority_summary",
+    "stage2_pipeline_status",
+    "stage2_pipeline_version",
+    "segmented_pipeline",
     "postprocess_provenance",
 )
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import sys
 import tempfile
@@ -11,18 +12,27 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from flayr_core.artifacts import parse_time_range_seconds
 from flayr_core.llm.parse import normalize_video_fact_result, normalize_video_understanding
 from flayr_core.llm.pipeline import (
+    _visual_input_timestamps,
     _mark_video_fact_coverage_audit_failed,
     _merge_video_fact_coverage_audit,
     _merge_video_fact_recovery,
     _maybe_recover_video_facts,
     detect_low_confidence_stages,
 )
-from flayr_core.llm.payload import _compact_comparison_facts, build_s1_boundary_hint_block
+from flayr_core.llm.payload import (
+    _compact_comparison_facts,
+    _recovery_stage_windows,
+    _replace_recovery_full_media,
+    build_s1_boundary_hint_block,
+)
 from flayr_core.postprocess.derive import _derive_one, derive_severity_from_facts
 from flayr_core.postprocess.claims_my import reconcile_certification_ownership
 from flayr_core.postprocess.repair_evidence import (
+    align_stage_flag_evidence,
+    bind_timed_transcript_quotes,
     ground_improvement_evidence,
     ground_stage_visual_evidence,
     reconcile_s5_trust_sources,
@@ -38,12 +48,17 @@ from flayr_core.postprocess.repair_stages import (
 )
 from flayr_core.postprocess.global_diagnosis import _attention_side_status, _dominant_selling_point
 from flayr_core.report import stage_report_severity, stage_skipped
-from flayr_core.postprocess.validate import validate_evidence_alignment, validate_stage_evidence_qualification
+from flayr_core.postprocess.validate import (
+    validate_evidence_alignment,
+    validate_s2_contract_flags,
+    validate_stage_evidence_qualification,
+)
 from flayr_core.stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
     STAGE_EVIDENCE_SNAPSHOT_VERSION,
     STAGE1_ACQUISITION_VERSION,
     STAGE1_COVERAGE_AUDIT_VERSION,
+    STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
     STAGE_BOUNDARY_TESTS,
     freeze_stage_evidence,
     materialize_stage_evidence_gates,
@@ -136,7 +151,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "version": STAGE1_COVERAGE_AUDIT_VERSION,
             "source": "pipeline",
             "status": "completed",
-            "independence": "separate_request_same_model",
+            "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
             "stages": stages,
             "errors": [],
         }
@@ -151,6 +166,13 @@ class StageEvidenceContractTests(unittest.TestCase):
         }
         self.assertEqual(stage_evidence_recovery_targets(side), list(stage_codes()))
         self.assertEqual(stage_evidence_contract_issues(side), [])
+
+    def test_not_needed_recovery_does_not_require_legacy_audit_projection(self) -> None:
+        side = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage1_recovery": {"source": "pipeline", "status": "not_needed"},
+        }
+        self.assertEqual(stage1_coverage_audit_issues(side, "S4"), [])
 
     def test_present_requires_real_id_and_explicit_strength(self) -> None:
         checks = self._checks("present", "inferred")
@@ -248,7 +270,7 @@ class StageEvidenceContractTests(unittest.TestCase):
         audit = {
             "version": STAGE1_COVERAGE_AUDIT_VERSION,
             "status": "completed",
-            "independence": "separate_request_same_model",
+            "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
             "stages": {
                 "S1": {
                     "status": "found",
@@ -264,12 +286,41 @@ class StageEvidenceContractTests(unittest.TestCase):
         signal = stage_evidence_contract("S1").required_signals[0]
         self.assertEqual(s1["signal_bindings"][signal]["status"], "conflict")
 
+    def test_legacy_coverage_merge_preserves_stage1_qualification(self) -> None:
+        base = self._active_side("C", "unknown")
+        base["stage1_qualification"] = {
+            "source": "pipeline",
+            "status": "completed",
+            "contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage_codes": list(stage_codes()),
+            "evidence_id_count": 1,
+        }
+        merged = _merge_video_fact_coverage_audit(
+            "creator",
+            base,
+            {
+                "version": STAGE1_COVERAGE_AUDIT_VERSION,
+                "status": "completed",
+                "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
+                "stages": {},
+            },
+            self._analysis(),
+        )
+        self.assertEqual(merged["stage1_qualification"]["status"], "completed")
+
     def test_present_qualification_uses_unit_strength_and_required_signals(self) -> None:
         checks = self._checks("present", "inferred")
         side = {
             "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
             "stage_evidence_checks": checks,
-            "evidence_units": [{"id": "C1", "evidence_strength": "direct", "visual_fact": "直接可见"}],
+            "evidence_units": [{
+                "id": "C1",
+                "evidence_strength": "direct",
+                "visual_fact": "直接可见",
+                "trust_source_signals": ["independent_user"],
+                "trust_source_reference": "用户评价：连续使用后体验改善。",
+                "trust_source_status": "explicit_present",
+            }],
             "stage1_acquisition": self._active_side("C")["stage1_acquisition"],
         }
         side["stage1_coverage_audit"] = self._coverage_audit(checks)
@@ -393,6 +444,7 @@ class StageEvidenceContractTests(unittest.TestCase):
 
     def test_failed_coverage_audit_is_structured_and_blocks_all_stages(self) -> None:
         side = self._active_side("C", "present")
+        atomic_units = copy.deepcopy(side["evidence_units"])
         result = _mark_video_fact_coverage_audit_failed(
             side,
             target_stages=list(stage_codes()),
@@ -407,12 +459,18 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(result["stage1_recovery"]["status"], "coverage_audited_with_unresolved")
         self.assertEqual(result["stage1_recovery"]["failure_reason"], "temporary audit failure")
         self.assertNotIn("secret-key", str(result))
+        self.assertEqual(result["evidence_units"], atomic_units)
+        self.assertEqual(stage_evidence_contract_issues(result), [])
         for stage in stage_codes():
+            check = next(item for item in result["stage_evidence_checks"] if item["stage"] == stage)
+            self.assertEqual(check["status"], "unknown")
+            self.assertEqual(check["evidence_ids"], [])
+            self.assertEqual(check["signal_bindings"], {})
             self.assertEqual(stage_evidence_readiness(result, stage), "unknown")
             self.assertIn(f"{stage}:coverage_audit_not_completed", stage1_coverage_audit_issues(result, stage))
 
-    def test_coverage_audit_execution_uses_registered_targets(self) -> None:
-        """The live audit path must reach merge without an undefined target variable."""
+    def test_focused_recovery_execution_uses_registered_targets(self) -> None:
+        """The live Stage1-C path reaches the append-only merge safely."""
         facts = self._active_side("C")
         args = type(
             "Args",
@@ -425,13 +483,11 @@ class StageEvidenceContractTests(unittest.TestCase):
             },
         )()
         audit_response = {
-            "version": STAGE1_COVERAGE_AUDIT_VERSION,
-            "source": "model",
-            "status": "partial",
-            "independence": "separate_request_same_model",
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
             "candidate_evidence_units": [],
-            "stages": {
-                stage: {
+            "stage_evidence_checks": [
+                {
+                    "stage": stage,
                     "status": "unknown",
                     "coverage": "unknown",
                     "evidence_ids": [],
@@ -439,11 +495,11 @@ class StageEvidenceContractTests(unittest.TestCase):
                     "missing_signals": [],
                 }
                 for stage in stage_codes()
-            },
+            ],
         }
         with tempfile.TemporaryDirectory() as tmp_dir:
             with patch(
-                "flayr_core.llm.pipeline.build_video_fact_coverage_audit_payload",
+                "flayr_core.llm.pipeline.build_video_fact_recovery_payload",
                 return_value={"messages": []},
             ), patch(
                 "flayr_core.llm.pipeline.fetch_json_completion",
@@ -456,10 +512,202 @@ class StageEvidenceContractTests(unittest.TestCase):
                     "secret",
                     "creator",
                     facts,
-                    [],
                 )
-        self.assertEqual(result["stage1_recovery"]["status"], "coverage_audited_with_unresolved")
+        self.assertEqual(result["stage1_recovery"]["status"], "focused_recovery_with_unresolved")
         self.assertEqual(result["stage1_coverage_audit"]["status"], "partial")
+        self.assertEqual(result["stage1_recovery"]["recovery_mode"], "stage1_c_focused_once")
+
+    def test_recovery_windows_use_canonical_stage_codes_and_merge_adjacent_stages(self) -> None:
+        analysis = {
+            "videos": {
+                "creator": {
+                    "duration_seconds": 60,
+                }
+            }
+        }
+        windows = _recovery_stage_windows(analysis, "creator", ["S2", "S3", "S6"])
+        self.assertEqual([item[0] for item in windows], ["S2", "S6"])
+        self.assertLessEqual(windows[0][1], 3.0)
+        self.assertGreaterEqual(windows[0][2], 15.0)
+        self.assertEqual(windows[1][2], 60.0)
+
+    def test_recovery_media_never_falls_back_to_full_video(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "creator.mp4"
+            video_path.write_bytes(b"fixture")
+            analysis = {
+                "videos": {
+                    "creator": {
+                        "duration_seconds": 60,
+                        "path": str(video_path),
+                        "work_dir": str(root),
+                    }
+                }
+            }
+            media = [
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,frame"}},
+                {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,full"}},
+                {"type": "input_audio", "input_audio": {"data": "full-audio", "format": "wav"}},
+            ]
+            with patch("flayr_core.llm.payload.can_analyze_native_audio", return_value=True), patch(
+                "flayr_core.llm.payload.video_to_data_url",
+                return_value="data:video/mp4;base64,clip",
+            ) as clip:
+                result = _replace_recovery_full_media(
+                    media,
+                    analysis,
+                    "creator",
+                    ["S3"],
+                    api_url="https://example.invalid/api",
+                    model="test-model",
+                    budget=None,
+                )
+
+            self.assertEqual(sum(item.get("type") == "video_url" for item in result), 1)
+            self.assertNotIn("full", json.dumps(result))
+            clip.assert_called_once()
+            self.assertGreater(clip.call_args.kwargs["duration"], 0)
+            self.assertLess(clip.call_args.kwargs["start"], 15.0)
+
+    def test_focused_recovery_preserves_candidate_without_qualifying_it(self) -> None:
+        facts = self._active_side("C")
+        args = type(
+            "Args",
+            (),
+            {
+                "llm_dry_run": False,
+                "llm_model": "test-model",
+                "llm_api_url": "https://example.invalid/api",
+                "_resource_budget": None,
+                "llm_image_limit": 4,
+            },
+        )()
+        recovery_response = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "candidate_evidence_units": [
+                {
+                    "id": "C_REC_S4",
+                    "time_range": "3.0s - 4.0s",
+                    "information": "定向补观察到一段可能与效果有关的画面。",
+                    "visual_fact": "效果区域可见，但因果关系仍待资格判断。",
+                    "evidence_strength": "direct",
+                    "functions": ["S4_effect"],
+                }
+            ],
+            "stage_evidence_checks": [
+                {
+                    "stage": "S4",
+                    "status": "unknown",
+                    "coverage": "partial",
+                    "evidence_ids": [],
+                    "observed_signals": [],
+                    "missing_signals": ["effect_attribution"],
+                    "signal_bindings": {},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch(
+                "flayr_core.llm.pipeline.build_video_fact_recovery_payload",
+                return_value={"messages": []},
+            ), patch(
+                "flayr_core.llm.pipeline.fetch_json_completion",
+                return_value=json.dumps(recovery_response),
+            ):
+                result = _maybe_recover_video_facts(
+                    args,
+                    self._analysis(),
+                    Path(tmp_dir),
+                    "secret",
+                    "creator",
+                    facts,
+                )
+
+        self.assertIn("C_REC_S4", {item["id"] for item in result["evidence_units"]})
+        s4 = next(item for item in result["stage_evidence_checks"] if item["stage"] == "S4")
+        self.assertEqual(s4["status"], "unknown")
+        view = stage_analysis_evidence_view(result, {"S4"})
+        self.assertEqual(
+            [item["id"] for item in view["candidate_observations_by_stage"]["S4"]],
+            ["C_REC_S4"],
+        )
+        self.assertEqual(view["qualified_stage_evidence_ids"]["S4"], [])
+
+    def test_recovery_blocks_only_stage_with_remaining_structural_issue(self) -> None:
+        facts = self._active_side("C", "unknown")
+        facts["evidence_units"][4].update(
+            {
+                "trust_source_signals": ["independent_user"],
+                "trust_source_reference": "用户评价：连续使用后体验改善。",
+                "trust_source_status": "explicit_present",
+            }
+        )
+        facts["stage_evidence_checks"] = [
+            {
+                "stage": stage,
+                "status": "present",
+                "coverage": "complete",
+                "evidence_ids": [f"C{index}"],
+                "observed_signals": list(stage_evidence_contract(stage).required_signals),
+                "missing_signals": [],
+                "signal_bindings": self._signal_bindings(stage, f"C{index}"),
+            }
+            for index, stage in enumerate(stage_codes(), start=1)
+        ]
+        s4 = facts["stage_evidence_checks"][3]
+        s4["observed_signals"] = list(stage_evidence_contract("S4").required_signals)
+        s4["signal_bindings"].pop("effect_attribution")
+        args = type(
+            "Args",
+            (),
+            {
+                "llm_dry_run": False,
+                "llm_model": "test-model",
+                "llm_api_url": "https://example.invalid/api",
+                "_resource_budget": None,
+            },
+        )()
+        recovery_response = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "candidate_evidence_units": [],
+            "stage_evidence_checks": [
+                {
+                    "stage": "S4",
+                    "status": "unknown",
+                    "coverage": "unknown",
+                    "evidence_ids": [],
+                    "observed_signals": [],
+                    "missing_signals": ["effect_attribution"],
+                    "signal_bindings": {},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch(
+                "flayr_core.llm.pipeline.build_video_fact_recovery_payload",
+                return_value={"messages": []},
+            ), patch(
+                "flayr_core.llm.pipeline.fetch_json_completion",
+                return_value=json.dumps(recovery_response),
+            ):
+                result = _maybe_recover_video_facts(
+                    args,
+                    self._analysis(),
+                    Path(tmp_dir),
+                    "secret",
+                    "creator",
+                    facts,
+                )
+
+        checks = {item["stage"]: item for item in result["stage_evidence_checks"]}
+        self.assertEqual(checks["S4"]["status"], "unknown")
+        self.assertEqual(checks["S4"]["evidence_ids"], [])
+        for stage in {"S1", "S2", "S3", "S5", "S6"}:
+            self.assertEqual(checks[stage]["status"], "present")
+        self.assertEqual(result["stage1_coverage_audit"]["status"], "partial")
+        self.assertIn("S4", result["stage1_recovery"]["unresolved_stages"])
+        self.assertEqual(stage_evidence_contract_issues(result), [])
 
     def test_coverage_audit_rejects_nested_downstream_judgment_fields(self) -> None:
         facts = self._active_side("C")
@@ -474,13 +722,11 @@ class StageEvidenceContractTests(unittest.TestCase):
             },
         )()
         audit_response = {
-            "version": STAGE1_COVERAGE_AUDIT_VERSION,
-            "source": "model",
-            "status": "partial",
-            "independence": "separate_request_same_model",
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
             "candidate_evidence_units": [],
-            "stages": {
-                stage: {
+            "stage_evidence_checks": [
+                {
+                    "stage": stage,
                     "status": "unknown",
                     "coverage": "unknown",
                     "evidence_ids": [],
@@ -489,11 +735,11 @@ class StageEvidenceContractTests(unittest.TestCase):
                     "reason": {"severity": "large"} if stage == "S4" else "未确认",
                 }
                 for stage in stage_codes()
-            },
+            ],
         }
         with tempfile.TemporaryDirectory() as tmp_dir:
             with patch(
-                "flayr_core.llm.pipeline.build_video_fact_coverage_audit_payload",
+                "flayr_core.llm.pipeline.build_video_fact_recovery_payload",
                 return_value={"messages": []},
             ), patch(
                 "flayr_core.llm.pipeline.fetch_json_completion",
@@ -506,11 +752,11 @@ class StageEvidenceContractTests(unittest.TestCase):
                     "secret",
                     "creator",
                     facts,
-                    [],
                 )
-        self.assertEqual(result["stage1_coverage_audit"]["status"], "failed")
+        self.assertEqual(result["stage1_coverage_audit"]["status"], "partial")
+        self.assertEqual(result["stage1_recovery"]["status"], "focused_recovery_with_unresolved")
         self.assertIn("returned downstream fields", result["stage1_recovery"]["failure_reason"])
-        self.assertIn("stages.S4.reason.severity", result["stage1_recovery"]["failure_reason"])
+        self.assertIn("stage_evidence_checks[3].reason.severity", result["stage1_recovery"]["failure_reason"])
 
     def test_alignment_uses_final_readiness_after_coverage_audit_failure(self) -> None:
         sides = {
@@ -550,7 +796,7 @@ class StageEvidenceContractTests(unittest.TestCase):
         audit = {
             "version": STAGE1_COVERAGE_AUDIT_VERSION,
             "status": "completed",
-            "independence": "separate_request_same_model",
+            "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
             "candidate_evidence_units": [candidate],
             "stages": {
                 "S4": {
@@ -570,6 +816,99 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(qualified_stage_evidence_ids(merged, "S4"), {"C_A1"})
         self.assertEqual(stage_evidence_readiness(merged, "S4"), "present")
 
+    def test_complete_audit_closes_partial_coverage_without_rewriting_primary_fact(self) -> None:
+        base = self._active_side("C", "unknown")
+        checks = self._checks("unknown")
+        contract = stage_evidence_contract("S4")
+        checks[3] = {
+            "stage": "S4",
+            "status": "present",
+            "coverage": "partial",
+            "evidence_ids": ["C4"],
+            "observed_signals": list(contract.required_signals),
+            "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S4", "C4"),
+        }
+        base["stage_evidence_checks"] = checks
+        audit = {
+            "version": STAGE1_COVERAGE_AUDIT_VERSION,
+            "status": "completed",
+            "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
+            "candidate_evidence_units": [{
+                "id": "C_A1",
+                "time_range": "3s - 4s",
+                "information": "独立扫描确认该阶段事实",
+                "visual_fact": "产品操作后目标区域出现可见结果差异",
+                "evidence_strength": "direct",
+            }],
+            "stages": {
+                "S4": {
+                    "status": "found",
+                    "coverage": "complete",
+                    "evidence_ids": ["C_A1"],
+                    "observed_signals": list(contract.required_signals),
+                    "missing_signals": [],
+                    "signal_bindings": self._signal_bindings("S4", "C_A1"),
+                }
+            },
+        }
+        original_primary = {
+            item["id"]: copy.deepcopy(item)
+            for item in base["evidence_units"]
+        }
+        merged = _merge_video_fact_coverage_audit("creator", base, audit, self._analysis())
+        s4 = next(item for item in merged["stage_evidence_checks"] if item["stage"] == "S4")
+        self.assertEqual(s4["status"], "present")
+        self.assertEqual(s4["coverage"], "complete")
+        merged_primary = {
+            item["id"]: item
+            for item in merged["evidence_units"]
+            if item["id"] in original_primary
+        }
+        self.assertEqual(set(merged_primary), set(original_primary))
+        for evidence_id, original in original_primary.items():
+            self.assertEqual(merged_primary[evidence_id]["time_range"], original["time_range"])
+            self.assertEqual(merged_primary[evidence_id]["visual_fact"], original["visual_fact"])
+            self.assertEqual(merged_primary[evidence_id]["evidence_strength"], original["evidence_strength"])
+        self.assertNotIn("S4:present_without_complete_coverage", stage_evidence_contract_issues(merged))
+
+    def test_partial_audit_does_not_close_partial_primary_coverage(self) -> None:
+        base = self._active_side("C", "unknown")
+        checks = self._checks("unknown")
+        contract = stage_evidence_contract("S4")
+        checks[3] = {
+            "stage": "S4",
+            "status": "present",
+            "coverage": "partial",
+            "evidence_ids": ["C4"],
+            "observed_signals": list(contract.required_signals),
+            "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S4", "C4"),
+        }
+        base["stage_evidence_checks"] = checks
+        merged = _merge_video_fact_coverage_audit(
+            "creator",
+            base,
+            {
+                "version": STAGE1_COVERAGE_AUDIT_VERSION,
+                "status": "partial",
+                "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
+                "stages": {
+                    "S4": {
+                        "status": "found",
+                        "coverage": "partial",
+                        "evidence_ids": [],
+                        "observed_signals": [],
+                        "missing_signals": [],
+                    }
+                },
+            },
+            self._analysis(),
+        )
+        s4 = next(item for item in merged["stage_evidence_checks"] if item["stage"] == "S4")
+        self.assertEqual(s4["coverage"], "partial")
+        self.assertIn("S4:present_without_complete_coverage", stage_evidence_contract_issues(merged))
+
     def test_incomplete_independent_audit_cannot_turn_absence_into_presence(self) -> None:
         base = self._active_side("C", "unknown")
         checks = self._checks("unknown")
@@ -586,7 +925,7 @@ class StageEvidenceContractTests(unittest.TestCase):
         audit = {
             "version": STAGE1_COVERAGE_AUDIT_VERSION,
             "status": "completed",
-            "independence": "separate_request_same_model",
+            "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
             "candidate_evidence_units": [{
                 "id": "C_A1",
                 "time_range": "3s - 4s",
@@ -618,7 +957,7 @@ class StageEvidenceContractTests(unittest.TestCase):
         audit = {
             "version": STAGE1_COVERAGE_AUDIT_VERSION,
             "status": "completed",
-            "independence": "separate_request_same_model",
+            "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
             "stages": {
                 "S4": {
                     "status": "clear",
@@ -652,7 +991,7 @@ class StageEvidenceContractTests(unittest.TestCase):
         audit = {
             "version": STAGE1_COVERAGE_AUDIT_VERSION,
             "status": "completed",
-            "independence": "separate_request_same_model",
+            "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
             "stages": {
                 "S4": {
                     "status": "clear",
@@ -687,7 +1026,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             {
                 "version": STAGE1_COVERAGE_AUDIT_VERSION,
                 "status": "completed",
-                "independence": "separate_request_same_model",
+            "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
                 "stages": {
                     "S4": {
                         "status": "clear",
@@ -713,7 +1052,14 @@ class StageEvidenceContractTests(unittest.TestCase):
         side = {
             "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
             "stage_evidence_checks": checks,
-            "evidence_units": [{"id": "C1", "evidence_strength": "direct", "visual_fact": "直接可见"}],
+            "evidence_units": [{
+                "id": "C1",
+                "evidence_strength": "direct",
+                "visual_fact": "直接可见",
+                "trust_source_signals": ["independent_user"],
+                "trust_source_reference": "用户评价：连续使用后体验改善。",
+                "trust_source_status": "explicit_present",
+            }],
         }
         issues = stage_evidence_contract_issues(side)
         self.assertIn("S1:unknown_with_evidence", issues)
@@ -729,6 +1075,31 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_units": [{"id": "C1"}],
         }
         self.assertIn("S1:absence_without_complete_coverage", stage_evidence_contract_issues(side))
+
+    def test_s5_present_requires_typed_source_in_atomic_fact(self) -> None:
+        side = self._active_side("C", "unknown")
+        side["stage_evidence_checks"][4] = {
+            "stage": "S5",
+            "status": "present",
+            "coverage": "complete",
+            "evidence_ids": ["C5"],
+            "observed_signals": list(stage_evidence_contract("S5").required_signals),
+            "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S5", "C5"),
+        }
+        self.assertIn(
+            "S5:present_without_typed_trust_source",
+            stage_evidence_contract_issues(side),
+        )
+
+        unit = side["evidence_units"][4]
+        unit["trust_source_signals"] = ["independent_user"]
+        unit["trust_source_reference"] = "用户评价：连续使用一周后脚后跟不再开裂。"
+        unit["trust_source_status"] = "explicit_present"
+        self.assertNotIn(
+            "S5:present_without_typed_trust_source",
+            stage_evidence_contract_issues(side),
+        )
 
     def test_stage1_normalization_does_not_silently_drop_units(self) -> None:
         units = [
@@ -747,12 +1118,93 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(len(normalized["evidence_units"]), 10)
         self.assertFalse(normalized["evidence_budget_exceeded"])
 
+    def test_fact_time_range_clamps_only_endpoint_rounding_noise(self) -> None:
+        analysis = {
+            "videos": {
+                "benchmark": {},
+                "creator": {"duration_seconds": 53.766667},
+            }
+        }
+        normalized = normalize_video_fact_result(
+            "creator",
+            {
+                "evidence_units": [
+                    {"id": "C1", "time_range": "47.0s - 53.8s", "information": "末尾观察"},
+                    {"id": "C2", "time_range": "47.0s - 54.0s", "information": "真实越界"},
+                ]
+            },
+            analysis,
+        )
+        normalized_range = normalized["evidence_units"][0]["time_range"]
+        self.assertEqual(normalized_range, "47.00s - 53.766667s")
+        self.assertEqual(
+            parse_time_range_seconds(normalized_range, 53.766667),
+            (47.0, 53.766667),
+        )
+        self.assertEqual(normalized["evidence_units"][1]["time_range"], "47.0s - 54.0s")
+
+    def test_stage1_fact_voiceover_is_clipped_to_its_word_timed_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transcript = root / "transcript.txt"
+            transcript.write_text("hook problem later cta", encoding="utf-8")
+            words = root / "transcript.words.json"
+            words.write_text(
+                json.dumps(
+                    {
+                        "words": [
+                            {"start_seconds": 0.1, "end_seconds": 0.4, "text": "hook"},
+                            {"start_seconds": 0.4, "end_seconds": 0.8, "text": "problem"},
+                            {"start_seconds": 8.0, "end_seconds": 8.4, "text": "later"},
+                            {"start_seconds": 40.0, "end_seconds": 40.4, "text": "cta"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            analysis = {
+                "videos": {
+                    "benchmark": {},
+                    "creator": {
+                        "work_dir": str(root),
+                        "duration_seconds": 45.0,
+                        "transcript_path": str(transcript),
+                        "transcript_words_path": str(words),
+                    },
+                }
+            }
+            normalized = normalize_video_fact_result(
+                "creator",
+                {
+                    "evidence_units": [
+                        {
+                            "id": "C1",
+                            "time_range": "0.0s - 2.0s",
+                            "information": "开场事实",
+                            "voiceover": "hook problem later cta",
+                            "voiceover_zh": "包含整片后续内容的翻译",
+                        }
+                    ]
+                },
+                analysis,
+            )
+
+        self.assertEqual(normalized["evidence_units"][0]["voiceover"], "hook problem")
+        self.assertEqual(normalized["evidence_units"][0]["voiceover_zh"], "")
+
     def test_budget_flag_opens_recovery_for_every_registered_stage(self) -> None:
         side = {
             "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
             "stage1_acquisition": self._active_side("C")["stage1_acquisition"],
             "stage_evidence_checks": self._checks("present", "direct"),
-            "evidence_units": [{"id": "C1", "evidence_strength": "direct", "visual_fact": "直接可见"}],
+            "evidence_units": [{
+                "id": "C1",
+                "evidence_strength": "direct",
+                "visual_fact": "直接可见",
+                "trust_source_signals": ["independent_user"],
+                "trust_source_reference": "用户评价：连续使用后体验改善。",
+                "trust_source_status": "explicit_present",
+            }],
             "evidence_budget_exceeded": True,
         }
         side["stage1_coverage_audit"] = self._coverage_audit(side["stage_evidence_checks"])
@@ -848,6 +1300,31 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(s6_check["status"], "unknown")
         self.assertEqual(blocked["creator"]["stage_evidence_readiness"]["S6"], "unknown")
 
+    def test_analysis_view_preserves_coverage_audit_candidates_for_recovery(self) -> None:
+        side = self._active_side("C")
+        side["evidence_units"].append(
+            {
+                "id": "C_AUDIT_S4",
+                "time_range": "3.0s - 4.0s",
+                "evidence_strength": "direct",
+                "visual_fact": "独立覆盖审计发现的效果候选事实",
+                "functions": [],
+            }
+        )
+        side["stage1_coverage_audit"]["stages"]["S4"]["evidence_ids"] = ["C_AUDIT_S4"]
+
+        view = stage_analysis_evidence_view({"creator": side}, ["S4"])
+
+        self.assertEqual(
+            view["creator"]["candidate_evidence_ids_by_stage"]["S4"],
+            ["C_AUDIT_S4"],
+        )
+        self.assertEqual(
+            view["creator"]["candidate_observations_by_stage"]["S4"][0]["id"],
+            "C_AUDIT_S4",
+        )
+        self.assertEqual(view["creator"]["stage_evidence_units"]["S4"], [])
+
     def test_analysis_view_partitions_full_units_by_qualified_stage(self) -> None:
         side = self._active_side("C", "present")
         checks = self._checks("unknown")
@@ -919,6 +1396,9 @@ class StageEvidenceContractTests(unittest.TestCase):
                         "information": "原始观察",
                         "visual_fact": "画面",
                         "evidence_strength": "direct",
+                        "trust_source_signals": ["independent_user"],
+                        "trust_source_reference": "用户评价：连续使用后体验改善。",
+                        "trust_source_status": "explicit_present",
                     },
                 ],
                 "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
@@ -1196,7 +1676,14 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
                 "stage1_acquisition": self._active_side(role_code)["stage1_acquisition"],
                 "stage_evidence_checks": checks,
-                "evidence_units": [{"id": unit_id, "evidence_strength": "direct", "visual_fact": "画面事实"}],
+                "evidence_units": [{
+                    "id": unit_id,
+                    "evidence_strength": "direct",
+                    "visual_fact": "画面事实",
+                    "trust_source_signals": ["independent_user"],
+                    "trust_source_reference": "用户评价：连续使用后体验改善。",
+                    "trust_source_status": "explicit_present",
+                }],
                 "evidence_budget_exceeded": True,
             }
         result = {
@@ -1415,7 +1902,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "version": STAGE1_COVERAGE_AUDIT_VERSION,
                 "source": "pipeline",
                 "status": "completed",
-                "independence": "separate_request_same_model",
+                "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
                 "stages": {
                     stage: {
                         "status": "found",
@@ -1441,6 +1928,168 @@ class StageEvidenceContractTests(unittest.TestCase):
         }
         freeze_stage_evidence(side)
         return side
+
+    def test_stage2_citations_follow_stage1_readiness_per_role(self) -> None:
+        creator = self._active_side("C")
+        creator_s2 = next(item for item in creator["stage_evidence_checks"] if item["stage"] == "S2")
+        creator_s2.update(
+            {
+                "status": "present",
+                "coverage": "complete",
+                "evidence_ids": ["C2"],
+                "observed_signals": list(stage_evidence_contract("S2").required_signals),
+                "missing_signals": [],
+                "signal_bindings": self._signal_bindings("S2", "C2"),
+            }
+        )
+        freeze_stage_evidence(creator)
+        benchmark = self._active_side("B")
+        stages = [{"stage": f"S{index}"} for index in range(1, 7)]
+        positive_flag = {
+            "exists": True,
+            "merged_with_s3": False,
+            "handoff_met": True,
+            "s1_s2_compatible": True,
+            "product_identity_clear": True,
+            "product_role_clear": True,
+            "excluded_or_risky_module": False,
+            "module_type": "A",
+            "start_seconds": 1.0,
+            "end_seconds": 2.0,
+            "handoff_reason": "产品身份与用途承接钩子。",
+            "evidence_ids": [],
+        }
+        stages[1].update(
+            {
+                "creator_evidence_ids": ["C3"],
+                "benchmark_evidence_ids": ["B2"],
+                "creator_s2": copy.deepcopy(positive_flag),
+                "benchmark_s2": copy.deepcopy(positive_flag),
+            }
+        )
+        result = {
+            "stage_analysis": stages,
+            "video_understanding": {"creator": creator, "benchmark": benchmark},
+        }
+
+        align_stage_flag_evidence(result)
+
+        self.assertEqual(stages[1]["creator_evidence_ids"], ["C2"])
+        self.assertEqual(stages[1]["creator_s2"]["evidence_ids"], ["C2"])
+        self.assertEqual(stages[1]["benchmark_evidence_ids"], [])
+        self.assertEqual(stages[1]["benchmark_s2"]["evidence_ids"], [])
+        validate_s2_contract_flags(result, {"s2_flags_required": True})
+
+    def test_stage_quote_and_range_are_bound_to_locked_stage1_units(self) -> None:
+        creator = self._active_side("C")
+        creator_s3 = next(item for item in creator["stage_evidence_checks"] if item["stage"] == "S3")
+        creator_s3.update(
+            {
+                "status": "present",
+                "coverage": "complete",
+                "evidence_ids": ["C3"],
+                "observed_signals": list(stage_evidence_contract("S3").required_signals),
+                "missing_signals": [],
+                "signal_bindings": self._signal_bindings("S3", "C3"),
+            }
+        )
+        creator_unit = next(item for item in creator["evidence_units"] if item["id"] == "C3")
+        creator_unit.update(
+            {
+                "time_range": "12.0s - 18.0s",
+                "voiceover": "挤一点在手上，再涂到脚后跟。",
+                "voiceover_zh": "挤一点在手上，再涂到脚后跟。",
+            }
+        )
+        creator["stage1_acquisition"]["channels"]["voiceover"] = {
+            "status": "ready",
+            "coverage": "full",
+            "count": 1,
+            "boundary_precision": "word",
+        }
+        freeze_stage_evidence(creator)
+        stages = [{"stage": f"S{index}"} for index in range(1, 7)]
+        stages[2].update(
+            {
+                "creator_time_range": "9.0s - 10.0s",
+                "creator_quote": "来自窗口外的模型口播",
+                "creator_quote_zh": "来自窗口外的模型口播",
+                "benchmark_time_range": "9.0s - 10.0s",
+                "benchmark_quote": "未资格化口播",
+                "benchmark_quote_zh": "未资格化口播",
+            }
+        )
+        result = {
+            "stage_analysis": stages,
+            "video_understanding": {
+                "creator": creator,
+                "benchmark": self._active_side("B"),
+            },
+        }
+
+        bind_timed_transcript_quotes(result, {})
+
+        self.assertEqual(stages[2]["creator_time_range"], "12.0s - 18.0s")
+        self.assertEqual(stages[2]["creator_quote"], "挤一点在手上，再涂到脚后跟。")
+        self.assertEqual(stages[2]["benchmark_quote"], "")
+        self.assertEqual(stages[2]["benchmark_quote_zh"], "")
+
+    def test_explicit_absence_does_not_hide_positive_s2_without_evidence(self) -> None:
+        creator = self._active_side("C")
+        creator_check = next(item for item in creator["stage_evidence_checks"] if item["stage"] == "S2")
+        creator_check.update(
+            {
+                "status": "absent",
+                "coverage": "complete",
+                "evidence_ids": [],
+                "observed_signals": [],
+                "missing_signals": list(stage_evidence_contract("S2").required_signals),
+                "signal_bindings": {},
+            }
+        )
+        creator_audit = creator["stage1_coverage_audit"]["stages"]["S2"]
+        creator_audit.update(
+            {
+                "status": "clear",
+                "coverage": "complete",
+                "evidence_ids": [],
+                "observed_signals": [],
+                "missing_signals": list(stage_evidence_contract("S2").required_signals),
+                "signal_bindings": {},
+            }
+        )
+        freeze_stage_evidence(creator)
+        stages = [{"stage": f"S{index}"} for index in range(1, 7)]
+        positive_flag = {
+            "exists": True,
+            "merged_with_s3": False,
+            "handoff_met": True,
+            "s1_s2_compatible": True,
+            "product_identity_clear": True,
+            "product_role_clear": True,
+            "excluded_or_risky_module": False,
+            "module_type": "A",
+            "start_seconds": 1.0,
+            "end_seconds": 2.0,
+            "handoff_reason": "错误的正向判断。",
+            "evidence_ids": [],
+        }
+        stages[1].update(
+            {
+                "creator_s2": positive_flag,
+                "benchmark_s2": {**positive_flag, "exists": False},
+            }
+        )
+        result = {
+            "stage_analysis": stages,
+            "video_understanding": {
+                "creator": creator,
+                "benchmark": self._active_side("B"),
+            },
+        }
+
+        with self.assertRaisesRegex(SystemExit, "creator_s2.evidence_ids"):
+            validate_s2_contract_flags(result, {"s2_flags_required": True})
 
     def test_active_s6_ceiling_requires_qualified_stage1_evidence(self) -> None:
         stage = {
@@ -1733,6 +2382,23 @@ class StageEvidenceContractTests(unittest.TestCase):
         content_issues = stage_evidence_snapshot_issues(content_side, expected_sha256=expected_content)
         self.assertIn("evidence_set_sha256_mismatch", content_issues)
 
+    def test_frozen_stage1_evidence_covers_independent_qualification_metadata(self) -> None:
+        side = self._active_side("C", "present")
+        side["stage1_qualification"] = {
+            "source": "pipeline",
+            "status": "completed",
+            "contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage_codes": list(stage_codes()),
+            "evidence_id_count": 1,
+        }
+        freeze_stage_evidence(side)
+        expected = side["evidence_set_sha256"]
+        side["stage1_qualification"]["status"] = "failed"
+        self.assertIn(
+            "evidence_set_changed_after_lock",
+            stage_evidence_snapshot_issues(side, expected_sha256=expected),
+        )
+
     def test_product_identity_is_preserved_and_frozen_with_stage1_observations(self) -> None:
         normalized = normalize_video_understanding(
             {
@@ -1755,6 +2421,34 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_set_changed_after_lock",
             stage_evidence_snapshot_issues(side, expected_sha256=expected),
         )
+
+    def test_missing_structure_events_normalize_idempotently_and_keep_frozen_hash(self) -> None:
+        first = normalize_video_understanding(
+            {
+                "benchmark": {
+                    "structure_event_checks": [
+                        {
+                            "module_id": "S1-A",
+                            "status": "unknown",
+                            "coverage": "unknown",
+                            "evidence_ids": [],
+                        }
+                    ]
+                }
+            }
+        )
+        second = normalize_video_understanding(first)
+        self.assertEqual(
+            first["benchmark"]["structure_event_checks"],
+            second["benchmark"]["structure_event_checks"],
+        )
+
+        side = first["benchmark"]
+        freeze_stage_evidence(side)
+        expected = side["evidence_set_sha256"]
+        renormalized = normalize_video_understanding({"benchmark": side})["benchmark"]
+        self.assertEqual(stage_evidence_sha256(renormalized), expected)
+        self.assertEqual(stage_evidence_snapshot_issues(renormalized, expected_sha256=expected), [])
 
     def test_active_boundary_hint_does_not_bypass_stage_gate_with_raw_transcript(self) -> None:
         side = self._active_side("C", "present")
@@ -1980,6 +2674,41 @@ class StageEvidenceContractTests(unittest.TestCase):
         }
         freeze_stage_evidence(side)
         self.assertEqual(stage_evidence_readiness(side, "S1"), "unknown")
+
+    def test_unavailable_audio_placeholder_is_not_treated_as_audio_evidence(self) -> None:
+        side = self._active_side("C", "unknown")
+        side["evidence_units"][0]["audio_fact"] = (
+            "当前模型未直接感知音轨，未评估语气、BGM或音效。"
+        )
+        side["stage_evidence_checks"][0] = {
+            "stage": "S1",
+            "status": "present",
+            "coverage": "complete",
+            "evidence_ids": ["C1"],
+            "observed_signals": list(stage_evidence_contract("S1").required_signals),
+            "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S1", "C1"),
+            "evidence_strength": "direct",
+        }
+        freeze_stage_evidence(side)
+        self.assertNotIn(
+            "S1:acquisition_channel_unavailable:audio",
+            stage1_acquisition_issues(side, "S1"),
+        )
+
+    def test_visual_input_timestamps_include_timeline_source_frames(self) -> None:
+        self.assertEqual(
+            _visual_input_timestamps(
+                [
+                    {
+                        "timestamp_seconds": None,
+                        "source_frame_timestamps": [0.0, 1.5, "invalid"],
+                    },
+                    {"timestamp_seconds": 4.0, "source_frame_timestamps": [1.5]},
+                ]
+            ),
+            [0.0, 1.5, 4.0],
+        )
 
     def test_unavailable_acquisition_also_hides_syntactically_valid_present_units(self) -> None:
         side = self._active_side("C", "present")
@@ -2209,6 +2938,35 @@ class StageEvidenceContractTests(unittest.TestCase):
         issues = stage_evidence_link_issues(result)
         self.assertTrue(any("primary_ownership_conflict" in item for item in issues))
         self.assertTrue(any("unqualified_evidence_id:S5:creator:C6" in item for item in issues))
+
+    def test_link_reconciliation_downgrades_duplicate_primary_ownership(self) -> None:
+        result = {
+            "stage_analysis": [
+                {"stage": "S1 Hook", "creator_evidence_ids": ["C1"]},
+                {"stage": "S2 产品引出", "creator_evidence_ids": ["C1"]},
+            ],
+            "video_understanding": {"creator": {"evidence_units": [{"id": "C1"}]}},
+            "stage_evidence_links": [
+                {
+                    "stage_id": stage,
+                    "role": "creator",
+                    "evidence_id": "C1",
+                    "relation": "primary",
+                    "linking_reason": "模型认为该事实承担主要作用。",
+                    "confidence": "high",
+                    "source": "model",
+                }
+                for stage in ("S1", "S2")
+            ],
+        }
+        reconcile_stage_evidence_links(result)
+        self.assertEqual(
+            [item["relation"] for item in result["stage_evidence_links"]],
+            ["primary", "supporting"],
+        )
+        self.assertFalse(
+            any("primary_ownership_conflict" in issue for issue in stage_evidence_link_issues(result))
+        )
 
     def test_active_stage_link_cannot_bypass_stage_specific_qualification(self) -> None:
         result = {

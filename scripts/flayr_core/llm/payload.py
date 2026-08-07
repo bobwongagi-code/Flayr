@@ -11,7 +11,13 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ..artifacts import format_seconds, parse_time_range_seconds, parse_timestamp_seconds, resolve_artifact_path
+from ..artifacts import (
+    format_seconds,
+    parse_time_range_seconds,
+    parse_timestamp_seconds,
+    resolve_artifact_path,
+    stage_time_ranges,
+)
 from ..proposition_contract import build_product_proposition_contract
 from ..market import render_market_knowledge
 from ..multimodal import multimodal_output_example, render_multimodal_prompt_contract
@@ -55,6 +61,7 @@ PHASE_C_REVIEW_MAX_WIDTH = 480
 QWEN36_PLUS_MODEL_PREFIX = "qwen3.6-plus"
 GENERIC_FULL_ANALYSIS_OUTPUT_BUDGET = 32768
 QWEN36_PLUS_FULL_ANALYSIS_OUTPUT_BUDGET = 65536
+STAGE1_RECOVERY_PADDING_SECONDS = 0.5
 
 
 def _uses_qwen36_plus_completion_budget(model: str) -> bool:
@@ -536,24 +543,18 @@ def build_video_fact_payload(
             observation_method_view(),
             obs_hint,
             observation_checklist,
-            "## 结构库事件目录（逐项核对，不是阶段评分）\n"
-            "先自由观察，再逐项写 status=present|absent|unknown|conflict 和 coverage=complete|partial|unknown；"
-            "只有 coverage=complete 时才允许写 absent，present/absent 都必须遵守证据引用合同，不能把未观察到写成 absent。\n"
+            "## 结构库事件目录（观察提示，不是阶段评分）\n"
+            "用目录帮助覆盖不同类型的原子事实，但不要输出阶段资格或 present/absent 结论；"
+            "未观察到的事项不要伪装成明确不存在，留给 Stage1-B 结合覆盖状态判断。\n"
             + event_catalog_text,
-            "## S1-S6 阶段证据合同（Stage1-B，只做证据资格，不做达人/标杆比较）\n"
-            "先完成 evidence_units 的原始观察，再为每个阶段输出一个 stage_evidence_checks。"
-            "stage_evidence_checks 是阶段归属的唯一权威；functions 只是旧版本兼容投影，不能用来替代它。"
-            "status=present 必须引用同侧真实 evidence_ids，并且这些 evidence_units 的 evidence_strength 必须由代码核验为 direct 或 explicit；"
-            "status=absent 只有在 coverage=complete、没有对应 evidence_ids 且明确列出 missing_signals 时才允许。"
-            "coverage=partial/unknown、事实冲突、时间范围不足或非替代渠道缺失时写 unknown/conflict，绝不能写 absent。"
-            "stage_evidence_checks 里的 evidence_strength 只作模型自检摘要，不能覆盖 evidence_unit 的权威强度；"
-            "同一个 evidence unit 可以被多个阶段引用，但必须分别填写 observed_signals 和 signal_bindings；"
-            "signal_bindings 必须逐个把每个 observed signal 绑定到本阶段 evidence_ids 中真实存在的证据，"
-            "required signal 没有逐项绑定时不得写 present；S3/S4 的 visual_required 不得被口播替代。"
+            "## Stage1-A 原子事实合同\n"
+            "本请求只负责观察当前视频：按时间记录 evidence_units、可观察的结构事件和覆盖清单。"
+            "不要判断 S1-S6 是否成立，不要把 evidence unit 归入阶段，不要输出 stage_evidence_checks。"
+            "阶段归属、资格、required signal 绑定和明确不存在将在后续独立的 Stage1-B 请求中完成；"
+            "functions 只能作为原子事实的功能标签，不能替代 Stage1-B 资格。"
             "Stage1 输出严格禁止 severity、model_severity、gap、comparison、commercial_priority、recommendations、improvements、stage_analysis 和 stage_evidence_links；"
-            "stage1_acquisition、evidence_set_* 和 stage1_recovery 是代码拥有的采集/冻结元数据，模型不得输出或覆盖；"
-            "这些字段属于后续 Judgment/Resolution/Report，出现时必须拒绝，不得由代码静默丢弃。\n"
-            + stage_evidence_contract_prompt(),
+            "stage1_acquisition、stage1_qualification、evidence_set_* 和 stage1_recovery 是代码拥有的采集/冻结元数据，模型不得输出或覆盖；"
+            "这些字段属于后续 Judgment/Resolution/Report，出现时必须拒绝，不得由代码静默丢弃。",
             "## 本地语言转写（语义参考；不提供精确窗口边界）",
             read_text_if_exists(role_dir / "transcript.txt"),
             "",
@@ -667,41 +668,7 @@ def build_video_fact_payload(
                             "channels": ["visual|voiceover|subtitle"],
                         }
                     ],
-                    "structure_event_checks": [
-                        {
-                            "module_id": "必须是上方结构库事件目录中的 S3-A~E 或 S4-A~F。",
-                            "status": "present|absent|unknown|conflict",
-                            "coverage": "complete|partial|unknown",
-                            "evidence_ids": [f"{code}1"],
-                        }
-                    ],
                     "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
-                    "stage_evidence_checks": [
-                        {
-                            "stage": "S1",
-                            "status": "present|absent|unknown|conflict",
-                            "coverage": "complete|partial|unknown",
-                            "evidence_ids": [f"{code}1"],
-                            "invalid_evidence_ids": [],
-                            "observed_signals": ["该阶段合同中实际观察到的信号"],
-                            "missing_signals": [],
-                            "signal_bindings": {
-                                "required_signal_id": {
-                                    "status": "supported|missing|unknown|conflict",
-                                    "evidence_ids": [f"{code}1"],
-                                    "invalid_evidence_ids": [],
-                                    "reason": "该信号由哪些原子事实支持。"
-                                }
-                            },
-                            "invalid_signal_bindings": [],
-                            "observed_disqualifiers": [],
-                            "invalid_observed_signals": [],
-                            "invalid_missing_signals": [],
-                            "invalid_observed_disqualifiers": [],
-                            "evidence_strength": "direct|explicit|inferred|absent",
-                            "reason": "只说明资格事实，不写比较结论。",
-                        }
-                    ],
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -806,6 +773,102 @@ def build_video_fact_payload(
     }
 
 
+def build_stage_evidence_qualification_payload(
+    model: str,
+    role: str,
+    analysis: dict[str, Any],
+    facts: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the media-free Stage1-B qualification request.
+
+    Stage1-A owns observation.  Stage1-B only projects those locked atomic
+    observations onto the six stage contracts; it must not re-watch media or
+    invent a missing fact.  Keeping this request text-only also makes a
+    qualification failure distinguishable from an acquisition failure.
+    """
+    info = analysis.get("videos", {}).get(role, {}) if isinstance(analysis.get("videos"), dict) else {}
+    units = []
+    for unit in facts.get("evidence_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        units.append(
+            {
+                "id": unit.get("id"),
+                "time_range": unit.get("time_range"),
+                "information": unit.get("information"),
+                "visual_fact": unit.get("visual_fact"),
+                "voiceover": unit.get("voiceover"),
+                "voiceover_zh": unit.get("voiceover_zh"),
+                "subtitle_fact": unit.get("subtitle_fact"),
+                "evidence_strength": unit.get("evidence_strength"),
+                "product_visible": unit.get("product_visible"),
+                "product_coverage": unit.get("product_coverage"),
+                "functions": unit.get("functions"),
+                "trust_source_signals": unit.get("trust_source_signals"),
+                "trust_source_reference": unit.get("trust_source_reference"),
+            }
+        )
+    context = {
+        "role": role,
+        "duration_seconds": info.get("duration_seconds"),
+        "stage1_acquisition": facts.get("stage1_acquisition") or {},
+        "evidence_units": units,
+        "structure_event_checks": facts.get("structure_event_checks") or [],
+        "evidence_checklist": facts.get("evidence_checklist") or [],
+    }
+    output_stage = {
+        "stage": "S1",
+        "status": "present|absent|unknown|conflict",
+        "coverage": "complete|partial|unknown",
+        "evidence_ids": [],
+        "observed_signals": [],
+        "missing_signals": [],
+        "signal_bindings": {},
+        "invalid_signal_bindings": [],
+        "observed_disqualifiers": [],
+        "evidence_strength": "direct|explicit|inferred|absent",
+        "reason": "只说明该阶段资格事实，不写比较或严重度。",
+    }
+    text = "\n\n".join(
+        [
+            f"# Stage1-B 阶段资格投影：{role}",
+            "你只负责把已锁定的原子观察投影到 S1-S6 阶段合同。不要看视频、不要补写事实、不要比较 benchmark 与 creator。",
+            "只能引用输入中实际存在的 evidence_units。没有满足 required signal、渠道不可用、时间边界不精确或 coverage 不完整时，必须返回 unknown/conflict；不能把缺失当 absent。",
+            "present 只能由 direct 或 explicit 的真实 evidence_ids 支撑；inferred、unknown、冲突或缺字段不得触发正式资格。",
+            "absent 只有在相关观察范围已完整覆盖、且合同要求的信号明确未出现时才允许。离散采样、粗粒度口播或未完成覆盖不能证明 absent。",
+            "每个 signal_binding 必须引用当前输入中真实存在的 evidence_id；不得跨角色、跨视频或跨阶段创造引用。",
+            "## 阶段合同",
+            stage_evidence_contract_prompt(),
+            "## 已锁定 Stage1-A 事实（只读）",
+            json.dumps(context, ensure_ascii=False, indent=2),
+            "## 严格 JSON 输出",
+            json.dumps(
+                {
+                    "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                    "stage_evidence_checks": [output_stage],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            "必须恰好输出 S1-S6 六条 stage_evidence_checks，顺序为 S1、S2、S3、S4、S5、S6。",
+        ]
+    )
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "你是 Flayr Stage1-B 资格投影器。只输出严格 JSON，不要 Markdown。"},
+            {"role": "user", "content": [{"type": "text", "text": text}]},
+        ],
+        "temperature": 0.0,
+    }
+    payload.update(
+        {"max_completion_tokens": 8192}
+        if str(model).lower().startswith("qwen3.6-plus")
+        else {"max_tokens": 8192}
+    )
+    return payload
+
+
 def build_video_fact_recovery_payload(
     model: str,
     role: str,
@@ -838,16 +901,34 @@ def build_video_fact_recovery_payload(
         "没有确认事实就写空数组和 unknown，不得为了让阶段成立而推断。"
     )
     payload["messages"][0]["content"] = recovery_system
-    user_content = payload["messages"][1]["content"]
-    if isinstance(user_content, list) and user_content and isinstance(user_content[0], dict):
-        user_content[0]["text"] += (
-            "\n\n## 定向复核目标\n"
-            f"只复核这些阶段：{target_text}。优先检查它们的 required_signals、非替代渠道和 disqualifiers。\n"
-            "## 已锁定的原始事实（只读，不能改写）\n"
-            + json.dumps(current_facts, ensure_ascii=False, indent=2)
-            + "\n## 输出合同\n"
-            + json.dumps(
-                {
+    original_content = payload["messages"][1].get("content")
+    media = [
+        item for item in original_content
+        if isinstance(item, dict) and item.get("type") in {"image_url", "video_url", "input_audio"}
+    ] if isinstance(original_content, list) else []
+    media = _replace_recovery_full_media(
+        media,
+        analysis,
+        role,
+        target_stages,
+        api_url=api_url,
+        model=model,
+        budget=budget,
+    )
+    payload["messages"][1]["content"] = [
+        {
+            "type": "text",
+            "text": "\n\n".join(
+                [
+                    "# Stage1-C 定向缺口补观察",
+                    f"只复核这些阶段：{target_text}。只看目标阶段的 required_signals、非替代渠道和 disqualifiers。",
+                    "这是一次追加观察，不是重新抽取整条视频；不得改写、删除或合并已有 evidence_units。",
+                    "已有事实只用于避免重复，不得把它们当成可修改的模型输出。没有确认事实就返回空 candidate_evidence_units 和 unknown。",
+                    "## 已锁定事实摘要（只读）",
+                    json.dumps(current_facts, ensure_ascii=False, indent=2),
+                    "## 输出合同",
+                    json.dumps(
+                        {
                     "candidate_evidence_units": [
                         {
                             "id": "新的唯一 ID，例如 C9；不能复用已有 ID",
@@ -882,104 +963,362 @@ def build_video_fact_recovery_payload(
                         }
                     ],
                     "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                ]
+            ),
+        },
+        *media,
+    ]
     return payload
 
 
-def build_video_fact_coverage_audit_payload(
-    model: str,
-    role: str,
+def _recovery_stage_windows(
     analysis: dict[str, Any],
-    visual_inputs: list[dict[str, Any]],
-    target_stages: list[str] | None = None,
+    role: str,
+    target_stages: list[str],
+) -> list[tuple[str, float, float]]:
+    """Return contiguous target-stage windows for bounded recovery media."""
+    videos = analysis.get("videos") if isinstance(analysis.get("videos"), dict) else {}
+    info = videos.get(role) if isinstance(videos.get(role), dict) else {}
+    duration = parse_timestamp_seconds(info.get("duration_seconds"))
+    if duration is None or duration <= 0:
+        return []
+    target_set = {
+        match.group(0)
+        for value in target_stages
+        if (match := re.search(r"\bS([1-6])\b", str(value).upper()))
+    }
+    all_ranges = stage_time_ranges(float(duration))
+    ranges = [item for item in all_ranges if _recovery_stage_code(item[0]) in target_set]
+    if not ranges:
+        return []
+    index_by_stage = {
+        _recovery_stage_code(item[0]): index
+        for index, item in enumerate(all_ranges)
+    }
+    windows: list[tuple[str, float, float]] = []
+    current_label = _recovery_stage_code(ranges[0][0])
+    current_start, current_end = ranges[0][2], ranges[0][3]
+    current_index = index_by_stage.get(current_label, -2)
+    for stage, _label, start, end in ranges[1:]:
+        stage_code = _recovery_stage_code(stage)
+        index = index_by_stage.get(stage_code, -2)
+        if index == current_index + 1:
+            current_end = end
+        else:
+            windows.append((current_label, current_start, current_end))
+            current_label, current_start, current_end = stage_code, start, end
+        current_index = index
+    windows.append((current_label, current_start, current_end))
+    return [
+        (
+            label,
+            max(0.0, start - STAGE1_RECOVERY_PADDING_SECONDS),
+            min(float(duration), end + STAGE1_RECOVERY_PADDING_SECONDS),
+        )
+        for label, start, end in windows
+    ]
+
+
+def _recovery_stage_code(value: Any) -> str:
+    match = re.search(r"\bS([1-6])\b", str(value or "").upper())
+    return match.group(0) if match else ""
+
+
+def _replace_recovery_full_media(
+    media: list[dict[str, Any]],
+    analysis: dict[str, Any],
+    role: str,
+    target_stages: list[str],
+    *,
+    api_url: str,
+    model: str,
+    budget: ResourceBudget | None,
+) -> list[dict[str, Any]]:
+    """Remove full-video/audio blocks and replace them with target windows."""
+    videos = analysis.get("videos") if isinstance(analysis.get("videos"), dict) else {}
+    info = videos.get(role) if isinstance(videos.get(role), dict) else {}
+    role_dir = Path(str(info.get("work_dir") or ""))
+    video_path = Path(str(info.get("path") or ""))
+    audio_path = role_dir / "audio.wav"
+    windows = _recovery_stage_windows(analysis, role, target_stages)
+    retained = [
+        item for item in media
+        if item.get("type") not in {"video_url", "input_audio"}
+    ]
+    for label, start, end in windows:
+        window_duration = max(0.1, end - start)
+        if can_analyze_native_audio(api_url, model) and video_path.is_file():
+            clip = video_to_data_url(
+                video_path,
+                start=start,
+                duration=window_duration,
+                budget=budget,
+            )
+            if clip:
+                retained.extend(
+                    [
+                        {"type": "text", "text": f"Stage1-C 目标视频窗口 {label}：{format_seconds(start)} - {format_seconds(end)}"},
+                        {"type": "video_url", "video_url": {"url": clip}},
+                    ]
+                )
+                continue
+        if can_analyze_native_audio(api_url, model) and can_send_standalone_audio(api_url, model):
+            audio_clip = audio_to_mp3_data_url(
+                audio_path,
+                start=start,
+                duration=window_duration,
+                budget=budget,
+            )
+            if audio_clip:
+                retained.extend(
+                    [
+                        {"type": "text", "text": f"Stage1-C 目标音频窗口 {label}：{format_seconds(start)} - {format_seconds(end)}"},
+                        {"type": "input_audio", "input_audio": {"data": audio_clip, "format": "mp3"}},
+                    ]
+                )
+    return retained
+
+
+STAGE_JUDGMENT_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("S1", "S2"),
+    ("S3", "S4"),
+    ("S5",),
+    ("S6",),
+)
+
+
+def _compact_stage_group_facts(
+    facts: dict[str, Any],
+    target_stages: list[str],
+) -> dict[str, Any]:
+    """Build the closed-world handoff consumed by one Stage2 group.
+
+    The immutable Stage1 record stays outside the model request.  Only
+    qualified observations for the target stages are exposed.  Readiness and
+    missing requirements are included as diagnostics so the model can return
+    ``uncertain`` instead of inventing a conclusion when the gate is blocked.
+    """
+    target = {str(value).strip().upper() for value in target_stages}
+    view = stage_analysis_evidence_view(facts, target)
+    compact: dict[str, Any] = {}
+    for role in ("benchmark", "creator"):
+        side = view.get(role) if isinstance(view.get(role), dict) else {}
+        original = facts.get(role) if isinstance(facts.get(role), dict) else {}
+        checks = {
+            str(item.get("stage") or "").upper(): item
+            for item in original.get("stage_evidence_checks") or []
+            if isinstance(item, dict) and str(item.get("stage") or "").upper() in target
+        }
+        audit = original.get("stage1_coverage_audit") if isinstance(original.get("stage1_coverage_audit"), dict) else {}
+        audit_stages = audit.get("stages") if isinstance(audit.get("stages"), dict) else {}
+        stage_payload: dict[str, Any] = {}
+        for stage in sorted(target):
+            stage_units = (side.get("stage_evidence_units") or {}).get(stage) or []
+            candidate_ids = (side.get("candidate_evidence_ids_by_stage") or {}).get(stage) or []
+            stage_payload[stage] = {
+                "readiness": (side.get("stage_evidence_readiness") or {}).get(stage, "unknown"),
+                "qualified_evidence": [
+                    {
+                        "id": unit.get("id"),
+                        "time_range": unit.get("time_range"),
+                        "information": unit.get("information"),
+                        "voiceover": unit.get("voiceover"),
+                        "voiceover_zh": unit.get("voiceover_zh"),
+                        "visual_fact": unit.get("visual_fact"),
+                        "subtitle_fact": unit.get("subtitle_fact"),
+                        "audio_fact": unit.get("audio_fact"),
+                        "evidence_strength": unit.get("evidence_strength"),
+                        "functions": unit.get("functions"),
+                        "trust_source_signals": unit.get("trust_source_signals"),
+                        "trust_source_reference": unit.get("trust_source_reference"),
+                    }
+                    for unit in stage_units
+                    if isinstance(unit, dict)
+                ],
+                "primary_projection": checks.get(stage) or {},
+                "coverage_audit": audit_stages.get(stage) or {},
+                "candidate_summary": {
+                    "ids": [str(value).strip() for value in candidate_ids if str(value).strip()],
+                    "count": len(candidate_ids),
+                    "rule": "candidate observations are retained for recovery/audit and cannot support judgment",
+                },
+            }
+        compact[role] = {
+            "product_identity": side.get("product_identity") or {},
+            "stages": stage_payload,
+            "ledger_hash": original.get("evidence_set_sha256") or "",
+        }
+    return compact
+
+
+def _stage_group_flag_contract(stage: str) -> str:
+    """Return only the stage-specific structured facts for one small call."""
+    contracts = {
+        "S1": (
+            '"creator_hook":{"exists":true,"type":"A-G|unknown","dims":{"camera":true,"copy":true,"sound":true,"rhythm":true},'
+            '"hook_boundary_seconds":0,"hook_boundary_reason":"...","s2_start_signal":"...","landing_met":false,'
+            '"landing_reason":"...","window_evidence":"...","landing_window_leak":false,"anchors_proposition":false,"evidence_ids":[]},'
+            '"benchmark_hook":{...}'
+        ),
+        "S2": (
+            '"creator_s2":{"exists":true,"merged_with_s3":false,"module_type":"A-D|unknown","handoff_met":false,'
+            '"s1_s2_compatible":false,"product_identity_clear":false,"product_role_clear":false,"excluded_or_risky_module":false,'
+            '"start_seconds":0,"end_seconds":0,"handoff_reason":"...","evidence_ids":[]},"benchmark_s2":{...}'
+        ),
+        "S3": (
+            '"creator_s3":{"exists":true,"module_type":"A-E|unknown","usage_evidence_state":"none|partial|complete|uncertain",'
+            '"usage_process_visible":false,"result_only_without_process":false,"mouth_only_or_static":false,"real_usage_met":false,'
+            '"core_selling_point_visible":false,"process_framing_met":false,"action_proof_met":false,"action_target_contact_met":false,'
+            '"action_application_change_visible":false,"critical_action_continuity_met":false,"demonstrated_selling_points":[],'
+            '"missing_selling_points":[],"scene_mode":"single_scene|multi_scene|multi_person|hybrid|unknown","usage_context_fit":false,'
+            '"continuity_met":false,"richness_met":false,"single_scene_continuity_met":false,"single_scene_variation_met":false,'
+            '"multi_scene_logic_met":false,"multi_scene_transition_met":false,"multi_scene_role_adaptation_met":false,"role_design_met":false,'
+            '"role_interaction_met":false,"distinct_personas_met":false,"steps_clear_met":false,"pov_immersive_met":false,'
+            '"presentation_overlays":[],"fake_or_staged":false,"start_seconds":0,"end_seconds":0,"usage_reason":"...","evidence_ids":[]},'
+            '"benchmark_s3":{...}'
+        ),
+        "S4": (
+            '"creator_s4":{"effect_type":"before_after|split_screen|person_vs_person|product_vs_alt|quantified_test|process_visualization|aesthetic_display|none",'
+            '"effect_evidence_state":"none|result_only|verified|uncertain","effect_visible":false,"effect_salience":"none|subtle|clear|strong",'
+            '"effect_proposition_matched":false,"comparison_control_met":false,"closeup_or_focus_met":false,"visual_difference_observed":false,'
+            '"module_constraints_met":false,"effect_maximized":false,"requires_close_inspection":false,"effect_attribution_supported":false,'
+            '"result_only_without_process":false,"process_linked_effect":false,"tamper_or_cut_risk":false,"effect_reason":"...","evidence_ids":[]},'
+            '"benchmark_s4":{...}'
+        ),
+        "S5": (
+            '"creator_s5":{"exists":false,"module_type":"A-E|unknown","trust_evidence_type":"hard|soft|mixed|none|unknown",'
+            '"trust_basis":"authority|traceable_data|independent_user|social_consensus|process_transparency|product_claim|offer_or_spec|none|unknown",'
+            '"trust_source_evidence_ids":[],"trust_source_visible":false,"trust_source_credible":false,"trust_claim_specific":false,'
+            '"product_relevance_met":false,"independent_trust_purpose":false,"duplicates_other_stage":false,"voice_only":false,'
+            '"risky_or_unsupported":false,"start_seconds":0,"end_seconds":0,"trust_reason":"...","evidence_ids":[]},"benchmark_s5":{...}'
+        ),
+        "S6": (
+            '"creator_s6":{"exists":false,"module_type":"A-E|unknown","direct_order_met":false,"action_path_clear":false,'
+            '"soft_purchase_invitation_met":false,"offer_or_incentive_clear":false,"price_anchor_met":false,"urgency_evidence_met":false,'
+            '"gift_stack_met":false,"guarantee_clear_met":false,"urgency_met":false,"product_value_recalled":false,"module_fit_met":false,'
+            '"ending_position_met":false,"depends_on_valid_s4":false,"compliance_risk":false,"start_seconds":0,"end_seconds":0,'
+            '"cta_reason":"...","evidence_ids":[]},"benchmark_s6":{...}'
+        ),
+    }
+    return contracts.get(stage, "")
+
+
+def build_stage_group_judgment_payload(
+    model: str,
+    _analysis_input: str,
+    facts: dict[str, Any],
+    analysis: dict[str, Any],
+    target_stages: list[str],
     api_url: str = "",
     budget: ResourceBudget | None = None,
 ) -> dict[str, Any]:
-    """Build an independent Stage1 coverage pass.
+    """Build one bounded Stage2 judgment request.
 
-    The pass receives the source modalities and the declarative stage registry,
-    but never receives the primary evidence units or primary stage conclusions.
-    It may return candidate observations and slot coverage; the pipeline merges
-    them append-only and computes the final gate.  It never returns severity or
-    comparison fields.
+    Stage2 is deliberately text-only.  The model must judge the locked,
+    stage-scoped handoff rather than silently re-reading raw video and creating
+    facts that cannot be traced back to the Stage1 ledger.
     """
-    payload = build_video_fact_payload(
-        model,
-        role,
-        analysis,
-        visual_inputs,
-        api_url=api_url,
-        budget=budget,
+    targets = [str(value).strip().upper() for value in target_stages if str(value).strip().upper() in stage_codes()]
+    targets = list(dict.fromkeys(targets))
+    if not targets:
+        raise ValueError("stage group must contain at least one known stage")
+    scoped_facts = _compact_stage_group_facts(facts, targets)
+    eligibility = analysis.get("comparison_contract") or analysis.get("comparison_eligibility") or {}
+    foundation = analysis.get("product_foundation") or {}
+    stage_lines = []
+    for stage in targets:
+        stage_lines.append(f"- {stage}：只判断该阶段；readiness 不为 present 时 relation 和 gap_magnitude 必须为 uncertain。")
+    flag_contract = "\n".join(f"{stage}: {_stage_group_flag_contract(stage)}" for stage in targets)
+    text = "\n\n".join(
+        [
+            "# Flayr Stage2 小阶段组判断",
+            f"目标阶段：{', '.join(targets)}",
+            "你只负责目标阶段的语义判断。先读取每侧该阶段的 qualified_evidence，再写阶段事实状态、relation、model_gap_magnitude 和理由。",
+            "candidate observations、coverage audit 和 readiness 只能说明为什么未知，不能被升级为正式证据。不得新增事实、不得跨阶段或跨角色引用。",
+            "relation 只能是 creator_better|benchmark_better|equivalent|uncertain；model_gap_magnitude 只能是 none|small|medium|large|uncertain。",
+            "model_gap_magnitude 不是最终 severity；最终 severity 由代码 resolver 处理。不得输出 stage_evidence_links、improvements、commercial_priority、完整报告或其他阶段字段。",
+            "每个阶段必须先完成 stage_state，再给 relation、model_gap_magnitude 和 judgment_reason；stage_state 只能是 completed|unknown|conflict|blocked；reason 只能引用该阶段实际 qualified evidence IDs。",
+            "如果该阶段一侧或两侧 readiness 是 unknown/conflict/absent/not_applicable，必须如实返回 uncertain，不能把没有证据当成 small 或 medium。",
+            "## 商品与比较合同",
+            json.dumps({"product_foundation": foundation, "comparison_contract": eligibility}, ensure_ascii=False, indent=2),
+            "## 目标阶段证据交接（只读）",
+            json.dumps(scoped_facts, ensure_ascii=False, indent=2),
+            "## 阶段字段合同",
+            "每个 stage 对象至少包含：stage, stage_state, benchmark_time_range, creator_time_range, benchmark_summary, creator_summary, benchmark_key_message, creator_key_message, benchmark_evidence_ids, creator_evidence_ids, benchmark_visual_evidence, creator_visual_evidence, benchmark_quote, benchmark_quote_zh, creator_quote, creator_quote_zh, relation, model_gap_magnitude, gap_type, gap_summary, gap, judgment_reason, benchmark_execution, creator_execution, painpoint_relevance, stage_standard_delivery。stage_state 是必填语义字段；无法完成该阶段判断时填 unknown/conflict/blocked，不得省略后让代码猜测。",
+            "仅在能够完整填写且引用合法证据时输出该阶段专属结构化字段；字段不完整就省略该字段，代码会将其视为 unknown，不会补写语义。",
+            flag_contract,
+            "## 输出严格 JSON",
+            json.dumps({
+                "stage_group": targets,
+                "stages": [{
+                    "stage": targets[0],
+                    "stage_state": "completed|unknown|conflict|blocked",
+                    "relation": "creator_better|benchmark_better|equivalent|uncertain",
+                    "model_gap_magnitude": "none|small|medium|large|uncertain",
+                    "judgment_reason": "只引用本阶段已锁定 evidence ID 的一句话理由",
+                }],
+            }, ensure_ascii=False, indent=2),
+            "stages 必须恰好覆盖目标阶段，顺序与目标阶段相同。",
+        ]
     )
-    targets = [str(stage).strip().upper()[:2] for stage in (target_stages or stage_codes()) if str(stage).strip()]
-    target_text = ", ".join(dict.fromkeys(targets)) or "S1-S6"
-    payload["messages"][0]["content"] = (
-        "你是 Flayr Stage1 的独立证据覆盖审计器。只输出严格 JSON，不输出 Markdown。"
-        "你不能看到 primary Stage1 事实，也不能比较 creator 与 benchmark。"
-        "你的任务是重新扫描当前这一条视频，按给定的 S1-S6 required signals 检查是否存在被漏抽的关键事实。"
-        "只记录原子事实、时间、信道和覆盖状态，不输出 severity、差距、建议、商业优先级或报告结论。"
-        "如果看到新的事实，放入 candidate_evidence_units；没有确定事实不要猜测。"
-    )
-    user_content = payload["messages"][1]["content"]
-    if isinstance(user_content, list) and user_content and isinstance(user_content[0], dict):
-        user_content[0]["text"] += (
-            "\n\n## 独立覆盖审计合同（优先于上方示例输出）\n"
-            f"只审计这些阶段：{target_text}。每个目标阶段都必须返回一条 stages 记录；没有证据也必须返回。\n"
-            "coverage=complete 只表示这一阶段的 required signals 已按素材完整搜索；是否发现事实由 status 表示，不能仅因没有发现就省略完整搜索。"
-            "如果素材、时间区间或响应预算不足，写 coverage=partial/unknown 和 status=unknown。"
-            "status=found 表示本次审计直接发现至少一个候选事实；status=clear 表示完整搜索后未发现该阶段 required signals；"
-            "两者都不能直接替代代码生成的 stage qualification。\n"
-            "每个 observed signal 都必须在 signal_bindings 中逐项绑定到候选 evidence_ids；不能用阶段总 evidence_ids 代替逐信号绑定。"
-            "independence/source 等运行 provenance 由管线写入，不要把模型自报值当作证明。\n"
-            "## 输出 JSON\n"
-            + json.dumps(
-                {
-                    "version": 1,
-                    "status": "completed|partial|failed|unknown",
-                    "independence": "separate_request_same_model",
-                    "candidate_evidence_units": [
-                        {
-                            "id": "新的唯一 ID，例如 C_A1；不能复用已有事实 ID",
-                            "time_range": "真实时间范围",
-                            "information": "直接观察到的事实",
-                            "voiceover": "仅窗口安全口播中的原句，没有则留空",
-                            "voiceover_zh": "中文翻译，没有则留空",
-                            "visual_fact": "直接看到的画面事实",
-                            "subtitle_fact": "直接读到的字幕，没有则留空",
-                            "audio_fact": "直接听到的音频事实，没有则写无",
-                            "evidence_strength": "direct|explicit|inferred|absent",
-                            "functions": [],
-                        }
-                    ],
-                    "stages": {
-                        "S1": {
-                            "status": "found|clear|conflict|unknown",
-                            "coverage": "complete|partial|unknown",
-                            "evidence_ids": ["本次审计新发现的候选事实 ID"],
-                            "observed_signals": ["required/optional signal id"],
-                            "missing_signals": [],
-                            "signal_bindings": {
-                                "required_signal_id": {
-                                    "status": "supported|missing|unknown|conflict",
-                                    "evidence_ids": ["本次审计新发现的候选事实 ID"],
-                                    "invalid_evidence_ids": [],
-                                    "reason": "只写信号与候选事实的绑定。"
-                                }
-                            },
-                            "invalid_signal_bindings": [],
-                            "reason": "只写覆盖和事实观察，不写 severity",
-                        }
-                    },
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "你是 Flayr 的小阶段判断器。只输出严格 JSON，不要 Markdown。"},
+            {"role": "user", "content": [{"type": "text", "text": text}]},
+        ],
+        "temperature": 0.0,
+    }
+    payload.update({"max_completion_tokens": 8192} if str(model).lower().startswith("qwen3.6-plus") else {"max_tokens": 8192})
     return payload
+
+
+def build_stage_synthesis_payload(
+    model: str,
+    analysis_input: str,
+    facts: dict[str, Any],
+    stage_results: list[dict[str, Any]],
+    analysis: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the read-only Stage3 synthesis request."""
+    text = "\n\n".join(
+        [
+            "# Flayr Stage3 只读综合",
+            "只基于已经锁定的六个阶段判断生成全局摘要和改进建议。不得改变任何 stage 的 relation、model_gap_magnitude、stage_state、evidence_ids 或 severity。",
+            "建议必须引用已有阶段证据，不得新造事实；如果阶段 unknown，只能明确写待复核，不能当作达人缺陷。",
+            "输出 one_line_verdict、one_line_summary、executive_summary、holistic_assessment、key_conclusions、loop_closure、s3_s4_relationship、promise_chain、improvements。",
+            "improvements 每项只需 title,target_stage,gap_type,time_range,creator_time_range,benchmark_time_range,problem,benchmark_reference,benchmark_evidence_ids,suggestion,actions,gmv_reason,evidence,priority；代码会补齐其余机械字段。",
+            "## 产品与比较合同",
+            json.dumps({"product": analysis.get("product") or {}, "foundation": analysis.get("product_foundation") or {}, "comparison_contract": analysis.get("comparison_contract") or {}}, ensure_ascii=False, indent=2),
+            "## 已锁定阶段判断",
+            json.dumps(stage_results, ensure_ascii=False, indent=2),
+            "## 输出 JSON",
+            json.dumps({
+                "one_line_verdict": "...",
+                "one_line_summary": "...",
+                "executive_summary": "...",
+                "holistic_assessment": {},
+                "key_conclusions": [],
+                "loop_closure": {},
+                "s3_s4_relationship": {},
+                "promise_chain": {},
+                "improvements": [],
+            }, ensure_ascii=False, indent=2),
+        ]
+    )
+    return {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "你是只读的 Stage3 综合器。只输出严格 JSON，不要 Markdown。"},
+            {"role": "user", "content": [{"type": "text", "text": text}]},
+        ],
+        "temperature": 0.0,
+        "max_completion_tokens": 8192 if str(model).lower().startswith("qwen3.6-plus") else 4096,
+    }
 
 
 def build_absolute_execution_shadow_payload(

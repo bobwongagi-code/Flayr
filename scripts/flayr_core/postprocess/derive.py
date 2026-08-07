@@ -1334,6 +1334,33 @@ def derive_severity_from_facts(
         model = _normalize_model_severity(stage.get("model_severity") or stage.get("severity"))
         gate = stage.get("stage_evidence_gate") if isinstance(stage.get("stage_evidence_gate"), dict) else None
         understanding = result.get("video_understanding") if isinstance(result.get("video_understanding"), dict) else {}
+        segmented_pipeline = str(result.get("stage2_pipeline_version") or "").strip() == "segmented_stage_v1"
+        segmented_status = str(stage.get("analysis_status") or "").strip().lower()
+        segmented_state = str(stage.get("stage_state") or "unknown").strip().lower()
+        segmented_magnitude = str(stage.get("model_gap_magnitude") or "").strip().lower()
+        if segmented_pipeline and (
+            segmented_status != "grounded"
+            or segmented_state != "completed"
+            or segmented_magnitude == "uncertain"
+        ):
+            # ADR-007: an unresolved segmented stage has no real severity.  Do
+            # not let the legacy normalizer's medium fallback turn a missing
+            # semantic stage state or evidence uncertainty into a conclusion.
+            stage["severity"] = None
+            stage["model_severity"] = None
+            stage["severity_derivation"] = {
+                "status": segmented_status or "evidence_blocked",
+                "severity": None,
+                "model_severity": None,
+                "resolver": "floor_ceiling_v1",
+                "phase_c_candidate": False,
+                "constraints": [],
+                "reason": str(
+                    stage.get("judgment_reason")
+                    or "Stage2 阶段证据未闭合，不产生 severity。"
+                ),
+            }
+            continue
         active_contract = any(
             isinstance(understanding.get(role), dict)
             and understanding[role].get("stage_evidence_contract_version")
@@ -1341,11 +1368,17 @@ def derive_severity_from_facts(
             for role in ("creator", "benchmark")
         )
         if active_contract and isinstance(gate, dict) and gate.get("status") != "grounded":
-            stage["severity"] = model
+            if segmented_pipeline:
+                stage["severity"] = None
+                stage["model_severity"] = None
+                blocked_severity = None
+            else:
+                stage["severity"] = model
+                blocked_severity = model
             stage["severity_derivation"] = {
                 "status": "evidence_blocked",
-                "severity": model,
-                "model_severity": model,
+                "severity": blocked_severity,
+                "model_severity": blocked_severity,
                 "resolver": "floor_ceiling_v1",
                 "phase_c_candidate": False,
                 "constraints": [],

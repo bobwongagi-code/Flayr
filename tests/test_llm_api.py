@@ -26,9 +26,35 @@ from flayr_core.llm.api import (  # noqa: E402
 )
 from flayr_core.llm.media import build_evidence_sensory_inputs  # noqa: E402
 from flayr_core.llm.payload import build_video_fact_payload  # noqa: E402
+from flayr_core.llm.pipeline import run_video_fact_extraction  # noqa: E402
 
 
 class LlmApiContractTests(unittest.TestCase):
+    def test_fact_extraction_uses_full_per_request_image_limit_for_each_role(self) -> None:
+        args = mock.Mock(
+            llm_image_limit=12,
+            llm_dry_run=True,
+            llm_model="qwen3.6-plus",
+            llm_api_url="https://example.test/chat/completions",
+        )
+        analysis = {"videos": {"benchmark": {}, "creator": {}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch(
+                    "flayr_core.llm.pipeline.select_role_visual_inputs",
+                    return_value=[],
+                ) as selector,
+                mock.patch(
+                    "flayr_core.llm.pipeline.build_video_fact_payload",
+                    return_value={"messages": []},
+                ),
+            ):
+                run_video_fact_extraction(args, analysis, Path(tmp), "unused")
+        self.assertEqual(
+            [call.args[2] for call in selector.call_args_list],
+            [12, 12],
+        )
+
     def test_known_provider_capabilities_are_explicit(self) -> None:
         qwen_url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
         qwen = provider_capabilities(qwen_url, "qwen3-omni-flash")
@@ -137,6 +163,10 @@ class LlmApiContractTests(unittest.TestCase):
             self.assertIn("image_url", types)
             payload_text = json.dumps(payload, ensure_ascii=False)
             self.assertIn("SAFE_FACT_WINDOW", payload_text)
+            self.assertIn("Stage1-A 原子事实合同", payload_text)
+            self.assertIn("不要输出 stage_evidence_checks", payload_text)
+            self.assertNotIn("只有 coverage=complete 时才允许写 present 或 absent", payload_text)
+            self.assertNotIn("status=unknown/conflict 时 evidence_ids 必须为空", payload_text)
             self.assertNotIn("RAW_SRT_FACT_PAYLOAD", payload_text)
             self.assertNotIn("RAW_WORD_FACT_PAYLOAD", payload_text)
             video_encoder.assert_not_called()
