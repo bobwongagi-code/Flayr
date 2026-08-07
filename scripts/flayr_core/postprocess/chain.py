@@ -47,6 +47,7 @@ from .repair import (
     reconcile_s5_trust_sources,
     reconcile_unsupported_cta,
     repair_s1_hook_boundaries,
+    validate_s1_hook_boundaries,
     stabilize_improvement_priorities,
     stabilize_stage_severity,
 )
@@ -108,10 +109,22 @@ def finalize_severity_after_repairs(
     analysis: dict[str, Any],
     audit: PostprocessAudit | None = None,
     activation_evidence: TrustedS4ActivationEvidence | None = None,
+    mutate_s1_facts: bool = True,
 ) -> None:
-    """所有 severity 重算入口都先完成 S1 repair，再调用唯一 resolver。"""
+    """Check S1 hard facts, then call the sole severity resolver.
+
+    ``mutate_s1_facts`` is retained only for the explicit legacy whole-object
+    path. The segmented production path passes ``False`` so postprocessing
+    cannot change Stage1 semantics before resolution.
+    """
+    s1_function = repair_s1_hook_boundaries if mutate_s1_facts else validate_s1_hook_boundaries
+    s1_rule = (
+        "postprocess.repair_s1_hook_boundaries"
+        if mutate_s1_facts
+        else "postprocess.validate_s1_hook_boundaries"
+    )
     steps = (
-        ("postprocess.repair_s1_hook_boundaries", repair_s1_hook_boundaries, (normalized, analysis)),
+        (s1_rule, s1_function, (normalized, analysis) if mutate_s1_facts else (normalized,)),
         ("postprocess.validate_s2_hard_fact_consistency", validate_s2_hard_fact_consistency, (normalized,)),
         ("postprocess.validate_s3_s4_hard_fact_consistency", validate_s3_s4_hard_fact_consistency, (normalized,)),
         (
@@ -168,6 +181,7 @@ def apply_segmented_postprocess_chain(
         analysis,
         audit=audit,
         activation_evidence=activation_evidence,
+        mutate_s1_facts=False,
     )
     step("postprocess.segmented.apply_comparison_eligibility", apply_comparison_eligibility, normalized)
     step("postprocess.segmented.materialize_quality_audits", materialize_quality_audits, normalized, analysis)

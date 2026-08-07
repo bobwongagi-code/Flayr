@@ -44,7 +44,7 @@ SEVERITY_RANK = {value: index for index, value in enumerate(SEVERITIES)}
 EVIDENCE_STRENGTHS = EVIDENCE_STATE_STRENGTHS
 _EXPLICIT_STRENGTHS = {"direct", "explicit"}
 _S1_REPAIR_STATE_KEY = "s1_hook_boundaries"
-_S1_REPAIR_STATE_VALUE = "repaired"
+_S1_REPAIR_STATE_VALUES = {"repaired", "validated"}
 
 
 class _Endorsement(NamedTuple):
@@ -766,7 +766,9 @@ def _hard_fact_gate_failure(
 def _s1_repair_ready(stage: dict[str, Any]) -> bool:
     postprocess_state = stage.get("_postprocess_state")
     marker = postprocess_state.get(_S1_REPAIR_STATE_KEY) if isinstance(postprocess_state, dict) else None
-    if not isinstance(marker, dict) or marker.get("status") != _S1_REPAIR_STATE_VALUE:
+    if not isinstance(marker, dict) or marker.get("status") not in _S1_REPAIR_STATE_VALUES:
+        return False
+    if marker.get("status") == "validated" and marker.get("valid") is not True:
         return False
     if tuple(marker.get("checked_fields") or ()) != S1_HOOK_FLOOR_FIELDS:
         return False

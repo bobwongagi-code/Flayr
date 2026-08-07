@@ -52,7 +52,7 @@ Stage1 还必须带一份代码生成的 `stage1_acquisition`。它只记录本�
 
 Stage1 不能输出或推导 `severity`、双方比较、差距、商业优先级、建议、报告结论或 `stage_evidence_links`。这些字段即使嵌套在别的对象中，也必须在 active contract 下拒绝，而不是静默丢弃。
 
-当前生产实现把 Stage1-A 和 Stage1-B 作为两个独立请求执行：Stage1-A 使用媒体输入，只产生原子观察；Stage1-B 是无媒体的只读资格投影，只读取已归一化的 `evidence_units` 和代码拥有的采集状态。Stage1-A 响应中的阶段资格字段不再作为权威输入；Stage1-B 失败时保留原子账本，并将阶段资格置为 `unknown`，再由一次有边界的 Stage1-C 决定是否需要补观察。
+当前生产实现把 Stage1-A 和 Stage1-B 作为两个独立请求执行：Stage1-A 使用媒体输入，只产生原子观察；Stage1-B 是无媒体的只读资格投影，只读取已归一化的 `evidence_units` 和代码拥有的采集状态。Stage1-B 进一步按 `S1+S2 / S3+S4 / S5 / S6` 四个独立阶段组请求，避免一个阶段组的跨阶段引用、超时或 JSON 失败清空其他组；代码只合并成功组，失败组单独置为 `unknown`。Stage1-A 响应中的阶段资格字段不再作为权威输入；Stage1-B 失败时保留原子账本，并将失败阶段交给一次有边界的 Stage1-C 决定是否需要补观察。
 
 ### C. 定向缺口补观察
 
@@ -80,14 +80,15 @@ Stage1 不能输出或推导 `severity`、双方比较、差距、商业优先�
 
 `stage_evidence_checks[]` 不是第二份事实库，而是把原子观察投影到功能阶段的资格结果。每个阶段必须有一条记录：
 
-- `status`：`present / absent / unknown / conflict`；
+- `status`：`present / absent / unknown / conflict / not_applicable`；
 - `coverage`：`complete / partial / unknown`；
 - `evidence_ids`：只能引用本侧真实原子事实；
 - `observed_signals`、`missing_signals`、`observed_disqualifiers`；
+- `unqualified_observed_signals`：模型声称但没有有效 `signal_binding` 的信号。它们保留在审计轨，不能参与阶段资格；未绑定的 required signal 仍会使 `present` 失败，未绑定的 optional signal 不得污染 required signal 已闭合的阶段；
 - `signal_bindings`：每个已观察信号分别绑定到本阶段的原子 `evidence_ids`；阶段总证据列表不能替代逐信号绑定；
 - `reason` 和必要的 `evidence_strength` 自检摘要。
 
-`present` 必须有完整覆盖、全部 required signals、每个 required signal 的有效 `signal_bindings`、真实证据 ID、`direct/explicit` 原子强度和所需渠道。`absent` 必须有完整覆盖，并明确缺少 required signals，且不能存在支持性 signal binding。`partial`、`unknown`、冲突、预算超限或渠道缺失只能进入 `unknown/conflict`，不能降格成 `absent`。
+`present` 必须有完整覆盖、全部 required signals、每个 required signal 的有效 `signal_bindings`、真实证据 ID、`direct/explicit` 原子强度和所需渠道。`absent` 必须有完整覆盖，并明确缺少 required signals，且不能存在支持性 signal binding。`not_applicable` 必须有完整覆盖和明确的适用性依据，并且不能携带证据或支持性绑定。`partial`、`unknown`、冲突、预算超限或渠道缺失只能进入 `unknown/conflict`，不能降格成 `absent` 或 `not_applicable`。
 
 `signal_bindings` 是 S1-S6 共用的泛化约束。例如 S4 不能因为一条证据同时出现在阶段列表中，就默认它同时证明“结果可见”和“结果由本品操作造成”；这两个信号必须分别绑定。一个原子事实可以支持多个信号，但每次绑定都必须留下可追溯关系。
 
@@ -101,7 +102,7 @@ Stage1 完成后由代码对全部规范化观察字段、`stage1_acquisition`�
 |---|---|---|
 | `grounded` | 两侧均为 `present` 或完整 `absent` | 可以形成有证据支撑的阶段比较 |
 | `blocked` | 任一侧 `unknown`、`conflict`、预算未闭合、采集不完整、采集通道不可用或冻结摘要无效 | 阶段标记 `evidence_blocked`；模型 severity 只保留在审计字段，不作为有证据结论展示 |
-| `not_applicable` | 比较合同确认双方均未涉及该功能 | 不生成阶段差距 |
+| `not_applicable` | 比较合同确认双方均未涉及该功能；单侧 `not_applicable` 与另一侧有证据时仍为 `blocked` | 双方均不适用时不生成阶段差距 |
 | `not_comparable` | 商品关系或共同任务不允许比较 | 不生成阶段差距 |
 | `legacy` | 至少一侧没有 active Stage1 合同 | 仅保留历史审计读取；报告不显示为当前阶段结论，不能与新合同的 grounded 结果混为同一统计口径 |
 
@@ -139,7 +140,7 @@ stage_id + role + evidence_id + relation + linking_reason + confidence
 | S4 有动作但没有可验证效果，或把结果与过程混淆 | S3/S4 独立 required signals、阶段链接和 `unknown` 闸门；不能用邻段证据补齐 |
 | S1 窗口泄漏、ASR 粗段跨越多个阶段 | windowed transcript 与 raw transcript 分离；阶段时间仅消费窗口安全转写；越界和跨阶段链接硬失败 |
 | S5 将产品主张、软背书、硬来源混为一谈 | Stage1 只记录 source facts；S5 资格要求来源主体、依据、关联性，未知不等于 absence |
-| S6 口播/字幕缺失或结尾证据漏采 | `evidence_budget_exceeded` 和缺阶段检查统一触发一次有预算的补观察；失败保留 unknown |
+| S6 口播/字幕缺失或结尾证据漏采 | 代码根据响应 `finish_reason=length` 记录 `evidence_budget_exceeded`，和缺阶段检查统一触发一次有预算的补观察；失败保留 unknown |
 | VL/模型输出两侧内容混合、证据引用错角色 | 每侧独立 evidence ID 空间、链接角色校验、跨视频/跨阶段引用拒绝 |
 | OCR、ASR、镜头或原生视频能力失败 | 采集能力状态写入运行产物；缺失能力只产生降级/unknown，不产生占位事实或确定性严重度 |
 | 详细模型撞隐藏证据数量上限 | 上限必须是公开合同；超限显式标记并触发全阶段补观察，代码不得静默截断 |

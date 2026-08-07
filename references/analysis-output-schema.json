@@ -119,10 +119,12 @@
       },
       "stage1_qualification": {
         "source": "pipeline",
-        "status": "completed | failed | deferred_dry_run。Stage1-B 对锁定原子事实的独立资格投影状态。",
-        "contract_version": 4,
+        "status": "completed | failed | deferred_dry_run。Stage1-B 按 S1+S2、S3+S4、S5、S6 四个独立阶段组执行；completed 表示请求已收口，不表示每个阶段都有资格证据。",
+        "contract_version": 5,
         "stage_codes": ["S1", "S2", "S3", "S4", "S5", "S6"],
         "evidence_id_count": "Stage1-B 读取的锁定原子事实数量。",
+        "group_records": "每个阶段组的 completed/failed 状态、请求产物和失败原因；组失败只阻断该组。",
+        "failed_stage_codes": "Stage1-B 失败且尚未由 Stage1-C 恢复的阶段；不等于 Stage1-A 没有采集事实。",
         "failure_reason": "资格投影失败时的机器可读原因；不得替代 unknown。"
       },
       "selling_point_observations": [
@@ -148,7 +150,7 @@
         "variant_focus": "complete | unknown",
         "attention_scan": "complete | unknown"
       },
-      "stage_evidence_contract_version": 4,
+      "stage_evidence_contract_version": 5,
       "stage1_coverage_audit": {
         "version": 2,
         "source": "pipeline",
@@ -165,11 +167,12 @@
       "stage_evidence_checks": [
         {
           "stage": "S1 | S2 | S3 | S4 | S5 | S6",
-          "status": "present | absent | unknown | conflict。unknown/absence 不能互换。",
+          "status": "present | absent | unknown | conflict | not_applicable。unknown/absence/not_applicable 不能互换。",
           "coverage": "complete | partial | unknown。只有 complete 才允许 absent。",
           "evidence_ids": ["只能引用本侧 evidence_units 的真实 ID"],
           "invalid_evidence_ids": ["代码保留的非法/未知引用，仅用于审计；不能参与分析"],
           "observed_signals": ["来自该阶段统一合同的信号名"],
+          "unqualified_observed_signals": ["模型声称但没有有效 signal_binding 的信号；仅用于审计，不参与资格"],
           "missing_signals": ["来自该阶段统一合同的缺失信号名"],
           "signal_bindings": {
             "signal_id": {
@@ -188,7 +191,7 @@
           "reason": "只解释阶段证据资格，不写双方比较或 severity。"
         }
       ],
-      "evidence_budget_exceeded": "true | false。若模型无法在预算内保留全部决策关键事件，必须显式为 true，代码不得静默截断。",
+      "evidence_budget_exceeded": "true | false。代码根据实际响应 finish_reason=length 生成；模型不得填写或覆盖。",
       "stage1_recovery": "Stage1 预锁定一次定向补观察的状态、目标阶段和候选事实数量；失败不得伪装成完成。",
       "attention_scan_audit": {
         "recording_equipment_visible": "true | false | null",
@@ -259,10 +262,12 @@
       },
       "stage1_qualification": {
         "source": "pipeline",
-        "status": "completed | failed | deferred_dry_run。Stage1-B 对锁定原子事实的独立资格投影状态。",
-        "contract_version": 4,
+        "status": "completed | failed | deferred_dry_run。Stage1-B 按 S1+S2、S3+S4、S5、S6 四个独立阶段组执行；completed 表示请求已收口，不表示每个阶段都有资格证据。",
+        "contract_version": 5,
         "stage_codes": ["S1", "S2", "S3", "S4", "S5", "S6"],
         "evidence_id_count": "Stage1-B 读取的锁定原子事实数量。",
+        "group_records": "每个阶段组的 completed/failed 状态、请求产物和失败原因；组失败只阻断该组。",
+        "failed_stage_codes": "Stage1-B 失败且尚未由 Stage1-C 恢复的阶段；不等于 Stage1-A 没有采集事实。",
         "failure_reason": "资格投影失败时的机器可读原因；不得替代 unknown。"
       },
       "selling_point_observations": [],
@@ -277,7 +282,7 @@
         "variant_focus": "complete | unknown",
         "attention_scan": "complete | unknown"
       },
-      "stage_evidence_contract_version": 4,
+      "stage_evidence_contract_version": 5,
       "stage1_coverage_audit": {
         "version": 2,
         "source": "pipeline",
@@ -294,11 +299,12 @@
       "stage_evidence_checks": [
         {
           "stage": "S1 | S2 | S3 | S4 | S5 | S6",
-          "status": "present | absent | unknown | conflict。unknown/absence 不能互换。",
+          "status": "present | absent | unknown | conflict | not_applicable。unknown/absence/not_applicable 不能互换。",
           "coverage": "complete | partial | unknown。只有 complete 才允许 absent。",
           "evidence_ids": ["只能引用本侧 evidence_units 的真实 ID"],
           "invalid_evidence_ids": ["代码保留的非法/未知引用，仅用于审计；不能参与分析"],
           "observed_signals": ["来自该阶段统一合同的信号名"],
+          "unqualified_observed_signals": ["模型声称但没有有效 signal_binding 的信号；仅用于审计，不参与资格"],
           "missing_signals": ["来自该阶段统一合同的缺失信号名"],
           "signal_bindings": {
             "signal_id": {
@@ -317,7 +323,7 @@
           "reason": "只解释阶段证据资格，不写双方比较或 severity。"
         }
       ],
-      "evidence_budget_exceeded": "true | false。若模型无法在预算内保留全部决策关键事件，必须显式为 true，代码不得静默截断。",
+      "evidence_budget_exceeded": "true | false。代码根据实际响应 finish_reason=length 生成；模型不得填写或覆盖。",
       "stage1_recovery": "Stage1 预锁定一次定向补观察的状态、目标阶段和候选事实数量；失败不得伪装成完成。",
       "attention_scan_audit": {
         "recording_equipment_visible": "true | false | null",
@@ -419,12 +425,12 @@
         "reason": "代码生成的证据交接原因。",
         "comparison_status": "direct | structural_comparison | not_applicable | not_directly_comparable",
         "creator": {
-          "status": "present | absent | unknown | conflict | legacy",
+          "status": "present | absent | unknown | conflict | not_applicable | legacy",
           "evidence_ids": [],
           "evidence_set_sha256": "",
           "diagnostics": {
-            "status": "present | absent | unknown | conflict | legacy",
-            "primary_status": "present | absent | unknown | conflict | missing | legacy",
+            "status": "present | absent | unknown | conflict | not_applicable | legacy",
+            "primary_status": "present | absent | unknown | conflict | not_applicable | missing | legacy",
             "acquisition_status": "complete | partial | failed | unknown | legacy",
             "coverage_audit_status": "completed | partial | failed | unknown | legacy",
             "reason_codes": ["ready | primary_unknown | primary_conflict | primary_qualification_gate | acquisition_gate | coverage_audit_gate | snapshot_invalid | legacy_contract | side_missing"],
@@ -432,12 +438,12 @@
           }
         },
         "benchmark": {
-          "status": "present | absent | unknown | conflict | legacy",
+          "status": "present | absent | unknown | conflict | not_applicable | legacy",
           "evidence_ids": [],
           "evidence_set_sha256": "",
           "diagnostics": {
-            "status": "present | absent | unknown | conflict | legacy",
-            "primary_status": "present | absent | unknown | conflict | missing | legacy",
+            "status": "present | absent | unknown | conflict | not_applicable | legacy",
+            "primary_status": "present | absent | unknown | conflict | not_applicable | missing | legacy",
             "acquisition_status": "complete | partial | failed | unknown | legacy",
             "coverage_audit_status": "completed | partial | failed | unknown | legacy",
             "reason_codes": ["ready | primary_unknown | primary_conflict | primary_qualification_gate | acquisition_gate | coverage_audit_gate | snapshot_invalid | legacy_contract | side_missing"],

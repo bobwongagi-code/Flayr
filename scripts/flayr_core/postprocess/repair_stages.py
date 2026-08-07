@@ -29,6 +29,7 @@ STAGES = stage_tuples()
 S1_POSTPROCESS_STATE_KEY = "_postprocess_state"
 S1_HOOK_BOUNDARIES_STATE_KEY = "s1_hook_boundaries"
 S1_HOOK_BOUNDARIES_REPAIRED = "repaired"
+S1_HOOK_BOUNDARIES_VALIDATED = "validated"
 from .utils import (
     adjacent_review_range,
     assign_benchmark_unit,
@@ -185,6 +186,43 @@ def repair_s1_hook_boundaries(result: dict[str, Any], analysis: dict[str, Any]) 
         postprocess_state[S1_HOOK_BOUNDARIES_STATE_KEY] = {
             "status": S1_HOOK_BOUNDARIES_REPAIRED,
             "checked_fields": list(S1_HOOK_FLOOR_FIELDS),
+            "facts_sha256": hard_fact_fingerprint(hooks, S1_HOOK_FLOOR_FIELDS),
+        }
+
+
+def validate_s1_hook_boundaries(result: dict[str, Any]) -> None:
+    """Record a read-only S1 hard-fact check for the segmented pipeline.
+
+    The legacy repair path may still normalize historical whole-object results.
+    ADR-007's segmented path cannot use that mutator: a resolver precondition
+    must prove that the current hook facts were checked, not silently replace
+    them with a second interpretation.
+    """
+    s1 = next(
+        (stage for stage in result.get("stage_analysis", []) if str(stage.get("stage", "")).startswith("S1")),
+        None,
+    )
+    if not isinstance(s1, dict):
+        return
+    hooks = {
+        role: s1.get(f"{role}_hook") if isinstance(s1.get(f"{role}_hook"), dict) else {}
+        for role in ("creator", "benchmark")
+    }
+    issues: list[str] = []
+    for role, hook in hooks.items():
+        missing = [field for field in S1_HOOK_FLOOR_FIELDS if field not in hook]
+        non_boolean = [field for field in S1_HOOK_FLOOR_FIELDS if field in hook and not isinstance(hook[field], bool)]
+        if missing:
+            issues.append(f"{role}:missing:{','.join(missing)}")
+        if non_boolean:
+            issues.append(f"{role}:non_boolean:{','.join(non_boolean)}")
+    postprocess_state = s1.setdefault(S1_POSTPROCESS_STATE_KEY, {})
+    if isinstance(postprocess_state, dict):
+        postprocess_state[S1_HOOK_BOUNDARIES_STATE_KEY] = {
+            "status": S1_HOOK_BOUNDARIES_VALIDATED if not issues else "invalid",
+            "valid": not issues,
+            "checked_fields": list(S1_HOOK_FLOOR_FIELDS),
+            "issues": issues,
             "facts_sha256": hard_fact_fingerprint(hooks, S1_HOOK_FLOOR_FIELDS),
         }
 

@@ -22,12 +22,13 @@ from .artifacts import (
 from .transcript import current_transcript_segments_path, current_transcript_words_path
 
 
-STAGE_EVIDENCE_CONTRACT_VERSION = 4
+STAGE_EVIDENCE_CONTRACT_VERSION = 5
 STAGE_EVIDENCE_SNAPSHOT_VERSION = 1
 STAGE_EVIDENCE_GATE_VERSION = 1
 STAGE1_ACQUISITION_VERSION = 4
 STAGE1_COVERAGE_AUDIT_VERSION = 2
-STAGE_EVIDENCE_STATES = ("present", "absent", "unknown", "conflict")
+STAGE1_PROJECTION_VERSION = "stage1_qualification_projection_v1"
+STAGE_EVIDENCE_STATES = ("present", "absent", "unknown", "conflict", "not_applicable")
 STAGE_EVIDENCE_COVERAGE_STATES = ("complete", "partial", "unknown")
 STAGE_EVIDENCE_STRENGTHS = ("direct", "explicit", "inferred", "absent")
 STAGE1_ACQUISITION_STATUSES = ("complete", "partial", "failed", "unknown")
@@ -54,6 +55,15 @@ STAGE_EVIDENCE_GATE_STATUSES = (
     "not_applicable",
     "not_comparable",
     "legacy",
+)
+# Qualification uses the same bounded semantic groups as Stage2.  Keeping the
+# grouping in the canonical contract prevents a single Stage1-B response from
+# coupling unrelated stages or allowing one group's failure to erase another.
+STAGE1_QUALIFICATION_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("S1", "S2"),
+    ("S3", "S4"),
+    ("S5",),
+    ("S6",),
 )
 _FUNCTION_TO_STAGE = {
     "S1_hook": "S1",
@@ -130,6 +140,7 @@ STAGE1_PIPELINE_OWNED_FIELDS = frozenset(
         "evidence_set_sha256",
         "evidence_set_status",
         "evidence_set_source",
+        "evidence_budget_exceeded",
     }
 )
 
@@ -348,12 +359,20 @@ def stage_evidence_contract(stage: Any) -> StageEvidenceContract | None:
     return _CONTRACT_BY_STAGE.get(code)
 
 
-def stage_evidence_contract_prompt() -> str:
-    """Return the only prompt-facing copy of the six stage contracts."""
+def stage_evidence_contract_prompt(stages: list[Any] | tuple[Any, ...] | set[Any] | None = None) -> str:
+    """Return the prompt-facing contract for all or only selected stages."""
     import json
 
+    selected = {
+        code
+        for code in (
+            normalize_stage_code(value)
+            for value in (stages if stages is not None else stage_codes())
+        )
+        if code is not None
+    }
     return json.dumps(
-        [item.as_prompt_dict() for item in STAGE_EVIDENCE_CONTRACTS],
+        [item.as_prompt_dict() for item in STAGE_EVIDENCE_CONTRACTS if item.code in selected],
         ensure_ascii=False,
         indent=2,
     )
@@ -902,6 +921,35 @@ def freeze_stage_evidence(side: Any) -> dict[str, Any]:
     return side
 
 
+def stage1_ledger_manifest(side: Any) -> dict[str, Any]:
+    """Expose every locked evidence ID and its immutable unit digest.
+
+    The Stage2 handoff stores the whole-ledger digest as well as this manifest.
+    Keeping the individual entries makes preservation auditable even for an
+    observation that was not qualified for any stage.
+    """
+    units = side.get("evidence_units") if isinstance(side, dict) else []
+    entries: list[dict[str, str]] = []
+    for unit in units or []:
+        if not isinstance(unit, dict):
+            continue
+        evidence_id = str(unit.get("id") or "").strip()
+        if not evidence_id:
+            continue
+        entries.append(
+            {
+                "id": evidence_id,
+                "sha256": hashlib.sha256(_canonical_json(unit).encode("utf-8")).hexdigest(),
+            }
+        )
+    return {
+        "version": STAGE_EVIDENCE_SNAPSHOT_VERSION,
+        "unit_count": len(entries),
+        "units": entries,
+        "ledger_sha256": str(side.get("evidence_set_sha256") or "").strip() if isinstance(side, dict) else "",
+    }
+
+
 def stage_evidence_snapshot_issues(
     side: Any,
     *,
@@ -1286,6 +1334,15 @@ def stage_evidence_gate(
         gate_status = "legacy"
         reason_code = "legacy_stage1_contract"
         reason = "至少一侧使用旧版 Stage1 事实合同，保留历史结果但不把它计入新合同的 grounded 结论。"
+    elif "not_applicable" in statuses:
+        if statuses == {"not_applicable"}:
+            gate_status = "not_applicable"
+            reason_code = "comparison_scope_closed"
+            reason = "双方 Stage1 资格均明确该阶段不适用，不生成阶段差距。"
+        else:
+            gate_status = "blocked"
+            reason_code = "comparison_scope_closed"
+            reason = "双方对该阶段的适用范围不一致，不能把单侧不适用当成完整比较依据。"
     elif normalized_comparison in {"not_applicable", "not_directly_comparable", "not_comparable"}:
         gate_status = "not_applicable" if normalized_comparison == "not_applicable" else "not_comparable"
         reason_code = "comparison_scope_closed"
@@ -1400,6 +1457,24 @@ def normalize_stage_evidence_checks(value: Any, valid_ids: set[str]) -> list[dic
             contract,
             valid_ids,
         )
+        # A signal that the model names without a binding is an audit-only
+        # claim. Keep it visible, but do not let an unbound optional signal
+        # invalidate a stage whose required signals are independently
+        # grounded. An unbound required signal is also removed from the
+        # actionable list and therefore fails the required-signal checks.
+        unqualified_observed_signals = [
+            token
+            for token in observed
+            if not (
+                isinstance(signal_bindings.get(token), dict)
+                and signal_bindings[token].get("status") == "supported"
+            )
+        ]
+        observed = [
+            token
+            for token in observed
+            if token not in unqualified_observed_signals
+        ]
         observed_disqualifiers = [
             token
             for token in _clean_tokens(raw.get("observed_disqualifiers") or raw.get("disqualifiers"))
@@ -1423,6 +1498,7 @@ def normalize_stage_evidence_checks(value: Any, valid_ids: set[str]) -> list[dic
             "evidence_ids": evidence_ids,
             "invalid_evidence_ids": invalid_evidence_ids,
             "observed_signals": observed,
+            "unqualified_observed_signals": unqualified_observed_signals,
             "missing_signals": missing,
             "invalid_observed_signals": invalid_observed_signals,
             "invalid_missing_signals": invalid_missing_signals,
@@ -1445,6 +1521,7 @@ def normalize_stage_evidence_checks(value: Any, valid_ids: set[str]) -> list[dic
                 "evidence_ids": [],
                 "invalid_evidence_ids": [],
                 "observed_signals": [],
+                "unqualified_observed_signals": [],
                 "missing_signals": [],
                 "invalid_observed_signals": [],
                 "invalid_missing_signals": [],
@@ -1794,6 +1871,9 @@ def _stage_check_issues(
         )
         if coverage != "complete" or evidence_ids or supported_bindings or not required.issubset(missing):
             issues.append(f"{contract.code}:absence_without_complete_coverage")
+    elif status == "not_applicable":
+        if coverage != "complete" or evidence_ids or signal_bindings or not str(check.get("reason") or "").strip():
+            issues.append(f"{contract.code}:not_applicable_without_explicit_basis")
     elif status in {"unknown", "conflict"}:
         bound_ids = [
             value
@@ -2146,9 +2226,184 @@ def stage_evidence_readiness(side: Any, stage: Any) -> str:
         return "present" if not issues and qualified_stage_evidence_ids(side, stage_code) else "unknown"
     if status == "absent":
         return "absent" if not issues else "unknown"
+    if status == "not_applicable":
+        return "not_applicable" if not issues else "unknown"
     if status in {"unknown", "conflict"}:
         return status
     return "unknown"
+
+
+def _projection_evidence_strength(
+    side: dict[str, Any],
+    evidence_ids: list[str],
+    readiness: str,
+) -> str:
+    """Derive stage strength from locked units, never from the model summary."""
+    if readiness == "absent":
+        return "absent"
+    if readiness != "present":
+        return "unknown"
+    units = _evidence_units_by_id(side)
+    strengths = [
+        str(units[evidence_id].get("evidence_strength") or "").strip().lower()
+        for evidence_id in evidence_ids
+        if evidence_id in units
+    ]
+    if not strengths or any(value not in STAGE_EVIDENCE_STRENGTHS for value in strengths):
+        return "unknown"
+    if all(value == "direct" for value in strengths):
+        return "direct"
+    if all(value in {"direct", "explicit"} for value in strengths):
+        return "explicit"
+    if any(value == "inferred" for value in strengths):
+        return "inferred"
+    return "unknown"
+
+
+def _projection_coverage_state(side: dict[str, Any], stage: str, readiness: str) -> str:
+    """Map runtime/qualification state to the frozen five-state coverage vocabulary."""
+    if not _budget_recovery_allows_qualification(side, stage):
+        return "budget_exhausted"
+    if readiness == "present":
+        return "captured"
+    if readiness == "absent":
+        return "explicit_absence"
+    if readiness == "not_applicable":
+        return "uncertain"
+    if readiness == "conflict":
+        return "uncertain"
+    acquisition_issues = stage1_acquisition_issues(side, stage)
+    if any(
+        token in issue
+        for issue in acquisition_issues
+        for token in (
+            "channel_unavailable",
+            "spine_unknown",
+            "visual_input_unobserved",
+            "boundary_imprecise",
+        )
+    ):
+        return "not_observable"
+    return "uncertain"
+
+
+def stage1_qualification_projection(
+    side: Any,
+    target_stages: list[Any] | set[Any] | None = None,
+) -> dict[str, Any]:
+    """Build the code-owned Stage1-B projection consumed by handoff and Stage2.
+
+    ``stage_evidence_checks`` is the normalized model projection. This separate
+    object is the authoritative view for downstream consumers: IDs, strength,
+    readiness, coverage state, missing requirements, and reason codes are all
+    derived from the locked ledger and runtime gates.
+    """
+    selected = {
+        normalize_stage_code(stage)
+        for stage in (target_stages or stage_codes())
+        if normalize_stage_code(stage) in stage_codes()
+    }
+    selected = selected or set(stage_codes())
+    base = {
+        "version": STAGE1_PROJECTION_VERSION,
+        "contract_version": side.get("stage_evidence_contract_version") if isinstance(side, dict) else None,
+        "ledger_version": side.get("evidence_set_version") if isinstance(side, dict) else None,
+        "ledger_hash": str(side.get("evidence_set_sha256") or "").strip() if isinstance(side, dict) else "",
+        "stages": {},
+    }
+    if not isinstance(side, dict):
+        for stage in sorted(selected):
+            base["stages"][stage] = {
+                "stage": stage,
+                "candidate_evidence_ids": [],
+                "qualified_evidence_ids": [],
+                "stage_readiness": "unknown",
+                "coverage_state": "not_observable",
+                "required_signal_bindings": {},
+                "missing_requirements": ["gate:side_missing"],
+                "evidence_strength": "unknown",
+                "projection_reason_code": "side_missing",
+                "ledger_version": None,
+                "ledger_hash": "",
+            }
+        return base
+
+    view = stage_analysis_evidence_view(side, selected)
+    checks = stage_evidence_check_map(side)
+    diagnostics_by_stage = {
+        stage: stage_evidence_diagnostics(side, stage)
+        for stage in selected
+    }
+    for stage in sorted(selected):
+        check = checks.get(stage) if isinstance(checks.get(stage), dict) else {}
+        readiness = str((view.get("stage_evidence_readiness") or {}).get(stage, "unknown"))
+        candidate_ids = list((view.get("candidate_evidence_ids_by_stage") or {}).get(stage) or [])
+        qualified_ids = list((view.get("qualified_stage_evidence_ids") or {}).get(stage) or [])
+        contract = stage_evidence_contract(stage)
+        raw_bindings = check.get("signal_bindings") if isinstance(check.get("signal_bindings"), dict) else {}
+        required_bindings = {
+            signal: copy.deepcopy(raw_bindings.get(signal) or {
+                "status": "unknown",
+                "evidence_ids": [],
+                "invalid_evidence_ids": [],
+                "reason": "缺少 required signal binding",
+            })
+            for signal in (contract.required_signals if contract else ())
+        }
+        missing_requirements = [
+            f"required_signal:{signal}"
+            for signal in check.get("missing_signals") or []
+            if str(signal).strip()
+        ]
+        missing_requirements.extend(
+            f"required_signal_binding:{signal}"
+            for signal, binding in required_bindings.items()
+            if not isinstance(binding, dict) or binding.get("status") != "supported"
+        )
+        diagnostics = diagnostics_by_stage[stage]
+        missing_requirements.extend(
+            f"gate:{reason}"
+            for reason in diagnostics.get("reason_codes") or []
+            if str(reason).strip() != "ready"
+        )
+        missing_requirements = list(dict.fromkeys(str(item) for item in missing_requirements if str(item).strip()))
+        coverage_state = _projection_coverage_state(side, stage, readiness)
+        if coverage_state == "budget_exhausted":
+            reason_code = "budget_exhausted"
+            if "budget_exhausted" not in missing_requirements:
+                missing_requirements.append("budget_exhausted")
+        elif readiness == "present" and qualified_ids:
+            reason_code = "qualified"
+        elif readiness == "absent":
+            reason_code = "explicit_absence"
+        elif readiness == "not_applicable":
+            reason_code = "not_applicable"
+        elif readiness == "conflict":
+            reason_code = "conflict"
+        elif not isinstance(check, dict) or not check:
+            reason_code = "missing_projection"
+        elif candidate_ids:
+            reason_code = "unqualified_candidates"
+        elif "budget_exhausted" in missing_requirements:
+            reason_code = "budget_exhausted"
+        elif missing_requirements:
+            reason_code = "missing_requirements"
+        else:
+            reason_code = "unknown"
+        base["stages"][stage] = {
+            "stage": stage,
+            "candidate_evidence_ids": sorted(dict.fromkeys(str(item) for item in candidate_ids if str(item).strip())),
+            "qualified_evidence_ids": sorted(dict.fromkeys(str(item) for item in qualified_ids if str(item).strip())),
+            "stage_readiness": readiness,
+            "coverage_state": coverage_state,
+            "required_signal_bindings": required_bindings,
+            "missing_requirements": missing_requirements,
+            "evidence_strength": _projection_evidence_strength(side, qualified_ids, readiness),
+            "projection_reason_code": reason_code,
+            "ledger_version": side.get("evidence_set_version"),
+            "ledger_hash": str(side.get("evidence_set_sha256") or "").strip(),
+        }
+    return base
 
 
 def _filter_evidence_references(value: Any, allowed_ids: set[str]) -> Any:

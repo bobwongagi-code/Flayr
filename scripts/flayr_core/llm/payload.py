@@ -25,9 +25,12 @@ from ..shot_track import render_shot_track_markdown
 from ..speech_mode import speech_mode_prompt
 from ..stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
+    STAGE1_QUALIFICATION_GROUPS,
     qualified_stage_evidence_ids,
     stage_evidence_contract_prompt,
+    stage_evidence_contract,
     stage_analysis_evidence_view,
+    stage1_qualification_projection,
     stage_analysis_stage_context,
     stage_codes,
 )
@@ -724,7 +727,7 @@ def build_video_fact_payload(
         "不得把屏幕字幕、画面文案或你对画面的理解伪装成口播。"
         "按带货短视频的天然结构（钩子→产品引出→使用过程→效果呈现→信任放大→促单）找证据切分 evidence_units，"
         "目标是完整抽出对分析带货视频有价值的原子事实，而非随意找转折点或为凑数量合并事实；"
-        "不设固定条数上限，沿时间线排列，id 必须使用指定前缀；如果受响应预算影响无法覆盖全部关键事实，必须设置 evidence_budget_exceeded=true，不能静默省略，"
+        "不设固定条数上限，沿时间线排列，id 必须使用指定前缀；代码会根据实际响应是否被输出预算截断记录预算状态，不能用模型字段伪造或掩盖采集不完整，"
         "time_range 用真实时间（如 2.5s - 4.0s）。"
         "product_identity 必须只记录当前视频里实际看见、听见或读到的产品身份；声明产品名只作核对线索，"
         "不得因为输入声明是某品就把视频中看不出的品牌、品类或形态填成该品。"
@@ -778,6 +781,7 @@ def build_stage_evidence_qualification_payload(
     role: str,
     analysis: dict[str, Any],
     facts: dict[str, Any],
+    target_stages: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Build the media-free Stage1-B qualification request.
 
@@ -808,49 +812,48 @@ def build_stage_evidence_qualification_payload(
                 "trust_source_reference": unit.get("trust_source_reference"),
             }
         )
+    normalized_targets = [
+        code
+        for code in stage_codes()
+        if code in {
+            str(stage).strip().upper()[:2]
+            for stage in (target_stages or stage_codes())
+            if str(stage).strip()
+        }
+    ]
+    target_text = ", ".join(normalized_targets) or "S1-S6"
     context = {
         "role": role,
         "duration_seconds": info.get("duration_seconds"),
         "stage1_acquisition": facts.get("stage1_acquisition") or {},
         "evidence_units": units,
-        "structure_event_checks": facts.get("structure_event_checks") or [],
-        "evidence_checklist": facts.get("evidence_checklist") or [],
     }
-    output_stage = {
-        "stage": "S1",
-        "status": "present|absent|unknown|conflict",
-        "coverage": "complete|partial|unknown",
-        "evidence_ids": [],
-        "observed_signals": [],
-        "missing_signals": [],
-        "signal_bindings": {},
-        "invalid_signal_bindings": [],
-        "observed_disqualifiers": [],
-        "evidence_strength": "direct|explicit|inferred|absent",
-        "reason": "只说明该阶段资格事实，不写比较或严重度。",
-    }
+    output_stages = _stage_evidence_qualification_examples(normalized_targets)
     text = "\n\n".join(
         [
-            f"# Stage1-B 阶段资格投影：{role}",
-            "你只负责把已锁定的原子观察投影到 S1-S6 阶段合同。不要看视频、不要补写事实、不要比较 benchmark 与 creator。",
+            f"# Stage1-B 阶段资格投影：{role}（{target_text}）",
+            f"你只负责把已锁定的原子观察投影到目标阶段 {target_text}。不要看视频、不要补写事实、不要比较 benchmark 与 creator。",
             "只能引用输入中实际存在的 evidence_units。没有满足 required signal、渠道不可用、时间边界不精确或 coverage 不完整时，必须返回 unknown/conflict；不能把缺失当 absent。",
             "present 只能由 direct 或 explicit 的真实 evidence_ids 支撑；inferred、unknown、冲突或缺字段不得触发正式资格。",
             "absent 只有在相关观察范围已完整覆盖、且合同要求的信号明确未出现时才允许。离散采样、粗粒度口播或未完成覆盖不能证明 absent。",
+            "not_applicable 只有在比较合同明确说明该阶段不适用时才允许，并必须在 reason 中写明依据；不能用它掩盖采集缺失。",
             "每个 signal_binding 必须引用当前输入中真实存在的 evidence_id；不得跨角色、跨视频或跨阶段创造引用。",
             "## 阶段合同",
-            stage_evidence_contract_prompt(),
+            stage_evidence_contract_prompt(normalized_targets),
+            "## 输出时必须遵守的阶段信号白名单",
+            _stage_evidence_signal_codebook(normalized_targets),
             "## 已锁定 Stage1-A 事实（只读）",
             json.dumps(context, ensure_ascii=False, indent=2),
             "## 严格 JSON 输出",
             json.dumps(
                 {
                     "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
-                    "stage_evidence_checks": [output_stage],
+                    "stage_evidence_checks": output_stages,
                 },
                 ensure_ascii=False,
                 indent=2,
             ),
-            "必须恰好输出 S1-S6 六条 stage_evidence_checks，顺序为 S1、S2、S3、S4、S5、S6。",
+            f"必须恰好输出目标阶段 {target_text} 的 stage_evidence_checks，不得输出其他阶段。",
         ]
     )
     payload = {
@@ -893,7 +896,12 @@ def build_video_fact_recovery_payload(
         api_url=api_url,
         budget=budget,
     )
-    target_text = ", ".join(str(stage).upper() for stage in target_stages if str(stage).strip()) or "S1-S6"
+    normalized_targets = [
+        code
+        for code in stage_codes()
+        if code in {str(stage).strip().upper()[:2] for stage in target_stages if str(stage).strip()}
+    ]
+    target_text = ", ".join(normalized_targets) or "S1-S6"
     recovery_system = (
         "你是 Flayr Stage1 的定向证据复核器。只输出严格 JSON。"
         "这是一次且仅一次的事实恢复，不得改写、删除或合并已有 evidence_units，"
@@ -922,6 +930,9 @@ def build_video_fact_recovery_payload(
                 [
                     "# Stage1-C 定向缺口补观察",
                     f"只复核这些阶段：{target_text}。只看目标阶段的 required_signals、非替代渠道和 disqualifiers。",
+                    "目标阶段的 signal 名称只能来自下面的白名单；禁止把其他阶段的 signal 拿来填当前阶段，禁止使用 product_identity、product_features 等未注册名称。",
+                    "## 目标阶段信号白名单",
+                    _stage_evidence_signal_codebook(normalized_targets),
                     "这是一次追加观察，不是重新抽取整条视频；不得改写、删除或合并已有 evidence_units。",
                     "已有事实只用于避免重复，不得把它们当成可修改的模型输出。没有确认事实就返回空 candidate_evidence_units 和 unknown。",
                     "## 已锁定事实摘要（只读）",
@@ -943,25 +954,7 @@ def build_video_fact_recovery_payload(
                             "functions": [],
                         }
                     ],
-                    "stage_evidence_checks": [
-                        {
-                            "stage": "S1",
-                            "status": "present|absent|unknown|conflict",
-                            "coverage": "complete|partial|unknown",
-                            "evidence_ids": ["已有或新增的真实 ID"],
-                            "observed_signals": [],
-                            "missing_signals": [],
-                            "signal_bindings": {},
-                            "invalid_signal_bindings": [],
-                            "observed_disqualifiers": [],
-                            "invalid_evidence_ids": [],
-                            "invalid_observed_signals": [],
-                            "invalid_missing_signals": [],
-                            "invalid_observed_disqualifiers": [],
-                            "evidence_strength": "direct|explicit|inferred|absent",
-                            "reason": "只写资格事实",
-                        }
-                    ],
+                    "stage_evidence_checks": _stage_evidence_qualification_examples(normalized_targets),
                     "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
                         },
                         ensure_ascii=False,
@@ -973,6 +966,77 @@ def build_video_fact_recovery_payload(
         *media,
     ]
     return payload
+
+
+def _stage_evidence_signal_codebook(stages: list[str] | tuple[str, ...] | None = None) -> str:
+    """Render the registered stage signal vocabulary for model-facing prompts.
+
+    The validator has always owned this vocabulary.  Printing the exact
+    per-stage allowlist next to the output shape prevents a text-only
+    qualification or focused recovery response from borrowing a plausible
+    signal name from a neighboring stage.
+    """
+    requested = {str(stage).strip().upper()[:2] for stage in stages or stage_codes()}
+    codebook: list[dict[str, Any]] = []
+    for code in stage_codes():
+        if code not in requested:
+            continue
+        contract = stage_evidence_contract(code)
+        if contract is None:
+            continue
+        codebook.append(
+            {
+                "stage": contract.code,
+                "required_signals": list(contract.required_signals),
+                "optional_signals": list(contract.optional_signals),
+                "allowed_signal_names": list(contract.allowed_signals),
+                "disqualifiers": list(contract.disqualifiers),
+                "channel_policy": contract.channel_policy,
+                "non_substitutable_channels": list(contract.non_substitutable_channels),
+            }
+        )
+    return json.dumps(codebook, ensure_ascii=False, indent=2)
+
+
+def _stage_evidence_qualification_examples(
+    stages: list[str] | tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
+    """Build exact output examples without duplicating the stage registry."""
+    requested = {str(stage).strip().upper()[:2] for stage in stages or stage_codes()}
+    examples: list[dict[str, Any]] = []
+    for code in stage_codes():
+        if code not in requested:
+            continue
+        contract = stage_evidence_contract(code)
+        if contract is None:
+            continue
+        examples.append(
+            {
+                "stage": code,
+                "status": "present|absent|unknown|conflict|not_applicable",
+                "coverage": "complete|partial|unknown",
+                "evidence_ids": [],
+                "observed_signals": [],
+                "missing_signals": [],
+                "signal_bindings": {
+                    signal: {
+                        "status": "supported|missing|unknown",
+                        "evidence_ids": [],
+                        "reason": "只说明该 signal 是否被当前证据支持。",
+                    }
+                    for signal in contract.required_signals
+                },
+                "invalid_signal_bindings": [],
+                "observed_disqualifiers": [],
+                "invalid_evidence_ids": [],
+                "invalid_observed_signals": [],
+                "invalid_missing_signals": [],
+                "invalid_observed_disqualifiers": [],
+                "evidence_strength": "direct|explicit|inferred|absent",
+                "reason": "只说明该阶段资格事实，不写比较或严重度。",
+            }
+        )
+    return examples
 
 
 def _recovery_stage_windows(
@@ -1083,12 +1147,10 @@ def _replace_recovery_full_media(
     return retained
 
 
-STAGE_JUDGMENT_GROUPS: tuple[tuple[str, ...], ...] = (
-    ("S1", "S2"),
-    ("S3", "S4"),
-    ("S5",),
-    ("S6",),
-)
+# Stage1 qualification and Stage2 judgment must share one grouping contract.
+# Keep the historical export name for callers, but do not maintain a second
+# literal that could drift from the canonical Stage1 definition.
+STAGE_JUDGMENT_GROUPS: tuple[tuple[str, ...], ...] = STAGE1_QUALIFICATION_GROUPS
 
 
 def _compact_stage_group_facts(
@@ -1108,13 +1170,7 @@ def _compact_stage_group_facts(
     for role in ("benchmark", "creator"):
         side = view.get(role) if isinstance(view.get(role), dict) else {}
         original = facts.get(role) if isinstance(facts.get(role), dict) else {}
-        checks = {
-            str(item.get("stage") or "").upper(): item
-            for item in original.get("stage_evidence_checks") or []
-            if isinstance(item, dict) and str(item.get("stage") or "").upper() in target
-        }
-        audit = original.get("stage1_coverage_audit") if isinstance(original.get("stage1_coverage_audit"), dict) else {}
-        audit_stages = audit.get("stages") if isinstance(audit.get("stages"), dict) else {}
+        projection = stage1_qualification_projection(original, target)
         stage_payload: dict[str, Any] = {}
         for stage in sorted(target):
             stage_units = (side.get("stage_evidence_units") or {}).get(stage) or []
@@ -1139,11 +1195,12 @@ def _compact_stage_group_facts(
                     for unit in stage_units
                     if isinstance(unit, dict)
                 ],
-                "primary_projection": checks.get(stage) or {},
-                "coverage_audit": audit_stages.get(stage) or {},
+                "projection": (projection.get("stages") or {}).get(stage) or {},
                 "candidate_summary": {
                     "ids": [str(value).strip() for value in candidate_ids if str(value).strip()],
                     "count": len(candidate_ids),
+                    "missing_requirements": ((projection.get("stages") or {}).get(stage) or {}).get("missing_requirements") or [],
+                    "reason_code": ((projection.get("stages") or {}).get(stage) or {}).get("projection_reason_code") or "unknown",
                     "rule": "candidate observations are retained for recovery/audit and cannot support judgment",
                 },
             }
@@ -1229,16 +1286,13 @@ def build_stage_group_judgment_payload(
     scoped_facts = _compact_stage_group_facts(facts, targets)
     eligibility = analysis.get("comparison_contract") or analysis.get("comparison_eligibility") or {}
     foundation = analysis.get("product_foundation") or {}
-    stage_lines = []
-    for stage in targets:
-        stage_lines.append(f"- {stage}：只判断该阶段；readiness 不为 present 时 relation 和 gap_magnitude 必须为 uncertain。")
     flag_contract = "\n".join(f"{stage}: {_stage_group_flag_contract(stage)}" for stage in targets)
     text = "\n\n".join(
         [
             "# Flayr Stage2 小阶段组判断",
             f"目标阶段：{', '.join(targets)}",
             "你只负责目标阶段的语义判断。先读取每侧该阶段的 qualified_evidence，再写阶段事实状态、relation、model_gap_magnitude 和理由。",
-            "candidate observations、coverage audit 和 readiness 只能说明为什么未知，不能被升级为正式证据。不得新增事实、不得跨阶段或跨角色引用。",
+            "candidate summary 和 readiness 只能说明为什么未知，不能被升级为正式证据。不得新增事实、不得跨阶段或跨角色引用。",
             "relation 只能是 creator_better|benchmark_better|equivalent|uncertain；model_gap_magnitude 只能是 none|small|medium|large|uncertain。",
             "model_gap_magnitude 不是最终 severity；最终 severity 由代码 resolver 处理。不得输出 stage_evidence_links、improvements、commercial_priority、完整报告或其他阶段字段。",
             "每个阶段必须先完成 stage_state，再给 relation、model_gap_magnitude 和 judgment_reason；stage_state 只能是 completed|unknown|conflict|blocked；reason 只能引用该阶段实际 qualified evidence IDs。",
@@ -1248,7 +1302,7 @@ def build_stage_group_judgment_payload(
             "## 目标阶段证据交接（只读）",
             json.dumps(scoped_facts, ensure_ascii=False, indent=2),
             "## 阶段字段合同",
-            "每个 stage 对象至少包含：stage, stage_state, benchmark_time_range, creator_time_range, benchmark_summary, creator_summary, benchmark_key_message, creator_key_message, benchmark_evidence_ids, creator_evidence_ids, benchmark_visual_evidence, creator_visual_evidence, benchmark_quote, benchmark_quote_zh, creator_quote, creator_quote_zh, relation, model_gap_magnitude, gap_type, gap_summary, gap, judgment_reason, benchmark_execution, creator_execution, painpoint_relevance, stage_standard_delivery。stage_state 是必填语义字段；无法完成该阶段判断时填 unknown/conflict/blocked，不得省略后让代码猜测。",
+            "每个 stage 对象只负责：stage、stage_state、relation、model_gap_magnitude、benchmark_evidence_ids、creator_evidence_ids、judgment_reason，以及该阶段专属结构化字段。不得输出 benchmark_summary、creator_summary、quote、time_range、gap、improvements、commercial_priority 或其他报告字段；这些字段由代码从锁定证据和阶段结果机械生成。stage_state 是必填语义字段；无法完成该阶段判断时填 unknown/conflict/blocked，不得省略后让代码猜测。",
             "仅在能够完整填写且引用合法证据时输出该阶段专属结构化字段；字段不完整就省略该字段，代码会将其视为 unknown，不会补写语义。",
             flag_contract,
             "## 输出严格 JSON",

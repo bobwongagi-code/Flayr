@@ -253,7 +253,7 @@ def validate_evidence_alignment(result: dict[str, Any]) -> None:
                 handoff_loss = str(stage.get("analysis_status") or "").strip().lower() == "handoff_loss"
                 references_required = readiness == "present" and not handoff_loss
             else:
-                references_required = contract_status not in {"absent", "unknown", "conflict"}
+                references_required = contract_status not in {"absent", "unknown", "conflict", "not_applicable"}
             if not references and references_required:
                 raise SystemExit(f"S{index} 缺少 {role}_evidence_ids，结论无法对应证据。")
             missing = [item for item in references if item not in available[role]]
@@ -1175,6 +1175,14 @@ def validate_stage_time_coherence(result: dict[str, Any]) -> None:
                 # Unknown/conflict has no publishable stage evidence and must
                 # not be forced to invent a non-zero time range. Other
                 # validators already ensure it carries no citations.
+                continue
+            understanding = result.get("video_understanding") if isinstance(result, dict) else None
+            side = understanding.get(role) if isinstance(understanding, dict) else None
+            readiness = stage_evidence_readiness(side, stage_code)
+            if readiness in {"absent", "not_applicable"}:
+                # A closed negative or an explicitly out-of-scope stage has no
+                # evidence interval to publish. Requiring a fabricated range
+                # here turns a valid analysis into a run failure.
                 continue
             time_range = stage.get(f"{role}_time_range")
             parsed = parse_time_range_seconds(time_range, None)

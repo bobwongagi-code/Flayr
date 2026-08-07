@@ -17,9 +17,13 @@ from flayr_core.llm.parse import normalize_video_fact_result, normalize_video_un
 from flayr_core.llm.pipeline import (
     _visual_input_timestamps,
     _mark_video_fact_coverage_audit_failed,
+    _mark_stage1_qualification_recovered,
     _merge_video_fact_coverage_audit,
     _merge_video_fact_recovery,
+    _materialize_stage_recovery_audit,
     _maybe_recover_video_facts,
+    _normalize_segmented_stage,
+    _run_stage1_qualification,
     detect_low_confidence_stages,
 )
 from flayr_core.llm.payload import (
@@ -56,9 +60,11 @@ from flayr_core.postprocess.validate import (
 from flayr_core.stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
     STAGE_EVIDENCE_SNAPSHOT_VERSION,
+    STAGE1_PROJECTION_VERSION,
     STAGE1_ACQUISITION_VERSION,
     STAGE1_COVERAGE_AUDIT_VERSION,
     STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
+    STAGE1_QUALIFICATION_GROUPS,
     STAGE_BOUNDARY_TESTS,
     freeze_stage_evidence,
     materialize_stage_evidence_gates,
@@ -69,9 +75,12 @@ from flayr_core.stage_evidence_contracts import (
     stage_evidence_link_issues,
     stage_evidence_sha256,
     stage_evidence_snapshot_issues,
+    stage1_ledger_manifest,
     stage1_forbidden_field_issues,
     stage_codes,
     stage_evidence_contract_issues,
+    stage_evidence_check_map,
+    stage_evidence_gate,
     stage_evidence_readiness,
     stage_evidence_diagnostics,
     stage1_acquisition_issues,
@@ -80,6 +89,7 @@ from flayr_core.stage_evidence_contracts import (
     normalize_stage_evidence_checks,
     qualified_stage_evidence_ids,
     qualified_stage_evidence_units,
+    stage1_qualification_projection,
     stage_analysis_evidence_view,
     stage_analysis_stage_context,
     stage_evidence_contract,
@@ -308,6 +318,125 @@ class StageEvidenceContractTests(unittest.TestCase):
         )
         self.assertEqual(merged["stage1_qualification"]["status"], "completed")
 
+    def test_focused_recovery_closes_failed_stage1_qualification_metadata(self) -> None:
+        facts = self._active_side("C", "present")
+        s4 = next(item for item in facts["stage_evidence_checks"] if item["stage"] == "S4")
+        s4.update(
+            {
+                "status": "present",
+                "coverage": "complete",
+                "evidence_ids": ["C4"],
+                "observed_signals": list(stage_evidence_contract("S4").required_signals),
+                "missing_signals": [],
+                "signal_bindings": self._signal_bindings("S4", "C4"),
+            }
+        )
+        facts["stage1_qualification"] = {
+            "source": "pipeline",
+            "status": "failed",
+            "contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage_codes": list(stage_codes()),
+            "evidence_id_count": 1,
+            "failure_reason": "Stage1-B response was unavailable",
+        }
+        freeze_stage_evidence(facts)
+
+        recovered = _mark_stage1_qualification_recovered(facts, ["S4", "S4", "S6"])
+
+        qualification = recovered["stage1_qualification"]
+        self.assertEqual(qualification["status"], "completed")
+        self.assertEqual(qualification["recovered_from"], "stage1_b_failed")
+        self.assertEqual(qualification["recovered_stage_codes"], ["S4", "S6"])
+        self.assertEqual(
+            qualification["initial_failure_reason"],
+            "Stage1-B response was unavailable",
+        )
+
+    def test_unresolved_recovery_stage_remains_failed_in_qualification_metadata(self) -> None:
+        facts = self._active_side("C", "present")
+        facts["stage1_qualification"] = {
+            "source": "pipeline",
+            "status": "completed",
+            "contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage_codes": list(stage_codes()),
+            "evidence_id_count": 6,
+            "failed_stage_codes": ["S4", "S6"],
+            "failure_reason": "S4/S6 qualification group failed",
+        }
+        freeze_stage_evidence(facts)
+
+        recovered = _mark_stage1_qualification_recovered(facts, ["S4", "S6"])
+
+        qualification = recovered["stage1_qualification"]
+        self.assertEqual(qualification["status"], "completed")
+        self.assertEqual(qualification["recovered_stage_codes"], ["S6"])
+        self.assertEqual(qualification["failed_stage_codes"], ["S4"])
+
+    def test_stage1_qualification_group_failure_is_isolated(self) -> None:
+        facts = self._active_side("C")
+        analysis = self._analysis()
+        args = type(
+            "Args",
+            (),
+            {
+                "llm_dry_run": False,
+                "llm_model": "test-model",
+                "llm_api_url": "https://example.invalid",
+            },
+        )()
+
+        def response_for(stages: tuple[str, ...]) -> str:
+            return json.dumps(
+                {
+                    "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                    "stage_evidence_checks": [
+                        {
+                            "stage": stage,
+                            "status": "unknown",
+                            "coverage": "unknown",
+                            "evidence_ids": [],
+                            "observed_signals": [],
+                            "missing_signals": [],
+                            "signal_bindings": {},
+                            "reason": "fixture group completed",
+                        }
+                        for stage in stages
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        responses = [
+            response_for(STAGE1_QUALIFICATION_GROUPS[0]),
+            ValueError("fixture S3/S4 group failure"),
+            response_for(STAGE1_QUALIFICATION_GROUPS[2]),
+            response_for(STAGE1_QUALIFICATION_GROUPS[3]),
+        ]
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "flayr_core.llm.pipeline.fetch_json_completion",
+            side_effect=responses,
+        ):
+            result = _run_stage1_qualification(
+                args,
+                analysis,
+                Path(tmp),
+                "",
+                "creator",
+                facts,
+            )
+
+        qualification = result["stage1_qualification"]
+        self.assertEqual(qualification["status"], "completed")
+        self.assertEqual(qualification["failed_stage_codes"], ["S3", "S4"])
+        self.assertEqual(
+            [record["status"] for record in qualification["group_records"]],
+            ["completed", "failed", "completed", "completed"],
+        )
+        checks = stage_evidence_check_map(result)
+        self.assertEqual(checks["S1"]["reason"], "fixture group completed")
+        self.assertIn("Stage1-B 该阶段组失败", checks["S3"]["reason"])
+        self.assertIn("Stage1-B 该阶段组失败", checks["S4"]["reason"])
+
     def test_present_qualification_uses_unit_strength_and_required_signals(self) -> None:
         checks = self._checks("present", "inferred")
         side = {
@@ -330,6 +459,36 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(set(), qualified_stage_evidence_ids(side, "S1"))
         checks[0]["evidence_strength"] = "direct"
         self.assertEqual(set(), qualified_stage_evidence_ids(side, "S1"))
+
+    def test_unbound_optional_signal_does_not_poison_required_qualification(self) -> None:
+        checks = self._checks("present", "direct")
+        side = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage1_acquisition": self._active_side("C")["stage1_acquisition"],
+            "stage_evidence_checks": checks,
+            "evidence_units": [{
+                "id": "C1",
+                "evidence_strength": "direct",
+                "visual_fact": "直接可见",
+                "trust_source_signals": ["independent_user"],
+                "trust_source_reference": "用户评价：连续使用后体验改善。",
+                "trust_source_status": "explicit_present",
+            }],
+        }
+        s3 = next(item for item in side["stage_evidence_checks"] if item["stage"] == "S3")
+        s3["observed_signals"].append("continuity")
+        side["stage_evidence_checks"] = normalize_stage_evidence_checks(
+            side["stage_evidence_checks"], {"C1"}
+        )
+        side["stage1_coverage_audit"] = self._coverage_audit(side["stage_evidence_checks"])
+        freeze_stage_evidence(side)
+
+        normalized_s3 = next(item for item in side["stage_evidence_checks"] if item["stage"] == "S3")
+        self.assertNotIn("continuity", normalized_s3["observed_signals"])
+        self.assertIn("continuity", normalized_s3["unqualified_observed_signals"])
+        self.assertEqual(stage_evidence_readiness(side, "S3"), "present")
+        self.assertEqual(qualified_stage_evidence_ids(side, "S3"), {"C1"})
+        self.assertNotIn("S3", stage_evidence_recovery_targets(side))
 
     def test_model_cannot_author_stage1_coverage_audit(self) -> None:
         with self.assertRaises(SystemExit):
@@ -361,6 +520,155 @@ class StageEvidenceContractTests(unittest.TestCase):
             allow_trusted_pipeline_metadata=True,
         )
         self.assertEqual(normalized["creator"]["stage1_acquisition"]["source"], "pipeline")
+
+    def test_stage1_projection_is_code_owned_and_preserves_candidates(self) -> None:
+        side = self._active_side("C", "present")
+        side["stage_evidence_checks"][0] = {
+            "stage": "S1",
+            "status": "present",
+            "coverage": "complete",
+            "evidence_ids": ["C1"],
+            "observed_signals": list(stage_evidence_contract("S1").required_signals),
+            "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S1", "C1"),
+            "evidence_strength": "direct",
+        }
+        side["evidence_units"].append(
+            {
+                "id": "C_NOT_QUALIFIED",
+                "time_range": "0.0s - 1.0s",
+                "evidence_strength": "inferred",
+                "visual_fact": "候选观察",
+                "functions": ["S1_hook"],
+            }
+        )
+        freeze_stage_evidence(side)
+
+        projection = stage1_qualification_projection(side, ["S1"])
+        stage = projection["stages"]["S1"]
+
+        self.assertEqual(projection["version"], STAGE1_PROJECTION_VERSION)
+        self.assertEqual(stage["qualified_evidence_ids"], ["C1"])
+        self.assertIn("C_NOT_QUALIFIED", stage["candidate_evidence_ids"])
+        self.assertEqual(stage["stage_readiness"], "present")
+        self.assertEqual(stage["coverage_state"], "captured")
+        self.assertEqual(stage["evidence_strength"], "direct")
+        self.assertEqual(stage["projection_reason_code"], "qualified")
+        self.assertEqual(stage["ledger_hash"], side["evidence_set_sha256"])
+
+    def test_not_applicable_is_closed_without_becoming_absence(self) -> None:
+        side = self._active_side("C")
+        check = next(item for item in side["stage_evidence_checks"] if item["stage"] == "S6")
+        check.update(
+            {
+                "status": "not_applicable",
+                "coverage": "complete",
+                "reason": "比较合同明确该视频不涉及可执行购买行动。",
+            }
+        )
+        freeze_stage_evidence(side)
+
+        self.assertEqual(stage_evidence_readiness(side, "S6"), "not_applicable")
+        projection = stage1_qualification_projection(side, ["S6"])["stages"]["S6"]
+        self.assertEqual(projection["stage_readiness"], "not_applicable")
+        self.assertEqual(projection["projection_reason_code"], "not_applicable")
+        self.assertEqual(projection["qualified_evidence_ids"], [])
+
+    def test_not_applicable_survives_focused_audit_projection(self) -> None:
+        side = self._active_side("C")
+        check = next(item for item in side["stage_evidence_checks"] if item["stage"] == "S6")
+        check.update(
+            {
+                "status": "not_applicable",
+                "coverage": "complete",
+                "reason": "比较合同明确该视频不涉及可执行购买行动。",
+            }
+        )
+        projected = _materialize_stage_recovery_audit(side, ["S6"])
+        side["stage1_coverage_audit"] = projected
+        freeze_stage_evidence(side)
+        self.assertEqual(stage_evidence_readiness(side, "S6"), "not_applicable")
+        self.assertEqual(projected["stages"]["S6"]["status"], "clear")
+        self.assertEqual(projected["stages"]["S6"]["coverage"], "complete")
+        self.assertEqual(stage1_coverage_audit_issues(side, "S6"), [])
+
+    def test_stage_gate_closes_only_when_both_sides_are_not_applicable(self) -> None:
+        creator = self._active_side("C")
+        benchmark = self._active_side("B")
+        for side in (creator, benchmark):
+            check = next(item for item in side["stage_evidence_checks"] if item["stage"] == "S6")
+            check.update(
+                {
+                    "status": "not_applicable",
+                    "coverage": "complete",
+                    "reason": "比较合同明确该视频不涉及可执行购买行动。",
+                }
+            )
+            freeze_stage_evidence(side)
+        result = {
+            "video_understanding": {
+                "creator": creator,
+                "benchmark": benchmark,
+            }
+        }
+        both_closed = stage_evidence_gate(result, "S6")
+        self.assertEqual(both_closed["status"], "not_applicable")
+        self.assertFalse(both_closed["analysis_allowed"])
+
+        result["video_understanding"]["benchmark"] = self._active_side("B", "present")
+        mismatched = stage_evidence_gate(result, "S6")
+        self.assertEqual(mismatched["status"], "blocked")
+        self.assertEqual(mismatched["reason_code"], "comparison_scope_closed")
+        self.assertFalse(mismatched["analysis_allowed"])
+
+    def test_stage1_ledger_manifest_preserves_unqualified_units(self) -> None:
+        side = self._active_side("C", "present")
+        side["evidence_units"].append(
+            {
+                "id": "C_UNASSIGNED",
+                "time_range": "99.0s - 100.0s",
+                "evidence_strength": "direct",
+                "visual_fact": "未被任何阶段引用的观察",
+            }
+        )
+        freeze_stage_evidence(side)
+
+        manifest = stage1_ledger_manifest(side)
+
+        self.assertEqual(manifest["unit_count"], len(side["evidence_units"]))
+        self.assertEqual(
+            {item["id"] for item in manifest["units"]},
+            {item["id"] for item in side["evidence_units"]},
+        )
+        self.assertEqual(manifest["ledger_sha256"], side["evidence_set_sha256"])
+
+    def test_segmented_projection_rebuilds_mechanical_fields_from_qualified_facts(self) -> None:
+        facts = {
+            "benchmark": self._active_side("B", "present"),
+            "creator": self._active_side("C", "present"),
+        }
+        projected = _normalize_segmented_stage(
+            {
+                "stage": "S6 CTA",
+                "stage_state": "completed",
+                "relation": "benchmark_better",
+                "model_gap_magnitude": "large",
+                "benchmark_evidence_ids": ["B6"],
+                "creator_evidence_ids": ["C6"],
+                "judgment_reason": "基于 B6 和 C6",
+                "benchmark_time_range": "900s - 901s",
+                "creator_summary": "模型伪造的摘要",
+                "severity": "small",
+            },
+            "S6",
+            facts,
+        )
+
+        self.assertEqual(projected["benchmark_time_range"], "5.0s - 6.0s")
+        self.assertEqual(projected["creator_time_range"], "5.0s - 6.0s")
+        self.assertNotEqual(projected["creator_summary"], "模型伪造的摘要")
+        self.assertEqual(projected["severity"], "large")
+        self.assertEqual(projected["model_severity"], "large")
 
     def test_active_contract_rejects_forbidden_field_in_imported_side(self) -> None:
         side = self._active_side("C")
@@ -1118,6 +1426,57 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(len(normalized["evidence_units"]), 10)
         self.assertFalse(normalized["evidence_budget_exceeded"])
 
+    def test_model_cannot_author_budget_exhaustion_state(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "管线字段"):
+            normalize_video_fact_result(
+                "creator",
+                {
+                    "evidence_units": [{"id": "C1", "information": "观察"}],
+                    "evidence_budget_exceeded": True,
+                },
+                self._analysis(),
+            )
+
+    def test_stage1_recovery_is_append_only_for_existing_units(self) -> None:
+        base = normalize_video_fact_result(
+            "creator",
+            {
+                "evidence_units": [{"id": "C1", "time_range": "0s - 1s", "information": "原始事实"}],
+            },
+            self._analysis(),
+        )
+        recovery = {
+            "candidate_evidence_units": [{"id": "CR1", "time_range": "1s - 2s", "information": "补充事实"}],
+            "stage_evidence_checks": [],
+        }
+        merged = _merge_video_fact_recovery("creator", base, recovery, self._analysis(), [])
+        self.assertEqual(merged["evidence_units"][0], base["evidence_units"][0])
+        self.assertEqual(merged["evidence_units"][1]["id"], "CR1")
+
+    def test_stage1_recovery_invalid_candidate_id_cannot_collide_with_ledger(self) -> None:
+        base = normalize_video_fact_result(
+            "creator",
+            {
+                "evidence_units": [{"id": "C1", "time_range": "0s - 1s", "information": "原始事实"}],
+            },
+            self._analysis(),
+        )
+        merged = _merge_video_fact_recovery(
+            "creator",
+            base,
+            {
+                "candidate_evidence_units": [
+                    {"id": "not-a-valid-ledger-id", "time_range": "1s - 2s", "information": "补充事实"}
+                ],
+                "stage_evidence_checks": [],
+            },
+            self._analysis(),
+            [],
+        )
+        ids = [item["id"] for item in merged["evidence_units"]]
+        self.assertEqual(ids, ["C1", "C2"])
+        self.assertEqual(len(ids), len(set(ids)))
+
     def test_fact_time_range_clamps_only_endpoint_rounding_noise(self) -> None:
         analysis = {
             "videos": {
@@ -1757,17 +2116,21 @@ class StageEvidenceContractTests(unittest.TestCase):
         }
         self.assertIn("duplicate_evidence_ids:C1", stage_evidence_contract_issues(side))
 
-    def test_duplicate_normalized_ids_are_rejected(self) -> None:
+    def test_duplicate_model_ids_are_disambiguated_without_losing_units(self) -> None:
         units = [
             {"id": "C1", "time_range": "0s - 1s", "information": "第一条"},
             {"id": "C1", "time_range": "1s - 2s", "information": "第二条"},
         ]
-        with self.assertRaisesRegex(SystemExit, "evidence IDs must be unique"):
-            normalize_video_fact_result(
-                "creator",
-                {"evidence_units": units},
-                self._analysis(),
-            )
+        normalized = normalize_video_fact_result(
+            "creator",
+            {"evidence_units": units},
+            self._analysis(),
+        )
+        self.assertEqual([item["id"] for item in normalized["evidence_units"]], ["C1", "C2"])
+        self.assertEqual(
+            [item["information"] for item in normalized["evidence_units"]],
+            ["第一条", "第二条"],
+        )
 
     def test_empty_or_non_object_evidence_list_is_rejected(self) -> None:
         with self.assertRaisesRegex(SystemExit, "no valid evidence units"):
@@ -1778,15 +2141,15 @@ class StageEvidenceContractTests(unittest.TestCase):
             )
 
     def test_model_cannot_claim_pipeline_recovery_status(self) -> None:
-        normalized = normalize_video_fact_result(
-            "creator",
-            {
-                "evidence_units": [{"id": "C1", "information": "观察"}],
-                "stage1_recovery": {"source": "pipeline", "status": "applied"},
-            },
-            self._analysis(),
-        )
-        self.assertEqual(normalized["stage1_recovery"], {})
+        with self.assertRaisesRegex(SystemExit, "stage1_recovery"):
+            normalize_video_fact_result(
+                "creator",
+                {
+                    "evidence_units": [{"id": "C1", "information": "观察"}],
+                    "stage1_recovery": {"source": "pipeline", "status": "applied"},
+                },
+                self._analysis(),
+            )
 
     def test_recovery_only_replaces_target_stage_and_keeps_old_observations(self) -> None:
         base = normalize_video_fact_result(

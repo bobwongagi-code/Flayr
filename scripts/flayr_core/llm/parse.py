@@ -1062,7 +1062,10 @@ def normalize_video_understanding(
             "stage_evidence_checks": normalize_stage_evidence_checks(
                 item.get("stage_evidence_checks"), valid_ids
             ),
-            "evidence_budget_exceeded": bool(item.get("evidence_budget_exceeded") is True),
+            # The runtime, not the model, owns whether the response hit its
+            # output budget. The locked Stage1 handoff restores the trusted
+            # value when one is available.
+            "evidence_budget_exceeded": False,
             # Both records are pipeline-owned. A model-shaped full analysis
             # response cannot author or replay them; finalize_analysis_result
             # restores the trusted copies from the locked Stage1 handoff.
@@ -1685,18 +1688,20 @@ def normalize_video_fact_result(
     allow_trusted_pipeline_metadata: bool = False,
 ) -> dict[str, Any]:
     code = "B" if role == "benchmark" else "C"
-    if result.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
-        forbidden = stage1_forbidden_field_issues(result)
-        if forbidden:
-            raise SystemExit(
-                f"{role} Stage1 输出越权字段，拒绝静默丢弃：{', '.join(forbidden)}"
-            )
-        pipeline_owned = stage1_pipeline_owned_field_issues(result)
-        if pipeline_owned and not allow_trusted_pipeline_metadata:
-            raise SystemExit(
-                f"{role} Stage1 输出包含非模型可写的管线字段，拒绝静默丢弃："
-                + ", ".join(pipeline_owned)
-            )
+    # These are trust-boundary checks, not version-gated conveniences. A
+    # malformed or old response must not bypass the prohibition by omitting or
+    # changing the contract version field.
+    forbidden = stage1_forbidden_field_issues(result)
+    if forbidden:
+        raise SystemExit(
+            f"{role} Stage1 输出越权字段，拒绝静默丢弃：{', '.join(forbidden)}"
+        )
+    pipeline_owned = stage1_pipeline_owned_field_issues(result)
+    if pipeline_owned and not allow_trusted_pipeline_metadata:
+        raise SystemExit(
+            f"{role} Stage1 输出包含非模型可写的管线字段，拒绝静默丢弃："
+            + ", ".join(pipeline_owned)
+        )
     units = result.get("evidence_units")
     if not isinstance(units, list) or not units:
         raise SystemExit(f"{role} fact extraction returned no evidence_units.")
@@ -1709,7 +1714,9 @@ def normalize_video_fact_result(
         "stage_evidence_contract_version": normalize_stage_evidence_contract_version(
             result.get("stage_evidence_contract_version")
         ),
-        "evidence_budget_exceeded": bool(result.get("evidence_budget_exceeded") is True),
+        # Set by the transport metadata after parsing; never trust a model
+        # self-report for a pipeline control flag.
+        "evidence_budget_exceeded": False,
         # This is code-owned from preprocessing metadata; the model cannot set it.
         "stage1_acquisition": {},
         "stage1_qualification": {},
@@ -1718,6 +1725,7 @@ def normalize_video_fact_result(
         "stage1_recovery": {},
     }
     duration = analysis.get("videos", {}).get(role, {}).get("duration_seconds")
+    used_ids: set[str] = set()
     for index, unit in enumerate(units, start=1):
         if not isinstance(unit, dict):
             continue
@@ -1735,26 +1743,26 @@ def normalize_video_fact_result(
                 if text
             )
         normalized_unit = {
-            "id": normalized_fact_id(unit.get("id"), code, index),
+            "id": normalized_fact_id(unit.get("id"), code, index, used_ids),
             "time_range": normalize_fact_time_range(unit.get("time_range"), duration),
-                "information": information,
-                "voiceover": str(unit.get("voiceover") or "").strip(),
-                "voiceover_zh": str(unit.get("voiceover_zh") or "").strip(),
-                "visual_fact": str(unit.get("visual_fact") or "").strip(),
-                "subtitle_fact": str(unit.get("subtitle_fact") or "").strip(),
-                "audio_fact": str(unit.get("audio_fact") or "").strip(),
-                "evidence_strength": normalize_evidence_strength(unit.get("evidence_strength")),
-                "product_visible": normalize_bool_flag(unit.get("product_visible")),
-                "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
-                # F 项背书劈成两个纯观察信道，替代旧的单字段硬判定：
-                "endorsement_verbal": normalize_demo_flag(unit.get("endorsement_verbal")),
-                "endorsement_visual": normalize_demo_flag(unit.get("endorsement_visual")),
-                "trust_source_signals": normalize_s5_source_signals(unit.get("trust_source_signals")),
-                "trust_source_reference": str(unit.get("trust_source_reference") or "").strip(),
-                "trust_source_status": normalize_s5_source_status(unit),
-                # 这段支撑哪些带货功能（多选，描述性）；nullable，老 facts 缺失为 None
-                "functions": normalize_functions(unit.get("functions")),
-            }
+            "information": information,
+            "voiceover": str(unit.get("voiceover") or "").strip(),
+            "voiceover_zh": str(unit.get("voiceover_zh") or "").strip(),
+            "visual_fact": str(unit.get("visual_fact") or "").strip(),
+            "subtitle_fact": str(unit.get("subtitle_fact") or "").strip(),
+            "audio_fact": str(unit.get("audio_fact") or "").strip(),
+            "evidence_strength": normalize_evidence_strength(unit.get("evidence_strength")),
+            "product_visible": normalize_bool_flag(unit.get("product_visible")),
+            "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
+            # F 项背书劈成两个纯观察信道，替代旧的单字段硬判定：
+            "endorsement_verbal": normalize_demo_flag(unit.get("endorsement_verbal")),
+            "endorsement_visual": normalize_demo_flag(unit.get("endorsement_visual")),
+            "trust_source_signals": normalize_s5_source_signals(unit.get("trust_source_signals")),
+            "trust_source_reference": str(unit.get("trust_source_reference") or "").strip(),
+            "trust_source_status": normalize_s5_source_status(unit),
+            # 这段支撑哪些带货功能（多选，描述性）；nullable，老 facts 缺失为 None
+            "functions": normalize_functions(unit.get("functions")),
+        }
         normalized_unit.update(normalize_variant_unit_fields(unit))
         normalized["evidence_units"].append(normalized_unit)
     if not normalized["evidence_units"]:
@@ -1859,9 +1867,32 @@ def normalize_gate_observation_status(
     }
 
 
-def normalized_fact_id(value: Any, code: str, index: int) -> str:
+def normalized_fact_id(
+    value: Any,
+    code: str,
+    index: int,
+    used_ids: set[str] | None = None,
+) -> str:
+    """Return a valid, unique code-scoped evidence ID.
+
+    The model may suggest an ID, but it does not own the ledger namespace. A
+    repeated suggestion is deterministically disambiguated instead of
+    discarding the observation or aborting the entire video extraction.
+    """
     text = str(value or "").strip().upper()
-    return text if re.fullmatch(rf"{code}[A-Z0-9_]*\d*", text) else f"{code}{index}"
+    candidate = text if re.fullmatch(rf"{code}[A-Z0-9_]*\d*", text) else f"{code}{index}"
+    if used_ids is None:
+        return candidate
+    if candidate not in used_ids:
+        used_ids.add(candidate)
+        return candidate
+    candidate = f"{code}{index}"
+    suffix = 2
+    while candidate in used_ids:
+        candidate = f"{code}{index}_{suffix}"
+        suffix += 1
+    used_ids.add(candidate)
+    return candidate
 
 
 def validate_single_video_facts(role: str, facts: dict[str, Any], analysis: dict[str, Any]) -> None:

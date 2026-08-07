@@ -33,6 +33,7 @@ from ..utils import write_json, write_text
 from ..analysis_model import ANALYSIS_RESULT_CONTRACT, AnalysisResult, schema_sha256
 from ..stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
+    STAGE_EVIDENCE_SNAPSHOT_VERSION,
     STAGE1_COVERAGE_AUDIT_VERSION,
     STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
     build_stage1_acquisition_manifest,
@@ -51,6 +52,9 @@ from ..stage_evidence_contracts import (
     stage_evidence_snapshot_issues,
     stage_evidence_readiness,
     stage_analysis_evidence_view,
+    stage1_ledger_manifest,
+    stage1_qualification_projection,
+    STAGE1_QUALIFICATION_GROUPS,
     normalize_stage_code,
     stage1_coverage_audit_issues,
     stage1_acquisition_issues,
@@ -76,6 +80,7 @@ from .parse import (
     normalize_product_profile,
     normalize_video_product_identity,
     normalize_video_fact_result,
+    normalized_fact_id,
     parse_json_text,
 )
 from .payload import (
@@ -132,7 +137,7 @@ from ..postprocess.validate import (
 
 
 # 修改 build_video_fact_payload 的语义合同后必须递增，避免旧 facts 与新判断规则混用。
-VIDEO_FACT_CACHE_SCHEMA_VERSION = 24
+VIDEO_FACT_CACHE_SCHEMA_VERSION = 26
 PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION = 2
 CACHE_RECORD_SCHEMA_VERSION = 1
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -464,6 +469,20 @@ def finalize_analysis_result(
         trusted_stage1_coverage_audit=trusted_stage1_coverage_audit,
         allow_trusted_pipeline_metadata=bool(locked_video_understanding),
     )
+    if locked_video_understanding:
+        normalized_sides = normalized.get("video_understanding")
+        if isinstance(normalized_sides, dict):
+            for role in ("benchmark", "creator"):
+                locked_side = locked_video_understanding.get(role)
+                normalized_side = normalized_sides.get(role)
+                if isinstance(locked_side, dict) and isinstance(normalized_side, dict):
+                    # normalize_video_understanding intentionally ignores
+                    # model-shaped pipeline flags; restore the trusted runtime
+                    # value at the same handoff boundary as the other Stage1
+                    # provenance fields.
+                    normalized_side["evidence_budget_exceeded"] = bool(
+                        locked_side.get("evidence_budget_exceeded") is True
+                    )
     segmented = (
         str(analysis.get("stage2_pipeline_version") or "").strip() == "segmented_stage_v1"
         or str(normalized.get("stage2_pipeline_version") or "").strip() == "segmented_stage_v1"
@@ -647,6 +666,7 @@ def fetch_json_completion(
     raw_path: Path,
     max_attempts: int = 3,
     request_max_time_seconds: int | None = None,
+    response_meta: dict[str, Any] | None = None,
 ) -> str:
     """调用 LLM 并确保返回内容是可解析 JSON；静默截断时整体重取。
 
@@ -712,6 +732,16 @@ def fetch_json_completion(
                 continue
         raw = json.loads(raw_text)
         last_text = extract_chat_completion_text(raw)
+        if response_meta is not None:
+            response_meta.clear()
+            choices = raw.get("choices") if isinstance(raw.get("choices"), list) else []
+            choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+            response_meta.update(
+                {
+                    "finish_reason": str(choice.get("finish_reason") or "").strip().lower(),
+                    "usage": copy.deepcopy(raw.get("usage")) if isinstance(raw.get("usage"), dict) else {},
+                }
+            )
         try:
             parse_json_text(last_text)
             return last_text
@@ -980,6 +1010,80 @@ def _segmented_evidence_range(facts: dict[str, Any], role: str, stage: str, ids:
     return f"{format_seconds(min(item[0] for item in parsed))} - {format_seconds(max(item[1] for item in parsed))}"
 
 
+def _segmented_qualified_units(
+    facts: dict[str, Any],
+    role: str,
+    stage: str,
+    ids: list[str],
+) -> list[dict[str, Any]]:
+    side = facts.get(role) if isinstance(facts.get(role), dict) else {}
+    units = {
+        str(unit.get("id") or ""): unit
+        for unit in side.get("evidence_units") or []
+        if isinstance(unit, dict) and str(unit.get("id") or "").strip()
+    }
+    qualified = qualified_stage_evidence_ids(side, stage)
+    return [
+        units[evidence_id]
+        for evidence_id in ids
+        if evidence_id in qualified and evidence_id in units
+    ]
+
+
+def _segmented_side_summary(units: list[dict[str, Any]], role: str, readiness: str) -> str:
+    if not units:
+        if readiness == "absent":
+            return f"{role}该阶段已完成观察，未发现合同要求的明确证据。"
+        if readiness == "unknown":
+            return f"{role}该阶段证据资格未知，暂不形成正式结论。"
+        if readiness == "conflict":
+            return f"{role}该阶段证据存在冲突，暂不形成正式结论。"
+        return f"{role}该阶段没有可交接的资格化证据。"
+    texts: list[str] = []
+    for unit in units:
+        text = next(
+            (
+                str(unit.get(field) or "").strip()
+                for field in ("information", "visual_fact", "voiceover_zh", "subtitle_fact")
+                if str(unit.get(field) or "").strip()
+            ),
+            "",
+        )
+        if text and text not in texts:
+            texts.append(text)
+    return "；".join(texts[:3]) or f"{role}该阶段已锁定证据，但缺少可展示的文字摘要。"
+
+
+def _segmented_support_status(units: list[dict[str, Any]]) -> str:
+    has_visual = any(str(unit.get("visual_fact") or "").strip() for unit in units)
+    has_voice = any(
+        str(unit.get(field) or "").strip()
+        for unit in units
+        for field in ("voiceover", "voiceover_zh", "subtitle_fact")
+    )
+    if has_visual and has_voice:
+        return "supported"
+    if has_voice:
+        return "voice_only"
+    return "visual_only"
+
+
+def _sanitize_segmented_flag(value: Any, qualified_ids: set[str]) -> Any:
+    """Keep semantic flags but strip any unqualified nested evidence IDs."""
+    if isinstance(value, dict):
+        return {
+            key: (
+                [str(item).strip() for item in nested if str(item).strip() in qualified_ids]
+                if key == "evidence_ids" and isinstance(nested, list)
+                else _sanitize_segmented_flag(nested, qualified_ids)
+            )
+            for key, nested in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_segmented_flag(item, qualified_ids) for item in value]
+    return value
+
+
 def _segmented_complete_flag(value: Any, stage: str) -> bool:
     if not isinstance(value, dict):
         return False
@@ -996,37 +1100,61 @@ def _normalize_segmented_stage(
     stage: str,
     facts: dict[str, Any],
 ) -> dict[str, Any]:
-    """Project one model-owned stage judgment into the legacy report shape.
+    """Project a small Stage2 judgment into the legacy report shape.
 
-    The projection is intentionally mechanical: evidence IDs are intersected
-    with the qualified Stage1 set and missing ranges are derived only from
-    those IDs. No candidate observation can become a formal reference here.
+    Only semantic judgment fields and complete stage-specific flags are read
+    from the model. Summaries, quotes, support status, ranges, and references
+    are rebuilt from the qualified Stage1 ledger so a prompt violation cannot
+    reclaim a code-owned field.
     """
-    output = copy.deepcopy(raw)
-    output["stage"] = _SEGMENTED_STAGE_NAMES[stage]
-    output["core_question"] = _SEGMENTED_STAGE_QUESTIONS[stage]
+    output: dict[str, Any] = {
+        "stage": _SEGMENTED_STAGE_NAMES[stage],
+        "core_question": _SEGMENTED_STAGE_QUESTIONS[stage],
+        "stage_state": "unknown",
+        "relation": "uncertain",
+        "model_gap_magnitude": "uncertain",
+        "judgment_reason": str(raw.get("judgment_reason") or raw.get("reason") or "").strip(),
+    }
     role_ids: dict[str, list[str]] = {}
+    readiness: dict[str, str] = {}
     for role in ("benchmark", "creator"):
         side = facts.get(role) if isinstance(facts.get(role), dict) else {}
         qualified = qualified_stage_evidence_ids(side, stage)
         key = f"{role}_evidence_ids"
         ids = [str(item).strip() for item in raw.get(key) or [] if str(item).strip() in qualified]
-        readiness = stage_evidence_readiness(side, stage)
-        if readiness != "present":
+        current_readiness = stage_evidence_readiness(side, stage)
+        readiness[role] = current_readiness
+        if current_readiness != "present":
             ids = []
         role_ids[role] = list(dict.fromkeys(ids))
+        units = _segmented_qualified_units(facts, role, stage, role_ids[role])
         output[key] = role_ids[role]
-        output[f"{role}_visual_evidence"] = _segmented_text_items(
-            raw.get(f"{role}_visual_evidence")
+        output[f"{role}_time_range"] = _segmented_evidence_range(facts, role, stage, role_ids[role])
+        output[f"{role}_summary"] = _segmented_side_summary(units, role, current_readiness)
+        output[f"{role}_key_message"] = output[f"{role}_summary"]
+        output[f"{role}_visual_evidence"] = [
+            str(unit.get("visual_fact") or "").strip()
+            for unit in units
+            if str(unit.get("visual_fact") or "").strip()
+        ][:5]
+        output[f"{role}_support_status"] = _segmented_support_status(units)
+        output[f"{role}_quote"] = next(
+            (
+                str(unit.get("voiceover") or "").strip()
+                for unit in units
+                if str(unit.get("voiceover") or "").strip()
+            ),
+            "",
         )
-        if not output.get(f"{role}_time_range") or parse_time_range_seconds(output.get(f"{role}_time_range"), None) is None:
-            output[f"{role}_time_range"] = _segmented_evidence_range(facts, role, stage, role_ids[role])
+        output[f"{role}_quote_zh"] = next(
+            (
+                str(unit.get("voiceover_zh") or "").strip()
+                for unit in units
+                if str(unit.get("voiceover_zh") or "").strip()
+            ),
+            "",
+        )
 
-    output["time_range"] = f"标杆 {output.get('benchmark_time_range') or '待复核'} / 达人 {output.get('creator_time_range') or '待复核'}"
-    readiness = {
-        role: stage_evidence_readiness(facts.get(role) if isinstance(facts.get(role), dict) else {}, stage)
-        for role in ("benchmark", "creator")
-    }
     missing_model_references = any(
         readiness[role] == "present" and not role_ids[role]
         for role in ("benchmark", "creator")
@@ -1050,62 +1178,67 @@ def _normalize_segmented_stage(
         )
         output["analysis_status"] = "evidence_blocked"
     else:
-        relation = str(raw.get("relation") or "").strip().lower()
-        output["relation"] = relation if relation in {"creator_better", "benchmark_better", "equivalent", "uncertain"} else "uncertain"
-        magnitude = str(raw.get("model_gap_magnitude") or raw.get("severity") or "").strip().lower()
-        output["model_gap_magnitude"] = magnitude if magnitude in {"none", "small", "medium", "large", "uncertain"} else "uncertain"
-        # Missing is an unknown semantic result, never an implicit success.
-        output["stage_state"] = str(raw.get("stage_state") or "unknown").strip().lower()
+        # A complete evidence handoff is necessary but not sufficient.  The
+        # group response must also close its own semantic state; otherwise a
+        # model-supplied relation or magnitude would become a conclusion merely
+        # because Stage1 happened to have evidence.
+        stage_state = str(raw.get("stage_state") or "unknown").strip().lower()
+        output["stage_state"] = stage_state if stage_state in {"completed", "unknown", "conflict", "blocked"} else "unknown"
         output["judgment_reason"] = str(raw.get("judgment_reason") or raw.get("reason") or "").strip()
-        output["analysis_status"] = "grounded"
+        if output["stage_state"] != "completed":
+            output["relation"] = "uncertain"
+            output["model_gap_magnitude"] = "uncertain"
+            output["analysis_status"] = "unknown" if output["stage_state"] == "unknown" else "evidence_blocked"
+        else:
+            relation = str(raw.get("relation") or "").strip().lower()
+            output["relation"] = relation if relation in {"creator_better", "benchmark_better", "equivalent", "uncertain"} else "uncertain"
+            magnitude = str(raw.get("model_gap_magnitude") or "").strip().lower()
+            output["model_gap_magnitude"] = magnitude if magnitude in {"none", "small", "medium", "large", "uncertain"} else "uncertain"
+            output["analysis_status"] = "grounded"
 
-    output["gap_type"] = str(raw.get("gap_type") or "execution").strip().lower()
-    if output["gap_type"] not in {"structural", "execution", "resource"}:
-        output["gap_type"] = "execution"
-    gap_summary_items = _segmented_text_items(raw.get("gap_summary"))
-    output["gap_summary"] = gap_summary_items[:5] or [output["judgment_reason"] or "待基于阶段证据复核。"]
-    output["benchmark_summary"] = str(raw.get("benchmark_summary") or "").strip() or (
-        "该阶段证据未完成资格化，暂不形成正式标杆结论。" if not role_ids["benchmark"] else "标杆阶段证据已锁定，待补充文字摘要。"
+    output["gap_type"] = "execution"
+    output["gap_summary"] = [output["judgment_reason"] or "待基于阶段证据复核。"]
+    output["evidence"] = [output["judgment_reason"] or "阶段证据由代码交接。"]
+    output["gap"] = output["judgment_reason"] or "阶段差距待复核。"
+    output["time_range"] = (
+        f"标杆 {output.get('benchmark_time_range') or '待复核'} / "
+        f"达人 {output.get('creator_time_range') or '待复核'}"
     )
-    output["creator_summary"] = str(raw.get("creator_summary") or "").strip() or (
-        "该阶段证据未完成资格化，暂不形成正式达人结论。" if not role_ids["creator"] else "达人阶段证据已锁定，待补充文字摘要。"
+    # Unknown, blocked, and handoff-loss stages must not acquire a synthetic
+    # medium severity before the resolver/finalizer runs.  A temporary default
+    # here would already be visible to Stage3 synthesis and could be mistaken
+    # for a model conclusion.
+    output["model_severity"] = (
+        output["model_gap_magnitude"]
+        if output["model_gap_magnitude"] in {"small", "medium", "large"}
+        else None
     )
-    output["benchmark_key_message"] = str(raw.get("benchmark_key_message") or output["benchmark_summary"]).strip()
-    output["creator_key_message"] = str(raw.get("creator_key_message") or output["creator_summary"]).strip()
-    output["benchmark_support_status"] = str(raw.get("benchmark_support_status") or ("supported" if role_ids["benchmark"] else "visual_only"))
-    output["creator_support_status"] = str(raw.get("creator_support_status") or ("supported" if role_ids["creator"] else "visual_only"))
-    output["benchmark_quote"] = str(raw.get("benchmark_quote") or "").strip()
-    output["benchmark_quote_zh"] = str(raw.get("benchmark_quote_zh") or "").strip()
-    output["creator_quote"] = str(raw.get("creator_quote") or "").strip()
-    output["creator_quote_zh"] = str(raw.get("creator_quote_zh") or "").strip()
-    evidence_items = _segmented_text_items(raw.get("evidence"))
-    output["evidence"] = evidence_items[:5] or [output["judgment_reason"] or "阶段证据由代码交接。"]
-    output["gap"] = str(raw.get("gap") or output["judgment_reason"] or "阶段差距待复核。").strip()
-    output["model_severity"] = output["model_gap_magnitude"] if output["model_gap_magnitude"] in {"small", "medium", "large"} else "medium"
     output["severity"] = output["model_severity"]
-    output["creator_module_id"] = str(raw.get("creator_module_id") or "unknown")
-    output["benchmark_module_id"] = str(raw.get("benchmark_module_id") or "unknown")
-    output["module_fit"] = str(raw.get("module_fit") or "unknown")
-    output["module_fit_reason"] = str(raw.get("module_fit_reason") or output["judgment_reason"] or "").strip()
-    output["task_completion"] = str(raw.get("task_completion") or "partial")
-    if output["task_completion"] not in {"complete", "partial", "missing"}:
-        output["task_completion"] = "partial"
-    output["voice_performance"] = raw.get("voice_performance") if isinstance(raw.get("voice_performance"), dict) else {"pace": "unknown", "energy": "unknown", "key_pause": False, "note": "由阶段证据交接。"}
-    output["benchmark_execution"] = raw.get("benchmark_execution")
-    output["creator_execution"] = raw.get("creator_execution")
-    output["painpoint_relevance"] = raw.get("painpoint_relevance")
-    output["stage_standard_delivery"] = raw.get("stage_standard_delivery") or "unknown"
+    output["creator_module_id"] = "unknown"
+    output["benchmark_module_id"] = "unknown"
+    output["module_fit"] = "unknown"
+    output["module_fit_reason"] = output["judgment_reason"]
+    output["task_completion"] = "complete" if output.get("analysis_status") == "grounded" else "missing"
+    output["voice_performance"] = {
+        "pace": "unknown",
+        "energy": "unknown",
+        "key_pause": False,
+        "note": "由阶段证据交接。",
+    }
+    output["benchmark_execution"] = None
+    output["creator_execution"] = None
+    output["painpoint_relevance"] = None
+    output["stage_standard_delivery"] = "unknown"
 
     # A nested structured flag is accepted only as a complete object. Partial
     # semantic objects are worse than an explicit unknown because the existing
     # resolver/validators would otherwise mistake omitted booleans for facts.
-    for role in ("benchmark", "creator"):
-        key = f"{role}_{stage.lower() if stage != 'S1' else 'hook'}"
-        value = raw.get(key)
-        if _segmented_complete_flag(value, stage):
-            output[key] = copy.deepcopy(value)
-        else:
-            output.pop(key, None)
+    if output.get("analysis_status") == "grounded":
+        for role in ("benchmark", "creator"):
+            key = f"{role}_{stage.lower() if stage != 'S1' else 'hook'}"
+            value = raw.get(key)
+            if _segmented_complete_flag(value, stage):
+                output[key] = _sanitize_segmented_flag(value, set(role_ids[role]))
     return output
 
 
@@ -1234,7 +1367,20 @@ def run_segmented_stage_pipeline(
     for role in ("benchmark", "creator"):
         side = facts.get(role) if isinstance(facts.get(role), dict) else {}
         view = stage_analysis_evidence_view(side)
+        projection = stage1_qualification_projection(side)
+        video_info = analysis.get("videos", {}).get(role, {}) if isinstance(analysis.get("videos"), dict) else {}
+        preprocess_fingerprint = video_info.get("preprocess_fingerprint") if isinstance(video_info.get("preprocess_fingerprint"), dict) else {}
         handoff["roles"][role] = {
+            "ledger_ref": {
+                "version": side.get("evidence_set_version") or STAGE_EVIDENCE_SNAPSHOT_VERSION,
+                "sha256": side.get("evidence_set_sha256") or "",
+            },
+            "ledger_manifest": stage1_ledger_manifest(side),
+            "source_fingerprints": {
+                "source_video_sha256": _source_video_hash(analysis, role),
+                "preprocess_fingerprint_sha256": _stable_digest(preprocess_fingerprint),
+            },
+            "stage1_projection": projection,
             "ledger_hash": side.get("evidence_set_sha256") or "",
             "qualified_evidence_ids": view.get("qualified_stage_evidence_ids") or {},
             "candidate_evidence_ids": view.get("candidate_evidence_ids_by_stage") or {},
@@ -1249,6 +1395,11 @@ def run_segmented_stage_pipeline(
                 for stage in stage_codes()
             },
         }
+    handoff["integrity"] = {
+        "algorithm": "sha256",
+        "sha256": _stable_digest({"version": handoff["version"], "pipeline": handoff["pipeline"], "roles": handoff["roles"]}),
+        "preservation_target": "100% of Stage1 ledger IDs and hashes are represented in the handoff",
+    }
     write_json(run_dir / "stage1_to_stage2_handoff.json", handoff)
     stage_results: list[dict[str, Any]] = []
     group_records: list[dict[str, Any]] = []
@@ -2827,6 +2978,28 @@ def has_product_foundation_anchor(analysis: dict[str, Any]) -> bool:
     return any("\u4e00" <= ch <= "\u9fff" for ch in name)
 
 
+def _unknown_stage_qualification_check(stage: str, reason: str) -> dict[str, Any]:
+    """Create a fail-closed stage check without touching the evidence ledger."""
+    return {
+        "stage": stage,
+        "status": "unknown",
+        "coverage": "unknown",
+        "evidence_ids": [],
+        "invalid_evidence_ids": [],
+        "observed_signals": [],
+        "unqualified_observed_signals": [],
+        "missing_signals": [],
+        "invalid_observed_signals": [],
+        "invalid_missing_signals": [],
+        "signal_bindings": {},
+        "invalid_signal_bindings": [],
+        "observed_disqualifiers": [],
+        "invalid_observed_disqualifiers": [],
+        "evidence_strength": None,
+        "reason": reason,
+    }
+
+
 def _run_stage1_qualification(
     args: argparse.Namespace,
     analysis: dict[str, Any],
@@ -2835,14 +3008,13 @@ def _run_stage1_qualification(
     role: str,
     facts: dict[str, Any],
 ) -> dict[str, Any]:
-    """Run the independent Stage1-B projection over locked atomic facts.
+    """Run bounded Stage1-B projections over the locked atomic facts.
 
-    A qualification failure is deliberately non-fatal to acquisition: the
-    ledger remains usable for diagnostics and the bounded Stage1-C recovery
-    can target the resulting unknown stages.
+    Qualification is split into the same four semantic groups as Stage2. A
+    response failure or cross-stage binding error therefore blocks only the
+    affected group; successful groups remain available for downstream
+    judgment and the single Stage1-C pass can target only the failed stages.
     """
-    request_path = run_dir / f"llm_facts_{role}_qualification_request.json"
-    response_path = run_dir / f"llm_facts_{role}_qualification_response.json"
     valid_ids = {
         str(item.get("id") or "").strip()
         for item in facts.get("evidence_units") or []
@@ -2860,68 +3032,136 @@ def _run_stage1_qualification(
             reason="Stage1-B 在 dry-run 中未执行，阶段资格保持未知。",
         )
         return facts
-    try:
-        payload = build_stage_evidence_qualification_payload(
-            args.llm_model,
-            role,
-            analysis,
-            facts,
-        )
-        write_json(request_path, payload)
-        response_text = fetch_json_completion(args, api_key, request_path, response_path)
-        response = parse_json_text(response_text)
-        if not isinstance(response, dict):
-            raise ValueError("Stage1-B qualification 必须返回 JSON object。")
-        allowed_keys = {"stage_evidence_contract_version", "stage_evidence_checks"}
-        extra_keys = sorted(set(response) - allowed_keys)
-        if extra_keys:
-            raise ValueError(
-                "Stage1-B qualification returned out-of-contract fields: "
-                + ", ".join(extra_keys)
+    existing_checks = normalize_stage_evidence_checks(
+        facts.get("stage_evidence_checks"),
+        valid_ids,
+    )
+    checks_by_stage = {
+        str(item.get("stage")): item
+        for item in existing_checks
+        if isinstance(item, dict) and str(item.get("stage") or "").strip()
+    }
+    group_records: list[dict[str, Any]] = []
+    failed_stage_codes: list[str] = []
+    successful_group_count = 0
+
+    for group in STAGE1_QUALIFICATION_GROUPS:
+        targets = list(group)
+        label = "_".join(targets)
+        request_path = run_dir / f"llm_facts_{role}_qualification_{label}_request.json"
+        response_path = run_dir / f"llm_facts_{role}_qualification_{label}_response.json"
+        try:
+            payload = build_stage_evidence_qualification_payload(
+                args.llm_model,
+                role,
+                analysis,
+                facts,
+                targets,
             )
-        if response.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
-            raise ValueError("Stage1-B qualification 缺少匹配的 evidence contract version。")
-        if not isinstance(response.get("stage_evidence_checks"), list):
-            raise ValueError("Stage1-B qualification 的 stage_evidence_checks 必须是数组。")
-        checks = normalize_stage_evidence_checks(response["stage_evidence_checks"], valid_ids)
-        returned = {
-            normalize_stage_code(item.get("stage"))
-            for item in response["stage_evidence_checks"]
-            if isinstance(item, dict) and normalize_stage_code(item.get("stage"))
-        }
-        if returned != set(stage_codes()):
-            missing = sorted(set(stage_codes()) - returned)
-            extra = sorted(returned - set(stage_codes()))
-            raise ValueError(
-                "Stage1-B qualification 必须覆盖 S1-S6。"
-                + (f" missing={','.join(missing)}" if missing else "")
-                + (f" extra={','.join(extra)}" if extra else "")
+            write_json(request_path, payload)
+            response_text = fetch_json_completion(args, api_key, request_path, response_path)
+            response = parse_json_text(response_text)
+            if not isinstance(response, dict):
+                raise ValueError("Stage1-B qualification 必须返回 JSON object。")
+            allowed_keys = {"stage_evidence_contract_version", "stage_evidence_checks"}
+            extra_keys = sorted(set(response) - allowed_keys)
+            if extra_keys:
+                raise ValueError(
+                    "Stage1-B qualification returned out-of-contract fields: "
+                    + ", ".join(extra_keys)
+                )
+            if response.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+                raise ValueError("Stage1-B qualification 缺少匹配的 evidence contract version。")
+            raw_checks = response.get("stage_evidence_checks")
+            if not isinstance(raw_checks, list):
+                raise ValueError("Stage1-B qualification 的 stage_evidence_checks 必须是数组。")
+            raw_codes: list[str] = []
+            for item in raw_checks:
+                if not isinstance(item, dict):
+                    raise ValueError("Stage1-B qualification 的 stage check 必须是对象。")
+                code = normalize_stage_code(item.get("stage"))
+                if code is None:
+                    raise ValueError("Stage1-B qualification 返回了无效阶段。")
+                raw_codes.append(code)
+            target_set = set(targets)
+            returned = set(raw_codes)
+            if len(raw_codes) != len(targets) or returned != target_set:
+                missing = sorted(target_set - returned)
+                extra = sorted(returned - target_set)
+                duplicate = sorted(
+                    code for code in returned if raw_codes.count(code) > 1
+                )
+                detail = []
+                if missing:
+                    detail.append(f"missing={','.join(missing)}")
+                if extra:
+                    detail.append(f"extra={','.join(extra)}")
+                if duplicate:
+                    detail.append(f"duplicate={','.join(duplicate)}")
+                raise ValueError(
+                    f"Stage1-B qualification 必须恰好覆盖 {','.join(targets)}。"
+                    + (" " + " ".join(detail) if detail else "")
+                )
+            checks = normalize_stage_evidence_checks(raw_checks, valid_ids)
+            normalized_by_stage = {
+                str(item.get("stage")): item
+                for item in checks
+                if isinstance(item, dict) and str(item.get("stage") or "").strip()
+            }
+            for stage in targets:
+                checks_by_stage[stage] = normalized_by_stage.get(
+                    stage,
+                    _unknown_stage_qualification_check(
+                        stage,
+                        "Stage1-B 响应缺少目标阶段，资格保持未知。",
+                    ),
+                )
+            successful_group_count += 1
+            group_records.append(
+                {
+                    "group": targets,
+                    "status": "completed",
+                    "request_artifact": request_path.name,
+                    "response_artifact": response_path.name,
+                }
             )
-        facts["stage_evidence_checks"] = checks
-        facts["stage1_qualification"] = {
-            "source": "pipeline",
-            "status": "completed",
-            "contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
-            "stage_codes": list(stage_codes()),
-            "evidence_id_count": len(valid_ids),
-        }
-    except (OSError, ValueError, RuntimeError, SystemExit) as exc:
-        safe_error = str(exc).strip()
-        if api_key and safe_error:
-            safe_error = safe_error.replace(api_key, "[REDACTED]")
-        _block_stage_qualifications(
-            facts,
-            list(stage_codes()),
-            reason="Stage1-B qualification 失败，阶段资格保持未知；Stage1-A 原子观察仍保留。",
-        )
-        facts["stage1_qualification"] = {
-            "source": "pipeline",
-            "status": "failed",
-            "contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
-            "stage_codes": list(stage_codes()),
-            "evidence_id_count": len(valid_ids),
-            "failure_reason": safe_error[:500] or type(exc).__name__,
-        }
+        except (OSError, ValueError, RuntimeError, SystemExit) as exc:
+            safe_error = str(exc).strip()
+            if api_key and safe_error:
+                safe_error = safe_error.replace(api_key, "[REDACTED]")
+            failed_stage_codes.extend(targets)
+            for stage in targets:
+                checks_by_stage[stage] = _unknown_stage_qualification_check(
+                    stage,
+                    "Stage1-B 该阶段组失败，资格保持未知；Stage1-A 原子观察仍保留。",
+                )
+            group_records.append(
+                {
+                    "group": targets,
+                    "status": "failed",
+                    "request_artifact": request_path.name,
+                    "response_artifact": response_path.name,
+                    "failure_reason": safe_error[:500] or type(exc).__name__,
+                }
+            )
+
+    facts["stage_evidence_checks"] = normalize_stage_evidence_checks(
+        list(checks_by_stage.values()),
+        valid_ids,
+    )
+    failed_stage_codes = list(dict.fromkeys(failed_stage_codes))
+    qualification = {
+        "source": "pipeline",
+        "status": "completed" if successful_group_count else "failed",
+        "contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+        "stage_codes": list(stage_codes()),
+        "evidence_id_count": len(valid_ids),
+        "group_records": group_records,
+        "failed_stage_codes": failed_stage_codes,
+    }
+    if failed_stage_codes:
+        qualification["failure_reason"] = "一个或多个 Stage1-B 阶段组失败；仅对应阶段保持未知。"
+    facts["stage1_qualification"] = qualification
     return facts
 
 
@@ -2967,7 +3207,17 @@ def run_video_fact_extraction(
                     {"video_understanding": {role: cached}, "stage_analysis": []},
                     can_analyze_native_audio(args.llm_api_url, args.llm_model),
                 )
-            cached = _run_stage1_qualification(args, analysis, run_dir, api_key, role, cached)
+            # A valid current-contract cache already contains the frozen
+            # Stage1-B result. Re-running qualification here would spend four
+            # LLM calls and make a supposedly reusable fact set nondeterministic.
+            # Legacy cache records are still migrated once so they can acquire
+            # the current qualification metadata before being frozen again.
+            if (
+                cached.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION
+                or not isinstance(cached.get("stage1_qualification"), dict)
+                or cached.get("stage1_qualification", {}).get("status") != "completed"
+            ):
+                cached = _run_stage1_qualification(args, analysis, run_dir, api_key, role, cached)
             cached = _maybe_recover_video_facts(
                 args,
                 analysis,
@@ -2998,8 +3248,12 @@ def run_video_fact_extraction(
         if args.llm_dry_run:
             request_path.unlink(missing_ok=True)
             continue
-        result_text = fetch_json_completion(args, api_key, request_path, response_path)
+        response_meta: dict[str, Any] = {}
+        result_text = fetch_json_completion(
+            args, api_key, request_path, response_path, response_meta=response_meta
+        )
         fact_result = normalize_video_fact_result(role, parse_json_text(result_text), analysis)
+        fact_result["evidence_budget_exceeded"] = response_meta.get("finish_reason") == "length"
         sanitize_audio_observations(
             {"video_understanding": {role: fact_result}, "stage_analysis": []},
             can_analyze_native_audio(args.llm_api_url, args.llm_model),
@@ -3332,11 +3586,14 @@ def _materialize_stage_recovery_audit(
         ]
         stage_issues.extend(stage1_acquisition_issues(facts, code))
         status = str(check.get("status") or "unknown").strip().lower()
-        if global_issues or stage_issues or status not in {"present", "absent"}:
+        if global_issues or stage_issues or status not in {"present", "absent", "not_applicable"}:
             audit_status = "conflict" if status == "conflict" else "unknown"
             coverage = "unknown"
             unresolved.append(code)
         else:
+            # The legacy audit field has no not_applicable enum. Preserve the
+            # closed primary state while using its historical non-positive
+            # projection; stage_evidence_readiness remains authoritative.
             audit_status = "found" if status == "present" else "clear"
             coverage = "complete"
         stage_ids = [
@@ -3594,7 +3851,10 @@ def _maybe_recover_video_facts(
             budget=getattr(args, "_resource_budget", None),
         )
         write_json(request_path, payload)
-        recovery_text = fetch_json_completion(args, api_key, request_path, response_path)
+        response_meta: dict[str, Any] = {}
+        recovery_text = fetch_json_completion(
+            args, api_key, request_path, response_path, response_meta=response_meta
+        )
         recovery = parse_json_text(recovery_text)
         if not isinstance(recovery, dict):
             raise ValueError("Stage1 focused recovery 必须返回 JSON object。")
@@ -3654,6 +3914,7 @@ def _maybe_recover_video_facts(
         recovery,
         analysis,
         targets,
+        budget_exceeded=response_meta.get("finish_reason") == "length",
     )
     merged["stage1_coverage_audit"] = _materialize_stage_recovery_audit(
         merged,
@@ -3723,6 +3984,7 @@ def _maybe_recover_video_facts(
             merged["stage1_recovery"] = recovery
             remaining_issues = stage_evidence_contract_issues(merged, require_version=True)
             if not remaining_issues:
+                _mark_stage1_qualification_recovered(merged, targets)
                 return merged
             final_issues = remaining_issues
         return _mark_video_fact_recovery_failed(
@@ -3734,6 +3996,7 @@ def _maybe_recover_video_facts(
             error=ValueError("Stage1 evidence contract remains invalid after bounded recovery."),
             api_key=api_key,
         )
+    _mark_stage1_qualification_recovered(merged, targets)
     return merged
 
 
@@ -3743,6 +4006,8 @@ def _merge_video_fact_recovery(
     recovery: dict[str, Any],
     analysis: dict[str, Any],
     target_stages: list[str],
+    *,
+    budget_exceeded: bool = False,
 ) -> dict[str, Any]:
     """Append recovery observations and replace only target-stage qualifications."""
     code = "B" if role == "benchmark" else "C"
@@ -3754,6 +4019,7 @@ def _merge_video_fact_recovery(
     existing_qualification = copy.deepcopy(merged.pop("stage1_qualification", None))
     existing_coverage_audit = copy.deepcopy(merged.pop("stage1_coverage_audit", None))
     existing_units = merged.get("evidence_units") if isinstance(merged.get("evidence_units"), list) else []
+    existing_units_snapshot = copy.deepcopy(existing_units)
     existing_ids = {
         str(item.get("id") or "").strip()
         for item in existing_units
@@ -3765,29 +4031,47 @@ def _merge_video_fact_recovery(
     safe_candidates: list[dict[str, Any]] = []
     blocked_candidate_ids: set[str] = set()
     candidate_ids: set[str] = set()
+    allocated_ids = set(existing_ids)
     next_index = len(existing_units) + 1
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
         item = copy.deepcopy(candidate)
-        candidate_id = str(item.get("id") or "").strip().upper()
-        if candidate_id and (candidate_id in existing_ids or candidate_id in candidate_ids):
+        raw_candidate_id = str(item.get("id") or "").strip().upper()
+        if raw_candidate_id and (raw_candidate_id in existing_ids or raw_candidate_id in candidate_ids):
             # A duplicate candidate ID is ambiguous: silently renaming it can
             # make a recovery check point at the old observation.  Reject the
             # candidate and make any reference fail closed below.
-            blocked_candidate_ids.add(candidate_id)
+            blocked_candidate_ids.add(raw_candidate_id)
             continue
-        if not candidate_id:
-            candidate_id = f"{code}R{next_index}"
+        # Candidate IDs are suggestions, not a second namespace. Allocate a
+        # valid, unique ID against the whole locked ledger before normalizing
+        # the candidate; otherwise an invalid suggestion such as "foo" could
+        # normalize to C1 and collide with an existing immutable observation.
+        candidate_id = normalized_fact_id(raw_candidate_id, code, next_index, allocated_ids)
         while candidate_id in existing_ids:
             next_index += 1
-            candidate_id = f"{code}R{next_index}"
+            candidate_id = normalized_fact_id("", code, next_index, allocated_ids)
         item["id"] = candidate_id
         existing_ids.add(candidate_id)
         candidate_ids.add(candidate_id)
         safe_candidates.append(item)
         next_index += 1
-    merged["evidence_units"] = existing_units + safe_candidates
+    normalized_candidates: list[dict[str, Any]] = []
+    if safe_candidates:
+        candidate_result = normalize_video_fact_result(
+            role,
+            {
+                "evidence_units": safe_candidates,
+                "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            },
+            analysis,
+            allow_trusted_pipeline_metadata=True,
+        )
+        normalized_candidates = candidate_result.get("evidence_units") or []
+    # Existing locked observations are copied byte-for-byte. Only newly
+    # appended candidates go through normalization.
+    merged["evidence_units"] = existing_units_snapshot + normalized_candidates
     merged["stage_evidence_contract_version"] = STAGE_EVIDENCE_CONTRACT_VERSION
 
     existing_checks = merged.get("stage_evidence_checks") if isinstance(merged.get("stage_evidence_checks"), list) else []
@@ -3856,6 +4140,7 @@ def _merge_video_fact_recovery(
         analysis,
         allow_trusted_pipeline_metadata=True,
     )
+    normalized["evidence_units"] = existing_units_snapshot + copy.deepcopy(normalized_candidates)
     # ``stage1_acquisition`` is code-owned and is deliberately discarded from
     # model-shaped normalization. Preserve the locked manifest while bounded
     # recovery replaces only the requested factual observations.
@@ -3865,7 +4150,78 @@ def _merge_video_fact_recovery(
         normalized["stage1_qualification"] = existing_qualification
     if isinstance(existing_coverage_audit, dict):
         normalized["stage1_coverage_audit"] = existing_coverage_audit
+    normalized["evidence_budget_exceeded"] = bool(
+        base.get("evidence_budget_exceeded") is True or budget_exceeded
+    )
     return normalized
+
+
+def _mark_stage1_qualification_recovered(
+    facts: dict[str, Any],
+    target_stages: list[str],
+) -> dict[str, Any]:
+    """Close the Stage1-B metadata after a valid Stage1-C projection.
+
+    Stage1-C may replace the qualification for the requested stages after an
+    independent Stage1-B request failed.  The original failure remains useful
+    provenance, but keeping ``status=failed`` would make the valid recovered
+    fact set fail cache validation and misrepresent the final handoff.
+    """
+    metadata = facts.get("stage1_qualification")
+    if not isinstance(metadata, dict):
+        return facts
+    normalized_targets = [
+        code
+        for code in (
+            normalize_stage_code(value)
+            for value in target_stages
+        )
+        if code in set(stage_codes())
+    ]
+    failed_codes = {
+        code
+        for code in (
+            normalize_stage_code(value)
+            for value in metadata.get("failed_stage_codes") or []
+        )
+        if code in set(stage_codes())
+    }
+    if metadata.get("status") == "failed" and not failed_codes:
+        # Older failed artifacts did not persist failed_stage_codes. Treat the
+        # bounded recovery targets as failed until their final readiness closes.
+        failed_codes = set(normalized_targets)
+    if metadata.get("status") != "failed" and not failed_codes:
+        return facts
+    recovered = copy.deepcopy(metadata)
+    initial_failure_reason = str(recovered.get("failure_reason") or "").strip()
+    resolved_statuses = {"present", "absent", "not_applicable"}
+    recovered_codes = [
+        code
+        for code in normalized_targets
+        if (
+            code in set(stage_codes())
+            and (not failed_codes or code in failed_codes)
+            and stage_evidence_readiness(facts, code) in resolved_statuses
+        )
+    ]
+    recovered.update(
+        {
+            "status": "completed",
+            "recovered_from": (
+                "stage1_b_partial_failure" if metadata.get("status") == "completed"
+                else "stage1_b_failed"
+            ),
+            "recovered_stage_codes": list(dict.fromkeys(recovered_codes)),
+            "failed_stage_codes": [
+                code for code in sorted(failed_codes)
+                if code not in recovered_codes
+            ],
+        }
+    )
+    if initial_failure_reason:
+        recovered["initial_failure_reason"] = initial_failure_reason
+    facts["stage1_qualification"] = recovered
+    return facts
 
 
 def run_video_identity_extraction(
