@@ -1,12 +1,15 @@
 # Flayr 技术架构设计
 
-> 当前架构基准：2026-05-31（全模态两阶段）。本文描述当前 report-first 分析产品及其资源与证据契约。
+> 当前架构基准：2026-08-08（Stage1 证据账本 + 分段 Stage2/Stage3）。本文描述已落地的
+> report-first 分析产品及其资源与证据契约。冻结设计的唯一来源是
+> [`references/ADR007.md`](references/ADR007.md)；Stage1 交接细节以
+> [`references/stage-evidence-contract.md`](references/stage-evidence-contract.md) 为准。
 
 ---
 
 ## 0. 契约（spec §0）
 
-> 本节是系统的**唯一真相源契约**（2026-06-10 落定）：只描述实际存在的东西，不写愿景。
+> 本节是系统当前实现的**唯一真相源契约**（2026-08-08 更新）：只描述实际存在的东西，不写愿景。
 > 各文档（商业评判框架 / 观察指引 / QA-RULES）对本节内容只引用不复制；冲突时以本节为准。
 > 任何"要不要加 X"的提案先对照本节自查，避免基于过时结构或臆想决策。
 
@@ -22,17 +25,15 @@
 | `subtitle_track.json`（OCR 权威字幕轨） | 视觉模型，auto 策略（有分析 key 即开） | 可选 | 状态标记，缺失显示占位 |
 | `_preprocess.json`（复用缓存） | flayr.py | 自动 | `--reuse-preprocessing` 仅在源视频内容和预处理配置指纹完全一致时命中；旧缓存或任一配置变化会重跑 |
 
-### 0.2 Step-0 + 两阶段架构 + Phase C
+### 0.2 Step-0 + 分层分析架构 + Phase C
 
 - **Step-0（产品合同）**：只吃运营产品信息与品类知识，先生成卖点分流计划和 `proof_contract`；
   `observable_dimension` 是 S4 单一主证明的硬边界，`consumer_outcome` 只负责自然语言表达结果。
 - **阶段一（事实）**：先做 Stage1-A 原子观察清单，再做 Stage1-B 的 S1-S6 阶段证据资格投影；口播语义以在线 Fun-ASR 转写为准，产出
   `video_facts_{role}.json` 的 `evidence_units[]`、`stage_evidence_checks[]`。若必需信号缺失、未知或冲突，最多做一次按阶段定向的预锁定补观察；补观察只能追加候选事实、替换目标阶段资格投影，不能删除或改写已有事实。补观察完成后才锁定 facts。
-- **阶段二（判断）**：只消费锁定 facts 中已经资格化的阶段证据 + analysis_input.md（产品信息/三层指引/结构库/QA/schema + 字幕轨/镜头轨）
-  单次调用完成 S1-S6 对比、improvements、key_conclusions。
-- **Phase C（回看）**：模型自报 ∪ 代码确定性检测（占位证据/visual_only、canonical 覆盖缺口、未被引用的高信号视觉事件 + medium/large），≤2 阶段、
-  仅一次；切对应阶段原生片段（含音轨）后只接受受限的判断证据引用补丁，再重跑后处理链。Phase C 不能绕过 Stage1，也不能新增或改写已锁定 facts。规范见 0.7。
-- **后处理链**：validate（阻断→repair 重试）/ repair（确定性修补）/ qa_warnings（软警告）。
+- **阶段二（判断）**：只消费锁定 facts 中已经资格化的阶段证据 + analysis_input.md（产品信息/三层指引/结构库/QA/schema + 字幕轨/镜头轨）。默认路径按 `S1+S2 / S3+S4 / S5 / S6` 四个小阶段组分别请求，随后由只读 Stage3 综合；单个阶段组失败不得让其他组重跑或丢失。
+- **Phase C（回看）**：模型自报 ∪ 代码确定性检测（占位证据/visual_only、canonical 覆盖缺口、未被引用的高信号视觉事件 + medium/large），≤2 阶段、仅一次；切对应阶段原生片段（含音轨）后只接受受限 `stage_patches[]`，再重跑目标阶段的后处理链。Phase C 不能绕过 Stage1，也不能新增或改写已锁定 facts。规范见 0.7。
+- **后处理链**：确定性投影、validate、resolver、局部 patch repair 与 qa_warnings；默认路径不做整对象 Stage2 repair。
 - **最终建议收敛**：确定性 severity 与可选 S4 视觉复核全部完成后，若仍有 `large` 阶段未被
   `improvements` 覆盖，只做一次纯文本缺项补全；它不得重判阶段，失败时保留主分析并写明状态。
 
@@ -139,9 +140,8 @@ derive 的回归必须同时覆盖 resolver 的 max/min 交换律、clamp/confli
 - 审计：`phase_c_review` 使用 `schema_version=2` 与
   `snapshot_schema=phase_c_patch_snapshot_v1`，只记录补丁字段及其应用前后 resolver 结果；
   旧整段阶段快照在评测中按独立 schema 分开统计，不能与补丁快照合并比较。
-- 输出：完整 stage 对象整体替换；引用口播必须能对上切片音频/转写，听不清标 voice_only 并写明，
-  **禁止推断补全未听清的话术**（kakwan S6 幻觉教训）；回看 prompt 不得含方向性压力
-  （如"持平必须给 small"——已删）。
+- 引用口播必须能对上切片音频/转写，听不清标 `voice_only` 并写明，**禁止推断补全未听清的话术**
+  （kakwan S6 幻觉教训）；回看 prompt 不得含方向性压力（如"持平必须给 small"——已删）。
 - 合并后重跑全套校验；facts 不可改。
 
 ### 0.8 验收与回归原则
@@ -220,10 +220,10 @@ API 请求的 bearer 凭据只通过子进程标准输入传递，不进入命�
 爆款视频 + 达人视频
   → 视频解析、抽帧、抽音频、转写、中文翻译
   → Step-0：建立与视频独立的产品卖点分流计划和单一视觉证明合同
-  → 阶段一：全模态 LLM（omni）原生视频各跑一次，建立单视频原子事实清单，再按共享合同资格化 S1-S6 证据
+  → 阶段一：按 provider 能力采集单视频原子事实；可用原生视频时使用原生视频，否则使用 canonical 帧/时间线与窗口安全转写，再按共享合同资格化 S1-S6 证据
   → 缺证据时：每侧最多一次定向 Stage1 补观察，之后锁定 facts
-  → 阶段二：对比判断，喂已资格化 facts 文字 + 每条 evidence 的关键帧 + 切片音频，按 S1-S6 横向对比
-  → Phase C：仅当模型声明 low_confidence_stages 时，对对应阶段切原生视频片段回看一次并重判
+  → 阶段二：按 S1+S2 / S3+S4 / S5 / S6 分组判断，喂已资格化 facts 文字 + 每条 evidence 的感官材料，再由只读 Stage3 综合
+  → Phase C：仅在预算和确定性门控允许时，对目标阶段切原生视频片段回看一次并应用局部 stage patch
   → 最终建议收敛：仅补齐确定性推导后遗漏的 large 阶段提升点
   → report.html + analysis.json
 ```
@@ -255,23 +255,40 @@ scripts/
 └── flayr_core/
     ├── artifacts.py                  # manifest 读取、帧候选、按时间段选帧
     ├── analysis_model.py              # schema 驱动的结果领域模型、字段投影与生命周期
-    ├── llm/                          # LLM 调用包（按职责拆 7 个子模块）
+    ├── llm/                          # LLM 调用、Stage1/Stage2/Stage3 编排包
     │   ├── __init__.py
     │   ├── api.py                    # HTTP 调用底层 + Keychain
     │   ├── analysis_contract.py      # LLM 结果最小运行时结构契约
+    │   ├── compact_eval.py           # 只读模型评估工具
     │   ├── json_codec.py             # LLM JSON 文本容错解析
+    │   ├── media.py                  # 多模态媒体输入构造
     │   ├── product_profile.py        # 产品地基与 S4 证明合同归一化
     │   ├── parse.py                  # 阶段 Flag、结果 schema normalize + 兼容导出
     │   ├── payload.py                # build_*_payload 系列请求构造
-    │   └── pipeline.py               # merge / parse_and_validate / run_large_model_analysis
-    ├── postprocess/                  # 分析结果修补与校验包（按职责拆 6 个子模块）
+    │   ├── pipeline.py               # Stage1、分段 Stage2、Stage3、Phase C 与 finalizer
+    │   ├── s4_visual_verifier.py     # S4 视觉复核输入与结果校验
+    │   └── stage_review_contract.py  # 阶段 patch 合同
+    ├── postprocess/                  # 分析结果投影、校验、局部修复与专项规则
     │   ├── __init__.py               # 仅 re-export apply_postprocess_chain
     │   ├── utils.py                  # 通用工具（SRT / evidence_unit / 时间关系）
-    │   ├── repair.py                 # 修补 result data（align / bind / reconcile / ground / fill / …）
-    │   ├── validate.py               # 通用校验，会抛 SystemExit 触发 repair 重跑
+    │   ├── audit.py                  # 审计轨与变更记录
+    │   ├── calibration.py            # activation manifest 与校准门禁
     │   ├── claims_my.py              # 马来西亚 KKM/认证主张专项
+    │   ├── commercial_priority.py    # 商业优先级聚合（不写 severity）
+    │   ├── derive.py                 # floor/ceiling resolver 与派生字段
+    │   ├── global_diagnosis.py       # 全局诊断投影
     │   ├── health_rewrite.py         # 健康品类合规重写专项
+    │   ├── proposition.py             # 产品命题与建议投影
+    │   ├── repair.py                 # 兼容路径的结果修补
+    │   ├── repair_claims.py           # 主张/证据声明的局部修补
+    │   ├── repair_evidence.py        # 证据硬事实机械检查
+    │   ├── repair_stages.py          # 目标阶段局部 patch 应用
+    │   ├── validate.py               # 通用校验
     │   └── chain.py                  # apply_postprocess_chain 流水线编排
+    ├── finalization/                  # 最终投影、等价性与发布前收口
+    │   ├── contracts.py
+    │   ├── equivalence.py
+    │   └── facade.py
     ├── stage_catalog.py               # S1-S6 唯一阶段目录与预处理回退窗口
     ├── stage_ownership.py             # 跨阶段认证归属规则
     ├── prompt.py                     # analysis_input.md 装配（LLM 输入包）
@@ -291,7 +308,7 @@ scripts/
 | frame/focus/stage manifest 读取和选帧 | `artifacts.py` | 已覆盖 |
 | 在线 Fun-ASR 转写和时间戳归一化 | `asr.py` | 已覆盖 |
 | 中文翻译 | `translation.py` | 已覆盖 |
-| LLM 请求构造 / 调用 / schema 解析 | `llm/` 包（api / payload / parse / pipeline） | 已覆盖 |
+| LLM 请求构造 / 调用 / schema 解析 / 分段 Stage2 | `llm/` 包（api / payload / parse / pipeline / finalizer） | 已覆盖 |
 | 分析结果修补 / 校验 / 品类合规 | `postprocess/` 包 | 已覆盖 |
 | analysis_input.md 装配 | `prompt.py` | 已覆盖 |
 | HTML 报告 | `report.py` | 已覆盖 |
@@ -412,7 +429,8 @@ scripts/
 
 ### 3.6 `llm/` 包 — 大模型分析
 
-按职责拆为 7 个子模块，依赖单向：`api → payload / json_codec / product_profile / parse → pipeline`。下游（translation）只 import `llm.api`，不被动加载整套业务规则。
+按职责拆分请求、解析、Stage1、分段 Stage2、Stage3 和 Phase C。依赖单向：`api → media / payload /
+json_codec / product_profile / parse → pipeline`。下游（translation）只 import `llm.api`，不被动加载整套业务规则。
 
 | 子模块 | 职责 |
 |------|------|
@@ -423,15 +441,16 @@ scripts/
 | `llm/product_profile.py` | Step-0 产品地基、短视频证明计划与 S4 证明合同的归一化；不反向依赖 `parse.py`。 |
 | `llm/parse.py` | 阶段 Flag 和最终结果 schema normalize；保留 `parse_json_text`、产品地基函数等兼容导出。含 `STAGES`、`is_effective_voiceover` 等被 `postprocess` 复用的基础接口。 |
 | `llm/payload.py` | `build_*_payload` 系列。阶段一 `build_video_fact_payload`（按 provider 能力选择原生视频或 canonical 帧/窗口转写）；阶段二 `build_llm_comparison_payload` + `build_evidence_sensory_inputs`（每条 evidence 配带原声短视频或关键帧+切片音频）；Phase C `build_stage_review_payload`（低置信阶段原生视频切片）。 |
-| `llm/pipeline.py` | 主入口：`merge_analysis_result` / `parse_and_validate_llm_result` / `run_large_model_analysis` / `run_video_fact_extraction`。所有外部结果先经过同一个 `finalize_analysis_result` 收口，再通过 `AnalysisResult` 唯一投影写回 analysis；第一遍成功后最多触发一次 Phase C 回看。完成收口时在运行目录保留 `raw_model_response.json`、`validated_normalized_result.json`、`final_derived_result.json` 和 `postprocess_change_log.json`，用于区分模型原文、规范化结果与确定性后处理。 |
+| `llm/pipeline.py` | 主入口：`run_video_fact_extraction`、`run_segmented_stage_pipeline`、`run_large_model_analysis`、`finalize_analysis_result`。分段 Stage2 依次收口四个阶段组，再执行只读 Stage3 综合；所有外部结果经过同一个 finalizer 和唯一投影写回 analysis。Phase C 只应用受限阶段 patch。运行目录保留 raw/validated/final/postprocess 产物，用于区分模型原文、规范化结果和确定性后处理。 |
 
-**两阶段架构（全模态主导）**：
+**事实采集、分段判断与只读综合架构**：
 
 | 阶段 | 函数 | 输入 | 产出 | 意图 |
 |------|------|------|------|------|
 | 一：事实抽取 | `run_video_fact_extraction` → `build_video_fact_payload` → `build_video_fact_recovery_payload`（最多一次） | 已验证原生能力的 provider 使用原生视频；北京 MaaS Qwen 等 transcript-only provider 使用 canonical 帧/时间线图 + 窗口安全转写，benchmark/creator 各一次 | Stage1-A 原子 `evidence_units` + Stage1-B `stage_evidence_checks`，补观察后锁定 | 先建立事实，再按统一 S1-S6 合同资格化；缺失/未知不伪装成 absent；不把静态页面输入误称为原生视频理解 |
-| 二：对比判断 | `build_llm_comparison_payload` → `build_evidence_sensory_inputs` | facts 文字 + 每条 evidence 的带原声视频片段 | severity / key_conclusions / 改进 | 判断环节重获感官，按 S1-S6 功能阶段横向对比 |
-| C：低置信回看 | `maybe_refine_low_confidence_stages` → `build_stage_review_payload` | 第一遍声明的 low_confidence_stages + 对应阶段原生视频片段 | 仅替换对应 `stage_analysis` | 解决代表帧信息不足导致的边界阶段漂移，硬限制 1 次 |
+| 二：分段对比判断 | `build_stage_group_judgment_payload` → `run_segmented_stage_pipeline` | 每个阶段组的锁定 facts + 必要感官材料 | 阶段事实状态 / relation / model gap | 每个阶段组独立失败与收口，避免完整大对象互相拖累 |
+| 三：只读综合 | `build_stage_synthesis_payload` | 已收口的阶段结果 | 全局结论 / 建议草稿 | 不能修改阶段事实、relation、model gap 或 resolver severity |
+| C：低置信回看 | `build_stage_review_payload` → `stage_patches[]` | 目标阶段锁定 facts + 对应阶段原生视频片段 | 仅局部 patch | 只修改目标阶段允许字段，硬限制预算和次数 |
 
 关键约束：Stage1 补观察完成后 facts 才锁定并成为"唯一事实源"，阶段二感官素材仅辅助评估声画质感，
 **不可新增或改写 facts，也不能用 `functions` 或自由文本补回未资格化阶段证据**（冲突以 facts 为准，可标注"感知歧义"）；阶段二 temperature=0 保证可复现；
@@ -462,16 +481,19 @@ ffmpeg 不可用时阶段一降级为关键帧。通过能力验证、可直接�
 
 ### 3.7 `postprocess/` 包 — 分析结果修补与校验
 
-按"职责性质"（修改 data vs 抛 SystemExit vs 市场专项 vs 品类专项）拆为 6 个子模块，依赖方向 `utils → repair / validate / claims_my / health_rewrite → chain`。
+按"职责性质"（确定性派生、审计、局部修复、通用校验、市场/品类专项）拆分；默认冻结路径使用局部阶段 patch，旧整对象修补仅保留兼容读取/调用边界，直到 Phase 5 明确删除。
 
 | 子模块 | 职责 | 行为语义 |
 |------|------|--------|
 | `postprocess/utils.py` | 通用工具：SRT 读取、evidence_unit 查找、时间关系。 | 纯函数 |
-| `postprocess/repair.py` | 修补 result data：align / bind / reconcile / ground / fill / materialize / deduplicate / downgrade + 品牌型号清洗 + 时间归一。 | 修改 data 后正常返回 |
-| `postprocess/validate.py` | 通用校验：evidence_alignment / analysis_dimensions / transcript_attribution / stage_ownership。 | 证据和归属硬错误抛 `SystemExit` 触发 repair；维度完整性写入 `qa_warnings`，不阻断报告。 |
+| `postprocess/derive.py` | 唯一 severity resolver；只消费 model severity 与受限 floor/ceiling 约束。 | 不允许其他模块直接写 severity |
+| `postprocess/repair_stages.py` | 目标阶段 `stage_patches[]` 的路径、角色、证据 ID 和快照校验。 | 非法 patch 拒绝，合法 patch 后重跑目标链 |
+| `postprocess/repair_evidence.py` | S3/S4 硬事实机械一致性检查。 | 只写审计状态，不重写语义状态 |
+| `postprocess/repair.py` | 旧结果修补兼容路径。 | 不属于默认分段 Stage2 的整对象修复入口 |
+| `postprocess/validate.py` | 通用证据、维度、转写归属和阶段所有权校验。 | 硬错误显式失败；不把缺失伪装成 absent |
 | `postprocess/claims_my.py` | 马来西亚（MY）市场 KKM/kelulusan 认证主张专项。扩市场时新增 `claims_xx.py` 平级文件。 | 修改 data |
 | `postprocess/health_rewrite.py` | 健康品类（维生素 / 营养补充 / 儿童牙膏）合规重写。含 2 个会抛 SystemExit 的 validate_*。扩品类时新增 `xx_rewrite.py` 平级文件。 | 修改 data + 抛 SystemExit |
-| `postprocess/chain.py` | `apply_postprocess_chain`：两个 caller 共享的中段流水线。每步带模块来源注释。 | 编排 |
+| `postprocess/chain.py` | `apply_postprocess_chain`：共享的确定性后处理编排。 | 编排 |
 
 职责：
 
@@ -551,8 +573,11 @@ flayr.py
   │   ├─ llm/api.py        HTTP 调用 + 临时目录传输
   │   ├─ llm/analysis_contract.py  结果结构契约
   │   ├─ llm/parse.py      JSON 解析 + schema normalize
-  │   └─ postprocess/      apply_postprocess_chain + 尾部 sanitize/validate/clamp
-  │       └─ 写 analysis_result.json
+  │   ├─ Stage1-A/B/C       原子账本、资格投影、一次定向补观察
+  │   ├─ Stage2 groups       S1+S2 / S3+S4 / S5 / S6 独立判断
+  │   ├─ Stage3 synthesis    只读阶段结果的综合
+  │   └─ postprocess/        投影、validate、resolver、局部 patch
+  │       └─ finalizer 写 analysis_result.json / manifest
   ├─ flayr.py
   │   └─ 写出分析结果与报告
   └─ report.py
