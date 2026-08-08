@@ -3446,7 +3446,7 @@ class ArchitectureContractTests(unittest.TestCase):
         validate_stage_time_coherence(result)
 
     def test_stage_links_are_validated_after_deterministic_postprocess(self) -> None:
-        source = inspect.getsource(pipeline.finalize_analysis_result)
+        source = inspect.getsource(pipeline.finalize_canonical_analysis_result)
         self.assertGreater(
             source.index("stage_evidence_link_issues(normalized)"),
             source.index("apply_postprocess_chain(normalized"),
@@ -3835,7 +3835,14 @@ class ArchitectureContractTests(unittest.TestCase):
     def test_all_result_entries_delegate_to_one_finalizer(self) -> None:
         self.assertIn("finalize_analysis_result", inspect.getsource(pipeline.merge_analysis_result))
         self.assertIn("finalize_analysis_result", inspect.getsource(pipeline._process_llm_result))
-        self.assertEqual(inspect.getsource(pipeline.finalize_analysis_result).count("validate_analysis_dimensions"), 1)
+        self.assertIn(
+            "finalize_canonical_analysis_result",
+            inspect.getsource(pipeline.finalize_analysis_result),
+        )
+        self.assertEqual(
+            inspect.getsource(pipeline.finalize_canonical_analysis_result).count("validate_analysis_dimensions"),
+            1,
+        )
 
     def test_preprocess_cache_requires_matching_video_and_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4151,7 +4158,7 @@ class ArchitectureContractTests(unittest.TestCase):
 
         self.assertEqual(unclosed["relation"], "uncertain")
         self.assertEqual(unclosed["model_gap_magnitude"], "uncertain")
-        self.assertEqual(unclosed["analysis_status"], "evidence_blocked")
+        self.assertEqual(unclosed["stage_handoff_status"], "evidence_blocked")
 
     def test_stage_group_payload_requires_stage_state_and_excludes_whole_report_contract(self) -> None:
         payload = build_stage_group_judgment_payload(

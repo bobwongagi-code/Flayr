@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .analysis_model import CanonicalAnalysisResult
 from .evidence_states import evidence_strength_gate_report
 from .postprocess.derive import derive_severity_from_facts
 
@@ -133,6 +134,43 @@ def read_analysis_input(path: Path) -> dict[str, Any]:
     """Read one bounded analysis artifact for CLI and library callers."""
     value, _ = _read_bounded_json(path.expanduser().resolve())
     return value
+
+
+def replay_canonical_finalization(
+    canonical_source: dict[str, Any],
+    analysis_context: dict[str, Any],
+    analysis_input: str,
+    *,
+    output_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Replay the complete deterministic finalizer without provider access."""
+    from .llm.pipeline import finalize_canonical_analysis_result
+
+    canonical = CanonicalAnalysisResult.from_mapping(canonical_source)
+    context = copy.deepcopy(analysis_context)
+    if output_dir is not None:
+        resolved_output = output_dir.expanduser().resolve()
+        resolved_output.mkdir(parents=True, exist_ok=True)
+        context["run_dir"] = str(resolved_output)
+    pipeline_version = str(canonical_source.get("stage2_pipeline_version") or "").strip()
+    if pipeline_version:
+        context["stage2_pipeline_version"] = pipeline_version
+    if pipeline_version == "segmented_stage_v1":
+        context["stage_evidence_contract_required"] = True
+    expected_hashes: dict[str, str] = {}
+    understanding = canonical_source.get("video_understanding")
+    if isinstance(understanding, dict):
+        for role in ("benchmark", "creator"):
+            side = understanding.get(role)
+            digest = str(side.get("evidence_set_sha256") or "") if isinstance(side, dict) else ""
+            if digest:
+                expected_hashes[role] = digest
+    return finalize_canonical_analysis_result(
+        canonical,
+        context,
+        analysis_input,
+        expected_stage1_hashes=expected_hashes,
+    )
 
 
 def _is_replay_derived_result(value: dict[str, Any]) -> bool:

@@ -10,9 +10,11 @@ from scripts.flayr_core.evidence_states import evidence_strength_gate_report
 from scripts.flayr_core.offline_replay import (
     MAX_REPLAY_INPUT_FILE_BYTES,
     discover_analysis_inputs,
+    replay_canonical_finalization,
     replay_derive_result,
     replay_many,
 )
+from scripts.flayr_core.llm.parse import normalize_analysis_result
 
 
 class OfflineReplayTests(unittest.TestCase):
@@ -36,6 +38,61 @@ class OfflineReplayTests(unittest.TestCase):
                 "benchmark": {"evidence_units": [{"id": "B1"}]},
             },
         }
+
+    def _canonical_result(self) -> dict:
+        stages = [
+            {
+                "stage": f"S{index}",
+                "benchmark_summary": "benchmark",
+                "creator_summary": "creator",
+                "gap": "gap",
+                "severity": "small",
+                "benchmark_time_range": f"{index - 1}.0s - {index}.0s",
+                "creator_time_range": f"{index - 1}.0s - {index}.0s",
+                "time_range": f"标杆 {index - 1}.0s - {index}.0s / 达人 {index - 1}.0s - {index}.0s",
+            }
+            for index in range(1, 7)
+        ]
+        return normalize_analysis_result({
+            "one_line_summary": "summary",
+            "executive_summary": "summary",
+            "holistic_assessment": {},
+            "product_visibility": {},
+            "loop_closure": {},
+            "video_understanding": {
+                "benchmark": {"evidence_units": []},
+                "creator": {"evidence_units": []},
+            },
+            "stage_analysis": stages,
+            "improvements": [{
+                "title": "improvement",
+                "target_stage": "S1",
+                "time_range": "0.0s - 1.0s",
+                "creator_time_range": "0.0s - 1.0s",
+                "benchmark_time_range": "0.0s - 1.0s",
+                "problem": "problem",
+                "suggestion": "suggestion",
+                "actions": ["action"],
+                "evidence": ["evidence"],
+            }],
+        })
+
+    def test_complete_finalization_replay_is_deterministic_and_does_not_mutate_canonical(self) -> None:
+        canonical = self._canonical_result()
+        before = json.loads(json.dumps(canonical))
+        context = {
+            "videos": {
+                "benchmark": {"duration_seconds": 10},
+                "creator": {"duration_seconds": 10},
+            }
+        }
+
+        first = replay_canonical_finalization(canonical, context, "")
+        second = replay_canonical_finalization(canonical, context, "")
+
+        self.assertEqual(first, second)
+        self.assertEqual(canonical, before)
+        self.assertEqual(len(first["stage_analysis"]), 6)
 
     def test_replay_is_offline_and_preserves_source_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -2081,6 +2081,7 @@ from flayr_core.llm.payload import (  # noqa: E402
 from flayr_core.llm.pipeline import (  # noqa: E402
     _process_llm_result,
     finalize_analysis_result,
+    finalize_canonical_analysis_result,
     has_product_foundation_anchor,
     merge_analysis_result,
     product_foundation_validation_reason,
@@ -2166,7 +2167,8 @@ check(
     "LLM 结果入口统一委托唯一收口链",
     "finalize_analysis_result" in inspect.getsource(merge_analysis_result)
     and "finalize_analysis_result" in inspect.getsource(_process_llm_result)
-    and inspect.getsource(finalize_analysis_result).count("validate_analysis_dimensions") == 1,
+    and "finalize_canonical_analysis_result" in inspect.getsource(finalize_analysis_result)
+    and inspect.getsource(finalize_canonical_analysis_result).count("validate_analysis_dimensions") == 1,
 )
 
 with tempfile.TemporaryDirectory() as tmp:

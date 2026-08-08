@@ -716,7 +716,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             facts,
         )
 
-        self.assertEqual(projected["analysis_status"], "grounded")
+        self.assertEqual(projected["stage_handoff_status"], "grounded")
         self.assertEqual(projected["benchmark_evidence_ids"], ["B6"])
         self.assertEqual(projected["creator_evidence_ids"], ["C6"])
 
@@ -739,7 +739,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             facts,
         )
 
-        self.assertEqual(projected["analysis_status"], "grounded")
+        self.assertEqual(projected["stage_handoff_status"], "grounded")
         self.assertEqual(projected["benchmark_evidence_ids"], ["B6"])
         self.assertEqual(projected["creator_evidence_ids"], ["C6"])
 
@@ -760,7 +760,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             facts,
         )
 
-        self.assertEqual(projected["analysis_status"], "handoff_loss")
+        self.assertEqual(projected["stage_handoff_status"], "handoff_loss")
         self.assertEqual(projected["benchmark_evidence_ids"], [])
         self.assertEqual(projected["creator_evidence_ids"], [])
 
@@ -790,7 +790,7 @@ class StageEvidenceContractTests(unittest.TestCase):
         )
 
         self.assertEqual(projected["comparison_status"], "not_directly_comparable")
-        self.assertEqual(projected["analysis_status"], "not_comparable")
+        self.assertEqual(projected["stage_handoff_status"], "not_comparable")
         self.assertEqual(projected["relation"], "uncertain")
         self.assertEqual(projected["model_gap_magnitude"], "uncertain")
         self.assertTrue(projected["benchmark_evidence_ids"])
@@ -907,7 +907,7 @@ class StageEvidenceContractTests(unittest.TestCase):
         )
         stage = result["stage_analysis"][0]
         self.assertEqual(stage["comparison_status"], "not_directly_comparable")
-        self.assertEqual(stage["analysis_status"], "not_comparable")
+        self.assertEqual(stage["stage_handoff_status"], "not_comparable")
         self.assertEqual(stage["relation"], "uncertain")
         self.assertEqual(stage["benchmark_evidence_ids"], ["B6"])
         self.assertEqual(stage["creator_evidence_ids"], ["C6"])

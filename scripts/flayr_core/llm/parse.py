@@ -1336,18 +1336,20 @@ def normalize_analysis_result(
                     {"completed", "unknown", "conflict", "blocked"},
                     "unknown",
                 ),
-                "analysis_status": normalize_choice(
-                    item.get("analysis_status"),
-                    {
-                        "grounded",
-                        "handoff_loss",
-                        "evidence_blocked",
-                        "not_comparable",
-                        "not_applicable",
+                **{
+                    ("stage_handoff_status" if segmented_result else "analysis_status"): normalize_choice(
+                        item.get("stage_handoff_status") or item.get("analysis_status"),
+                        {
+                            "grounded",
+                            "handoff_loss",
+                            "evidence_blocked",
+                            "not_comparable",
+                            "not_applicable",
+                            "unknown",
+                        },
                         "unknown",
-                    },
-                    "unknown",
-                ),
+                    )
+                },
                 # Code-owned comparison scope survives normalization so the
                 # finalizer can replay an already-normalized segmented result
                 # without turning a closed stage back into a handoff failure.
@@ -1483,7 +1485,17 @@ def normalize_analysis_result(
         "stage_evidence_links": stage_evidence_links,
         "stage_analysis": normalized_stages,
         "improvements": normalized_improvements,
-        "stage2_pipeline_status": str(result.get("stage2_pipeline_status") or "completed").strip().lower(),
+        **{
+            (
+                "stage2_candidate_status"
+                if result.get("stage2_pipeline_version") == "segmented_stage_v1"
+                else "stage2_pipeline_status"
+            ): str(
+                result.get("stage2_candidate_status")
+                or result.get("stage2_pipeline_status")
+                or "completed"
+            ).strip().lower()
+        },
         "stage2_pipeline_version": str(result.get("stage2_pipeline_version") or "").strip(),
         "segmented_pipeline": copy.deepcopy(result.get("segmented_pipeline"))
         if isinstance(result.get("segmented_pipeline"), dict)

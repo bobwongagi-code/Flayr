@@ -45,10 +45,13 @@ SOURCE_CONTRACT_FILES = (
     "references/brand_propositions.json",
     "references/commercial-judgement-framework.md",
     "references/observation-guide.md",
+    "references/result-pipeline-architecture.md",
+    "scripts/flayr_core/analysis_model.py",
     "scripts/flayr_core/llm/payload.py",
     "scripts/flayr_core/llm/parse.py",
     "scripts/flayr_core/llm/pipeline.py",
     "scripts/flayr_core/llm/s4_visual_verifier.py",
+    "scripts/flayr_core/llm/stage_group_artifacts.py",
     "scripts/flayr_core/llm/stage_review_contract.py",
     "scripts/flayr_core/evidence_states.py",
     "scripts/flayr_core/finalization/__init__.py",
@@ -59,6 +62,7 @@ SOURCE_CONTRACT_FILES = (
     "scripts/flayr_core/postprocess/derive.py",
     "scripts/flayr_core/postprocess/repair_evidence.py",
     "scripts/flayr_core/postprocess/validate.py",
+    "scripts/flayr_core/stage_evidence_contracts.py",
 )
 
 

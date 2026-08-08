@@ -220,6 +220,35 @@ class AnalysisResult:
         analysis["analysis_result_contract"] = ANALYSIS_RESULT_CONTRACT.metadata()
 
 
+@dataclass(frozen=True)
+class CanonicalAnalysisResult:
+    """Validated provider result before any derived business mutation.
+
+    The nested mapping is copied on construction and every consumer receives a
+    fresh copy.  This makes the canonical artifact a real replay boundary
+    rather than a second name for the mutable object used by postprocessing.
+    """
+
+    data: Mapping[str, Any]
+    sha256: str
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "CanonicalAnalysisResult":
+        if not isinstance(value, Mapping):
+            raise TypeError("canonical analysis result must be a mapping")
+        copied = copy.deepcopy(dict(value))
+        encoded = json.dumps(
+            copied,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return cls(copied, hashlib.sha256(encoded).hexdigest())
+
+    def to_dict(self) -> dict[str, Any]:
+        return copy.deepcopy(dict(self.data))
+
+
 def placeholder_stage(definition: StageDefinition) -> dict[str, Any]:
     """Create the single placeholder shape used before an LLM result exists."""
     return {

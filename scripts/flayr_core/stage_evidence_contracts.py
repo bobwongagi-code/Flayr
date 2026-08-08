@@ -1386,7 +1386,14 @@ def materialize_stage_evidence_gates(result: Any) -> None:
         if not isinstance(stage, dict):
             continue
         code = normalize_stage_code(stage.get("stage")) or f"S{index}"
-        prior_status = str(stage.get("analysis_status") or "").strip().lower()
+        # Segmented Canonical results expose only the handoff state. This
+        # finalizer is the sole writer of the publishable analysis_status.
+        # Fall back to the legacy field so old artifacts remain replayable.
+        prior_status = str(
+            stage.get("stage_handoff_status")
+            or stage.get("analysis_status")
+            or ""
+        ).strip().lower()
         gate = stage_evidence_gate(
             result,
             code,

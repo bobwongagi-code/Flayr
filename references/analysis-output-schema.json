@@ -452,6 +452,7 @@
         },
         "source": "code"
       },
+      "stage_handoff_status": "grounded | handoff_loss | evidence_blocked | not_applicable | not_comparable | unknown。Canonical 分段交接状态；finalizer 只读。",
       "analysis_status": "grounded | evidence_blocked | not_applicable | not_comparable | legacy_evidence_contract。代码生成。",
       "analysis_reason": "证据不足或旧合同下的代码生成说明。",
       "time_range": "标杆真实时间 / 达人真实时间",
@@ -852,11 +853,13 @@
     "dna_source": "library | operator | model_inferred。DNA 来源标记，postprocess 填；模型现推为 model_inferred。",
     "confidence": "high | low。模型对该 DNA 判断的置信度；小众品/本地新奇特品类宜标 low。"
   },
-  "stage2_pipeline_status": "completed | degraded | failed。由分阶段调用编排器写入，不由模型决定。",
+  "stage2_candidate_status": "completed | degraded | failed。Canonical 分组执行候选状态；finalizer 只读。",
+  "stage2_pipeline_status": "completed | degraded | failed。由 finalizer 根据分组记录和最终阶段状态唯一生成。",
   "stage2_pipeline_version": "segmented_stage_v1 | legacy。生产新路径必须为 segmented_stage_v1。",
   "segmented_pipeline": {
     "version": "segmented_stage_v1",
-    "status": "completed | degraded | failed",
+    "candidate_status": "completed | degraded | failed。Canonical 分组执行状态。",
+    "status": "completed | degraded | failed。Finalizer 发布状态。",
     "stage_groups": "四个独立 Stage2 阶段组的状态、响应摘要和失败原因。",
     "synthesis_status": "completed | failed"
   },

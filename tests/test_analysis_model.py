@@ -8,6 +8,7 @@ from scripts.flayr_core.analysis_model import (
     ANALYSIS_RESULT_CONTRACT,
     ANALYSIS_PROJECTION_FIELDS,
     AnalysisResult,
+    CanonicalAnalysisResult,
     placeholder_stages,
 )
 
@@ -57,6 +58,20 @@ class AnalysisModelContractTests(unittest.TestCase):
             self.assertTrue(phase["input_artifact"])
             self.assertTrue(phase["output_artifact"])
         self.assertEqual(len(metadata["schema_sha256"]), 64)
+
+    def test_canonical_result_is_a_detached_replay_boundary(self) -> None:
+        source = {"stage_analysis": [{"stage": "S1 Hook", "creator_evidence_ids": ["C1"]}]}
+        canonical = CanonicalAnalysisResult.from_mapping(source)
+
+        source["stage_analysis"][0]["creator_evidence_ids"].append("C2")
+        mutable = canonical.to_dict()
+        mutable["stage_analysis"][0]["creator_evidence_ids"].append("C3")
+
+        self.assertEqual(
+            canonical.to_dict()["stage_analysis"][0]["creator_evidence_ids"],
+            ["C1"],
+        )
+        self.assertEqual(len(canonical.sha256), 64)
 
     def test_placeholder_stages_are_owned_by_the_same_stage_catalog(self) -> None:
         stages = placeholder_stages()

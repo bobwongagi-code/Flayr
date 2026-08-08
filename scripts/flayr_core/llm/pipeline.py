@@ -30,7 +30,12 @@ from ..artifacts import format_seconds, get_analysis_frame_entries, parse_time_r
 from ..evidence_states import stage_flag_allows_empty_evidence
 from ..multimodal import sanitize_audio_observations
 from ..utils import write_json, write_text
-from ..analysis_model import ANALYSIS_RESULT_CONTRACT, AnalysisResult, schema_sha256
+from ..analysis_model import (
+    ANALYSIS_RESULT_CONTRACT,
+    AnalysisResult,
+    CanonicalAnalysisResult,
+    schema_sha256,
+)
 from ..stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
     STAGE_EVIDENCE_SNAPSHOT_VERSION,
@@ -109,6 +114,14 @@ from .stage_review_contract import (
     patch_fields_for_stage,
 )
 from .s4_visual_verifier import maybe_apply_s4_visual_verifier
+from .stage_group_artifacts import (
+    StageGroupArtifactError,
+    completed_stage_group_artifact,
+    failed_stage_group_artifact,
+    read_stage_group_artifact,
+    reusable_stage_group_response,
+    stage_group_artifact_path,
+)
 from .media import select_role_visual_inputs, select_stage_recovery_visual_inputs
 from ..finalization import facade as finalization_facade
 from ..postprocess import apply_postprocess_chain, apply_segmented_postprocess_chain
@@ -378,7 +391,13 @@ def _refresh_segmented_pipeline_status(result: dict[str, Any]) -> tuple[str, lis
     } if isinstance(groups, list) else set()
     metadata_incomplete = not required_groups.issubset(observed_groups)
     synthesis_failed = str(pipeline.get("synthesis_status") or "").strip().lower() not in {"", "completed"}
-    current_status = str(result.get("stage2_pipeline_status") or pipeline.get("status") or "").strip().lower()
+    current_status = str(
+        result.get("stage2_candidate_status")
+        or result.get("stage2_pipeline_status")
+        or pipeline.get("candidate_status")
+        or pipeline.get("status")
+        or ""
+    ).strip().lower()
     if current_status == "failed":
         status = "failed"
     elif unresolved or "failed" in group_statuses or metadata_incomplete or synthesis_failed:
@@ -410,7 +429,11 @@ def _clear_segmented_unresolved_severity(
         if isinstance(trace, dict):
             trace["severity"] = None
             trace["model_severity"] = None
-            trace["status"] = str(stage.get("analysis_status") or "evidence_blocked")
+            trace["status"] = str(
+                stage.get("analysis_status")
+                or stage.get("stage_handoff_status")
+                or "evidence_blocked"
+            )
 
 
 def _reproject_segmented_stage_results(
@@ -472,6 +495,127 @@ def _authoritative_segmented_comparison_contract(
         if isinstance(source, dict) and source:
             return copy.deepcopy(source)
     return {}
+
+
+def finalize_canonical_analysis_result(
+    canonical_result: CanonicalAnalysisResult,
+    analysis: dict[str, Any],
+    analysis_input: str,
+    *,
+    expected_stage1_hashes: dict[str, str] | None = None,
+    raw_snapshot: dict[str, Any] | None = None,
+    audit: PostprocessAudit | None = None,
+) -> dict[str, Any]:
+    """Apply deterministic finalization to one immutable canonical snapshot.
+
+    This boundary never parses provider aliases and never calls a model.  It
+    is therefore safe for code-only replay after a gate, resolver, validation,
+    or report change.
+    """
+    artifact_dir = _analysis_artifact_dir(analysis)
+    if artifact_dir is not None:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+    if audit is None and artifact_dir is not None:
+        audit = PostprocessAudit()
+    validated_snapshot = canonical_result.to_dict()
+    if artifact_dir is not None:
+        write_json(artifact_dir / "validated_normalized_result.json", validated_snapshot)
+    normalized = canonical_result.to_dict()
+    segmented = str(normalized.get("stage2_pipeline_version") or "").strip() == "segmented_stage_v1"
+
+    if segmented:
+        apply_segmented_postprocess_chain(normalized, analysis, audit=audit)
+    else:
+        apply_postprocess_chain(normalized, analysis, audit=audit)
+
+    if segmented:
+        if audit is None:
+            _status, unresolved = _refresh_segmented_pipeline_status(normalized)
+            _clear_segmented_unresolved_severity(normalized, unresolved)
+        else:
+            _status, unresolved = audit.run(
+                normalized,
+                "postprocess.segmented.refresh_pipeline_status",
+                _refresh_segmented_pipeline_status,
+                normalized,
+            )
+            audit.run(
+                normalized,
+                "postprocess.segmented.clear_unresolved_severity",
+                _clear_segmented_unresolved_severity,
+                normalized,
+                unresolved,
+            )
+
+    def audited_step(rule: str, function: Any, *args: Any) -> None:
+        if audit is None:
+            function(*args)
+        else:
+            audit.run(normalized, rule, function, *args)
+
+    audited_step(
+        "postprocess.reconcile_stage_evidence_links",
+        reconcile_stage_evidence_links,
+        normalized,
+    )
+    validate_evidence_alignment(normalized)
+    validate_stage_ownership(normalized)
+    audited_step("postprocess.sanitize_health_recommendations", sanitize_health_recommendations, normalized, analysis_input)
+    audited_step(
+        "postprocess.sanitize_child_toothpaste_recommendations",
+        sanitize_child_toothpaste_recommendations,
+        normalized,
+        analysis_input,
+    )
+    audited_step("postprocess.stabilize_improvement_priorities.tail_1", stabilize_improvement_priorities, normalized)
+    audited_step("postprocess.ground_improvement_evidence", ground_improvement_evidence, normalized)
+    audited_step("postprocess.stabilize_improvement_priorities.tail_2", stabilize_improvement_priorities, normalized)
+    validate_analysis_dimensions(normalized)
+    validate_recommendation_safety(normalized, analysis_input)
+    validate_creator_script_language(normalized, analysis_input)
+    audited_step("postprocess.remove_unverified_brand_models", remove_unverified_brand_models, normalized, analysis)
+    audited_step("postprocess.clamp_result_time_ranges", _clamp_result_time_ranges, normalized, analysis)
+    audited_step("postprocess.materialize_global_diagnosis", materialize_global_diagnosis, normalized, analysis)
+    validate_quality_contract(normalized, analysis)
+    final_link_issues = stage_evidence_link_issues(normalized)
+    if final_link_issues:
+        raise SystemExit("最终阶段证据链接合同无效：" + "；".join(final_link_issues))
+    stage1_hashes = expected_stage1_hashes or {}
+    immutability_issues = stage_evidence_immutability_issues(
+        normalized,
+        stage1_hashes,
+        require_snapshot=bool(stage1_hashes),
+    )
+    if immutability_issues:
+        raise SystemExit("Stage1 证据在下游流程中发生未授权变化：" + "；".join(immutability_issues))
+
+    if artifact_dir is not None and audit is not None:
+        source_snapshot = copy.deepcopy(raw_snapshot) if isinstance(raw_snapshot, dict) else validated_snapshot
+        field_sources = build_field_sources(
+            source_snapshot,
+            validated_snapshot,
+            normalized,
+            audit.changes,
+            truncated=audit.truncated,
+        )
+        provenance = {
+            "schema_version": 1,
+            "result_contract": ANALYSIS_RESULT_CONTRACT.metadata(),
+            "raw_model_response": "raw_model_response.json" if raw_snapshot is not None else None,
+            "validated_normalized_result": "validated_normalized_result.json",
+            "validated_normalized_sha256": canonical_result.sha256,
+            "final_derived_result": "final_derived_result.json",
+            "field_change_log": "postprocess_change_log.json",
+            "change_count": len(audit.changes),
+            "change_log_truncated": audit.truncated,
+            "field_sources": field_sources,
+        }
+        normalized["postprocess_provenance"] = provenance
+        change_log = audit.as_dict()
+        change_log["field_sources"] = field_sources
+        write_json(artifact_dir / "postprocess_change_log.json", change_log)
+        write_json(artifact_dir / "final_derived_result.json", normalized)
+    return normalized
 
 
 def finalize_analysis_result(
@@ -578,7 +722,7 @@ def finalize_analysis_result(
     segmented = segmented_pipeline or str(normalized.get("stage2_pipeline_version") or "").strip() == "segmented_stage_v1"
     if segmented:
         normalized["stage2_pipeline_version"] = "segmented_stage_v1"
-        _status, unresolved = _refresh_segmented_pipeline_status(normalized)
+        unresolved = _segmented_stage_unresolved(normalized.get("stage_analysis") or [])
         _clear_segmented_unresolved_severity(normalized, unresolved)
     if audit is not None:
         audit.record(before_normalize, normalized, "pipeline.normalize_analysis_result")
@@ -615,111 +759,15 @@ def finalize_analysis_result(
                 raise SystemExit(f"{role} Stage1 证据集未冻结或已损坏：" + "；".join(snapshot_issues))
             expected_stage1_hashes[role] = str(side.get("evidence_set_sha256") or "")
 
-    validated_snapshot = copy.deepcopy(normalized)
-    if artifact_dir is not None:
-        write_json(artifact_dir / "validated_normalized_result.json", validated_snapshot)
-
-    if analysis.get("stage2_pipeline_version") == "segmented_stage_v1":
-        apply_segmented_postprocess_chain(normalized, analysis, audit=audit)
-    else:
-        apply_postprocess_chain(normalized, analysis, audit=audit)
-
-    if segmented:
-        # Comparison eligibility is materialized inside the segmented
-        # postprocess chain. Recompute publishability after that gate, not
-        # only before it; otherwise intentionally closed stages remain in the
-        # pre-gate unresolved list and downgrade an otherwise valid run.
-        if audit is None:
-            _status, unresolved = _refresh_segmented_pipeline_status(normalized)
-            _clear_segmented_unresolved_severity(normalized, unresolved)
-        else:
-            _status, unresolved = audit.run(
-                normalized,
-                "postprocess.segmented.refresh_pipeline_status",
-                _refresh_segmented_pipeline_status,
-                normalized,
-            )
-            audit.run(
-                normalized,
-                "postprocess.segmented.clear_unresolved_severity",
-                _clear_segmented_unresolved_severity,
-                normalized,
-                unresolved,
-            )
-
-    def audited_step(rule: str, function: Any, *args: Any) -> None:
-        if audit is None:
-            function(*args)
-        else:
-            audit.run(normalized, rule, function, *args)
-
-    # Stage flags and top-level references are deterministically aligned by the
-    # postprocess chain. The link list is a code-owned projection of those
-    # aligned references, so validate it only after rebuilding it here. Strict
-    # pre-chain validation would reject exactly the safe repairs this chain is
-    # responsible for and trigger an unnecessary full-model retry.
-    audited_step(
-        "postprocess.reconcile_stage_evidence_links",
-        reconcile_stage_evidence_links,
-        normalized,
-    )
-
-    validate_evidence_alignment(normalized)
-    validate_stage_ownership(normalized)
-    audited_step("postprocess.sanitize_health_recommendations", sanitize_health_recommendations, normalized, analysis_input)
-    audited_step(
-        "postprocess.sanitize_child_toothpaste_recommendations",
-        sanitize_child_toothpaste_recommendations,
-        normalized,
+    canonical_result = CanonicalAnalysisResult.from_mapping(normalized)
+    return finalize_canonical_analysis_result(
+        canonical_result,
+        analysis,
         analysis_input,
+        expected_stage1_hashes=expected_stage1_hashes,
+        raw_snapshot=raw_snapshot,
+        audit=audit,
     )
-    audited_step("postprocess.stabilize_improvement_priorities.tail_1", stabilize_improvement_priorities, normalized)
-    audited_step("postprocess.ground_improvement_evidence", ground_improvement_evidence, normalized)
-    audited_step("postprocess.stabilize_improvement_priorities.tail_2", stabilize_improvement_priorities, normalized)
-    validate_analysis_dimensions(normalized)
-    validate_recommendation_safety(normalized, analysis_input)
-    validate_creator_script_language(normalized, analysis_input)
-    audited_step("postprocess.remove_unverified_brand_models", remove_unverified_brand_models, normalized, analysis)
-    audited_step("postprocess.clamp_result_time_ranges", _clamp_result_time_ranges, normalized, analysis)
-    # 全局门控须在提升点完成最终过滤后生成，避免商业优先级引用已被清除的建议。
-    audited_step("postprocess.materialize_global_diagnosis", materialize_global_diagnosis, normalized, analysis)
-    validate_quality_contract(normalized, analysis)
-    final_link_issues = stage_evidence_link_issues(normalized)
-    if final_link_issues:
-        raise SystemExit("最终阶段证据链接合同无效：" + "；".join(final_link_issues))
-    immutability_issues = stage_evidence_immutability_issues(
-        normalized,
-        expected_stage1_hashes,
-        require_snapshot=bool(expected_stage1_hashes),
-    )
-    if immutability_issues:
-        raise SystemExit("Stage1 证据在下游流程中发生未授权变化：" + "；".join(immutability_issues))
-
-    if artifact_dir is not None and audit is not None:
-        field_sources = build_field_sources(
-            raw_snapshot,
-            validated_snapshot,
-            normalized,
-            audit.changes,
-            truncated=audit.truncated,
-        )
-        provenance = {
-            "schema_version": 1,
-            "result_contract": ANALYSIS_RESULT_CONTRACT.metadata(),
-            "raw_model_response": "raw_model_response.json",
-            "validated_normalized_result": "validated_normalized_result.json",
-            "final_derived_result": "final_derived_result.json",
-            "field_change_log": "postprocess_change_log.json",
-            "change_count": len(audit.changes),
-            "change_log_truncated": audit.truncated,
-            "field_sources": field_sources,
-        }
-        normalized["postprocess_provenance"] = provenance
-        change_log = audit.as_dict()
-        change_log["field_sources"] = field_sources
-        write_json(artifact_dir / "postprocess_change_log.json", change_log)
-        write_json(artifact_dir / "final_derived_result.json", normalized)
-    return normalized
 
 
 def merge_analysis_result(analysis: dict[str, Any], result_path: Path, analysis_input: str) -> None:
@@ -728,7 +776,11 @@ def merge_analysis_result(analysis: dict[str, Any], result_path: Path, analysis_
     segmented = str(result.get("stage2_pipeline_version") or "").strip() == "segmented_stage_v1"
     if segmented:
         analysis["stage2_pipeline_version"] = "segmented_stage_v1"
-        analysis["stage2_pipeline_status"] = str(result.get("stage2_pipeline_status") or "degraded").strip().lower()
+        analysis["stage2_candidate_status"] = str(
+            result.get("stage2_candidate_status")
+            or result.get("stage2_pipeline_status")
+            or "degraded"
+        ).strip().lower()
         analysis["stage_evidence_contract_required"] = True
     stages = result.get("stage_analysis") if isinstance(result.get("stage_analysis"), list) else []
     if segmented:
@@ -1387,7 +1439,7 @@ def _normalize_segmented_stage(
         output["relation"] = "uncertain"
         output["model_gap_magnitude"] = "uncertain"
         output["stage_state"] = "unknown"
-        output["analysis_status"] = (
+        output["stage_handoff_status"] = (
             "not_applicable" if comparison_status == "not_applicable" else "not_comparable"
         )
     elif missing_model_references:
@@ -1398,7 +1450,7 @@ def _normalize_segmented_stage(
             str(raw.get("judgment_reason") or "").strip()
             or "Stage2 未返回可核验的阶段证据 ID，未将候选事实升级为正式引用。"
         )
-        output["analysis_status"] = "handoff_loss"
+        output["stage_handoff_status"] = "handoff_loss"
     elif any(value != "present" for value in readiness.values()):
         output["relation"] = "uncertain"
         output["model_gap_magnitude"] = "uncertain"
@@ -1407,7 +1459,7 @@ def _normalize_segmented_stage(
             str(raw.get("judgment_reason") or "").strip()
             or f"Stage1 资格未闭合：benchmark={readiness['benchmark']}，creator={readiness['creator']}。"
         )
-        output["analysis_status"] = "evidence_blocked"
+        output["stage_handoff_status"] = "evidence_blocked"
     else:
         # A complete evidence handoff is necessary but not sufficient.  The
         # group response must also close its own semantic state; otherwise a
@@ -1419,13 +1471,13 @@ def _normalize_segmented_stage(
         if output["stage_state"] != "completed":
             output["relation"] = "uncertain"
             output["model_gap_magnitude"] = "uncertain"
-            output["analysis_status"] = "unknown" if output["stage_state"] == "unknown" else "evidence_blocked"
+            output["stage_handoff_status"] = "unknown" if output["stage_state"] == "unknown" else "evidence_blocked"
         else:
             relation = str(raw.get("relation") or "").strip().lower()
             output["relation"] = relation if relation in {"creator_better", "benchmark_better", "equivalent", "uncertain"} else "uncertain"
             magnitude = str(raw.get("model_gap_magnitude") or "").strip().lower()
             output["model_gap_magnitude"] = magnitude if magnitude in {"none", "small", "medium", "large", "uncertain"} else "uncertain"
-            output["analysis_status"] = "grounded"
+            output["stage_handoff_status"] = "grounded"
 
     output["gap_type"] = "execution"
     output["gap_summary"] = [output["judgment_reason"] or "待基于阶段证据复核。"]
@@ -1449,7 +1501,7 @@ def _normalize_segmented_stage(
     output["benchmark_module_id"] = "unknown"
     output["module_fit"] = "unknown"
     output["module_fit_reason"] = output["judgment_reason"]
-    output["task_completion"] = "complete" if output.get("analysis_status") == "grounded" else "missing"
+    output["task_completion"] = "complete" if output.get("stage_handoff_status") == "grounded" else "missing"
     output["voice_performance"] = {
         "pace": "unknown",
         "energy": "unknown",
@@ -1464,7 +1516,7 @@ def _normalize_segmented_stage(
     # A nested structured flag is accepted only as a complete object. Partial
     # semantic objects are worse than an explicit unknown because the existing
     # resolver/validators would otherwise mistake omitted booleans for facts.
-    if output.get("analysis_status") == "grounded":
+    if output.get("stage_handoff_status") == "grounded":
         for role in ("benchmark", "creator"):
             key = f"{role}_{stage.lower() if stage != 'S1' else 'hook'}"
             value = raw.get(key)
@@ -1559,7 +1611,11 @@ def _segmented_stage_unresolved(stage_results: list[dict[str, Any]]) -> list[str
             # but should not make an otherwise complete segmented run appear
             # degraded.
             continue
-        status = str(stage.get("analysis_status") or "unknown").strip().lower()
+        status = str(
+            stage.get("analysis_status")
+            or stage.get("stage_handoff_status")
+            or "unknown"
+        ).strip().lower()
         stage_state = str(stage.get("stage_state") or "unknown").strip().lower()
         magnitude = str(stage.get("model_gap_magnitude") or "unknown").strip().lower()
         # ``stage_state`` is a required semantic output.  A grounded evidence
@@ -1675,6 +1731,35 @@ def _stage1_to_stage2_handoff_issues(
     return list(dict.fromkeys(issues))
 
 
+def _stage2_replay_source(args: argparse.Namespace) -> tuple[Path | None, bool]:
+    """Return the source directory and whether missing entries may call LLM."""
+    replay = getattr(args, "stage2_replay_from", None)
+    resume = getattr(args, "stage2_resume_from", None)
+    if replay:
+        return Path(replay).expanduser().resolve(), False
+    if resume:
+        return Path(resume).expanduser().resolve(), True
+    return None, True
+
+
+def _read_replayable_stage_group(
+    source_dir: Path,
+    *,
+    group: list[str] | tuple[str, ...],
+    payload: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    path = stage_group_artifact_path(source_dir, group)
+    artifact = read_stage_group_artifact(path)
+    return reusable_stage_group_response(
+        artifact,
+        group=group,
+        payload=payload,
+        model=args.llm_model,
+        api_url=args.llm_api_url,
+    )
+
+
 def run_segmented_stage_pipeline(
     args: argparse.Namespace,
     analysis: dict[str, Any],
@@ -1709,12 +1794,15 @@ def run_segmented_stage_pipeline(
     stage_results: list[dict[str, Any]] = []
     group_records: list[dict[str, Any]] = []
     any_group_failed = False
+    replay_source, provider_fallback_allowed = _stage2_replay_source(args)
     for group in STAGE_JUDGMENT_GROUPS:
         label = "_".join(group)
         target = list(group)
         record: dict[str, Any] = {"group": target, "status": "pending", "stages": []}
+        provider_artifact_path = stage_group_artifact_path(run_dir, target)
         request_path = run_dir / f"llm_stage_group_{label}_request.json"
         response_path = run_dir / f"llm_stage_group_{label}_response.json"
+        payload: dict[str, Any] = {}
         try:
             payload = build_stage_group_judgment_payload(
                 args.llm_model,
@@ -1725,9 +1813,36 @@ def run_segmented_stage_pipeline(
                 api_url=args.llm_api_url,
                 budget=getattr(args, "_resource_budget", None),
             )
-            write_json(request_path, payload)
-            response_text = fetch_json_completion(args, api_key, request_path, response_path)
-            parsed = parse_json_text(response_text)
+            execution_source = "provider"
+            parsed: dict[str, Any] | None = None
+            if replay_source is not None:
+                try:
+                    parsed = _read_replayable_stage_group(
+                        replay_source,
+                        group=target,
+                        payload=payload,
+                        args=args,
+                    )
+                    execution_source = "replay"
+                except StageGroupArtifactError as exc:
+                    if not provider_fallback_allowed:
+                        raise SystemExit(f"阶段组 {label} 无法离线重放：{exc}") from exc
+            if parsed is None:
+                write_json(request_path, payload)
+                response_text = fetch_json_completion(args, api_key, request_path, response_path)
+                parsed = parse_json_text(response_text)
+            if not isinstance(parsed, dict):
+                raise SystemExit(f"阶段组 {label} 必须返回 JSON 对象")
+            write_json(
+                provider_artifact_path,
+                completed_stage_group_artifact(
+                    group=target,
+                    payload=payload,
+                    response=parsed,
+                    model=args.llm_model,
+                    api_url=args.llm_api_url,
+                ),
+            )
             raw_stages = parsed.get("stages") if isinstance(parsed, dict) and isinstance(parsed.get("stages"), list) else []
             by_code = {
                 _segmented_stage_code(item.get("stage")): item
@@ -1741,11 +1856,27 @@ def run_segmented_stage_pipeline(
                 _normalize_segmented_stage(by_code[code], code, facts, comparison_eligibility)
                 for code in target
             ]
-            record.update({"status": "completed", "stages": target, "response_sha256": _stable_digest(parsed)})
+            record.update({
+                "status": "completed",
+                "stages": target,
+                "response_sha256": _stable_digest(parsed),
+                "provider_artifact": provider_artifact_path.name,
+                "execution_source": execution_source,
+            })
             stage_results.extend(projected)
         except (OSError, ValueError, SystemExit, json.JSONDecodeError) as exc:
             any_group_failed = True
             record.update({"status": "failed", "error": str(exc)})
+            write_json(
+                provider_artifact_path,
+                failed_stage_group_artifact(
+                    group=target,
+                    payload=payload,
+                    model=args.llm_model,
+                    api_url=args.llm_api_url,
+                    error=str(exc),
+                ),
+            )
             projected = [
                 _normalize_segmented_stage(
                     {"stage": _SEGMENTED_STAGE_NAMES[code], "relation": "uncertain", "model_gap_magnitude": "uncertain", "judgment_reason": f"阶段组调用失败：{exc}"},
@@ -1763,18 +1894,55 @@ def run_segmented_stage_pipeline(
     synthesis: dict[str, Any] = {}
     synthesis_request = run_dir / "llm_stage_synthesis_request.json"
     synthesis_response = run_dir / "llm_stage_synthesis_response.json"
+    synthesis_provider_artifact = stage_group_artifact_path(run_dir, ("SYNTHESIS",))
+    synthesis_payload: dict[str, Any] = {}
+    synthesis_execution_source = "provider"
     try:
-        payload = build_stage_synthesis_payload(args.llm_model, analysis_input, facts, stage_results, analysis)
-        write_json(synthesis_request, payload)
-        response_text = fetch_json_completion(args, api_key, synthesis_request, synthesis_response)
-        parsed = parse_json_text(response_text)
+        synthesis_payload = build_stage_synthesis_payload(args.llm_model, analysis_input, facts, stage_results, analysis)
+        parsed: dict[str, Any] | None = None
+        if replay_source is not None:
+            try:
+                parsed = _read_replayable_stage_group(
+                    replay_source,
+                    group=("SYNTHESIS",),
+                    payload=synthesis_payload,
+                    args=args,
+                )
+                synthesis_execution_source = "replay"
+            except StageGroupArtifactError as exc:
+                if not provider_fallback_allowed:
+                    raise SystemExit(f"Stage3 synthesis 无法离线重放：{exc}") from exc
+        if parsed is None:
+            write_json(synthesis_request, synthesis_payload)
+            response_text = fetch_json_completion(args, api_key, synthesis_request, synthesis_response)
+            parsed = parse_json_text(response_text)
         if not isinstance(parsed, dict):
             raise SystemExit("Stage3 synthesis must be a JSON object")
+        write_json(
+            synthesis_provider_artifact,
+            completed_stage_group_artifact(
+                group=("SYNTHESIS",),
+                payload=synthesis_payload,
+                response=parsed,
+                model=args.llm_model,
+                api_url=args.llm_api_url,
+            ),
+        )
         synthesis = parsed
     except (OSError, ValueError, SystemExit, json.JSONDecodeError) as exc:
         synthesis_status = "failed"
         synthesis = {"synthesis_error": str(exc)}
         any_group_failed = True
+        write_json(
+            synthesis_provider_artifact,
+            failed_stage_group_artifact(
+                group=("SYNTHESIS",),
+                payload=synthesis_payload,
+                model=args.llm_model,
+                api_url=args.llm_api_url,
+                error=str(exc),
+            ),
+        )
 
     synthesis = _prepare_segmented_synthesis(synthesis, stage_results)
     unresolved_stages = _segmented_stage_unresolved(stage_results)
@@ -1782,13 +1950,18 @@ def run_segmented_stage_pipeline(
         "pipeline": "segmented_stage_v1",
         "stage_groups": group_records,
         "synthesis_status": synthesis_status,
+        "synthesis_provider_artifact": synthesis_provider_artifact.name,
+        "synthesis_execution_source": (
+            synthesis_execution_source if synthesis_status == "completed" else "failed"
+        ),
         "unresolved_stages": unresolved_stages,
         "synthesis": synthesis,
     }
     _write_raw_model_response(run_dir, result=raw_bundle, overwrite=True)
-    analysis["stage2_pipeline_status"] = (
+    candidate_status = (
         "degraded" if any_group_failed or unresolved_stages else "completed"
     )
+    analysis["stage2_candidate_status"] = candidate_status
     analysis["stage2_pipeline_version"] = "segmented_stage_v1"
     analysis["stage_evidence_contract_required"] = True
     analysis["evidence_state_required"] = False
@@ -1818,13 +1991,13 @@ def run_segmented_stage_pipeline(
         "stage_analysis": stage_results,
         "improvements": synthesis.get("improvements") or _deterministic_improvement(stage_results),
         "stage2_pipeline_version": "segmented_stage_v1",
-        "stage2_pipeline_status": analysis["stage2_pipeline_status"],
+        "stage2_candidate_status": candidate_status,
         "segmented_pipeline": {
             "version": "segmented_stage_v1",
             "stage_groups": group_records,
             "synthesis_status": synthesis_status,
             "unresolved_stages": unresolved_stages,
-            "status": analysis["stage2_pipeline_status"],
+            "candidate_status": candidate_status,
         },
     }
     return result

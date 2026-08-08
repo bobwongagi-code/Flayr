@@ -107,6 +107,7 @@ _RUN_OUTPUT_FILES = frozenset(
 _RUN_OUTPUT_PREFIXES = (
     "absolute_execution_",
     "llm_",
+    "stage2_provider_",
     "video_facts_",
     "video_identity_",
 )
@@ -432,6 +433,23 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Optional large-model analysis JSON to merge into analysis.json and report.html.",
     )
+    stage2_reuse = parser.add_mutually_exclusive_group()
+    stage2_reuse.add_argument(
+        "--stage2-replay-from",
+        type=Path,
+        help=(
+            "Strictly replay matching completed Stage2 provider artifacts from another run. "
+            "Never calls the Stage2 provider when an artifact is missing or its request identity changed."
+        ),
+    )
+    stage2_reuse.add_argument(
+        "--stage2-resume-from",
+        type=Path,
+        help=(
+            "Reuse matching completed Stage2 provider artifacts from another run and call the provider "
+            "only for missing, failed, or semantically changed groups."
+        ),
+    )
     parser.add_argument(
         "--llm-model",
         help="Optional approved-provider chat model used to generate analysis_result.json.",
@@ -606,6 +624,15 @@ def validate_inputs(args: argparse.Namespace) -> dict[str, Path]:
 
     if args.analysis_result_json:
         args.analysis_result_json = validate_optional_file(args.analysis_result_json, "--analysis-result-json")
+
+    for option in ("stage2_replay_from", "stage2_resume_from"):
+        value = getattr(args, option, None)
+        if not value:
+            continue
+        resolved = value.expanduser().resolve()
+        if not resolved.is_dir():
+            raise SystemExit(f"--{option.replace('_', '-')} must be an existing run directory: {resolved}")
+        setattr(args, option, resolved)
 
     if args.comparison_scope_override and args.mode not in {"compare", "improve", "scope"}:
         raise SystemExit("--comparison-scope-override 仅可用于 compare、improve 或 scope 模式。")

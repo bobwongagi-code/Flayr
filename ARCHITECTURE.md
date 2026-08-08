@@ -42,6 +42,9 @@
 `references/analysis-output-schema.json` 是模型输出字段说明；`flayr_core/analysis_model.py` 读取该 schema，
 集中声明结果领域模型、标准化必需字段、唯一的 runtime projection、契约版本和
 `raw_model_response -> validated_normalized_result -> final_derived_result` 生命周期。
+四层职责、字段唯一所有者、技术重放与语义重跑边界以
+`references/result-pipeline-architecture.md` 为准；代码修复后的结果收口必须优先使用
+`scripts/replay_finalization.py` 离线验证，不得用真实模型调用代替确定性回放。
 `llm/analysis_contract.py` 只负责边界校验（阶段数量、顺序、改进项范围和标准化结果骨架），不再复制字段清单。
 evidence_unit 含多模态事实字段 +
 结构化标记（`product_visible` / `product_coverage` / `endorsement_verbal` / `endorsement_visual` / `evidence_strength`）；

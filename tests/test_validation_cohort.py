@@ -22,11 +22,15 @@ class ValidationCohortTest(unittest.TestCase):
     def test_source_contract_covers_adr_and_production_finalization_surface(self) -> None:
         required = {
             "references/ADR006.md",
+            "references/result-pipeline-architecture.md",
+            "scripts/flayr_core/analysis_model.py",
             "scripts/flayr_core/finalization/__init__.py",
             "scripts/flayr_core/finalization/contracts.py",
             "scripts/flayr_core/finalization/facade.py",
             "scripts/flayr_core/llm/pipeline.py",
+            "scripts/flayr_core/llm/stage_group_artifacts.py",
             "scripts/flayr_core/llm/stage_review_contract.py",
+            "scripts/flayr_core/stage_evidence_contracts.py",
         }
         self.assertTrue(required.issubset(set(SOURCE_CONTRACT_FILES)))
 
@@ -157,7 +161,21 @@ class ValidationCohortTest(unittest.TestCase):
         errors = validate_blind_sample_contract("sample", label, {"group": "blind"})
         self.assertTrue(any("evidence_event_ids 不能为空" in error for error in errors))
 
-    def test_lock_detects_drift_and_can_be_spent(self) -> None:
+    @patch(
+        "scripts.flayr_core.validation_cohort._worktree_identity",
+        return_value={
+            "clean": True,
+            "status_sha256": "1" * 64,
+            "diff_sha256": "2" * 64,
+            "untracked_files": [],
+            "fingerprint_sha256": "3" * 64,
+        },
+    )
+    @patch(
+        "scripts.flayr_core.validation_cohort._git_value",
+        return_value="a" * 40,
+    )
+    def test_lock_detects_drift_and_can_be_spent(self, _git_value, _worktree_identity) -> None:
         repo = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
