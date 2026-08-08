@@ -560,6 +560,11 @@ def _prepare_explicit_run_dir(run_dir: Path, *, reuse: bool) -> None:
     for entry in entries:
         if entry.is_dir() and not entry.is_symlink() and entry.name in _RUN_ROLE_DIRS:
             continue
+        if entry.is_file() and entry.name == "product_foundation.json" and reuse:
+            # Product foundation is a keyed, schema-checked cache. Keep it
+            # across an explicit preprocessing reuse so a Stage2 retry does
+            # not invoke the foundation model again before cache validation.
+            continue
         if entry.is_file() and (
             entry.name in _RUN_OUTPUT_FILES
             or entry.name.startswith(_RUN_OUTPUT_PREFIXES)

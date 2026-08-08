@@ -624,6 +624,29 @@ def finalize_analysis_result(
     else:
         apply_postprocess_chain(normalized, analysis, audit=audit)
 
+    if segmented:
+        # Comparison eligibility is materialized inside the segmented
+        # postprocess chain. Recompute publishability after that gate, not
+        # only before it; otherwise intentionally closed stages remain in the
+        # pre-gate unresolved list and downgrade an otherwise valid run.
+        if audit is None:
+            _status, unresolved = _refresh_segmented_pipeline_status(normalized)
+            _clear_segmented_unresolved_severity(normalized, unresolved)
+        else:
+            _status, unresolved = audit.run(
+                normalized,
+                "postprocess.segmented.refresh_pipeline_status",
+                _refresh_segmented_pipeline_status,
+                normalized,
+            )
+            audit.run(
+                normalized,
+                "postprocess.segmented.clear_unresolved_severity",
+                _clear_segmented_unresolved_severity,
+                normalized,
+                unresolved,
+            )
+
     def audited_step(rule: str, function: Any, *args: Any) -> None:
         if audit is None:
             function(*args)
@@ -1238,6 +1261,29 @@ def _sanitize_segmented_flag(value: Any, qualified_ids: set[str]) -> Any:
     return value
 
 
+def _segmented_model_evidence_ids(raw: dict[str, Any], role: str) -> list[str]:
+    """Read only explicit Stage2 evidence-ID fields, including legacy nesting.
+
+    Some compatible providers return the two role judgments as nested
+    ``benchmark``/``creator`` objects even when the current compact contract
+    asks for top-level ``*_evidence_ids``.  The nested alias is still an
+    explicit structured field; free-text reasons are intentionally ignored.
+    """
+    candidates: list[Any] = [raw.get(f"{role}_evidence_ids")]
+    nested = raw.get(role)
+    if isinstance(nested, dict):
+        candidates.append(nested.get("evidence_ids"))
+    for key, value in raw.items():
+        if str(key).startswith(f"{role}_") and isinstance(value, dict):
+            candidates.append(value.get("evidence_ids"))
+    ids: list[str] = []
+    for candidate in candidates:
+        if not isinstance(candidate, list):
+            continue
+        ids.extend(str(item).strip() for item in candidate if str(item).strip())
+    return list(dict.fromkeys(ids))
+
+
 def _segmented_complete_flag(value: Any, stage: str) -> bool:
     if not isinstance(value, dict):
         return False
@@ -1294,7 +1340,7 @@ def _normalize_segmented_stage(
         side = facts.get(role) if isinstance(facts.get(role), dict) else {}
         qualified = qualified_stage_evidence_ids(side, stage)
         key = f"{role}_evidence_ids"
-        ids = [str(item).strip() for item in raw.get(key) or [] if str(item).strip() in qualified]
+        ids = [item for item in _segmented_model_evidence_ids(raw, role) if item in qualified]
         current_readiness = stage_evidence_readiness(side, stage)
         readiness[role] = current_readiness
         if current_readiness != "present":
@@ -1846,9 +1892,11 @@ def run_large_model_analysis(
             analysis_input,
             locked_video_understanding=facts,
         )
-        normalized["stage2_pipeline_status"] = analysis.get("stage2_pipeline_status", "completed")
-        normalized["stage2_pipeline_version"] = "segmented_stage_v1"
-        normalized["segmented_pipeline"] = segmented_result.get("segmented_pipeline", {})
+        # finalize_analysis_result is the single authority for the publish
+        # status.  The live runner's pre-finalization status may still contain
+        # stages that become intentionally not-comparable after the locked
+        # evidence gate is materialized; copying it back here would turn a
+        # valid completed result into a false degraded result.
         result_path = run_dir / "analysis_result.json"
         write_json(result_path, normalized)
         return result_path, normalized

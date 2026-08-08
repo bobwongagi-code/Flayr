@@ -1301,6 +1301,7 @@ def build_stage_group_judgment_payload(
             json.dumps({"product_foundation": foundation, "comparison_contract": eligibility}, ensure_ascii=False, indent=2),
             "## 目标阶段证据交接（只读）",
             json.dumps(scoped_facts, ensure_ascii=False, indent=2),
+            "每个阶段的正式引用必须从该阶段 qualified_evidence 的 id 中选择；如果 readiness=present，至少引用能支撑该阶段判断的一个 ID。不得把 candidate_summary 的 ID 当成正式引用，也不得只在理由文字中提到 ID。",
             "## 阶段字段合同",
             "每个 stage 对象只负责：stage、stage_state、relation、model_gap_magnitude、benchmark_evidence_ids、creator_evidence_ids、judgment_reason，以及该阶段专属结构化字段。不得输出 benchmark_summary、creator_summary、quote、time_range、gap、improvements、commercial_priority 或其他报告字段；这些字段由代码从锁定证据和阶段结果机械生成。stage_state 是必填语义字段；无法完成该阶段判断时填 unknown/conflict/blocked，不得省略后让代码猜测。",
             "仅在能够完整填写且引用合法证据时输出该阶段专属结构化字段；字段不完整就省略该字段，代码会将其视为 unknown，不会补写语义。",

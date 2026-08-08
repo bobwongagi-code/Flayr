@@ -345,7 +345,12 @@ def stage_report_severity(stage: dict[str, Any]) -> Any:
     closed evidence state for both sides.
     """
     gate = stage.get("stage_evidence_gate") if isinstance(stage, dict) else None
-    if isinstance(gate, dict) and gate.get("status") in {"blocked", "legacy"}:
+    if isinstance(gate, dict) and gate.get("status") in {
+        "blocked",
+        "legacy",
+        "not_applicable",
+        "not_comparable",
+    }:
         return None
     return stage.get("severity") if isinstance(stage, dict) else None
 

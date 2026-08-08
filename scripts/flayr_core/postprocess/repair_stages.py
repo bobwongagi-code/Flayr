@@ -728,7 +728,11 @@ def _suppress_blocked_stage_improvements(result: dict[str, Any]) -> None:
         code
         for code, stage in stages.items()
         if isinstance(stage.get("stage_evidence_gate"), dict)
-        and stage["stage_evidence_gate"].get("status") == "blocked"
+        and stage["stage_evidence_gate"].get("status") in {
+            "blocked",
+            "not_applicable",
+            "not_comparable",
+        }
     }
     if not blocked:
         return

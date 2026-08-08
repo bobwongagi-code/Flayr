@@ -1058,6 +1058,21 @@ def normalize_video_understanding(
             normalized_units.append(normalized_unit)
         valid_ids = {unit["id"] for unit in normalized_units}
         raw_gate_status = item.get("gate_observation_status") if isinstance(item.get("gate_observation_status"), dict) else {}
+        raw_stage_evidence_checks = item.get("stage_evidence_checks")
+        if (
+            allow_trusted_pipeline_metadata
+            and item.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+            and isinstance(raw_stage_evidence_checks, list)
+        ):
+            # A frozen Stage1 side has already passed the contract and its
+            # hash covers this exact table. Re-normalizing it here can discard
+            # valid audit-only values such as unqualified observations and
+            # silently change the evidence-set digest.
+            normalized_stage_evidence_checks = copy.deepcopy(raw_stage_evidence_checks)
+        else:
+            normalized_stage_evidence_checks = normalize_stage_evidence_checks(
+                raw_stage_evidence_checks, valid_ids
+            )
         normalized[role] = {
             # 产品身份是 Stage1 的全局观察，不能在完整归一化时丢失；S2 是否能使用它
             # 仍由 stage_evidence_units/S2 的资格闸门决定。
@@ -1077,9 +1092,7 @@ def normalize_video_understanding(
             "stage_evidence_contract_version": normalize_stage_evidence_contract_version(
                 item.get("stage_evidence_contract_version")
             ),
-            "stage_evidence_checks": normalize_stage_evidence_checks(
-                item.get("stage_evidence_checks"), valid_ids
-            ),
+            "stage_evidence_checks": normalized_stage_evidence_checks,
             # The runtime, not the model, owns whether the response hit its
             # output budget. The locked Stage1 handoff restores the trusted
             # value when one is available.

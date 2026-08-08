@@ -630,6 +630,24 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(mismatched["reason_code"], "comparison_scope_closed")
         self.assertFalse(mismatched["analysis_allowed"])
 
+    def test_closed_comparison_scope_precedes_unknown_evidence(self) -> None:
+        result = {
+            "video_understanding": {
+                "creator": self._active_side("C", "unknown"),
+                "benchmark": self._active_side("B", "unknown"),
+            }
+        }
+
+        gate = stage_evidence_gate(
+            result,
+            "S4",
+            comparison_status="not_directly_comparable",
+        )
+
+        self.assertEqual(gate["status"], "not_comparable")
+        self.assertEqual(gate["reason_code"], "comparison_scope_closed")
+        self.assertFalse(gate["analysis_allowed"])
+
     def test_stage1_ledger_manifest_preserves_unqualified_units(self) -> None:
         side = self._active_side("C", "present")
         side["evidence_units"].append(
@@ -678,6 +696,73 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertNotEqual(projected["creator_summary"], "模型伪造的摘要")
         self.assertEqual(projected["severity"], "large")
         self.assertEqual(projected["model_severity"], "large")
+
+    def test_segmented_projection_accepts_explicit_nested_role_evidence_ids(self) -> None:
+        facts = {
+            "benchmark": self._active_side("B", "present"),
+            "creator": self._active_side("C", "present"),
+        }
+        projected = _normalize_segmented_stage(
+            {
+                "stage": "S6 CTA",
+                "stage_state": "completed",
+                "relation": "benchmark_better",
+                "model_gap_magnitude": "medium",
+                "benchmark": {"evidence_ids": ["B6"]},
+                "creator": {"evidence_ids": ["C6"]},
+                "judgment_reason": "基于 B6 和 C6",
+            },
+            "S6",
+            facts,
+        )
+
+        self.assertEqual(projected["analysis_status"], "grounded")
+        self.assertEqual(projected["benchmark_evidence_ids"], ["B6"])
+        self.assertEqual(projected["creator_evidence_ids"], ["C6"])
+
+    def test_segmented_projection_accepts_stage_flag_evidence_ids(self) -> None:
+        facts = {
+            "benchmark": self._active_side("B", "present"),
+            "creator": self._active_side("C", "present"),
+        }
+        projected = _normalize_segmented_stage(
+            {
+                "stage": "S6 CTA",
+                "stage_state": "completed",
+                "relation": "benchmark_better",
+                "model_gap_magnitude": "medium",
+                "benchmark_s6": {"evidence_ids": ["B6"]},
+                "creator_s6": {"evidence_ids": ["C6"]},
+                "judgment_reason": "基于 B6 和 C6",
+            },
+            "S6",
+            facts,
+        )
+
+        self.assertEqual(projected["analysis_status"], "grounded")
+        self.assertEqual(projected["benchmark_evidence_ids"], ["B6"])
+        self.assertEqual(projected["creator_evidence_ids"], ["C6"])
+
+    def test_segmented_projection_does_not_parse_evidence_ids_from_reason_text(self) -> None:
+        facts = {
+            "benchmark": self._active_side("B", "present"),
+            "creator": self._active_side("C", "present"),
+        }
+        projected = _normalize_segmented_stage(
+            {
+                "stage": "S6 CTA",
+                "stage_state": "completed",
+                "relation": "benchmark_better",
+                "model_gap_magnitude": "medium",
+                "judgment_reason": "基于 B6 和 C6",
+            },
+            "S6",
+            facts,
+        )
+
+        self.assertEqual(projected["analysis_status"], "handoff_loss")
+        self.assertEqual(projected["benchmark_evidence_ids"], [])
+        self.assertEqual(projected["creator_evidence_ids"], [])
 
     def test_closed_comparison_scope_keeps_qualified_facts_without_model_references(self) -> None:
         facts = {
@@ -3025,6 +3110,31 @@ class StageEvidenceContractTests(unittest.TestCase):
             [],
         )
 
+    def test_locked_stage_evidence_checks_preserve_audit_only_signals(self) -> None:
+        side = normalize_video_understanding(
+            {"creator": self._active_side("C", "absent")},
+            allow_trusted_pipeline_metadata=True,
+        )["creator"]
+        s6 = next(item for item in side["stage_evidence_checks"] if item["stage"] == "S6")
+        s6["unqualified_observed_signals"] = ["offer_or_value"]
+        freeze_stage_evidence(side)
+        expected = side["evidence_set_sha256"]
+
+        renormalized = normalize_video_understanding(
+            {"creator": side},
+            allow_trusted_pipeline_metadata=True,
+        )["creator"]
+
+        self.assertEqual(
+            renormalized["stage_evidence_checks"],
+            side["stage_evidence_checks"],
+        )
+        self.assertEqual(stage_evidence_sha256(renormalized), expected)
+        self.assertEqual(
+            stage_evidence_snapshot_issues(renormalized, expected_sha256=expected),
+            [],
+        )
+
     def test_active_boundary_hint_does_not_bypass_stage_gate_with_raw_transcript(self) -> None:
         side = self._active_side("C", "present")
         block = build_s1_boundary_hint_block(
@@ -3662,6 +3772,48 @@ class StageEvidenceContractTests(unittest.TestCase):
         materialize_stage_evidence_gates(result)
         self.assertEqual(result["stage_analysis"][5]["stage_evidence_gate"]["status"], "not_applicable")
         self.assertEqual(result["stage_analysis"][0]["stage_evidence_gate"]["status"], "grounded")
+
+    def test_handoff_loss_survives_a_blocked_stage1_gate(self) -> None:
+        creator = self._active_side("C", "unknown")
+        creator_s2 = next(item for item in creator["stage_evidence_checks"] if item["stage"] == "S2")
+        creator_s2.update(
+            {
+                "status": "present",
+                "coverage": "complete",
+                "evidence_ids": ["C2"],
+                "observed_signals": list(stage_evidence_contract("S2").required_signals),
+                "missing_signals": [],
+                "signal_bindings": self._signal_bindings("S2", "C2"),
+            }
+        )
+        freeze_stage_evidence(creator)
+        result = {
+            "stage_analysis": [
+                {
+                    "stage": f"S{index}",
+                    "analysis_status": "handoff_loss",
+                    "benchmark_evidence_ids": [],
+                    "creator_evidence_ids": [],
+                }
+                for index in range(1, 7)
+            ],
+            "video_understanding": {
+                "creator": creator,
+                "benchmark": self._active_side("B", "unknown"),
+            },
+        }
+
+        materialize_stage_evidence_gates(result)
+
+        self.assertTrue(
+            all(stage["stage_evidence_gate"]["status"] == "blocked" for stage in result["stage_analysis"])
+        )
+        self.assertTrue(
+            all(stage["analysis_status"] == "handoff_loss" for stage in result["stage_analysis"])
+        )
+        # A missing Stage2 citation is a typed unresolved stage, not a whole
+        # result validation failure caused by the Stage1 gate.
+        validate_evidence_alignment(result)
 
     def test_blocked_stage_cannot_reach_resolver_or_publish_improvement(self) -> None:
         result = {

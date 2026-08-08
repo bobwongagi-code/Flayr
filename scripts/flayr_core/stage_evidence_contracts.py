@@ -1316,6 +1316,19 @@ def stage_evidence_gate(
         gate_status = "blocked"
         reason_code = "evidence_snapshot_invalid"
         reason = "Stage1 事实集未通过冻结摘要校验，不能把未锁定事实交给后续判断。"
+    elif normalized_comparison in {"not_applicable", "not_directly_comparable", "not_comparable"}:
+        # An explicit, code-owned comparison scope can close a stage without
+        # pretending that incomplete evidence is a complete comparison.  This
+        # branch must precede the normal unknown/legacy checks: a closed scope
+        # needs no grounded judgment, while conflicts and invalid snapshots
+        # still remain hard failures above.
+        gate_status = "not_applicable" if normalized_comparison == "not_applicable" else "not_comparable"
+        reason_code = "comparison_scope_closed"
+        reason = (
+            "比较合同已明确该阶段不适用，不生成阶段差距。"
+            if normalized_comparison == "not_applicable"
+            else "比较合同已明确该阶段不可比，不输出差距判断。"
+        )
     elif "unknown" in statuses:
         blocked_roles = [role for role, item in role_states.items() if item["status"] == "unknown"]
         budget_roles = [
@@ -1343,10 +1356,6 @@ def stage_evidence_gate(
             gate_status = "blocked"
             reason_code = "comparison_scope_closed"
             reason = "双方对该阶段的适用范围不一致，不能把单侧不适用当成完整比较依据。"
-    elif normalized_comparison in {"not_applicable", "not_directly_comparable", "not_comparable"}:
-        gate_status = "not_applicable" if normalized_comparison == "not_applicable" else "not_comparable"
-        reason_code = "comparison_scope_closed"
-        reason = "比较合同已明确该阶段不适用或不可比。"
     else:
         gate_status = "grounded"
         reason_code = "qualified_stage1_evidence"
@@ -1377,13 +1386,25 @@ def materialize_stage_evidence_gates(result: Any) -> None:
         if not isinstance(stage, dict):
             continue
         code = normalize_stage_code(stage.get("stage")) or f"S{index}"
+        prior_status = str(stage.get("analysis_status") or "").strip().lower()
         gate = stage_evidence_gate(
             result,
             code,
             comparison_status=stage.get("comparison_status"),
         )
         stage["stage_evidence_gate"] = gate
-        if gate["status"] == "blocked":
+        if prior_status == "handoff_loss":
+            # A qualified Stage1 gate cannot repair a missing Stage2 citation,
+            # and a blocked Stage1 gate must not erase that more specific
+            # handoff diagnosis.  Downstream validation uses handoff_loss to
+            # suppress the citation requirement while keeping the stage
+            # explicitly unresolved.
+            stage["analysis_status"] = "handoff_loss"
+            stage["analysis_reason"] = (
+                str(stage.get("judgment_reason") or "").strip()
+                or "Stage2 未返回可核验的正式证据引用。"
+            )
+        elif gate["status"] == "blocked":
             stage["analysis_status"] = "evidence_blocked"
             stage["analysis_reason"] = gate["reason"]
         elif gate["status"] == "legacy":
@@ -1391,14 +1412,6 @@ def materialize_stage_evidence_gates(result: Any) -> None:
             stage["analysis_reason"] = gate["reason"]
         elif gate["status"] in {"not_applicable", "not_comparable"}:
             stage["analysis_status"] = gate["status"]
-        elif stage.get("analysis_status") == "handoff_loss":
-            # A qualified Stage1 gate does not erase a Stage2 handoff failure.
-            # The code must preserve that distinction instead of presenting an
-            # evidence-free model judgment as grounded.
-            stage["analysis_reason"] = (
-                str(stage.get("judgment_reason") or "").strip()
-                or "Stage2 未返回可核验的正式证据引用。"
-            )
         else:
             stage["analysis_status"] = "grounded"
             stage.pop("analysis_reason", None)

@@ -4313,6 +4313,39 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIsNone(result["stage_analysis"][3]["model_severity"])
         self.assertEqual(result["stage_analysis"][0]["severity"], "medium")
 
+    def test_segmented_finalizer_can_close_pre_finalization_degraded_status(self) -> None:
+        result = {
+            "stage2_pipeline_version": "segmented_stage_v1",
+            # The live runner may mark this degraded before the final evidence
+            # gate turns intentionally closed comparison stages terminal.
+            "stage2_pipeline_status": "degraded",
+            "stage_analysis": [
+                {
+                    "stage": f"S{index}",
+                    "analysis_status": "grounded" if index <= 3 else "not_comparable",
+                    "comparison_status": None if index <= 3 else "not_directly_comparable",
+                    "stage_state": "completed" if index <= 3 else "unknown",
+                    "model_gap_magnitude": "small" if index <= 3 else "uncertain",
+                }
+                for index in range(1, 7)
+            ],
+            "segmented_pipeline": {
+                "stage_groups": [
+                    {"group": ["S1", "S2"], "status": "completed"},
+                    {"group": ["S3", "S4"], "status": "completed"},
+                    {"group": ["S5"], "status": "completed"},
+                    {"group": ["S6"], "status": "completed"},
+                ],
+                "synthesis_status": "completed",
+            },
+        }
+
+        status, unresolved = pipeline._refresh_segmented_pipeline_status(result)
+
+        self.assertEqual(status, "completed")
+        self.assertEqual(unresolved, [])
+        self.assertEqual(result["stage2_pipeline_status"], "completed")
+
     def test_segmented_resolver_does_not_create_medium_for_unresolved_stage(self) -> None:
         from flayr_core.postprocess.derive import derive_severity_from_facts
 

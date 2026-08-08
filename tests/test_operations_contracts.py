@@ -71,6 +71,17 @@ class OperationsContractTests(unittest.TestCase):
             self.assertFalse((output_dir / "report.html").exists())
             self.assertTrue((output_dir / "benchmark").is_dir())
 
+    def test_reuse_preserves_keyed_product_foundation_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "run"
+            output_dir.mkdir()
+            cache = output_dir / "product_foundation.json"
+            cache.write_text('{"cache_record_schema_version": 1}', encoding="utf-8")
+            args = SimpleNamespace(output_dir=output_dir, reuse_preprocessing=True, mode="improve")
+
+            self.assertEqual(flayr.create_run_dir(args), output_dir.resolve())
+            self.assertTrue(cache.exists())
+
     def test_reuse_rejects_unknown_top_level_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp) / "run"
