@@ -76,6 +76,7 @@ from .api import (
     can_send_standalone_audio,
 )
 from .analysis_contract import AnalysisContractError, validate_normalized_analysis_contract
+from .artifact_identity import identity_value
 from .json_codec import ResponseParseError
 from .parse import (
     normalize_analysis_result,
@@ -208,7 +209,7 @@ def _localized_failure_kind(
 
 # 修改 build_video_fact_payload 的语义合同后必须递增，避免旧 facts 与新判断规则混用。
 VIDEO_FACT_CACHE_SCHEMA_VERSION = 28
-PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION = 2
+PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION = 3
 CACHE_RECORD_SCHEMA_VERSION = 1
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -1417,14 +1418,14 @@ def _product_context_digest(analysis: dict[str, Any]) -> str:
 
 
 def _product_foundation_cache_key(args: argparse.Namespace, analysis: dict[str, Any]) -> dict[str, Any]:
+    payload = build_product_foundation_payload(str(args.llm_model or ""), analysis)
     return {
         "cache_schema_version": PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION,
-        "code_commit": _git_commit_sha(),
         "llm_model": str(args.llm_model or ""),
         "llm_api_url": str(args.llm_api_url or ""),
         "temperature": 0.0,
         "product_context_digest": _product_context_digest(analysis),
-        "reference_digests": _cache_reference_digests(),
+        "request_payload_sha256": _stable_digest(identity_value(payload)),
     }
 
 
@@ -4916,7 +4917,16 @@ def _materialize_stage_recovery_audit(
         if code in set(stage_codes())
     ))
     checks = stage_evidence_check_map(facts)
-    structural_issues = stage_evidence_contract_issues(facts, require_version=True)
+    # This function is the sole producer of the post-recovery coverage audit.
+    # The previous audit describes the pre-recovery state and must not take
+    # part in validating its replacement; otherwise a stale ``unknown`` audit
+    # can veto newly qualified stage checks and make recovery self-blocking.
+    facts_without_previous_audit = dict(facts)
+    facts_without_previous_audit.pop("stage1_coverage_audit", None)
+    structural_issues = stage_evidence_contract_issues(
+        facts_without_previous_audit,
+        require_version=True,
+    )
     global_issues = [
         issue
         for issue in structural_issues
@@ -5429,30 +5439,37 @@ def _merge_video_fact_recovery(
     safe_candidates: list[dict[str, Any]] = []
     blocked_candidate_ids: set[str] = set()
     candidate_ids: set[str] = set()
+    candidate_id_remap: dict[str, str] = {}
     allocated_ids = set(existing_ids)
     next_index = len(existing_units) + 1
+    raw_candidate_counts: dict[str, int] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        raw_candidate_id = str(candidate.get("id") or "").strip().upper()
+        if raw_candidate_id:
+            raw_candidate_counts[raw_candidate_id] = raw_candidate_counts.get(raw_candidate_id, 0) + 1
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
         item = copy.deepcopy(candidate)
         raw_candidate_id = str(item.get("id") or "").strip().upper()
-        if raw_candidate_id and (raw_candidate_id in existing_ids or raw_candidate_id in candidate_ids):
-            # A duplicate candidate ID is ambiguous: silently renaming it can
-            # make a recovery check point at the old observation.  Reject the
-            # candidate and make any reference fail closed below.
+        if raw_candidate_id and raw_candidate_counts.get(raw_candidate_id, 0) > 1:
+            # Two new observations sharing one response-local ID cannot be
+            # disambiguated safely. Reject both and fail their references
+            # closed below.
             blocked_candidate_ids.add(raw_candidate_id)
             continue
-        # Candidate IDs are suggestions, not a second namespace. Allocate a
-        # valid, unique ID against the whole locked ledger before normalizing
-        # the candidate; otherwise an invalid suggestion such as "foo" could
-        # normalize to C1 and collide with an existing immutable observation.
+        # Stage1-C candidate IDs are response-local handles. The code owns the
+        # canonical ledger namespace, allocates the final ID, and rewrites all
+        # references in the same recovery response. This prevents a provider
+        # suggestion such as B8 from colliding with an immutable B8 fact and
+        # invalidating otherwise valid stage qualifications.
         candidate_id = normalized_fact_id(raw_candidate_id, code, next_index, allocated_ids)
-        while candidate_id in existing_ids:
-            next_index += 1
-            candidate_id = normalized_fact_id("", code, next_index, allocated_ids)
         item["id"] = candidate_id
-        existing_ids.add(candidate_id)
         candidate_ids.add(candidate_id)
+        if raw_candidate_id:
+            candidate_id_remap[raw_candidate_id] = candidate_id
         safe_candidates.append(item)
         next_index += 1
     normalized_candidates: list[dict[str, Any]] = []
@@ -5473,8 +5490,23 @@ def _merge_video_fact_recovery(
     merged["stage_evidence_contract_version"] = STAGE_EVIDENCE_CONTRACT_VERSION
 
     existing_checks = merged.get("stage_evidence_checks") if isinstance(merged.get("stage_evidence_checks"), list) else []
+    def remap_recovery_evidence_ids(value: Any, key: str = "") -> Any:
+        if isinstance(value, dict):
+            return {
+                name: remap_recovery_evidence_ids(item, str(name))
+                for name, item in value.items()
+            }
+        if isinstance(value, list):
+            if key in {"evidence_ids", "invalid_evidence_ids"}:
+                return [candidate_id_remap.get(str(item).strip().upper(), item) for item in value]
+            return [remap_recovery_evidence_ids(item, key) for item in value]
+        return value
+
     replacement_items: dict[str, list[dict[str, Any]]] = {}
-    for item in recovery.get("stage_evidence_checks") or []:
+    recovery_checks = remap_recovery_evidence_ids(
+        copy.deepcopy(recovery.get("stage_evidence_checks") or [])
+    )
+    for item in recovery_checks:
         if isinstance(item, dict):
             replacement_items.setdefault(str(item.get("stage") or "").strip().upper()[:2], []).append(item)
     replacement_by_stage: dict[str, dict[str, Any]] = {}

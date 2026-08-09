@@ -900,6 +900,21 @@ def build_video_fact_recovery_payload(
         if code in {str(stage).strip().upper()[:2] for stage in target_stages if str(stage).strip()}
     ]
     target_text = ", ".join(normalized_targets) or "S1-S6"
+    evidence_prefix = "B" if role == "benchmark" else "C"
+    target_set = set(normalized_targets)
+    locked_fact_summary = {
+        "evidence_units": [
+            dict(item)
+            for item in current_facts.get("evidence_units") or []
+            if isinstance(item, dict)
+        ],
+        "stage_evidence_checks": [
+            dict(item)
+            for item in current_facts.get("stage_evidence_checks") or []
+            if isinstance(item, dict)
+            and str(item.get("stage") or "").strip().upper()[:2] in target_set
+        ],
+    }
     recovery_system = (
         "你是 Flayr Stage1 的定向证据复核器。只输出严格 JSON。"
         "这是一次且仅一次的事实恢复，不得改写、删除或合并已有 evidence_units，"
@@ -934,13 +949,14 @@ def build_video_fact_recovery_payload(
                     "这是一次追加观察，不是重新抽取整条视频；不得改写、删除或合并已有 evidence_units。",
                     "已有事实只用于避免重复，不得把它们当成可修改的模型输出。没有确认事实就返回空 candidate_evidence_units 和 unknown。",
                     "## 已锁定事实摘要（只读）",
-                    json.dumps(current_facts, ensure_ascii=False, indent=2),
+                    json.dumps(locked_fact_summary, ensure_ascii=False, indent=2),
                     "## 输出合同",
                     json.dumps(
                         {
                     "candidate_evidence_units": [
                         {
-                            "id": "新的唯一 ID，例如 C9；不能复用已有 ID",
+                            "id": f"新的唯一 ID，例如 {evidence_prefix}9；不能复用已有 ID；"
+                            f"当前角色只能使用 {evidence_prefix} 前缀",
                             "time_range": "真实时间范围",
                             "information": "直接观察到的事实",
                             "voiceover": "仅窗口安全口播中的原句，没有则留空",
@@ -1312,6 +1328,8 @@ def build_stage_group_judgment_payload(
                     "stage_state": "completed|unknown|conflict|blocked",
                     "relation": "creator_better|benchmark_better|equivalent|uncertain",
                     "model_gap_magnitude": "none|small|medium|large|uncertain",
+                    "benchmark_evidence_ids": ["只能引用本阶段 benchmark qualified_evidence ID"],
+                    "creator_evidence_ids": ["只能引用本阶段 creator qualified_evidence ID"],
                     "judgment_reason": "只引用本阶段已锁定 evidence ID 的一句话理由",
                 }],
             }, ensure_ascii=False, indent=2),

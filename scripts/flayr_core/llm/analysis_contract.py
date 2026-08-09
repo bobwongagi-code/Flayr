@@ -18,7 +18,21 @@ class AnalysisContractError(ValueError):
 
 RESULT_STAGE_COUNT = ANALYSIS_RESULT_CONTRACT.stage_count
 IMPROVEMENT_COUNT_RANGE = (1, 5)
+SEGMENTED_IMPROVEMENT_COUNT_RANGE = (0, 5)
 NORMALIZED_TOP_LEVEL_FIELDS = ANALYSIS_RESULT_CONTRACT.normalized_required_fields
+
+
+def improvement_count_range(result: dict[str, Any]) -> tuple[int, int]:
+    """Return the lifecycle-aware recommendation cardinality contract.
+
+    Segmented results may legitimately reach publication with no improvements:
+    deterministic evidence gates remove recommendations for unresolved stages.
+    Legacy and non-segmented provider envelopes retain the historical 1-5
+    requirement.
+    """
+    if str(result.get("stage2_pipeline_version") or "").strip() == "segmented_stage_v1":
+        return SEGMENTED_IMPROVEMENT_COUNT_RANGE
+    return IMPROVEMENT_COUNT_RANGE
 
 
 def validate_raw_analysis_envelope(result: Any) -> dict[str, Any]:
@@ -31,7 +45,7 @@ def validate_raw_analysis_envelope(result: Any) -> dict[str, Any]:
         raise AnalysisContractError(f"analysis_result must contain stage_analysis with {RESULT_STAGE_COUNT} items.")
 
     improvements = result.get("improvements")
-    minimum, maximum = IMPROVEMENT_COUNT_RANGE
+    minimum, maximum = improvement_count_range(result)
     if not isinstance(improvements, list) or not minimum <= len(improvements) <= maximum:
         raise AnalysisContractError(f"analysis_result must contain {minimum} to {maximum} improvements.")
     return result
@@ -55,6 +69,6 @@ def validate_normalized_analysis_contract(result: dict[str, Any]) -> None:
             raise AnalysisContractError(f"stage_analysis order must match S1-S6; expected {definition.code}.")
 
     improvements = result["improvements"]
-    minimum, maximum = IMPROVEMENT_COUNT_RANGE
+    minimum, maximum = improvement_count_range(result)
     if not isinstance(improvements, list) or not minimum <= len(improvements) <= maximum:
         raise AnalysisContractError(f"normalized analysis_result must contain {minimum} to {maximum} improvements.")

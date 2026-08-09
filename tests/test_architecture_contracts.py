@@ -1811,6 +1811,33 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertEqual(foundation["category_profile"]["category"], "散粉")
             request.assert_not_called()
 
+    def test_product_foundation_cache_key_tracks_request_not_unrelated_source_files(self) -> None:
+        args = SimpleNamespace(
+            llm_model="test",
+            llm_api_url="https://example.test/v1/chat/completions",
+        )
+        analysis = {"product": {"category": "散粉", "target_market": "MY"}}
+        with (
+            mock.patch.object(pipeline, "_git_commit_sha", return_value="commit-a"),
+            mock.patch.object(pipeline, "_cache_reference_digests", return_value={"payload.py": "digest-a"}),
+        ):
+            first = pipeline._product_foundation_cache_key(args, analysis)
+        with (
+            mock.patch.object(pipeline, "_git_commit_sha", return_value="commit-b"),
+            mock.patch.object(pipeline, "_cache_reference_digests", return_value={"payload.py": "digest-b"}),
+        ):
+            second = pipeline._product_foundation_cache_key(args, analysis)
+
+        self.assertEqual(first, second)
+        self.assertIn("request_payload_sha256", first)
+        self.assertNotIn("code_commit", first)
+        self.assertNotIn("reference_digests", first)
+        changed = pipeline._product_foundation_cache_key(
+            args,
+            {"product": {"category": "护脚霜", "target_market": "MY"}},
+        )
+        self.assertNotEqual(first["request_payload_sha256"], changed["request_payload_sha256"])
+
     def test_product_foundation_failure_is_explicit_not_a_silent_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -4126,10 +4153,51 @@ class ArchitectureContractTests(unittest.TestCase):
         with self.assertRaises(AnalysisContractError):
             validate_raw_analysis_envelope({"stage_analysis": [], "improvements": []})
 
+        complete_stages = [{"stage": f"S{index}"} for index in range(1, 7)]
+        with self.assertRaisesRegex(AnalysisContractError, "1 to 5 improvements"):
+            validate_raw_analysis_envelope(
+                {"stage_analysis": complete_stages, "improvements": []}
+            )
+
         accepted = validate_raw_analysis_envelope(
-            {"stage_analysis": [{"stage": f"S{index}"} for index in range(1, 7)], "improvements": [{"title": "one"}]}
+            {"stage_analysis": complete_stages, "improvements": [{"title": "one"}]}
         )
         self.assertEqual(len(accepted["stage_analysis"]), 6)
+
+    def test_segmented_result_allows_no_grounded_improvements_at_publish_boundary(self) -> None:
+        stages = [{"stage": f"S{index} stage"} for index in range(1, 7)]
+        result = {
+            "one_line_summary": "summary",
+            "executive_summary": "summary",
+            "holistic_assessment": {},
+            "product_visibility": {},
+            "loop_closure": {},
+            "video_understanding": {},
+            "stage_analysis": stages,
+            "improvements": [],
+            "stage2_pipeline_version": "segmented_stage_v1",
+        }
+
+        self.assertIs(validate_raw_analysis_envelope(result), result)
+        validate_normalized_analysis_contract(result)
+
+    def test_stage1_recovery_contract_uses_role_specific_evidence_prefix(self) -> None:
+        analysis = {"videos": {"benchmark": {}, "creator": {}}}
+        for role, expected, forbidden in (
+            ("benchmark", "B9", "C9"),
+            ("creator", "C9", "B9"),
+        ):
+            payload = build_video_fact_recovery_payload(
+                "qwen3.6-plus",
+                role,
+                analysis,
+                [],
+                {"evidence_units": []},
+                ["S3"],
+            )
+            text = payload["messages"][1]["content"][0]["text"]
+            self.assertIn(expected, text)
+            self.assertNotIn(forbidden, text)
 
     def test_analysis_contract_rejects_normalized_stage_order_drift(self) -> None:
         result = {
@@ -4887,6 +4955,9 @@ class ArchitectureContractTests(unittest.TestCase):
         text = payload["messages"][1]["content"][0]["text"]
         self.assertIn("stage_state", text)
         self.assertIn("stage_state 是必填语义字段", text)
+        strict_output = text.split("## 输出严格 JSON", 1)[1]
+        self.assertIn('"benchmark_evidence_ids"', strict_output)
+        self.assertIn('"creator_evidence_ids"', strict_output)
         self.assertNotIn('"improvements":', text)
         self.assertNotIn('"commercial_priority":', text)
         self.assertNotIn('"benchmark_summary":', text)
@@ -5009,6 +5080,44 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn('"effect_attribution"', text)
         self.assertNotIn('"stop_trigger"', text)
         self.assertNotIn('"product_identity"', text)
+
+    def test_stage1_recovery_prompt_excludes_execution_provenance(self) -> None:
+        analysis = {
+            "product": {"name": "测试品"},
+            "videos": {"creator": {"duration_seconds": 12.0}},
+        }
+        facts = {
+            "evidence_units": [{"id": "C1", "information": "已有事实"}],
+            "stage_evidence_checks": [
+                {"stage": "S3", "status": "unknown"},
+                {"stage": "S4", "status": "unknown"},
+            ],
+            "stage1_acquisition": {
+                "provider_artifacts": [
+                    {"execution_source": "provider", "response_sha256": "audit-only"}
+                ]
+            },
+            "stage1_qualification": {"status": "completed"},
+            "stage1_coverage_audit": {"status": "partial"},
+        }
+
+        payload = build_video_fact_recovery_payload(
+            "test-model",
+            "creator",
+            analysis,
+            [],
+            facts,
+            ["S3"],
+        )
+        text = payload["messages"][1]["content"][0]["text"]
+
+        self.assertIn('"id": "C1"', text)
+        self.assertIn('"stage": "S3"', text)
+        self.assertNotIn('"stage": "S4"', text)
+        self.assertNotIn("execution_source", text)
+        self.assertNotIn("provider_artifacts", text)
+        self.assertNotIn("stage1_qualification", text)
+        self.assertNotIn("stage1_coverage_audit", text)
 
     def test_segmented_finalizer_recomputes_status_and_removes_unknown_severity(self) -> None:
         result = {

@@ -62,13 +62,24 @@ class OperationsContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp) / "run"
             output_dir.mkdir()
-            (output_dir / "analysis.json").write_text("stale", encoding="utf-8")
-            (output_dir / "report.html").write_text("stale", encoding="utf-8")
+            stale_outputs = (
+                "analysis.json",
+                "analysis_replay_context.json",
+                "comparison_provider_artifact_ref.json",
+                "comparison_provider_meta.json",
+                "product_foundation_provider_meta.json",
+                "provider_product_foundation.json",
+                "stage1_provider_creator_A.json",
+                "stage2_provider_S1_S2.json",
+                "report.html",
+            )
+            for name in stale_outputs:
+                (output_dir / name).write_text("stale", encoding="utf-8")
             (output_dir / "benchmark").mkdir()
             args = SimpleNamespace(output_dir=output_dir, reuse_preprocessing=True, mode="improve")
             self.assertEqual(flayr.create_run_dir(args), output_dir.resolve())
-            self.assertFalse((output_dir / "analysis.json").exists())
-            self.assertFalse((output_dir / "report.html").exists())
+            for name in stale_outputs:
+                self.assertFalse((output_dir / name).exists())
             self.assertTrue((output_dir / "benchmark").is_dir())
 
     def test_reuse_preserves_keyed_product_foundation_cache(self) -> None:

@@ -724,16 +724,28 @@ def _suppress_blocked_stage_improvements(result: dict[str, Any]) -> None:
         for stage in result.get("stage_analysis", [])
         if isinstance(stage, dict) and stage_code(stage)
     }
-    blocked = {
-        code
-        for code, stage in stages.items()
-        if isinstance(stage.get("stage_evidence_gate"), dict)
-        and stage["stage_evidence_gate"].get("status") in {
-            "blocked",
-            "not_applicable",
-            "not_comparable",
-        }
-    }
+    blocked = set()
+    for code, stage in stages.items():
+        gate = stage.get("stage_evidence_gate")
+        gate_status = str(gate.get("status") or "").strip().lower() if isinstance(gate, dict) else ""
+        analysis_status = str(
+            stage.get("analysis_status")
+            or stage.get("stage_handoff_status")
+            or ""
+        ).strip().lower()
+        stage_state = str(stage.get("stage_state") or "").strip().lower()
+        if (
+            gate_status in {"blocked", "not_applicable", "not_comparable"}
+            or analysis_status in {
+                "evidence_blocked",
+                "handoff_loss",
+                "not_applicable",
+                "not_comparable",
+                "unknown",
+            }
+            or (stage_state and stage_state != "completed")
+        ):
+            blocked.add(code)
     if not blocked:
         return
     improvements = result.get("improvements")

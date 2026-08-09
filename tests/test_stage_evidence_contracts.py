@@ -625,6 +625,47 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(projected["stages"]["S6"]["coverage"], "complete")
         self.assertEqual(stage1_coverage_audit_issues(side, "S6"), [])
 
+    def test_recovery_audit_replaces_stale_pre_recovery_state(self) -> None:
+        side = self._active_side("C")
+        s3 = next(item for item in side["stage_evidence_checks"] if item["stage"] == "S3")
+        s3.update(
+            {
+                "status": "present",
+                "coverage": "complete",
+                "evidence_ids": ["C3"],
+                "observed_signals": list(stage_evidence_contract("S3").required_signals),
+                "missing_signals": [],
+                "signal_bindings": self._signal_bindings("S3", "C3"),
+                "evidence_strength": "direct",
+            }
+        )
+        freeze_stage_evidence(side)
+        side["stage1_coverage_audit"] = {
+            "version": STAGE1_COVERAGE_AUDIT_VERSION,
+            "source": "pipeline",
+            "status": "partial",
+            "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
+            "target_stages": ["S3"],
+            "stages": {
+                "S3": {
+                    "status": "unknown",
+                    "coverage": "unknown",
+                    "evidence_ids": [],
+                    "observed_signals": [],
+                    "missing_signals": [],
+                    "reason": "恢复前尚未完成资格判断。",
+                }
+            },
+            "errors": ["S3:focused_recovery_unresolved"],
+        }
+
+        projected = _materialize_stage_recovery_audit(side, ["S3"])
+
+        self.assertEqual(projected["status"], "completed")
+        self.assertEqual(projected["stages"]["S3"]["status"], "found")
+        self.assertEqual(projected["stages"]["S3"]["coverage"], "complete")
+        self.assertNotIn("S3:focused_recovery_unresolved", projected["errors"])
+
     def test_stage_gate_closes_only_when_both_sides_are_not_applicable(self) -> None:
         creator = self._active_side("C")
         benchmark = self._active_side("B")
@@ -1772,6 +1813,61 @@ class StageEvidenceContractTests(unittest.TestCase):
         ids = [item["id"] for item in merged["evidence_units"]]
         self.assertEqual(ids, ["C1", "C2"])
         self.assertEqual(len(ids), len(set(ids)))
+
+    def test_stage1_recovery_remaps_response_local_candidate_ids_and_references(self) -> None:
+        base = normalize_video_fact_result(
+            "creator",
+            {
+                "evidence_units": [
+                    {"id": "C1", "time_range": "0s - 1s", "information": "原始事实"},
+                ],
+                "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                "stage1_acquisition": self._active_side("C")["stage1_acquisition"],
+                "stage_evidence_checks": self._checks("unknown"),
+            },
+            self._analysis(),
+            allow_trusted_pipeline_metadata=True,
+        )
+        base["stage1_acquisition"] = self._active_side("C")["stage1_acquisition"]
+        recovery = {
+            "candidate_evidence_units": [
+                {
+                    "id": "C1",
+                    "time_range": "1s - 2s",
+                    "information": "恢复观察",
+                    "visual_fact": "画面直接可见",
+                    "evidence_strength": "direct",
+                }
+            ],
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage_evidence_checks": [
+                {
+                    "stage": "S1",
+                    "status": "present",
+                    "coverage": "complete",
+                    "evidence_ids": ["C1"],
+                    "observed_signals": list(stage_evidence_contract("S1").required_signals),
+                    "missing_signals": [],
+                    "signal_bindings": self._signal_bindings("S1", "C1"),
+                }
+            ],
+        }
+
+        merged = _merge_video_fact_recovery(
+            "creator",
+            base,
+            recovery,
+            self._analysis(),
+            ["S1"],
+        )
+
+        self.assertEqual([item["id"] for item in merged["evidence_units"]], ["C1", "C2"])
+        check = {item["stage"]: item for item in merged["stage_evidence_checks"]}["S1"]
+        self.assertEqual(check["evidence_ids"], ["C2"])
+        self.assertTrue(
+            all(binding["evidence_ids"] == ["C2"] for binding in check["signal_bindings"].values())
+        )
+        self.assertEqual(stage_evidence_contract_issues(merged), [])
 
     def test_fact_time_range_clamps_only_endpoint_rounding_noise(self) -> None:
         analysis = {
@@ -3964,6 +4060,24 @@ class StageEvidenceContractTests(unittest.TestCase):
         stage = result["stage_analysis"][3]
         self.assertIsNone(stage_report_severity(stage))
         self.assertTrue(stage_skipped(stage)[0])
+        self.assertEqual(result["improvements"], [])
+
+    def test_handoff_loss_cannot_publish_improvement_with_grounded_stage1_gate(self) -> None:
+        result = {
+            "stage_analysis": [
+                {
+                    "stage": "S1 Hook",
+                    "stage_state": "unknown",
+                    "stage_handoff_status": "handoff_loss",
+                    "analysis_status": "handoff_loss",
+                    "stage_evidence_gate": {"status": "grounded"},
+                }
+            ],
+            "improvements": [{"target_stage": "S1", "title": "优化冷启动钩子"}],
+        }
+
+        apply_comparison_eligibility(result)
+
         self.assertEqual(result["improvements"], [])
 
     def test_active_clamp_rejects_invalid_evidence_but_preserves_valid_range(self) -> None:
