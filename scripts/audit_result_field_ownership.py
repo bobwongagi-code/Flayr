@@ -134,7 +134,7 @@ def inventory(root: Path, fields: tuple[str, ...]) -> dict[str, list[dict[str, A
     tracked = set(fields)
     result: dict[str, list[dict[str, Any]]] = {field: [] for field in fields}
     for path in _repository_files(root):
-        relative = str(path.relative_to(root))
+        relative = path.relative_to(root).as_posix()
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError):

@@ -53,6 +53,7 @@
       "tests/test_stage_evidence_contracts.py",
       "tests/test_stage_fact_artifacts.py",
       "tests/test_stage_group_artifacts.py",
+      "tests/test_video_evidence_selection.py",
       "scripts/verify_analysis_contracts.py"
     ],
     "forbidden_globs": [

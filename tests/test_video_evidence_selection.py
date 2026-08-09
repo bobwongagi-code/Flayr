@@ -590,7 +590,7 @@ class VideoEvidenceSelectionTests(unittest.TestCase):
             ],
         }
         candidates = get_llm_frame_candidates(info, 1)
-        self.assertEqual([item["path"] for item in candidates], ["/scene.jpg"])
+        self.assertEqual([item["path"] for item in candidates], [str(Path("/scene.jpg").resolve())])
 
     def test_time_range_selection_uses_canonical_manifest(self) -> None:
         info = {
@@ -599,7 +599,7 @@ class VideoEvidenceSelectionTests(unittest.TestCase):
             "duration_seconds": 5,
         }
         selected = select_frames_for_time_range(info, "1s - 3s", limit=1)
-        self.assertEqual([item["path"] for item in selected], ["/selected.jpg"])
+        self.assertEqual([item["path"] for item in selected], [str(Path("/selected.jpg").resolve())])
 
     def test_stage_manifest_preserves_selection_provenance(self) -> None:
         frames = [
@@ -646,7 +646,14 @@ class VideoEvidenceSelectionTests(unittest.TestCase):
             ],
         }
         entries = _merge_ocr_frame_entries(info)
-        self.assertEqual([item["path"] for item in entries], ["/base-0.jpg", "/shared.jpg", "/focus-cta.jpg"])
+        self.assertEqual(
+            [item["path"] for item in entries],
+            [
+                str(Path("/base-0.jpg").resolve()),
+                str(Path("/shared.jpg").resolve()),
+                str(Path("/focus-cta.jpg").resolve()),
+            ],
+        )
 
     def test_online_asr_response_is_normalized_to_word_seconds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

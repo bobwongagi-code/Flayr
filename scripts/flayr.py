@@ -1109,15 +1109,24 @@ def _generation_path_variants(root: Path) -> set[str]:
 
 def _rewrite_generation_paths(value: Any, old_root: Path, new_root: Path) -> Any:
     old_variants = sorted(_generation_path_variants(old_root), key=len, reverse=True)
-    new = str(new_root.resolve())
     if isinstance(value, dict):
         return {key: _rewrite_generation_paths(item, old_root, new_root) for key, item in value.items()}
     if isinstance(value, list):
         return [_rewrite_generation_paths(item, old_root, new_root) for item in value]
     if isinstance(value, str):
         for old in old_variants:
-            if value == old or value.startswith(old + "/"):
-                return new + value[len(old):]
+            if not os.path.isabs(value):
+                continue
+            try:
+                relative = os.path.relpath(value, old)
+                if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+                    continue
+                common = os.path.commonpath((os.path.abspath(value), os.path.abspath(old)))
+                if os.path.normcase(common) != os.path.normcase(os.path.abspath(old)):
+                    continue
+            except ValueError:
+                continue
+            return str((new_root / relative).resolve())
     return value
 
 
@@ -1134,6 +1143,9 @@ def _rewrite_generation_json_artifacts(
     artifacts retain references to a directory that is about to disappear.
     """
     old_variants = _generation_path_variants(old_root)
+    serialized_old_variants = set(old_variants)
+    serialized_old_variants.update(item.replace("\\", "/") for item in old_variants)
+    serialized_old_variants.update(item.replace("\\", "\\\\") for item in old_variants)
     for path in sorted(root.rglob("*.json")):
         if path.name == "_preprocess.json":
             continue
@@ -1141,7 +1153,7 @@ def _rewrite_generation_json_artifacts(
             text = path.read_text(encoding="utf-8")
         except OSError as exc:
             raise OSError(f"cannot read generated JSON artifact: {path}") from exc
-        if not any(old in text for old in old_variants):
+        if not any(old in text for old in serialized_old_variants):
             continue
         try:
             value = json.loads(text)
@@ -1149,7 +1161,7 @@ def _rewrite_generation_json_artifacts(
             raise ValueError(f"generated JSON artifact contains a staging path but is invalid: {path}") from exc
         rewritten = _rewrite_generation_paths(value, old_root, new_root)
         write_json(path, rewritten)
-        if any(old in path.read_text(encoding="utf-8") for old in old_variants):
+        if any(old in path.read_text(encoding="utf-8") for old in serialized_old_variants):
             raise ValueError(f"staging path remains in generated JSON artifact: {path}")
 
 
