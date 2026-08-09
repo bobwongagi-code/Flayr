@@ -3,7 +3,6 @@
 三个 public 函数：
   - run_comparison_scope_preflight  只建立锁定事实与双视频产品比较资格
   - run_large_model_analysis        从 analysis_input.md 跑完整分析，写出 analysis_result.json
-  - parse_and_validate_llm_result   解析模型原始输出，并按 provider 执行受限 repair
   - merge_analysis_result           把外部提供的 analysis_result.json 合并进 analysis dict
 
 所有入口通过 finalize_analysis_result 走同一条完整处理链，避免外部 JSON 和实时 LLM
@@ -92,9 +91,6 @@ from .payload import (
     build_improvement_reconciliation_payload,
     build_comparison_eligibility_payload,
     build_absolute_execution_shadow_payload,
-    build_llm_comparison_payload,
-    build_llm_payload,
-    build_llm_repair_payload,
     build_stage_group_judgment_payload,
     build_stage_synthesis_payload,
     STAGE_JUDGMENT_GROUPS,
@@ -121,6 +117,14 @@ from .stage_group_artifacts import (
     read_stage_group_artifact,
     reusable_stage_group_response,
     stage_group_artifact_path,
+)
+from .stage_fact_artifacts import (
+    StageFactArtifactError,
+    completed_stage_fact_artifact,
+    failed_stage_fact_artifact,
+    read_stage_fact_artifact,
+    reusable_stage_fact_response,
+    stage_fact_artifact_path,
 )
 from .media import select_role_visual_inputs, select_stage_recovery_visual_inputs
 from ..finalization import facade as finalization_facade
@@ -150,7 +154,7 @@ from ..postprocess.validate import (
 
 
 # 修改 build_video_fact_payload 的语义合同后必须递增，避免旧 facts 与新判断规则混用。
-VIDEO_FACT_CACHE_SCHEMA_VERSION = 26
+VIDEO_FACT_CACHE_SCHEMA_VERSION = 28
 PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION = 2
 CACHE_RECORD_SCHEMA_VERSION = 1
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -598,17 +602,28 @@ def finalize_canonical_analysis_result(
             audit.changes,
             truncated=audit.truncated,
         )
+        replay_context_path = artifact_dir / "analysis_replay_context.json"
+        write_json(replay_context_path, analysis)
         provenance = {
-            "schema_version": 1,
+            "schema_version": 2,
             "result_contract": ANALYSIS_RESULT_CONTRACT.metadata(),
             "raw_model_response": "raw_model_response.json" if raw_snapshot is not None else None,
             "validated_normalized_result": "validated_normalized_result.json",
-            "validated_normalized_sha256": canonical_result.sha256,
+            # The replay gate validates the bytes on disk, not the compact
+            # in-memory canonical digest.  write_json intentionally uses
+            # pretty-printed JSON, so these two serializations have different
+            # byte hashes even when they carry the same object.
+            "validated_normalized_sha256": _sha256_file(
+                artifact_dir / "validated_normalized_result.json"
+            ),
             "final_derived_result": "final_derived_result.json",
             "field_change_log": "postprocess_change_log.json",
             "change_count": len(audit.changes),
             "change_log_truncated": audit.truncated,
             "field_sources": field_sources,
+            "replay_context": replay_context_path.name,
+            "replay_context_sha256": _sha256_file(replay_context_path),
+            "analysis_input_sha256": hashlib.sha256(analysis_input.encode("utf-8")).hexdigest(),
         }
         normalized["postprocess_provenance"] = provenance
         change_log = audit.as_dict()
@@ -841,6 +856,7 @@ def fetch_json_completion(
     last_text = ""
     logical_request_id = uuid.uuid4().hex
     outer_retry_reason = ""
+    retry_reasons: list[str] = []
     try:
         payload_text = payload_path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -864,6 +880,7 @@ def fetch_json_completion(
                     budget=getattr(args, "_resource_budget", None),
                     request_id=logical_request_id,
                     initial_retry_reason=outer_retry_reason,
+                    response_meta=response_meta,
                     **request_options,
                 )
             except SystemExit as exc:
@@ -890,32 +907,94 @@ def fetch_json_completion(
                     raise
                 # 底层已做同一 SSE 请求的传输重试；仍失败时重取完整响应，不能让单次网络中断终止整条 pipeline。
                 if attempt + 1 >= max_attempts:
+                    if response_meta is not None:
+                        response_meta.update(
+                            {
+                                "logical_request_id": logical_request_id,
+                                "completion_attempts": attempt + 1,
+                                "retry_reasons": [*retry_reasons, error_text[:200]],
+                                "status": "failed",
+                            }
+                        )
                     raise
                 outer_retry_reason = error_text[:200]
+                retry_reasons.append(outer_retry_reason)
                 time.sleep(5 * (attempt + 1))
                 continue
-        raw = json.loads(raw_text)
-        last_text = extract_chat_completion_text(raw)
+        try:
+            raw = json.loads(raw_text)
+        except json.JSONDecodeError:
+            reason = "invalid JSON in provider envelope"
+            retry_reasons.append(reason)
+            if response_meta is not None:
+                response_meta.update(
+                    {
+                        "status": "invalid_json",
+                        "logical_request_id": logical_request_id,
+                        "completion_attempts": attempt + 1,
+                        "retry_reasons": list(retry_reasons),
+                        "json_valid": False,
+                    }
+                )
+            if attempt + 1 >= max_attempts:
+                break
+            outer_retry_reason = reason
+            time.sleep(5 * (attempt + 1))
+            continue
+        try:
+            last_text = extract_chat_completion_text(raw)
+        except SystemExit as exc:
+            reason = f"provider response missing text output: {exc}"
+            retry_reasons.append(reason)
+            if response_meta is not None:
+                response_meta.update(
+                    {
+                        "status": "invalid_response",
+                        "logical_request_id": logical_request_id,
+                        "completion_attempts": attempt + 1,
+                        "retry_reasons": list(retry_reasons),
+                        "json_valid": True,
+                    }
+                )
+            if attempt + 1 >= max_attempts:
+                raise SystemExit(reason) from exc
+            outer_retry_reason = reason
+            time.sleep(5 * (attempt + 1))
+            continue
         if response_meta is not None:
-            response_meta.clear()
             choices = raw.get("choices") if isinstance(raw.get("choices"), list) else []
             choice = choices[0] if choices and isinstance(choices[0], dict) else {}
             response_meta.update(
                 {
+                    "status": "completed",
+                    "logical_request_id": logical_request_id,
+                    "completion_attempts": attempt + 1,
+                    "retry_reasons": list(retry_reasons),
                     "finish_reason": str(choice.get("finish_reason") or "").strip().lower(),
                     "usage": copy.deepcopy(raw.get("usage")) if isinstance(raw.get("usage"), dict) else {},
+                    "json_valid": True,
                 }
             )
         try:
             parse_json_text(last_text)
             return last_text
         except SystemExit:
+            reason = "invalid JSON in completed model response"
+            retry_reasons.append(reason)
+            if response_meta is not None:
+                response_meta.update(
+                    {
+                        "status": "invalid_json",
+                        "json_valid": False,
+                        "retry_reasons": list(retry_reasons),
+                    }
+                )
             # 输出预算截断（finish_reason=length）重发也会在同处截断，直接交给 repair，不徒劳重取。
             if str(raw.get("choices", [{}])[0].get("finish_reason")) == "length":
                 break
             if attempt + 1 >= max_attempts:
                 break
-            outer_retry_reason = "invalid JSON in completed model response"
+            outer_retry_reason = reason
     return last_text
 
 
@@ -923,6 +1002,42 @@ def _stable_digest(value: Any) -> str:
     """生成跨运行稳定的内容摘要；缓存 key 只依赖可审计输入。"""
     text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _preprocess_artifact_content_digest(value: Any) -> str:
+    """Digest artifact content, excluding volatile filesystem metadata."""
+    if not isinstance(value, dict):
+        return _stable_digest(value)
+    files_value = value.get("files")
+    if isinstance(files_value, dict):
+        files = [
+            {
+                "relative_path": relative_path,
+                **(metadata if isinstance(metadata, dict) else {}),
+            }
+            for relative_path, metadata in files_value.items()
+        ]
+    elif isinstance(files_value, list):
+        files = files_value
+    else:
+        files = []
+    stable_files = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        stable_files.append(
+            {
+                "relative_path": str(item.get("relative_path") or ""),
+                "sha256": str(item.get("sha256") or ""),
+                "size": item.get("size", item.get("size_bytes")),
+            }
+        )
+    return _stable_digest(
+        {
+            "version": value.get("version", value.get("schema_version")),
+            "files": sorted(stable_files, key=lambda item: item["relative_path"]),
+        }
+    )
 
 
 def _source_video_hash(analysis: dict[str, Any], role: str) -> str:
@@ -942,6 +1057,16 @@ def _cache_path(run_dir: Path, namespace: str, key: dict[str, Any]) -> Path | No
 
 
 def _read_cache_result(
+    path: Path | None,
+    result_key: str,
+    expected_key: dict[str, Any] | None = None,
+    validator: Any = None,
+) -> dict[str, Any] | None:
+    cached = _read_cache_record(path, result_key, expected_key, validator)
+    return cached.get(result_key) if isinstance(cached, dict) else None
+
+
+def _read_cache_record(
     path: Path | None,
     result_key: str,
     expected_key: dict[str, Any] | None = None,
@@ -974,9 +1099,55 @@ def _read_cache_result(
         return None
     if artifact.get("sha256") != hashlib.sha256(serialized.encode("utf-8")).hexdigest():
         return None
+    stage_fact_artifacts = cached.get("stage_fact_artifacts")
+    if stage_fact_artifacts is not None:
+        if not isinstance(stage_fact_artifacts, dict):
+            return None
+        expected_artifacts_digest = cached.get("stage_fact_artifacts_sha256")
+        if expected_artifacts_digest != _stable_digest(stage_fact_artifacts):
+            return None
     if validator is not None and not validator(result):
         return None
-    return result
+    return cached
+
+
+def _stage_fact_artifacts_for_cache(run_dir: Path, role: str) -> dict[str, dict[str, Any]]:
+    artifacts: dict[str, dict[str, Any]] = {}
+    prefix = f"stage1_provider_{role}_"
+    for path in sorted(run_dir.glob(f"{prefix}*.json")):
+        if path.name == f"stage1_provider_{role}_" or not path.is_file():
+            continue
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict):
+            artifacts[path.name] = value
+    return artifacts
+
+
+def _restore_stage_fact_artifacts_from_cache(
+    cache_record: dict[str, Any],
+    run_dir: Path,
+    role: str,
+) -> bool:
+    value = cache_record.get("stage_fact_artifacts")
+    if not isinstance(value, dict) or not value:
+        return False
+    prefix = f"stage1_provider_{role}_"
+    restored = 0
+    for name, artifact in value.items():
+        safe_name = str(name or "")
+        if (
+            not safe_name.startswith(prefix)
+            or Path(safe_name).name != safe_name
+            or not safe_name.endswith(".json")
+            or not isinstance(artifact, dict)
+        ):
+            return False
+        write_json(run_dir / safe_name, artifact)
+        restored += 1
+    return restored > 0
 
 
 def _write_cache_result(path: Path | None, record: dict[str, Any]) -> None:
@@ -997,6 +1168,8 @@ def _write_cache_result(path: Path | None, record: dict[str, Any]) -> None:
             "sha256": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
         },
     }
+    if isinstance(record.get("stage_fact_artifacts"), dict):
+        record["stage_fact_artifacts_sha256"] = _stable_digest(record["stage_fact_artifacts"])
     path.parent.mkdir(parents=True, exist_ok=True)
     write_json(path, record)
 
@@ -1065,9 +1238,14 @@ def _product_foundation_cache_key(args: argparse.Namespace, analysis: dict[str, 
 
 def _video_fact_cache_key(args: argparse.Namespace, analysis: dict[str, Any], role: str) -> dict[str, Any]:
     foundation = analysis.get("product_foundation") if isinstance(analysis.get("product_foundation"), dict) else {}
+    video_info = analysis.get("videos", {}).get(role, {}) if isinstance(analysis.get("videos"), dict) else {}
+    preprocess_fingerprint = video_info.get("preprocess_fingerprint") if isinstance(video_info, dict) else {}
+    preprocess_artifacts = video_info.get("preprocess_artifacts") if isinstance(video_info, dict) else {}
     return {
         "cache_schema_version": VIDEO_FACT_CACHE_SCHEMA_VERSION,
         "source_video_sha256": _source_video_hash(analysis, role),
+        "preprocess_fingerprint_sha256": _stable_digest(preprocess_fingerprint),
+        "preprocess_artifacts_sha256": _preprocess_artifact_content_digest(preprocess_artifacts),
         "role": role,
         "llm_model": str(args.llm_model or ""),
         "llm_api_url": str(args.llm_api_url or ""),
@@ -1581,6 +1759,57 @@ def _deterministic_improvement(stage_results: list[dict[str, Any]]) -> list[dict
     }]
 
 
+def _project_synthesis_improvements(
+    raw_improvements: Any,
+    stage_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project model prose onto code-owned stage evidence and ranges.
+
+    Stage3 may write prose and select a target stage. It cannot author IDs,
+    time ranges, gap types, or priority because those fields already have a
+    single authoritative source in the normalized Stage2 result.
+    """
+    by_code = {
+        code: stage
+        for stage in stage_results
+        if isinstance(stage, dict)
+        for code in [_segmented_stage_code(stage.get("stage"))]
+        if code in _SEGMENTED_STAGE_NAMES
+    }
+    projected: list[dict[str, Any]] = []
+    for item in raw_improvements if isinstance(raw_improvements, list) else []:
+        if not isinstance(item, dict):
+            continue
+        code = _segmented_stage_code(item.get("target_stage"))
+        stage = by_code.get(code)
+        if stage is None:
+            continue
+        magnitude = str(stage.get("model_gap_magnitude") or "uncertain").strip().lower()
+        priority = {"large": 1, "medium": 2, "small": 3, "none": 4}.get(magnitude, 4)
+        actions = item.get("actions") if isinstance(item.get("actions"), list) else []
+        projected.append(
+            {
+                "title": str(item.get("title") or f"复核{code}阶段").strip(),
+                "target_stage": code,
+                "problem": str(item.get("problem") or stage.get("gap") or "阶段差距待复核").strip(),
+                "suggestion": str(item.get("suggestion") or "待基于阶段证据复核").strip(),
+                "actions": [str(value).strip() for value in actions if str(value).strip()][:5],
+                "gmv_reason": str(item.get("gmv_reason") or "避免把证据未知误写成业务缺陷").strip(),
+                "gmv_impact": str(item.get("gmv_impact") or "待基于完整阶段证据确认").strip(),
+                # All fields below are deterministic projections from Stage2.
+                "gap_type": stage.get("gap_type") or "execution",
+                "time_range": stage.get("time_range") or "",
+                "creator_time_range": stage.get("creator_time_range") or "",
+                "benchmark_time_range": stage.get("benchmark_time_range") or "",
+                "benchmark_reference": stage.get("benchmark_summary") or "暂无合格标杆证据。",
+                "benchmark_evidence_ids": list(stage.get("benchmark_evidence_ids") or []),
+                "evidence": list(stage.get("evidence") or []),
+                "priority": priority,
+            }
+        )
+    return projected[:5]
+
+
 def _prepare_segmented_synthesis(raw: dict[str, Any] | None, stage_results: list[dict[str, Any]]) -> dict[str, Any]:
     raw = raw if isinstance(raw, dict) else {}
     result = copy.deepcopy(raw)
@@ -1592,8 +1821,10 @@ def _prepare_segmented_synthesis(raw: dict[str, Any] | None, stage_results: list
     result.setdefault("loop_closure", {})
     result.setdefault("s3_s4_relationship", {})
     result.setdefault("promise_chain", {})
-    improvements = result.get("improvements") if isinstance(result.get("improvements"), list) else []
-    result["improvements"] = improvements[:5] or _deterministic_improvement(stage_results)
+    result["improvements"] = _project_synthesis_improvements(
+        result.get("improvements"),
+        stage_results,
+    ) or _deterministic_improvement(stage_results)
     return result
 
 
@@ -1742,22 +1973,58 @@ def _stage2_replay_source(args: argparse.Namespace) -> tuple[Path | None, bool]:
     return None, True
 
 
+def _stage1_replay_source(args: argparse.Namespace) -> tuple[Path | None, bool]:
+    """Return the frozen Stage1 artifact source and provider fallback policy."""
+    replay = getattr(args, "stage1_replay_from", None)
+    resume = getattr(args, "stage1_resume_from", None)
+    if isinstance(replay, (str, Path)) and str(replay):
+        return Path(replay).expanduser().resolve(), False
+    if isinstance(resume, (str, Path)) and str(resume):
+        return Path(resume).expanduser().resolve(), True
+    return None, True
+
+
+def _read_replayable_stage_fact(
+    source_dir: Path,
+    *,
+    role: str,
+    phase: str,
+    group: list[str] | tuple[str, ...] | None,
+    payload: dict[str, Any],
+    args: argparse.Namespace,
+) -> tuple[dict[str, Any], dict[str, Any], Path]:
+    path = stage_fact_artifact_path(source_dir, role, phase, group)
+    artifact = read_stage_fact_artifact(path)
+    response, response_meta = reusable_stage_fact_response(
+        artifact,
+        role=role,
+        phase=phase,
+        group=group,
+        payload=payload,
+        model=args.llm_model,
+        api_url=args.llm_api_url,
+    )
+    return response, response_meta, path
+
+
 def _read_replayable_stage_group(
     source_dir: Path,
     *,
     group: list[str] | tuple[str, ...],
     payload: dict[str, Any],
     args: argparse.Namespace,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     path = stage_group_artifact_path(source_dir, group)
     artifact = read_stage_group_artifact(path)
-    return reusable_stage_group_response(
+    response = reusable_stage_group_response(
         artifact,
         group=group,
         payload=payload,
         model=args.llm_model,
         api_url=args.llm_api_url,
     )
+    response_meta = artifact.get("response_meta")
+    return response, copy.deepcopy(response_meta) if isinstance(response_meta, dict) else {}
 
 
 def run_segmented_stage_pipeline(
@@ -1803,6 +2070,7 @@ def run_segmented_stage_pipeline(
         request_path = run_dir / f"llm_stage_group_{label}_request.json"
         response_path = run_dir / f"llm_stage_group_{label}_response.json"
         payload: dict[str, Any] = {}
+        response_meta: dict[str, Any] = {}
         try:
             payload = build_stage_group_judgment_payload(
                 args.llm_model,
@@ -1817,7 +2085,7 @@ def run_segmented_stage_pipeline(
             parsed: dict[str, Any] | None = None
             if replay_source is not None:
                 try:
-                    parsed = _read_replayable_stage_group(
+                    parsed, response_meta = _read_replayable_stage_group(
                         replay_source,
                         group=target,
                         payload=payload,
@@ -1829,7 +2097,13 @@ def run_segmented_stage_pipeline(
                         raise SystemExit(f"阶段组 {label} 无法离线重放：{exc}") from exc
             if parsed is None:
                 write_json(request_path, payload)
-                response_text = fetch_json_completion(args, api_key, request_path, response_path)
+                response_text = fetch_json_completion(
+                    args,
+                    api_key,
+                    request_path,
+                    response_path,
+                    response_meta=response_meta,
+                )
                 parsed = parse_json_text(response_text)
             if not isinstance(parsed, dict):
                 raise SystemExit(f"阶段组 {label} 必须返回 JSON 对象")
@@ -1841,6 +2115,7 @@ def run_segmented_stage_pipeline(
                     response=parsed,
                     model=args.llm_model,
                     api_url=args.llm_api_url,
+                    response_meta=response_meta,
                 ),
             )
             raw_stages = parsed.get("stages") if isinstance(parsed, dict) and isinstance(parsed.get("stages"), list) else []
@@ -1862,6 +2137,10 @@ def run_segmented_stage_pipeline(
                 "response_sha256": _stable_digest(parsed),
                 "provider_artifact": provider_artifact_path.name,
                 "execution_source": execution_source,
+                "logical_request_id": response_meta.get("logical_request_id"),
+                "completion_attempts": response_meta.get("completion_attempts", 0),
+                "retry_reasons": response_meta.get("retry_reasons", []),
+                "usage": response_meta.get("usage", {}),
             })
             stage_results.extend(projected)
         except (OSError, ValueError, SystemExit, json.JSONDecodeError) as exc:
@@ -1875,6 +2154,7 @@ def run_segmented_stage_pipeline(
                     model=args.llm_model,
                     api_url=args.llm_api_url,
                     error=str(exc),
+                    response_meta=response_meta,
                 ),
             )
             projected = [
@@ -1896,13 +2176,14 @@ def run_segmented_stage_pipeline(
     synthesis_response = run_dir / "llm_stage_synthesis_response.json"
     synthesis_provider_artifact = stage_group_artifact_path(run_dir, ("SYNTHESIS",))
     synthesis_payload: dict[str, Any] = {}
+    synthesis_response_meta: dict[str, Any] = {}
     synthesis_execution_source = "provider"
     try:
         synthesis_payload = build_stage_synthesis_payload(args.llm_model, analysis_input, facts, stage_results, analysis)
         parsed: dict[str, Any] | None = None
         if replay_source is not None:
             try:
-                parsed = _read_replayable_stage_group(
+                parsed, synthesis_response_meta = _read_replayable_stage_group(
                     replay_source,
                     group=("SYNTHESIS",),
                     payload=synthesis_payload,
@@ -1914,7 +2195,13 @@ def run_segmented_stage_pipeline(
                     raise SystemExit(f"Stage3 synthesis 无法离线重放：{exc}") from exc
         if parsed is None:
             write_json(synthesis_request, synthesis_payload)
-            response_text = fetch_json_completion(args, api_key, synthesis_request, synthesis_response)
+            response_text = fetch_json_completion(
+                args,
+                api_key,
+                synthesis_request,
+                synthesis_response,
+                response_meta=synthesis_response_meta,
+            )
             parsed = parse_json_text(response_text)
         if not isinstance(parsed, dict):
             raise SystemExit("Stage3 synthesis must be a JSON object")
@@ -1926,6 +2213,7 @@ def run_segmented_stage_pipeline(
                 response=parsed,
                 model=args.llm_model,
                 api_url=args.llm_api_url,
+                response_meta=synthesis_response_meta,
             ),
         )
         synthesis = parsed
@@ -1941,6 +2229,7 @@ def run_segmented_stage_pipeline(
                 model=args.llm_model,
                 api_url=args.llm_api_url,
                 error=str(exc),
+                response_meta=synthesis_response_meta,
             ),
         )
 
@@ -2003,205 +2292,8 @@ def run_segmented_stage_pipeline(
     return result
 
 
-def run_large_model_analysis(
-    args: argparse.Namespace,
-    analysis: dict[str, Any],
-    analysis_input_path: Path,
-    run_dir: Path,
-) -> tuple[Path, dict[str, Any]] | None:
-    """从 analysis_input.md 出发跑一次完整 LLM 分析，写出 analysis_result.json。"""
-    api_key = read_llm_api_key(args).strip()
-    if not api_key and not args.llm_dry_run:
-        keychain_hint = ""
-        if args.llm_api_key_keychain_service:
-            keychain_hint = f" or Keychain service {args.llm_api_key_keychain_service}"
-        raise SystemExit(f"Missing API key: set ${args.llm_api_key_env}{keychain_hint}, or use --llm-dry-run.")
-
-    if args.llm_include_images:
-        # 冻结 S1 命题尺子（人工策展）：先挂进 analysis，再跑 Step-0，避免品牌/型号空猜污染品地基。
-        product = analysis.get("product") if isinstance(analysis.get("product"), dict) else {}
-        brand_proposition = load_brand_proposition(
-            run_dir,
-            str(product.get("proposition_key") or ""),
-        )
-        if brand_proposition:
-            analysis["brand_proposition"] = brand_proposition
-        # Step-0：先确立品的商业地基（特征+命题），贯穿喂给阶段1 观察 + 阶段2 判断；失败则下游内联兜底。
-        foundation = establish_product_foundation(args, analysis, run_dir, api_key)
-        if foundation:
-            analysis["product_foundation"] = foundation
-        facts = run_video_fact_extraction(args, analysis, run_dir, api_key)
-        if args.llm_dry_run:
-            print("LLM dry run: fact request payloads constructed in memory; no request artifacts retained")
-            return None
-        maybe_run_absolute_execution_shadow(args, analysis, facts, run_dir, api_key)
-        comparison_contract = establish_comparison_eligibility(args, facts, run_dir, api_key)
-        analysis["comparison_contract"] = comparison_contract
-        analysis["comparison_eligibility"] = comparison_contract
-        if comparison_contract.get("overall_status") in {"not_comparable", "uncertain"}:
-            _apply_non_comparable_result(analysis, facts, comparison_contract, run_dir)
-            return None
-        analysis_input = analysis_input_path.read_text(encoding="utf-8")
-        # ADR-007 production path: Stage2 is four bounded judgment calls and
-        # Stage3 is a read-only synthesis. The legacy whole-object request and
-        # whole-object repair remain available only to explicit legacy imports.
-        segmented_result = run_segmented_stage_pipeline(
-            args,
-            analysis,
-            analysis_input,
-            facts,
-            run_dir,
-            api_key,
-        )
-        segmented_result["analysis_run_metadata"] = {
-            "llm_model": str(args.llm_model or ""),
-            "llm_api_url": str(args.llm_api_url or ""),
-            "multimodal_input": True,
-            "pipeline": "segmented_stage_v1",
-        }
-        normalized = finalize_analysis_result(
-            segmented_result,
-            analysis,
-            analysis_input,
-            locked_video_understanding=facts,
-        )
-        # finalize_analysis_result is the single authority for the publish
-        # status.  The live runner's pre-finalization status may still contain
-        # stages that become intentionally not-comparable after the locked
-        # evidence gate is materialized; copying it back here would turn a
-        # valid completed result into a false degraded result.
-        result_path = run_dir / "analysis_result.json"
-        write_json(result_path, normalized)
-        return result_path, normalized
-    else:
-        facts = None
-        payload = build_llm_payload(args.llm_model, analysis_input_path.read_text(encoding="utf-8"), [])
-
-    payload_path = run_dir / "llm_request.json"
-    write_json(payload_path, payload)
-
-    if args.llm_dry_run:
-        payload_path.unlink(missing_ok=True)
-        print("LLM dry run: request payload constructed in memory; no request artifact retained")
-        return None
-
-    raw_path = run_dir / "llm_response.json"
-    result_text = fetch_json_completion(args, api_key, payload_path, raw_path)
-    result = parse_and_validate_llm_result(
-        args=args,
-        api_key=api_key,
-        raw_result_text=result_text,
-        analysis_input=analysis_input_path.read_text(encoding="utf-8"),
-        run_dir=run_dir,
-        analysis=analysis,
-        locked_video_understanding=facts,
-    )
-    result["analysis_run_metadata"] = {
-        "llm_model": str(args.llm_model or ""),
-        "llm_api_url": str(args.llm_api_url or ""),
-        "comparison_temperature": payload.get("temperature"),
-        "multimodal_input": bool(args.llm_include_images),
-    }
-    result_path = run_dir / "analysis_result.json"
-    write_json(result_path, result)
-    return result_path, result
-
-
-def maybe_run_absolute_execution_shadow(
-    args: argparse.Namespace,
-    analysis: dict[str, Any],
-    facts: dict[str, Any],
-    run_dir: Path,
-    api_key: str,
-) -> None:
-    """按开关运行单侧执行审计；失败只记录结果，不得中断主分析。
-
-    审计读取的仅是每侧 Stage1 锁定事实，因此不会接触另一侧视频或主对比的
-    stage_analysis。当前是 shadow mode：结果不进入 severity，也不缓存评分结果；
-    这样才能如实测量模型在相同 facts 下的方差，而不是把首次随机结果伪装成稳定。
-    """
-    if not getattr(args, "absolute_execution_shadow", False):
-        return
-    audit: dict[str, Any] = {"status": "pending", "roles": {}, "errors": []}
-    for role in ("benchmark", "creator"):
-        if not isinstance(facts.get(role), dict):
-            audit["errors"].append(f"{role}: 缺少锁定单视频事实")
-            continue
-        try:
-            request_path = run_dir / f"llm_absolute_execution_{role}_request.json"
-            response_path = run_dir / f"llm_absolute_execution_{role}_response.json"
-            payload = build_absolute_execution_shadow_payload(args.llm_model, role, facts, analysis)
-            write_json(request_path, payload)
-            response_text = fetch_json_completion(args, api_key, request_path, response_path)
-            parsed = normalize_absolute_execution_shadow(role, parse_json_text(response_text))
-            if parsed is None:
-                raise SystemExit("单侧审计缺少完整 S1-S4 枚举输出")
-            audit["roles"][role] = parsed
-            write_json(run_dir / f"absolute_execution_{role}.json", parsed)
-        except (OSError, ValueError, SystemExit, json.JSONDecodeError) as exc:
-            audit["errors"].append(f"{role}: {exc}")
-    audit["status"] = "completed" if len(audit["roles"]) == 2 else "partial" if audit["roles"] else "failed"
-    analysis["absolute_execution_shadow"] = audit
-
-
-def parse_and_validate_llm_result(
-    args: argparse.Namespace,
-    api_key: str,
-    raw_result_text: str,
-    analysis_input: str,
-    run_dir: Path,
-    analysis: dict[str, Any],
-    locked_video_understanding: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """解析 LLM 输出并跑全套校验；失败时执行一次完整 JSON repair。"""
-    raw_result: dict[str, Any] | None = None
-    try:
-        raw_result = parse_json_text(raw_result_text)
-        _write_raw_model_response(run_dir, result=raw_result, raw_text=raw_result_text, overwrite=True)
-        return _finish_validated_llm_result(
-            args, api_key, raw_result, analysis_input, run_dir, analysis, locked_video_understanding
-        )
-    except SystemExit as exc:
-        if raw_result is None:
-            _write_raw_model_response(run_dir, raw_text=raw_result_text, overwrite=True)
-        first_error = str(exc)
-
-    # 所有 provider 统一使用一次完整 JSON repair，避免 provider 专属补丁协议。
-    repair_payload = build_llm_repair_payload(
-        args.llm_model,
-        raw_result_text,
-        first_error,
-        analysis_input,
-        locked_video_understanding,
-        analysis=analysis,
-    )
-    repair_request_path = run_dir / "llm_repair_request.json"
-    repair_response_path = run_dir / "llm_repair_response.json"
-    write_json(repair_request_path, repair_payload)
-    # Repair 也必须复用 JSON 完整性保护；模型偶发返回残缺 JSON 时只重取修复结果，
-    # 不能让一次格式故障迫使整条昂贵的多模态分析从头重跑。
-    repair_result_text = fetch_json_completion(
-        args,
-        api_key,
-        repair_request_path,
-        repair_response_path,
-    )
-    raw_repair_result = raw_result or {}
-    try:
-        raw_repair_result = preserve_valid_repair_sections(raw_result, parse_json_text(repair_result_text))
-        return _finish_validated_llm_result(
-            args, api_key, raw_repair_result, analysis_input, run_dir, analysis, locked_video_understanding
-        )
-    except SystemExit as exc:
-        raise SystemExit(f"LLM output repair failed. First error: {first_error}. Repair error: {exc}") from exc
-
-
-def _is_permanent_llm_error(error_text: str) -> bool:
-    """Return whether the transport error is a non-retryable HTTP 4xx failure."""
-    return bool(re.search(r"\bHTTP\s+(?:400|401|403|404|405|422)\b", str(error_text or "")))
-
-
-def _finish_validated_llm_result(
+def _apply_live_postprocess_chain(
+    *,
     args: argparse.Namespace,
     api_key: str,
     raw_result: dict[str, Any],
@@ -2210,7 +2302,12 @@ def _finish_validated_llm_result(
     analysis: dict[str, Any],
     locked_video_understanding: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """处理已解析结果，并统一执行 Phase C、S4 复核和提升点收口。"""
+    """Run the live-only Phase C/S4/improvement pass before finalization.
+
+    Stage2 owns bounded judgments and this function owns the single live
+    post-judgment handoff.  The deterministic finalizer still runs afterwards
+    and remains the only publisher of the final status.
+    """
     result = _process_llm_result(
         raw_result,
         analysis,
@@ -2248,6 +2345,134 @@ def _finish_validated_llm_result(
         locked_video_understanding=locked_video_understanding,
         run_dir=run_dir,
     )
+
+
+def run_large_model_analysis(
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    analysis_input_path: Path,
+    run_dir: Path,
+) -> tuple[Path, dict[str, Any]] | None:
+    """从 analysis_input.md 出发跑一次完整 LLM 分析，写出 analysis_result.json。"""
+    if not args.llm_include_images:
+        raise SystemExit(
+            "旧的 text-only LLM 路径已移除；请删除 --no-llm-include-images，"
+            "生产分析必须使用 Stage1 + segmented Stage2/Stage3 多模态链路。"
+        )
+    api_key = read_llm_api_key(args).strip()
+    if not api_key and not args.llm_dry_run:
+        keychain_hint = ""
+        if args.llm_api_key_keychain_service:
+            keychain_hint = f" or Keychain service {args.llm_api_key_keychain_service}"
+        raise SystemExit(f"Missing API key: set ${args.llm_api_key_env}{keychain_hint}, or use --llm-dry-run.")
+
+    # 冻结 S1 命题尺子（人工策展）：先挂进 analysis，再跑 Step-0，避免品牌/型号空猜污染品地基。
+    product = analysis.get("product") if isinstance(analysis.get("product"), dict) else {}
+    brand_proposition = load_brand_proposition(
+        run_dir,
+        str(product.get("proposition_key") or ""),
+    )
+    if brand_proposition:
+        analysis["brand_proposition"] = brand_proposition
+    # Step-0：先确立品的商业地基（特征+命题），贯穿喂给阶段1 观察 + 阶段2 判断；失败则下游内联兜底。
+    foundation = establish_product_foundation(args, analysis, run_dir, api_key)
+    if foundation:
+        analysis["product_foundation"] = foundation
+    facts = run_video_fact_extraction(args, analysis, run_dir, api_key)
+    if args.llm_dry_run:
+        print("LLM dry run: fact request payloads constructed in memory; no request artifacts retained")
+        return None
+    maybe_run_absolute_execution_shadow(args, analysis, facts, run_dir, api_key)
+    comparison_contract = establish_comparison_eligibility(args, facts, run_dir, api_key)
+    analysis["comparison_contract"] = comparison_contract
+    analysis["comparison_eligibility"] = comparison_contract
+    if comparison_contract.get("overall_status") in {"not_comparable", "uncertain"}:
+        _apply_non_comparable_result(analysis, facts, comparison_contract, run_dir)
+        return None
+    analysis_input = analysis_input_path.read_text(encoding="utf-8")
+    segmented_result = run_segmented_stage_pipeline(
+        args,
+        analysis,
+        analysis_input,
+        facts,
+        run_dir,
+        api_key,
+    )
+    segmented_result["analysis_run_metadata"] = {
+        "llm_model": str(args.llm_model or ""),
+        "llm_api_url": str(args.llm_api_url or ""),
+        "multimodal_input": True,
+        "pipeline": "segmented_stage_v1",
+    }
+    live_result = _apply_live_postprocess_chain(
+        args=args,
+        api_key=api_key,
+        raw_result=segmented_result,
+        analysis_input=analysis_input,
+        run_dir=run_dir,
+        analysis=analysis,
+        locked_video_understanding=facts,
+    )
+    normalized = finalize_analysis_result(
+        live_result,
+        analysis,
+        analysis_input,
+        locked_video_understanding=facts,
+    )
+    # finalize_analysis_result is the single authority for the publish status.
+    result_path = run_dir / "analysis_result.json"
+    write_json(result_path, normalized)
+    return result_path, normalized
+
+
+def maybe_run_absolute_execution_shadow(
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    facts: dict[str, Any],
+    run_dir: Path,
+    api_key: str,
+) -> None:
+    """按开关运行单侧执行审计；失败只记录结果，不得中断主分析。
+
+    审计读取的仅是每侧 Stage1 锁定事实，因此不会接触另一侧视频或主对比的
+    stage_analysis。当前是 shadow mode：结果不进入 severity，也不缓存评分结果；
+    这样才能如实测量模型在相同 facts 下的方差，而不是把首次随机结果伪装成稳定。
+    """
+    if not getattr(args, "absolute_execution_shadow", False):
+        return
+    audit: dict[str, Any] = {"status": "pending", "roles": {}, "errors": [], "provider_meta": {}}
+    for role in ("benchmark", "creator"):
+        if not isinstance(facts.get(role), dict):
+            audit["errors"].append(f"{role}: 缺少锁定单视频事实")
+            continue
+        try:
+            request_path = run_dir / f"llm_absolute_execution_{role}_request.json"
+            response_path = run_dir / f"llm_absolute_execution_{role}_response.json"
+            payload = build_absolute_execution_shadow_payload(args.llm_model, role, facts, analysis)
+            write_json(request_path, payload)
+            response_meta: dict[str, Any] = {}
+            response_text = fetch_json_completion(
+                args,
+                api_key,
+                request_path,
+                response_path,
+                response_meta=response_meta,
+            )
+            parsed = normalize_absolute_execution_shadow(role, parse_json_text(response_text))
+            if parsed is None:
+                raise SystemExit("单侧审计缺少完整 S1-S4 枚举输出")
+            audit["roles"][role] = parsed
+            audit["provider_meta"][role] = response_meta
+            write_json(run_dir / f"absolute_execution_{role}.json", parsed)
+        except (OSError, ValueError, SystemExit, json.JSONDecodeError) as exc:
+            audit["errors"].append(f"{role}: {exc}")
+    audit["status"] = "completed" if len(audit["roles"]) == 2 else "partial" if audit["roles"] else "failed"
+    analysis["absolute_execution_shadow"] = audit
+
+
+def _is_permanent_llm_error(error_text: str) -> bool:
+    """Return whether the transport error is a non-retryable HTTP 4xx failure."""
+    return bool(re.search(r"\bHTTP\s+(?:400|401|403|404|405|422)\b", str(error_text or "")))
 
 
 def preserve_valid_repair_sections(
@@ -2407,12 +2632,28 @@ def merge_reconciled_improvements(
         for stage in merged.get("stage_analysis", [])
         if isinstance(stage, dict)
     }
-    combined = [*additions_by_stage.values(), *existing]
+    projected_additions = []
+    for code, item in additions_by_stage.items():
+        stage = stages_by_code.get(code)
+        if not isinstance(stage, dict):
+            continue
+        stage_for_projection = dict(stage)
+        if stage_for_projection.get("model_gap_magnitude") not in {"none", "small", "medium", "large", "uncertain"}:
+            stage_for_projection["model_gap_magnitude"] = stage_for_projection.get("severity") or "uncertain"
+        projected = _project_synthesis_improvements([item], [stage_for_projection])
+        if projected:
+            projected_additions.append(projected[0])
+    projected_codes = {
+        stage_code(item.get("target_stage"))
+        for item in projected_additions
+        if isinstance(item, dict)
+    }
+    combined = [*projected_additions, *existing]
     severity_rank = {"large": 0, "medium": 1, "small": 2}
     combined.sort(
         key=lambda item: (
             severity_rank.get(stage_severity.get(stage_code(item.get("target_stage")), "medium"), 1),
-            0 if stage_code(item.get("target_stage")) in additions_by_stage else 1,
+            0 if stage_code(item.get("target_stage")) in projected_codes else 1,
             _safe_priority(item.get("priority")),
         )
     )
@@ -2450,6 +2691,7 @@ def maybe_reconcile_final_improvements(
         for key in ("phase_c_review", "s4_visual_verifier")
         if key in result
     }
+    response_meta: dict[str, Any] = {}
     try:
         raw_text = call_llm_api(
             args.llm_api_url,
@@ -2457,6 +2699,7 @@ def maybe_reconcile_final_improvements(
             request_path,
             response_path,
             budget=getattr(args, "_resource_budget", None),
+            response_meta=response_meta,
         )
         parsed = parse_json_text(extract_chat_completion_text(json.loads(raw_text)))
         additions = parsed.get("improvements") if isinstance(parsed.get("improvements"), list) else []
@@ -2475,6 +2718,7 @@ def maybe_reconcile_final_improvements(
             "applied": False,
             "requested_stages": missing,
             "reason": f"最终提升点补全失败：{exc}",
+            "provider_meta": response_meta,
         }
         _refresh_final_derived_artifact(analysis, result, ("improvement_reconciliation",))
         return result
@@ -2483,6 +2727,7 @@ def maybe_reconcile_final_improvements(
         "applied": True,
         "requested_stages": missing,
         "response_retention": "ephemeral",
+        "provider_meta": response_meta,
     }
     _refresh_final_derived_artifact(
         analysis,
@@ -2555,6 +2800,7 @@ def maybe_refine_low_confidence_stages(
     review_request_path = run_dir / "llm_stage_review_request.json"
     review_response_path = run_dir / "llm_stage_review_response.json"
     write_json(review_request_path, review_payload)
+    response_meta: dict[str, Any] = {}
     try:
         review_raw_text = call_llm_api(
             args.llm_api_url,
@@ -2562,6 +2808,7 @@ def maybe_refine_low_confidence_stages(
             review_request_path,
             review_response_path,
             budget=getattr(args, "_resource_budget", None),
+            response_meta=response_meta,
         )
         review_text = extract_chat_completion_text(json.loads(review_raw_text))
         review_result = parse_json_text(review_text)
@@ -2583,6 +2830,7 @@ def maybe_refine_low_confidence_stages(
             "applied": False,
             "reason": f"低置信阶段回看失败：{exc}",
             "patches": [],
+            "provider_meta": response_meta,
         }
         _refresh_final_derived_artifact(analysis, result, ("phase_c_review",))
         return result
@@ -2594,6 +2842,7 @@ def maybe_refine_low_confidence_stages(
         "requested_stages": stage_codes,
         "applied": True,
         "response_retention": "ephemeral",
+        "provider_meta": response_meta,
         "notes": review_result.get("review_notes", []),
         "patches": _phase_c_patch_snapshots(result, refined, review_result),
     }
@@ -3185,6 +3434,7 @@ def establish_product_foundation(
     payload = build_product_foundation_payload(args.llm_model, analysis)
     request_path = run_dir / "llm_product_foundation_request.json"
     response_path = run_dir / "llm_product_foundation_response.json"
+    provider_meta: dict[str, Any] = {"initial": {}, "repair": {}}
     write_json(request_path, payload)
     if args.llm_dry_run:
         request_path.unlink(missing_ok=True)
@@ -3196,6 +3446,7 @@ def establish_product_foundation(
             request_path,
             response_path,
             request_max_time_seconds=240,
+            response_meta=provider_meta["initial"],
         )
         raw = parse_json_text(result_text)
         foundation = {
@@ -3220,6 +3471,7 @@ def establish_product_foundation(
                 repair_request_path,
                 repair_response_path,
                 request_max_time_seconds=240,
+                response_meta=provider_meta["repair"],
             )
             repaired_raw = parse_json_text(repair_text)
             foundation = {
@@ -3257,7 +3509,9 @@ def establish_product_foundation(
             raise ValueError("category_profile 与 product_profile 均为空")
     except Exception as exc:  # noqa: BLE001
         print(f"Step-0 品地基确立失败，回退到阶段2 内联产出：{exc}", flush=True)
+        write_json(run_dir / "product_foundation_provider_meta.json", provider_meta)
         return None
+    write_json(run_dir / "product_foundation_provider_meta.json", provider_meta)
     _write_cache_result(cache_path, {**cache_key, "foundation": foundation})
     return foundation
 
@@ -3272,9 +3526,16 @@ def establish_comparison_eligibility(
     payload = build_comparison_eligibility_payload(args.llm_model, facts)
     request_path = run_dir / "llm_comparison_eligibility_request.json"
     response_path = run_dir / "llm_comparison_eligibility_response.json"
+    response_meta: dict[str, Any] = {}
     write_json(request_path, payload)
     try:
-        result_text = fetch_json_completion(args, api_key, request_path, response_path)
+        result_text = fetch_json_completion(
+            args,
+            api_key,
+            request_path,
+            response_path,
+            response_meta=response_meta,
+        )
         eligibility = normalize_comparison_contract(parse_json_text(result_text))
         if eligibility["overall_status"] == "uncertain" and not eligibility["reason"]:
             eligibility["reason"] = "双侧产品身份不足以确认产品级比较资格。"
@@ -3289,6 +3550,7 @@ def establish_comparison_eligibility(
     )
     write_json(run_dir / "comparison_contract.json", eligibility)
     write_json(run_dir / "comparison_eligibility.json", eligibility)
+    write_json(run_dir / "comparison_provider_meta.json", response_meta)
     return eligibility
 
 
@@ -3529,12 +3791,17 @@ def _run_stage1_qualification(
     group_records: list[dict[str, Any]] = []
     failed_stage_codes: list[str] = []
     successful_group_count = 0
+    replay_source, provider_fallback_allowed = _stage1_replay_source(args)
 
     for group in STAGE1_QUALIFICATION_GROUPS:
         targets = list(group)
         label = "_".join(targets)
         request_path = run_dir / f"llm_facts_{role}_qualification_{label}_request.json"
         response_path = run_dir / f"llm_facts_{role}_qualification_{label}_response.json"
+        artifact_path = stage_fact_artifact_path(run_dir, role, "B", targets)
+        payload: dict[str, Any] = {}
+        response_meta: dict[str, Any] = {}
+        execution_source = "provider"
         try:
             payload = build_stage_evidence_qualification_payload(
                 args.llm_model,
@@ -3543,9 +3810,31 @@ def _run_stage1_qualification(
                 facts,
                 targets,
             )
-            write_json(request_path, payload)
-            response_text = fetch_json_completion(args, api_key, request_path, response_path)
-            response = parse_json_text(response_text)
+            response: dict[str, Any] | None = None
+            if replay_source is not None:
+                try:
+                    response, response_meta, _source_artifact = _read_replayable_stage_fact(
+                        replay_source,
+                        role=role,
+                        phase="B",
+                        group=targets,
+                        payload=payload,
+                        args=args,
+                    )
+                    execution_source = "replay"
+                except StageFactArtifactError:
+                    if not provider_fallback_allowed:
+                        raise
+            if response is None:
+                write_json(request_path, payload)
+                response_text = fetch_json_completion(
+                    args,
+                    api_key,
+                    request_path,
+                    response_path,
+                    response_meta=response_meta,
+                )
+                response = parse_json_text(response_text)
             if not isinstance(response, dict):
                 raise ValueError("Stage1-B qualification 必须返回 JSON object。")
             allowed_keys = {"stage_evidence_contract_version", "stage_evidence_checks"}
@@ -3601,13 +3890,28 @@ def _run_stage1_qualification(
                         "Stage1-B 响应缺少目标阶段，资格保持未知。",
                     ),
                 )
+            artifact = completed_stage_fact_artifact(
+                role=role,
+                phase="B",
+                group=targets,
+                payload=payload,
+                response=response,
+                model=args.llm_model,
+                api_url=args.llm_api_url,
+                response_meta=response_meta,
+                artifact_name=artifact_path.name,
+            )
+            write_json(artifact_path, artifact)
             successful_group_count += 1
             group_records.append(
                 {
                     "group": targets,
                     "status": "completed",
-                    "request_artifact": request_path.name,
-                    "response_artifact": response_path.name,
+                    "execution_source": execution_source,
+                    "provider_artifact": artifact_path.name,
+                    "request_identity_sha256": artifact["request_identity"]["sha256"],
+                    "response_sha256": artifact["response_sha256"],
+                    "completion_attempts": response_meta.get("completion_attempts", 0),
                 }
             )
         except (OSError, ValueError, RuntimeError, SystemExit) as exc:
@@ -3624,11 +3928,25 @@ def _run_stage1_qualification(
                 {
                     "group": targets,
                     "status": "failed",
-                    "request_artifact": request_path.name,
-                    "response_artifact": response_path.name,
+                    "provider_artifact": artifact_path.name,
                     "failure_reason": safe_error[:500] or type(exc).__name__,
                 }
             )
+            if payload:
+                write_json(
+                    artifact_path,
+                    failed_stage_fact_artifact(
+                        role=role,
+                        phase="B",
+                        group=targets,
+                        payload=payload,
+                        model=args.llm_model,
+                        api_url=args.llm_api_url,
+                        error=safe_error or type(exc).__name__,
+                        artifact_name=artifact_path.name,
+                        response_meta=response_meta,
+                    ),
+                )
 
     facts["stage_evidence_checks"] = normalize_stage_evidence_checks(
         list(checks_by_stage.values()),
@@ -3663,6 +3981,7 @@ def run_video_fact_extraction(
     # the image budget by the number of videos would halve each request's
     # temporal coverage even though no request ever contains both sides.
     per_role_limit = max(4, args.llm_image_limit)
+    stage1_replay_source, _provider_fallback_allowed = _stage1_replay_source(args)
     for role in ("benchmark", "creator"):
         if role not in videos:
             continue
@@ -3670,15 +3989,21 @@ def run_video_fact_extraction(
         result_path = run_dir / f"video_facts_{role}.json"
         cache_key = _video_fact_cache_key(args, analysis, role)
         cache_path = _cache_path(run_dir, ".video_fact_cache", cache_key)
-        cached = (
+        cache_record = (
             None
-            if args.llm_dry_run
-            else _read_cache_result(
+            if args.llm_dry_run or stage1_replay_source is not None
+            else _read_cache_record(
                 cache_path,
                 "fact_result",
                 cache_key,
                 validator=lambda value: _is_valid_video_fact_cache(role, value, analysis),
             )
+        )
+        cached = (
+            cache_record.get("fact_result")
+            if isinstance(cache_record, dict)
+            and _restore_stage_fact_artifacts_from_cache(cache_record, run_dir, role)
+            else None
         )
         if cached is not None:
             acquisition_manifest = copy.deepcopy(cached.get("stage1_acquisition"))
@@ -3729,15 +4054,59 @@ def run_video_fact_extraction(
         )
         request_path = run_dir / f"llm_facts_{role}_request.json"
         response_path = run_dir / f"llm_facts_{role}_response.json"
-        write_json(request_path, payload)
         if args.llm_dry_run:
-            request_path.unlink(missing_ok=True)
             continue
         response_meta: dict[str, Any] = {}
-        result_text = fetch_json_completion(
-            args, api_key, request_path, response_path, response_meta=response_meta
-        )
-        fact_result = normalize_video_fact_result(role, parse_json_text(result_text), analysis)
+        artifact_path = stage_fact_artifact_path(run_dir, role, "A")
+        execution_source = "provider"
+        parsed_response: dict[str, Any] | None = None
+        try:
+            if stage1_replay_source is not None:
+                parsed_response, response_meta, _source_artifact = _read_replayable_stage_fact(
+                    stage1_replay_source,
+                    role=role,
+                    phase="A",
+                    group=None,
+                    payload=payload,
+                    args=args,
+                )
+                execution_source = "replay"
+            if parsed_response is None:
+                write_json(request_path, payload)
+                result_text = fetch_json_completion(
+                    args, api_key, request_path, response_path, response_meta=response_meta
+                )
+                parsed_response = parse_json_text(result_text)
+            if not isinstance(parsed_response, dict):
+                raise ValueError("Stage1-A provider response must be a JSON object")
+            artifact = completed_stage_fact_artifact(
+                role=role,
+                phase="A",
+                payload=payload,
+                response=parsed_response,
+                model=args.llm_model,
+                api_url=args.llm_api_url,
+                response_meta=response_meta,
+                artifact_name=artifact_path.name,
+            )
+            write_json(artifact_path, artifact)
+        except (OSError, ValueError, RuntimeError, SystemExit) as exc:
+            safe_error = str(exc).replace(api_key, "[REDACTED]")[:1000]
+            write_json(
+                artifact_path,
+                failed_stage_fact_artifact(
+                    role=role,
+                    phase="A",
+                    payload=payload,
+                    model=args.llm_model,
+                    api_url=args.llm_api_url,
+                    error=safe_error or type(exc).__name__,
+                    artifact_name=artifact_path.name,
+                    response_meta=response_meta,
+                ),
+            )
+            raise
+        fact_result = normalize_video_fact_result(role, parsed_response, analysis)
         fact_result["evidence_budget_exceeded"] = response_meta.get("finish_reason") == "length"
         sanitize_audio_observations(
             {"video_understanding": {role: fact_result}, "stage_analysis": []},
@@ -3759,6 +4128,14 @@ def run_video_fact_extraction(
                 )
             ),
         )
+        fact_result["stage1_acquisition"]["provider_artifacts"] = [{
+            "phase": "A",
+            "artifact": artifact_path.name,
+            "execution_source": execution_source,
+            "request_identity_sha256": artifact["request_identity"]["sha256"],
+            "response_sha256": artifact["response_sha256"],
+            "completion_attempts": response_meta.get("completion_attempts", 0),
+        }]
         fact_result = _run_stage1_qualification(
             args,
             analysis,
@@ -3793,11 +4170,44 @@ def run_video_fact_extraction(
                 )
             ),
         )
+        existing_provider_artifacts = fact_result["stage1_acquisition"].get("provider_artifacts") or []
+        for item in (
+            fact_result.get("stage1_qualification", {}).get("group_records", [])
+            if isinstance(fact_result.get("stage1_qualification"), dict)
+            else []
+        ):
+            if isinstance(item, dict) and item.get("provider_artifact"):
+                existing_provider_artifacts.append({
+                    "phase": "B",
+                    "artifact": item.get("provider_artifact"),
+                    "execution_source": item.get("execution_source", "provider"),
+                    "request_identity_sha256": item.get("request_identity_sha256", ""),
+                    "response_sha256": item.get("response_sha256", ""),
+                    "completion_attempts": item.get("completion_attempts", 0),
+                })
+        recovery_meta = fact_result.get("stage1_recovery")
+        if isinstance(recovery_meta, dict) and recovery_meta.get("provider_artifact"):
+            existing_provider_artifacts.append({
+                "phase": "C",
+                "artifact": recovery_meta.get("provider_artifact"),
+                "execution_source": recovery_meta.get("execution_source", "provider"),
+                "request_identity_sha256": recovery_meta.get("request_identity_sha256", ""),
+                "response_sha256": recovery_meta.get("response_sha256", ""),
+                "completion_attempts": recovery_meta.get("completion_attempts", 0),
+            })
+        fact_result["stage1_acquisition"]["provider_artifacts"] = existing_provider_artifacts
         if fact_result.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
             freeze_stage_evidence(fact_result)
         facts[role] = fact_result
         write_json(result_path, fact_result)
-        _write_cache_result(cache_path, {**cache_key, "fact_result": fact_result})
+        _write_cache_result(
+            cache_path,
+            {
+                **cache_key,
+                "fact_result": fact_result,
+                "stage_fact_artifacts": _stage_fact_artifacts_for_cache(run_dir, role),
+            },
+        )
     return facts
 
 
@@ -4317,6 +4727,11 @@ def _maybe_recover_video_facts(
 
     request_path = run_dir / f"llm_facts_{role}_stage_recovery_request.json"
     response_path = run_dir / f"llm_facts_{role}_stage_recovery_response.json"
+    artifact_path = stage_fact_artifact_path(run_dir, role, "C", targets)
+    replay_source, provider_fallback_allowed = _stage1_replay_source(args)
+    payload: dict[str, Any] = {}
+    response_meta: dict[str, Any] = {}
+    execution_source = "provider"
     try:
         video_info = analysis.get("videos", {}).get(role, {}) if isinstance(analysis.get("videos"), dict) else {}
         recovery_visual_inputs = select_stage_recovery_visual_inputs(
@@ -4335,12 +4750,27 @@ def _maybe_recover_video_facts(
             api_url=args.llm_api_url,
             budget=getattr(args, "_resource_budget", None),
         )
-        write_json(request_path, payload)
-        response_meta: dict[str, Any] = {}
-        recovery_text = fetch_json_completion(
-            args, api_key, request_path, response_path, response_meta=response_meta
-        )
-        recovery = parse_json_text(recovery_text)
+        recovery: dict[str, Any] | None = None
+        if replay_source is not None:
+            try:
+                recovery, response_meta, _source_artifact = _read_replayable_stage_fact(
+                    replay_source,
+                    role=role,
+                    phase="C",
+                    group=targets,
+                    payload=payload,
+                    args=args,
+                )
+                execution_source = "replay"
+            except StageFactArtifactError:
+                if not provider_fallback_allowed:
+                    raise
+        if recovery is None:
+            write_json(request_path, payload)
+            recovery_text = fetch_json_completion(
+                args, api_key, request_path, response_path, response_meta=response_meta
+            )
+            recovery = parse_json_text(recovery_text)
         if not isinstance(recovery, dict):
             raise ValueError("Stage1 focused recovery 必须返回 JSON object。")
         forbidden = stage1_forbidden_field_issues(recovery)
@@ -4382,7 +4812,34 @@ def _maybe_recover_video_facts(
                 "Stage1 focused recovery returned out-of-scope stages: "
                 + ", ".join(out_of_scope)
             )
+        artifact = completed_stage_fact_artifact(
+            role=role,
+            phase="C",
+            group=targets,
+            payload=payload,
+            response=recovery,
+            model=args.llm_model,
+            api_url=args.llm_api_url,
+            response_meta=response_meta,
+            artifact_name=artifact_path.name,
+        )
+        write_json(artifact_path, artifact)
     except (OSError, ValueError, RuntimeError, SystemExit) as exc:
+        if payload:
+            write_json(
+                artifact_path,
+                failed_stage_fact_artifact(
+                    role=role,
+                    phase="C",
+                    group=targets,
+                    payload=payload,
+                    model=args.llm_model,
+                    api_url=args.llm_api_url,
+                    error=str(exc) or type(exc).__name__,
+                    artifact_name=artifact_path.name,
+                    response_meta=response_meta,
+                ),
+            )
         return _mark_video_fact_recovery_failed(
             facts,
             target_stages=targets,
@@ -4429,6 +4886,11 @@ def _maybe_recover_video_facts(
             "unresolved" if budget_flag else "not_flagged"
         ),
         "audit_independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
+        "execution_source": execution_source,
+        "provider_artifact": artifact_path.name,
+        "request_identity_sha256": artifact["request_identity"]["sha256"],
+        "response_sha256": artifact["response_sha256"],
+        "completion_attempts": response_meta.get("completion_attempts", 0),
     }
     final_issues = stage_evidence_contract_issues(merged, require_version=True)
     if final_issues:
@@ -4734,8 +5196,16 @@ def run_video_identity_extraction(
         if args.llm_dry_run:
             request_path.unlink(missing_ok=True)
             continue
-        result_text = fetch_json_completion(args, api_key, request_path, response_path)
+        response_meta: dict[str, Any] = {}
+        result_text = fetch_json_completion(
+            args,
+            api_key,
+            request_path,
+            response_path,
+            response_meta=response_meta,
+        )
         identity = {"product_identity": normalize_video_product_identity(parse_json_text(result_text).get("product_identity"))}
         identities[role] = identity
         write_json(result_path, identity)
+        write_json(run_dir / f"video_identity_{role}_provider_meta.json", response_meta)
     return identities

@@ -229,6 +229,8 @@ def ocr_frame_with_retry(
     for attempt in range(2):
         request_path = raw_dir / f"ocr_{index:03d}_req.json"
         response_path = raw_dir / f"ocr_{index:03d}_resp.json"
+        meta_path = raw_dir / f"ocr_{index:03d}_attempt{attempt + 1}_meta.json"
+        response_meta: dict[str, Any] = {}
         write_json(request_path, build_ocr_payload(frame_path, model))
         try:
             raw = call_llm_api(
@@ -241,15 +243,52 @@ def ocr_frame_with_retry(
                 retries=0,
                 budget=budget,
                 call_kind="ocr",
+                request_id=f"ocr-{index:03d}-{attempt + 1}",
+                response_meta=response_meta,
             )
         except SystemExit as exc:
+            write_json(
+                meta_path,
+                {
+                    "schema_version": 1,
+                    "attempt": attempt + 1,
+                    "status": "failed",
+                    "error": str(exc)[:500],
+                    "provider_meta": response_meta,
+                },
+            )
             if "budget" in str(exc).lower() or "exceeded" in str(exc).lower():
                 return [], f"ocr_budget_exhausted: {str(exc)[:80]}"
             if attempt == 0:
                 continue
             return [], f"ocr_request_failed: {str(exc)[:80]}"
-        text = extract_chat_completion_text(json.loads(raw))
+        try:
+            text = extract_chat_completion_text(json.loads(raw))
+        except (SystemExit, json.JSONDecodeError) as exc:
+            write_json(
+                meta_path,
+                {
+                    "schema_version": 1,
+                    "attempt": attempt + 1,
+                    "status": "invalid_response",
+                    "error": str(exc)[:500],
+                    "provider_meta": response_meta,
+                },
+            )
+            if attempt == 0:
+                continue
+            return [], f"ocr_request_failed: {str(exc)[:80]}"
         lines = parse_ocr_lines(text)
+        write_json(
+            meta_path,
+            {
+                "schema_version": 1,
+                "attempt": attempt + 1,
+                "status": "completed" if lines else "empty_ocr",
+                "line_count": len(lines),
+                "provider_meta": response_meta,
+            },
+        )
         if lines:
             return lines, "ocr_ready"
         # 无文字（多半是退回纯坐标检测模式）→ 重试一次

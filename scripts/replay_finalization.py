@@ -46,11 +46,25 @@ def main() -> int:
 
     source = args.source_run.expanduser().resolve()
     canonical_path = source / "validated_normalized_result.json"
-    analysis_path = source / "analysis.json"
+    provenance_path = source / "final_derived_result.json"
+    analysis_path = source / "analysis_replay_context.json"
     input_path = source / "analysis_input.md"
-    for path in (canonical_path, analysis_path, input_path):
+    for path in (canonical_path, provenance_path, analysis_path, input_path):
         if not path.is_file():
             raise SystemExit(f"required replay artifact is missing: {path}")
+    provenance_result = _read_object(provenance_path)
+    provenance = provenance_result.get("postprocess_provenance")
+    if not isinstance(provenance, dict) or provenance.get("schema_version") != 2:
+        raise SystemExit("replay provenance is missing or outdated; the source run must be regenerated")
+    canonical_sha = _sha256(canonical_path)
+    if provenance.get("validated_normalized_sha256") != canonical_sha:
+        raise SystemExit("replay provenance does not match validated_normalized_result.json")
+    if provenance.get("replay_context") != analysis_path.name:
+        raise SystemExit("replay provenance points to a different analysis context")
+    if provenance.get("replay_context_sha256") != _sha256(analysis_path):
+        raise SystemExit("replay analysis context hash mismatch")
+    if provenance.get("analysis_input_sha256") != _sha256(input_path):
+        raise SystemExit("replay analysis input hash mismatch")
     output = _prepare_output(args.output_dir)
 
     finalized = replay_canonical_finalization(
@@ -68,7 +82,10 @@ def main() -> int:
             "mode": "canonical_finalization_only",
             "provider_calls": 0,
             "source_run": str(source),
-            "source_canonical_sha256": _sha256(canonical_path),
+            "source_canonical_sha256": canonical_sha,
+            "source_provenance_sha256": _sha256(provenance_path),
+            "source_replay_context_sha256": _sha256(analysis_path),
+            "source_analysis_input_sha256": _sha256(input_path),
             "result_sha256": _sha256(result_path),
             "stage2_pipeline_status": finalized.get("stage2_pipeline_status"),
         },

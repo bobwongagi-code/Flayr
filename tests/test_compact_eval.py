@@ -857,6 +857,14 @@ class CompactEvalContractTests(unittest.TestCase):
                 self.assertEqual(kwargs["retries"], 0)
                 self.assertEqual(kwargs["call_kind"], "compact_eval")
                 self.assertFalse(kwargs["cleanup_raw"])
+                kwargs["response_meta"].update(
+                    {
+                        "logical_request_id": "compact-fake-1",
+                        "transport_attempts": 1,
+                        "transport_retry_reasons": [],
+                        "usage": {"input_tokens": 10, "output_tokens": 20},
+                    }
+                )
                 raw_path.write_text(json.dumps(raw_response, ensure_ascii=False), encoding="utf-8")
                 return json.dumps(raw_response, ensure_ascii=False)
 
@@ -879,6 +887,7 @@ class CompactEvalContractTests(unittest.TestCase):
             self.assertEqual(outcome["gt_score"]["correct_stages"], 6)
             self.assertFalse(outcome["promotion_eligible"])
             self.assertEqual(outcome["decision_scope"], "calibration_only")
+            self.assertEqual(outcome["provider_meta"]["logical_request_id"], "compact-fake-1")
             self.assertEqual(call.call_count, 1)
             self.assertTrue((output_dir / "compact_evaluation.json").is_file())
             metadata = json.loads((output_dir / "compact_request_metadata.json").read_text(encoding="utf-8"))

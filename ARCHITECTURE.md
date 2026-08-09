@@ -30,8 +30,8 @@
 - **Step-0（产品合同）**：只吃运营产品信息与品类知识，先生成卖点分流计划和 `proof_contract`；
   `observable_dimension` 是 S4 单一主证明的硬边界，`consumer_outcome` 只负责自然语言表达结果。
 - **阶段一（事实）**：先做 Stage1-A 原子观察清单，再做 Stage1-B 的 S1-S6 阶段证据资格投影；口播语义以在线 Fun-ASR 转写为准，产出
-  `video_facts_{role}.json` 的 `evidence_units[]`、`stage_evidence_checks[]`。若必需信号缺失、未知或冲突，最多做一次按阶段定向的预锁定补观察；补观察只能追加候选事实、替换目标阶段资格投影，不能删除或改写已有事实。补观察完成后才锁定 facts。
-- **阶段二（判断）**：只消费锁定 facts 中已经资格化的阶段证据 + analysis_input.md（产品信息/三层指引/结构库/QA/schema + 字幕轨/镜头轨）。默认路径按 `S1+S2 / S3+S4 / S5 / S6` 四个小阶段组分别请求，随后由只读 Stage3 综合；单个阶段组失败不得让其他组重跑或丢失。
+  `video_facts_{role}.json` 的 `evidence_units[]`、`stage_evidence_checks[]`。Stage1-A/B/C 每次 provider 响应都先写入带完整 request identity、response hash、retry/usage 元数据的 `stage1_provider_*.json`；严格回放缺失或身份变化时直接失败，不得回退到缓存或 provider。若必需信号缺失、未知或冲突，最多做一次按阶段定向的预锁定补观察；补观察只能追加候选事实、替换目标阶段资格投影，不能删除或改写已有事实。补观察完成后才锁定 facts。
+- **阶段二（判断）**：只消费锁定 facts 中已经资格化的阶段证据 + analysis_input.md（产品信息/三层指引/结构库/QA/schema + 字幕轨/镜头轨）。默认路径按 `S1+S2 / S3+S4 / S5 / S6` 四个小阶段组分别请求，随后由只读 Stage3 综合；Stage2/Stage3 provider 原文先写入 `stage2_provider_*.json`，单个阶段组失败不得让其他组重跑或丢失。Stage3 只输出建议 prose 和 target stage，时间范围、证据 ID、gap type、priority 由代码从已锁定 Stage2 结果投影，不能由模型重新编写。
 - **Phase C（回看）**：模型自报 ∪ 代码确定性检测（占位证据/visual_only、canonical 覆盖缺口、未被引用的高信号视觉事件 + medium/large），≤2 阶段、仅一次；切对应阶段原生片段（含音轨）后只接受受限 `stage_patches[]`，再重跑目标阶段的后处理链。Phase C 不能绕过 Stage1，也不能新增或改写已锁定 facts。规范见 0.7。
 - **后处理链**：确定性投影、validate、resolver、局部 patch repair 与 qa_warnings；默认路径不做整对象 Stage2 repair。
 - **最终建议收敛**：确定性 severity 与可选 S4 视觉复核全部完成后，若仍有 `large` 阶段未被
@@ -44,7 +44,7 @@
 `raw_model_response -> validated_normalized_result -> final_derived_result` 生命周期。
 四层职责、字段唯一所有者、技术重放与语义重跑边界以
 `references/result-pipeline-architecture.md` 为准；代码修复后的结果收口必须优先使用
-`scripts/replay_finalization.py` 离线验证，不得用真实模型调用代替确定性回放。
+`scripts/replay_finalization.py` 离线验证；它要求 source run 的 provenance、canonical 结果、分析上下文和 `analysis_input.md` 哈希全部一致，不得用真实模型调用代替确定性回放。
 `llm/analysis_contract.py` 只负责边界校验（阶段数量、顺序、改进项范围和标准化结果骨架），不再复制字段清单。
 evidence_unit 含多模态事实字段 +
 结构化标记（`product_visible` / `product_coverage` / `endorsement_verbal` / `endorsement_visual` / `evidence_strength`）；
@@ -443,7 +443,7 @@ json_codec / product_profile / parse → pipeline`。下游（translation）只 
 | `llm/json_codec.py` | LLM JSON fence、尾逗号和未转义引号的容错解析；不承载 schema 或业务规则。 |
 | `llm/product_profile.py` | Step-0 产品地基、短视频证明计划与 S4 证明合同的归一化；不反向依赖 `parse.py`。 |
 | `llm/parse.py` | 阶段 Flag 和最终结果 schema normalize；保留 `parse_json_text`、产品地基函数等兼容导出。含 `STAGES`、`is_effective_voiceover` 等被 `postprocess` 复用的基础接口。 |
-| `llm/payload.py` | `build_*_payload` 系列。阶段一 `build_video_fact_payload`（按 provider 能力选择原生视频或 canonical 帧/窗口转写）；阶段二 `build_llm_comparison_payload` + `build_evidence_sensory_inputs`（每条 evidence 配带原声短视频或关键帧+切片音频）；Phase C `build_stage_review_payload`（低置信阶段原生视频切片）。 |
+| `llm/payload.py` | `build_*_payload` 系列。阶段一 `build_video_fact_payload`（按 provider 能力选择原生视频或 canonical 帧/窗口转写）；阶段二 `build_stage_group_judgment_payload`（四个边界明确的小组请求）和只读 `build_stage_synthesis_payload`；Phase C `build_stage_review_payload`（低置信阶段原生视频切片）。 |
 | `llm/pipeline.py` | 主入口：`run_video_fact_extraction`、`run_segmented_stage_pipeline`、`run_large_model_analysis`、`finalize_analysis_result`。分段 Stage2 依次收口四个阶段组，再执行只读 Stage3 综合；所有外部结果经过同一个 finalizer 和唯一投影写回 analysis。Phase C 只应用受限阶段 patch。运行目录保留 raw/validated/final/postprocess 产物，用于区分模型原文、规范化结果和确定性后处理。 |
 
 **事实采集、分段判断与只读综合架构**：
@@ -479,7 +479,7 @@ ffmpeg 不可用时阶段一降级为关键帧。通过能力验证、可直接�
 - 每个阶段必须给出结构库官方模块编号、适配判断、任务完成度、差距类型和口播表现；缺少即判分析结果无效。
 - `time_range` 必须是模型理解后的真实阶段时间，而不是机械照抄参考范围。
 - 有效口播是信息核心，画面只证明实际可见内容；静音视频改以画面/字幕组织分析。
-- 输出不合 schema 时按已配置的 provider profile 执行一次允许的 repair；失败则 fail loud。
+- 分段生产路径不对完整分析对象做模型 repair；阶段组失败直接产出 typed unknown/degraded。仅兼容读取/旧入口边界可按已配置 provider profile 执行一次允许的 repair，失败则 fail loud。
 - `llm/__init__.py` 不主动 re-export 子模块，下游必须显式 import 子模块路径。
 
 ### 3.7 `postprocess/` 包 — 分析结果修补与校验

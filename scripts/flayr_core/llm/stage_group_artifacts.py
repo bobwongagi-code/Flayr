@@ -9,27 +9,19 @@ rerun instead of silently mixing results from different runs.
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .artifact_identity import identity_value as _identity_value
+from .artifact_identity import stable_sha256 as _stable_sha256
 
-STAGE_GROUP_ARTIFACT_SCHEMA_VERSION = 1
+
+STAGE_GROUP_ARTIFACT_SCHEMA_VERSION = 2
 
 
 class StageGroupArtifactError(ValueError):
     """Raised when a saved provider response is not safe to replay."""
-
-
-def _stable_sha256(value: Any) -> str:
-    encoded = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def stage_group_label(group: Sequence[str]) -> str:
@@ -55,7 +47,7 @@ def request_identity(
         "group": [str(item).strip().upper() for item in group],
         "model": str(model or "").strip(),
         "api_url": str(api_url or "").strip(),
-        "payload_sha256": _stable_sha256(payload),
+        "payload_sha256": _stable_sha256(_identity_value(payload)),
     }
     identity["sha256"] = _stable_sha256(identity)
     return identity
@@ -68,6 +60,7 @@ def completed_stage_group_artifact(
     response: Mapping[str, Any],
     model: str,
     api_url: str,
+    response_meta: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     identity = request_identity(
         group=group,
@@ -82,6 +75,7 @@ def completed_stage_group_artifact(
         "request_identity": identity,
         "response_sha256": _stable_sha256(response_copy),
         "provider_response": response_copy,
+        "response_meta": copy.deepcopy(dict(response_meta or {})),
     }
 
 
@@ -92,6 +86,7 @@ def failed_stage_group_artifact(
     model: str,
     api_url: str,
     error: str,
+    response_meta: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": STAGE_GROUP_ARTIFACT_SCHEMA_VERSION,
@@ -103,6 +98,7 @@ def failed_stage_group_artifact(
             api_url=api_url,
         ),
         "error": str(error)[:1000],
+        "response_meta": copy.deepcopy(dict(response_meta or {})),
     }
 
 

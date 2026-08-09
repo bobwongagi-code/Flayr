@@ -567,6 +567,18 @@ def normalize_stage1_acquisition(value: Any) -> dict[str, Any]:
         "channels": normalized_channels,
         "visual_input_timestamps": visual_input_timestamps,
         "stage_coverage": normalized_stage_coverage,
+        "provider_artifacts": [
+            {
+                "phase": str(item.get("phase") or "").strip().upper(),
+                "artifact": str(item.get("artifact") or "").strip(),
+                "execution_source": str(item.get("execution_source") or "provider").strip().lower(),
+                "request_identity_sha256": str(item.get("request_identity_sha256") or "").strip(),
+                "response_sha256": str(item.get("response_sha256") or "").strip(),
+                "completion_attempts": _nonnegative_int(item.get("completion_attempts")),
+            }
+            for item in (value.get("provider_artifacts") if isinstance(value.get("provider_artifacts"), list) else [])
+            if isinstance(item, dict) and str(item.get("artifact") or "").strip()
+        ],
         "errors": [
             str(item).strip()
             for item in (value.get("errors") if isinstance(value.get("errors"), list) else [])
@@ -877,6 +889,7 @@ def build_stage1_acquisition_manifest(
             "channels": channels,
             "stage_coverage": stage_coverage,
             "visual_input_timestamps": request_timestamps,
+            "provider_artifacts": [],
             "errors": frame_errors + missing_required,
         }
     )

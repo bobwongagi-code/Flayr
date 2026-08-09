@@ -2666,6 +2666,7 @@ def _run_isolated_evaluation(
     budget = ResourceBudget(limits)
     token = budget.activate()
     raw_path = output_dir / "raw_model_response.json"
+    response_meta: dict[str, Any] = {}
     try:
         payload_path = output_dir / ".compact-request.json"
         write_json(payload_path, payload)
@@ -2680,6 +2681,7 @@ def _run_isolated_evaluation(
             budget=budget,
             call_kind=call_kind,
             cleanup_raw=False,
+            response_meta=response_meta,
         )
         response = json.loads(raw_text)
         content = extract_chat_completion_text(response)
@@ -2693,6 +2695,7 @@ def _run_isolated_evaluation(
                 "failure_class": "contract_validation",
                 "contract_error_codes": _contract_error_codes(errors),
                 "candidate_result": parsed,
+                "provider_meta": response_meta,
                 "resource_budget": budget.snapshot(),
             }
             if diagnostics is not None:
@@ -2703,6 +2706,7 @@ def _run_isolated_evaluation(
             "status": "completed",
             **metadata,
             "result": parsed,
+            "provider_meta": response_meta,
             "resource_budget": budget.snapshot(),
         }
         if variant == "visual_extraction_on_raw_video":
@@ -2719,6 +2723,7 @@ def _run_isolated_evaluation(
             **metadata,
             "failure_class": "resource_limit",
             "error": str(exc)[:1000],
+            "provider_meta": response_meta,
             "resource_budget": budget.snapshot(),
         }
         write_json(output_dir / failure_filename, failure)
@@ -2729,6 +2734,7 @@ def _run_isolated_evaluation(
             **metadata,
             "failure_class": "response_parse",
             "error": str(exc)[:1000],
+            "provider_meta": response_meta,
             "resource_budget": budget.snapshot(),
         }
         write_json(output_dir / failure_filename, failure)
@@ -2739,6 +2745,7 @@ def _run_isolated_evaluation(
             **metadata,
             "failure_class": "provider_or_transport",
             "error": str(exc)[:1000],
+            "provider_meta": response_meta,
             "resource_budget": budget.snapshot(),
         }
         write_json(output_dir / failure_filename, failure)
@@ -2749,6 +2756,7 @@ def _run_isolated_evaluation(
             **metadata,
             "failure_class": "input_or_contract_setup",
             "error": str(exc)[:1000],
+            "provider_meta": response_meta,
             "resource_budget": budget.snapshot(),
         }
         write_json(output_dir / failure_filename, failure)
@@ -2759,6 +2767,7 @@ def _run_isolated_evaluation(
             **metadata,
             "failure_class": "io_or_transport",
             "error": str(exc)[:1000],
+            "provider_meta": response_meta,
             "resource_budget": budget.snapshot(),
         }
         write_json(output_dir / failure_filename, failure)

@@ -234,7 +234,7 @@ class StageGroupPipelineReplayTests(unittest.TestCase):
                 if group != missing:
                     self._write_completed(source, group)
 
-            def fetch_response(_args, _api_key, request_path, _response_path):
+            def fetch_response(_args, _api_key, request_path, _response_path, **_kwargs):
                 payload = json.loads(Path(request_path).read_text(encoding="utf-8"))
                 return json.dumps(self._response(payload["group"]))
 
@@ -248,6 +248,108 @@ class StageGroupPipelineReplayTests(unittest.TestCase):
             }
             self.assertEqual(sources[missing], "provider")
             self.assertTrue(all(source_name == "replay" for group, source_name in sources.items() if group != missing))
+
+    def test_provider_path_runs_all_groups_and_persists_retry_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+
+            def fetch_response(_args, _api_key, request_path, _response_path, **kwargs):
+                payload = json.loads(Path(request_path).read_text(encoding="utf-8"))
+                response_meta = kwargs["response_meta"]
+                response_meta.update(
+                    {
+                        "logical_request_id": f"fake-{payload['group'][0]}",
+                        "completion_attempts": 1,
+                        "retry_reasons": [],
+                        "usage": {"input_tokens": 10, "output_tokens": 20},
+                    }
+                )
+                return json.dumps(self._response(payload["group"]))
+
+            fetch_mock = unittest.mock.Mock(side_effect=fetch_response)
+            result = self._run(self._args(), run_dir, fetch_mock)
+
+            self.assertEqual(fetch_mock.call_count, len(STAGE_JUDGMENT_GROUPS) + 1)
+            self.assertEqual(result["segmented_pipeline"]["synthesis_status"], "completed")
+            for group in (*STAGE_JUDGMENT_GROUPS, ("SYNTHESIS",)):
+                artifact = stage_group_artifact_path(run_dir, group)
+                self.assertTrue(artifact.is_file())
+                value = json.loads(artifact.read_text(encoding="utf-8"))
+                self.assertEqual(value["status"], "completed")
+                self.assertEqual(value["response_meta"]["completion_attempts"], 1)
+
+    def test_default_entrypoint_runs_phase_c_and_s4_hooks(self) -> None:
+        args = Namespace(
+            llm_include_images=True,
+            llm_dry_run=False,
+            llm_model=self.model,
+            llm_api_url=self.api_url,
+            llm_api_key_env="TEST_KEY",
+            llm_api_key_keychain_service=None,
+            llm_api_key_keychain_account="API_KEY",
+        )
+        facts = {"benchmark": {}, "creator": {}}
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            analysis_input = run_dir / "analysis_input.md"
+            analysis_input.write_text("locked input", encoding="utf-8")
+            analysis = {"videos": {}, "comparison_contract": {}}
+            with (
+                patch.object(pipeline, "read_llm_api_key", return_value="secret"),
+                patch.object(pipeline, "load_brand_proposition", return_value=None),
+                patch.object(pipeline, "establish_product_foundation", return_value=None),
+                patch.object(pipeline, "run_video_fact_extraction", return_value=facts),
+                patch.object(pipeline, "maybe_run_absolute_execution_shadow"),
+                patch.object(pipeline, "establish_comparison_eligibility", return_value={"overall_status": "direct"}),
+                patch.object(pipeline, "run_segmented_stage_pipeline", return_value={"stage2_pipeline_version": "segmented_stage_v1"}),
+                patch.object(pipeline, "_process_llm_result", return_value={"stage_analysis": []}) as process,
+                patch.object(pipeline, "maybe_refine_low_confidence_stages", return_value={"stage_analysis": []}) as phase_c,
+                patch.object(pipeline, "maybe_apply_s4_visual_verifier", return_value={"stage_analysis": []}) as s4,
+                patch.object(pipeline, "maybe_reconcile_final_improvements", return_value={"stage_analysis": []}),
+                patch.object(pipeline, "finalize_analysis_result", return_value={"stage2_pipeline_status": "completed"}),
+            ):
+                result_path, result = pipeline.run_large_model_analysis(
+                    args,
+                    analysis,
+                    analysis_input,
+                    run_dir,
+                )
+            self.assertEqual(result_path, run_dir / "analysis_result.json")
+            self.assertEqual(result["stage2_pipeline_status"], "completed")
+            process.assert_called_once()
+            phase_c.assert_called_once()
+            s4.assert_called_once()
+
+    def test_stage3_cannot_override_code_owned_ranges_or_evidence_ids(self) -> None:
+        stage_results = [{
+            "stage": "S3",
+            "gap_type": "execution",
+            "model_gap_magnitude": "large",
+            "time_range": "标杆 10s - 12s / 达人 1s - 2s",
+            "creator_time_range": "1s - 2s",
+            "benchmark_time_range": "10s - 12s",
+            "benchmark_evidence_ids": ["B3"],
+            "benchmark_summary": "代码生成的标杆摘要",
+            "evidence": ["代码生成的证据"],
+            "gap": "代码生成的差距",
+        }]
+        result = pipeline._prepare_segmented_synthesis({
+            "improvements": [{
+                "target_stage": "S3",
+                "title": "模型建议",
+                "problem": "模型问题",
+                "suggestion": "模型动作",
+                "actions": ["保留"],
+                "time_range": "0s - 99s",
+                "benchmark_evidence_ids": ["FAKE"],
+                "priority": 1,
+            }],
+        }, stage_results)
+        improvement = result["improvements"][0]
+        self.assertEqual(improvement["creator_time_range"], "1s - 2s")
+        self.assertEqual(improvement["benchmark_time_range"], "10s - 12s")
+        self.assertEqual(improvement["benchmark_evidence_ids"], ["B3"])
+        self.assertEqual(improvement["priority"], 1)
 
 
 if __name__ == "__main__":

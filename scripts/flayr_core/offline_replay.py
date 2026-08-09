@@ -33,6 +33,8 @@ SIDECAR_ARTIFACT_NAMES = (
     "validated_normalized_result.json",
     "final_derived_result.json",
     "postprocess_change_log.json",
+    "analysis_replay_context.json",
+    "analysis_input.md",
 )
 
 

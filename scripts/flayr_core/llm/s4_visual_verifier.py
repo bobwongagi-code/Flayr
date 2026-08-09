@@ -55,6 +55,7 @@ def maybe_apply_s4_visual_verifier(
     request_path = run_dir / "llm_s4_visual_verifier_request.json"
     response_path = run_dir / "llm_s4_visual_verifier_response.json"
     write_json(request_path, payload)
+    response_meta: dict[str, Any] = {}
     try:
         raw_text = call_llm_api(
             getattr(args, "llm_api_url"),
@@ -62,16 +63,22 @@ def maybe_apply_s4_visual_verifier(
             request_path,
             response_path,
             budget=getattr(args, "_resource_budget", None),
+            response_meta=response_meta,
         )
         parsed = parse_json_text(extract_chat_completion_text(json.loads(raw_text)))
         applied = apply_s4_visual_verifier_result(result, parsed, analysis, review_s4=review_s4)
     except (Exception, SystemExit) as exc:  # verifier 是降级增强，不允许拖垮主链
-        result["s4_visual_verifier"] = {"applied": False, "reason": f"S4 视觉复核失败：{exc}"}
+        result["s4_visual_verifier"] = {
+            "applied": False,
+            "reason": f"S4 视觉复核失败：{exc}",
+            "provider_meta": response_meta,
+        }
         return result
 
     result["s4_visual_verifier"] = {
         "applied": applied,
         "response_retention": "ephemeral",
+        "provider_meta": response_meta,
         "reason": (
             "已用原片时序复核覆盖 S3 使用真实性与 S4 视觉质量字段。"
             if applied and review_s4

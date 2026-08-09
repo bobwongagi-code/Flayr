@@ -314,6 +314,7 @@ def call_llm_api(
     initial_retry_reason: str | None = None,
     cleanup_payload: bool = True,
     cleanup_raw: bool = True,
+    response_meta: dict[str, Any] | None = None,
 ) -> str:
     """流式（SSE）调用已批准供应商的 chat completions，分块拼装后合成标准 completion JSON 返回。
 
@@ -392,6 +393,17 @@ def call_llm_api(
         else DEFAULT_SINGLE_REQUEST_BYTES
     )
     logical_request_id = str(request_id or uuid.uuid4().hex)
+    transport_retry_reasons: list[str] = []
+    if initial_retry_reason:
+        transport_retry_reasons.append(str(initial_retry_reason)[:200])
+    if response_meta is not None:
+        response_meta.update(
+            {
+                "logical_request_id": logical_request_id,
+                "transport_attempts": 0,
+                "transport_retry_reasons": list(transport_retry_reasons),
+            }
+        )
     # The request body is sensitive media, so keep it in a short-lived, known
     # temporary directory. The bearer header is supplied through stdin and is
     # never written to disk or exposed in the process argument list.
@@ -440,6 +452,8 @@ def call_llm_api(
         last_error = ""
         retry_reason = str(initial_retry_reason or "")[:200]
         for attempt in range(retries + 1):
+            if response_meta is not None:
+                response_meta["transport_attempts"] = attempt + 1
             current_request_size = req_path.stat().st_size
             if current_request_size > request_limit:
                 raise SystemExit(
@@ -497,24 +511,37 @@ def call_llm_api(
                     last_error = f"{last_error}\n{body}"
                 # 鉴权/请求错误等硬错误快速失败，不浪费重试。
                 if not is_retryable_error(last_error, http_status=http_status):
+                    transport_retry_reasons.append(last_error[:200])
                     break
                 if "total wall time budget exceeded" in last_error:
                     # Retrying after the shared run budget is exhausted cannot
                     # make progress and would create an untracked extra call.
+                    transport_retry_reasons.append(last_error[:200])
                     break
             else:
                 if response_size > request_limit:
                     last_error = "LLM response exceeded the single-request byte limit"
+                    transport_retry_reasons.append(last_error)
                     retry_reason = last_error
                     continue
                 content, usage, complete, finish_reason, parse_error = parser.result()
                 if parse_error:
                     last_error = f"SSE parse failed: {parse_error}"
+                    transport_retry_reasons.append(last_error[:200])
                     retry_reason = last_error
                     if attempt >= retries:
                         break
                     continue
                 if complete and content and finish_reason != "length":
+                    if response_meta is not None:
+                        response_meta.update(
+                            {
+                                "transport_status": "completed",
+                                "transport_retry_reasons": list(transport_retry_reasons),
+                                "finish_reason": finish_reason or "stop",
+                                "usage": usage or {},
+                            }
+                        )
                     return _write_completion_response(
                         raw_path,
                         content,
@@ -536,6 +563,15 @@ def call_llm_api(
                         # repair; repeating the identical request only burns
                         # wall time and model quota.
                         if content:
+                            if response_meta is not None:
+                                response_meta.update(
+                                    {
+                                        "transport_status": "completed",
+                                        "transport_retry_reasons": list(transport_retry_reasons),
+                                        "finish_reason": "length",
+                                        "usage": usage or {},
+                                    }
+                                )
                             return _write_completion_response(
                                 raw_path,
                                 content,
@@ -548,6 +584,7 @@ def call_llm_api(
                     # 流被中途截断（无 [DONE]/finish_reason）→ 传输问题，可重试。
                     last_error = "流式响应不完整（连接在 [DONE] 前中断）" if content else "流式响应无内容"
             retry_reason = last_error
+            transport_retry_reasons.append(last_error[:200])
             if attempt >= retries:
                 break
             sleep_seconds = float(5 * (attempt + 1))
@@ -556,6 +593,14 @@ def call_llm_api(
             if sleep_seconds <= 0:
                 break
             time.sleep(sleep_seconds)
+        if response_meta is not None:
+            response_meta.update(
+                {
+                    "transport_status": "failed",
+                    "transport_retry_reasons": list(transport_retry_reasons),
+                    "transport_error": last_error[:500],
+                }
+            )
         raise SystemExit(f"LLM streaming request failed: {last_error}")
 
 

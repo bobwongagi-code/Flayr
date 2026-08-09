@@ -34,7 +34,6 @@ EXPECTED_FLOOR_OUTCOMES = (
 HARD_FACT_CHECK_STATUSES = ("consistent", "state_conflict", "incomplete")
 ACTIVATION_EVIDENCE_KIND = "s4_large_floor_activation_v1"
 ACTIVATION_EVIDENCE_SCHEMA_VERSION = 1
-REQUIRED_S4_CALIBRATION_SAMPLE_ID = "youkoubo-c1/S4"
 REPEAT_STABILITY_FIELDS = (
     "usage_process_visible",
     "core_selling_point_visible",
@@ -288,12 +287,6 @@ def validate_derive_calibration_card(card: Any) -> list[str]:
     stage = str(card.get("stage") or "").strip()
     if stage not in CALIBRATION_STAGES:
         errors.append("stage must be S3 or S4")
-    if sample_id == REQUIRED_S4_CALIBRATION_SAMPLE_ID:
-        if stage != "S4":
-            errors.append(f"{REQUIRED_S4_CALIBRATION_SAMPLE_ID} must be an S4 card")
-        if card.get("background_known") is not False:
-            errors.append(f"{REQUIRED_S4_CALIBRATION_SAMPLE_ID} must be marked background_known=false")
-
     allowed_states = S3_USAGE_EVIDENCE_STATES if stage == "S3" else S4_EFFECT_EVIDENCE_STATES
     if stage not in CALIBRATION_STAGES:
         return errors
@@ -447,14 +440,17 @@ def validate_derive_calibration_cards(cards: Any) -> list[str]:
             missing = sorted(required - observed)
             if missing:
                 errors.append(f"calibration {stage} {role} boundary coverage missing: {','.join(missing)}")
-    required_s4_cards = [
+    unknown_background_s4_cards = [
         card for card in cards
-        if isinstance(card, dict) and str(card.get("sample_id") or "").strip() == REQUIRED_S4_CALIBRATION_SAMPLE_ID
+        if isinstance(card, dict)
+        and str(card.get("stage") or "").strip() == "S4"
+        and card.get("background_known") is False
     ]
-    if len(required_s4_cards) != 1:
-        errors.append(f"calibration cards must include exactly one {REQUIRED_S4_CALIBRATION_SAMPLE_ID} card")
-    elif required_s4_cards[0].get("background_known") is not False:
-        errors.append(f"{REQUIRED_S4_CALIBRATION_SAMPLE_ID} must be an unknown-background blind-style card")
+    if not unknown_background_s4_cards:
+        errors.append(
+            "calibration cards must include at least one S4 card with background_known=false; "
+            "coverage must not depend on a fixed sample ID"
+        )
     if annotator_ids != {"annotator_a", "annotator_b"}:
         errors.append("calibration cards must contain the two fixed independent annotators")
     return list(dict.fromkeys(errors))
@@ -631,7 +627,6 @@ __all__ = [
     "ACTIVATION_EVIDENCE_KIND",
     "ACTIVATION_EVIDENCE_SCHEMA_VERSION",
     "REPEAT_STABILITY_FIELDS",
-    "REQUIRED_S4_CALIBRATION_SAMPLE_ID",
     "MIN_BOUNDARY_CARDS",
     "MIN_BLIND_CATEGORIES",
     "MIN_BLIND_MARKETS",

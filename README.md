@@ -74,7 +74,7 @@ Flayr/
 │       │   ├── product_profile.py #  产品地基与证明合同归一化
 │       │   ├── payload.py        #   请求 payload 构造（两阶段）
 │       │   ├── parse.py          #   响应解析 + 归一化
-│       │   └── pipeline.py       #   分析主入口 + 校验/repair 编排
+│       │   └── pipeline.py       #   分析主入口 + 分段编排/最终收口
 │       └── postprocess/          # 结果后处理流水线
 │           ├── chain.py          #   流水线编排（说明书式）
 │           ├── repair.py         #   内容修补
@@ -137,7 +137,7 @@ python3 scripts/flayr.py \
 | `--llm-api-url` | 已批准供应商的 Chat Completions 端点；当前网络策略允许 OpenAI、DashScope 官方域名和登记的北京 MaaS Qwen 端点 |
 | `--max-total-wall-time` | 单次运行总墙钟上限；默认 1800 秒，慢模型验证可显式提高，例如 3600 秒 |
 | `--llm-api-key-keychain-service` | macOS Keychain 服务名（或用 `--llm-api-key-env` 走环境变量） |
-| `--llm-include-images` | 默认启用：完整 Step-0 + 单视频事实抽取 + omni 对比链；`--no-llm-include-images` 仅保留给旧文本路径兼容调试 |
+| `--llm-include-images` | 默认启用：完整 Step-0 + 单视频事实抽取 + 分段 Stage2/Stage3 + Phase C；`--no-llm-include-images` 仅作为已拒绝的旧路径标志保留 |
 | `--asr-api-url` | 在线 Fun-ASR endpoint；默认使用北京 MaaS 地址 |
 | `--asr-model` | 在线 ASR 模型；默认 `fun-asr-flash-2026-06-15` |
 | `--asr-language` | ASR 语言提示；默认 `auto` |
@@ -179,9 +179,12 @@ python3 scripts/flayr.py \
 | `report.html` | 主报告，可直接在浏览器打开 |
 | `analysis.json` | 完整分析数据 |
 | `analysis_result.json` | LLM 分析结果（归一化和统一后处理后） |
-| `raw_model_response.json` / `validated_normalized_result.json` / `final_derived_result.json` | LLM 原始、校验规范化和最终派生结果；请求与临时响应不落盘 |
+| `raw_model_response.json` / `validated_normalized_result.json` / `final_derived_result.json` | LLM 原始、校验规范化和最终派生结果 |
+| `analysis_replay_context.json` / `postprocess_provenance` | 绑定确定性重放所需的分析上下文、输入哈希和规范化结果哈希；缺失或哈希不匹配时不得重放 |
 | `postprocess_change_log.json` | 后处理字段变更、规则、证据和字段来源记录 |
 | `video_facts_{benchmark,creator}.json` | 阶段一单视频事实清单 |
+| `stage1_provider_{role}_{A|B|C}*.json` | Stage1-A/B/C provider 原始 JSON、完整请求身份、响应哈希、重试与 usage 元数据；可用 `--stage1-replay-from` 严格重放 |
+| `stage2_provider_{GROUP}.json` | Stage2/Stage3 provider 原始 JSON、请求身份、响应哈希、重试与 usage 元数据；可用 `--stage2-replay-from` 严格重放 |
 | `transcript.txt` / `.srt` / `.zh.txt` | 转写与翻译 |
 | `frames/` `focus_frames/` | 抽取的关键帧 |
 | `frames/analysis_manifest.json` / `analysis_stage_frames.json` | 由镜头、字幕、变化点和词级 ASR 边界共同生成的 canonical 模型输入帧集 |
@@ -214,6 +217,19 @@ python3 scripts/manage_validation_cohort.py freeze \
 修改规则，须执行 `manage_validation_cohort.py spend`，该批样本以后只作 `seen_validation` 回归。
 
 验证清单中的视频路径使用 `${FLAYR_VALIDATION_ROOT}` 占位符。运行冻结或评测前，需在本地环境设置该变量；真实视频目录不应写入仓库或作业清单。
+
+### 代码修复后的回放
+
+确定性后处理只使用已经验证的 canonical 结果和同一次运行的
+`analysis_replay_context.json`、`analysis_input.md`。运行：
+
+```bash
+python3 scripts/replay_finalization.py <source-run> <new-output-dir>
+```
+
+这个命令在 provenance 缺失、规范化结果、分析上下文或输入哈希不一致时直接失败，
+不会读取视频、调用 ASR 或调用 LLM。Stage1/Stage2 provider 结果则分别使用
+`--stage1-replay-from` / `--stage2-replay-from`；请求身份变化时必须语义重跑，不能静默混用。
 
 ---
 

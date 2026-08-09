@@ -442,6 +442,22 @@ def build_parser() -> argparse.ArgumentParser:
             "Never calls the Stage2 provider when an artifact is missing or its request identity changed."
         ),
     )
+    stage1_reuse = parser.add_mutually_exclusive_group()
+    stage1_reuse.add_argument(
+        "--stage1-replay-from",
+        type=Path,
+        help=(
+            "严格重放匹配的 Stage1-A/B/C provider artifact；缺失、损坏或请求身份变化时直接失败，"
+            "绝不调用 Stage1 provider。"
+        ),
+    )
+    stage1_reuse.add_argument(
+        "--stage1-resume-from",
+        type=Path,
+        help=(
+            "优先复用匹配的 Stage1-A/B/C provider artifact；仅对缺失、失败或语义变化的阶段调用 provider。"
+        ),
+    )
     stage2_reuse.add_argument(
         "--stage2-resume-from",
         type=Path,
@@ -493,7 +509,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help=(
             "Use the full Step-0 + per-video fact extraction + multimodal comparison pipeline. "
-            "Enabled by default; --no-llm-include-images is legacy text-only compatibility mode."
+            "Enabled by default; --no-llm-include-images is retained only as a rejected legacy flag."
         ),
     )
     parser.add_argument(
@@ -625,7 +641,12 @@ def validate_inputs(args: argparse.Namespace) -> dict[str, Path]:
     if args.analysis_result_json:
         args.analysis_result_json = validate_optional_file(args.analysis_result_json, "--analysis-result-json")
 
-    for option in ("stage2_replay_from", "stage2_resume_from"):
+    for option in (
+        "stage1_replay_from",
+        "stage1_resume_from",
+        "stage2_replay_from",
+        "stage2_resume_from",
+    ):
         value = getattr(args, option, None)
         if not value:
             continue

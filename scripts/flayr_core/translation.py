@@ -90,6 +90,8 @@ def translate_transcript_with_llm(
     )
     payload_path = role_dir / "translation_request.json"
     raw_path = role_dir / "translation_response.json"
+    provider_meta_path = role_dir / "translation_provider_meta.json"
+    response_meta: dict[str, Any] = {}
     write_json(payload_path, payload)
     if args.llm_dry_run:
         payload_path.unlink(missing_ok=True)
@@ -105,22 +107,65 @@ def translate_transcript_with_llm(
 
         budget = getattr(args, "_resource_budget", None)
         raw_text = (
-            call_llm_api(args.llm_api_url, api_key, payload_path, raw_path, budget=budget)
+            call_llm_api(
+                args.llm_api_url,
+                api_key,
+                payload_path,
+                raw_path,
+                budget=budget,
+                response_meta=response_meta,
+            )
             if budget is not None
-            else call_llm_api(args.llm_api_url, api_key, payload_path, raw_path)
+            else call_llm_api(
+                args.llm_api_url,
+                api_key,
+                payload_path,
+                raw_path,
+                response_meta=response_meta,
+            )
+        )
+        write_json(
+            provider_meta_path,
+            {"schema_version": 1, "status": "completed", "provider_meta": response_meta},
         )
         translated = extract_chat_completion_text(json.loads(raw_text)).strip()
         translated = sanitize_translation_claims(translated, str(args.product_name or ""))
     except SystemExit as exc:
+        write_json(
+            provider_meta_path,
+            {
+                "schema_version": 1,
+                "status": "failed",
+                "error": str(exc)[:500],
+                "provider_meta": response_meta,
+            },
+        )
         result["translation_status"] = "failed"
         result["errors"].append(f"translation failed: {str(exc)[:200]}")
         return
     except Exception as exc:  # noqa: BLE001 — 可选翻译失败不得中断主分析。
+        write_json(
+            provider_meta_path,
+            {
+                "schema_version": 1,
+                "status": "failed",
+                "error": str(exc)[:500],
+                "provider_meta": response_meta,
+            },
+        )
         result["translation_status"] = "failed"
         result["errors"].append(f"translation failed: {str(exc)[:200]}")
         return
 
     if not translated:
+        write_json(
+            provider_meta_path,
+            {
+                "schema_version": 1,
+                "status": "empty_output",
+                "provider_meta": response_meta,
+            },
+        )
         result["translation_status"] = "failed"
         result["errors"].append("translation failed: empty LLM output")
         return
@@ -135,9 +180,11 @@ def translate_transcript_with_llm(
             "payload_sha256": hashlib.sha256(
                 json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest(),
+            "provider_meta": response_meta,
         },
     )
     result["translation_status"] = "completed"
+    result["translation_provider_meta"] = response_meta
     result["translation_source"] = {
         "type": "llm",
         "model": model,

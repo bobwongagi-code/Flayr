@@ -411,10 +411,8 @@ def build_improvement_reconciliation_payload(
         ],
     }
     fields = (
-        "title,target_stage,gmv_impact,gap_type,time_range,creator_time_range,benchmark_time_range,problem,"
-        "benchmark_reference,benchmark_evidence_ids,suggestion,actions,gmv_reason,evidence,creator_script,"
-        "creator_script_zh,base_frame_suitability,best_base_frame_time,base_frame_evidence_id,base_frame_reason,"
-        "expected_effect,priority"
+        "title,target_stage,problem,suggestion,actions,gmv_reason,gmv_impact,creator_script,"
+        "creator_script_zh,base_frame_suitability,base_frame_reason,expected_effect"
     )
     prompt = (
         "最终确定性 severity 已完成，但部分 large 阶段没有对应 Top 提升点。"
@@ -424,7 +422,7 @@ def build_improvement_reconciliation_payload(
         "所有事实、时间和 evidence id 只能来自输入；creator_script 使用达人视频的本地语言，creator_script_zh 给中文。"
         "若某个目标阶段没有 Stage1 资格化证据，输入中的该侧 referenced_evidence_units 为空；不得用其他阶段或未资格化单元补写。"
         "若达人本人或素材条件不适合改造参考，明确写 base_frame_suitability=no_suitable_frame，不得伪造画面。\n"
-        f"每项必须含字段：{fields}。\n"
+        f"每项只能由模型填写这些 prose 字段：{fields}。gap_type、时间范围、evidence ID、evidence、priority 等机械字段由代码从已锁定阶段结果投影，模型不得输出或修改。\n"
         "只输出严格 JSON：{\"improvements\":[...]}。\n\n"
         + json.dumps(context, ensure_ascii=False, indent=2)
     )
@@ -1346,7 +1344,7 @@ def build_stage_synthesis_payload(
             "只基于已经锁定的六个阶段判断生成全局摘要和改进建议。不得改变任何 stage 的 relation、model_gap_magnitude、stage_state、evidence_ids 或 severity。",
             "建议必须引用已有阶段证据，不得新造事实；如果阶段 unknown，只能明确写待复核，不能当作达人缺陷。",
             "输出 one_line_verdict、one_line_summary、executive_summary、holistic_assessment、key_conclusions、loop_closure、s3_s4_relationship、promise_chain、improvements。",
-            "improvements 每项只需 title,target_stage,gap_type,time_range,creator_time_range,benchmark_time_range,problem,benchmark_reference,benchmark_evidence_ids,suggestion,actions,gmv_reason,evidence,priority；代码会补齐其余机械字段。",
+            "improvements 每项只输出 title,target_stage,problem,suggestion,actions,gmv_reason,gmv_impact；target_stage 必须是 S1-S6。代码会从已锁定阶段结果补齐 gap_type、时间范围、证据 ID、evidence 和 priority，模型不得填写这些机械字段。",
             "## 产品与比较合同",
             json.dumps({"product": analysis.get("product") or {}, "foundation": analysis.get("product_foundation") or {}, "comparison_contract": analysis.get("comparison_contract") or {}}, ensure_ascii=False, indent=2),
             "## 已锁定阶段判断",
@@ -1365,15 +1363,20 @@ def build_stage_synthesis_payload(
             }, ensure_ascii=False, indent=2),
         ]
     )
-    return {
+    payload = {
         "model": model,
         "messages": [
             {"role": "system", "content": "你是只读的 Stage3 综合器。只输出严格 JSON，不要 Markdown。"},
             {"role": "user", "content": [{"type": "text", "text": text}]},
         ],
         "temperature": 0.0,
-        "max_completion_tokens": 8192 if str(model).lower().startswith("qwen3.6-plus") else 4096,
     }
+    payload.update(
+        {"max_completion_tokens": 8192}
+        if str(model).lower().startswith("qwen3.6-plus")
+        else {"max_tokens": 8192}
+    )
+    return payload
 
 
 def build_absolute_execution_shadow_payload(

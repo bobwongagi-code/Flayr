@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import hashlib
 import json
 import subprocess
 import sys
@@ -58,6 +59,7 @@ from flayr_core.llm.payload import (
     build_llm_payload,
     build_llm_repair_payload,
     build_stage_group_judgment_payload,
+    build_stage_synthesis_payload,
     build_stage_evidence_qualification_payload,
     build_video_fact_recovery_payload,
     full_analysis_output_fields,
@@ -277,6 +279,45 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertFalse(written["postprocess_provenance"]["change_log_truncated"])
             self.assertEqual(written["postprocess_provenance"]["field_sources"]["coverage"], "complete")
             self.assertIn("/stage_analysis/0/severity", logged["field_sources"]["fields"])
+
+    def test_replay_provenance_uses_serialized_validated_artifact_hash(self) -> None:
+        canonical = {"stage_analysis": []}
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            analysis = {"run_dir": str(run_dir)}
+            no_op = mock.Mock()
+            with (
+                mock.patch.object(pipeline, "apply_postprocess_chain", no_op),
+                mock.patch.object(pipeline, "reconcile_stage_evidence_links", no_op),
+                mock.patch.object(pipeline, "validate_evidence_alignment", no_op),
+                mock.patch.object(pipeline, "validate_stage_ownership", no_op),
+                mock.patch.object(pipeline, "sanitize_health_recommendations", no_op),
+                mock.patch.object(pipeline, "sanitize_child_toothpaste_recommendations", no_op),
+                mock.patch.object(pipeline, "stabilize_improvement_priorities", no_op),
+                mock.patch.object(pipeline, "ground_improvement_evidence", no_op),
+                mock.patch.object(pipeline, "validate_analysis_dimensions", no_op),
+                mock.patch.object(pipeline, "validate_recommendation_safety", no_op),
+                mock.patch.object(pipeline, "validate_creator_script_language", no_op),
+                mock.patch.object(pipeline, "remove_unverified_brand_models", no_op),
+                mock.patch.object(pipeline, "_clamp_result_time_ranges", no_op),
+                mock.patch.object(pipeline, "materialize_global_diagnosis", no_op),
+                mock.patch.object(pipeline, "validate_quality_contract", no_op),
+                mock.patch.object(pipeline, "stage_evidence_link_issues", return_value=[]),
+                mock.patch.object(pipeline, "stage_evidence_immutability_issues", return_value=[]),
+            ):
+                pipeline.finalize_canonical_analysis_result(
+                    pipeline.CanonicalAnalysisResult.from_mapping(canonical),
+                    analysis,
+                    "analysis input",
+                    raw_snapshot=canonical,
+                )
+
+            validated_path = run_dir / "validated_normalized_result.json"
+            provenance = json.loads(
+                (run_dir / "final_derived_result.json").read_text(encoding="utf-8")
+            )["postprocess_provenance"]
+            serialized_hash = hashlib.sha256(validated_path.read_bytes()).hexdigest()
+            self.assertEqual(provenance["validated_normalized_sha256"], serialized_hash)
 
     @staticmethod
     def _multimodal(
@@ -944,6 +985,18 @@ class ArchitectureContractTests(unittest.TestCase):
         legacy = flayr.build_parser().parse_args(["--no-llm-include-images", "compare"])
         self.assertFalse(legacy.llm_include_images)
 
+    def test_legacy_text_entrypoint_is_explicitly_rejected(self) -> None:
+        args = flayr.build_parser().parse_args(["--no-llm-include-images", "compare"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaisesRegex(SystemExit, "text-only LLM"):
+                pipeline.run_large_model_analysis(
+                    args,
+                    {},
+                    root / "analysis_input.md",
+                    root,
+                )
+
     def test_cli_does_not_accept_abbreviated_protected_network_flags(self) -> None:
         with self.assertRaises(SystemExit):
             flayr.build_parser().parse_args(["compare", "--llm-api-u", "https://attacker.invalid"])
@@ -1316,6 +1369,7 @@ class ArchitectureContractTests(unittest.TestCase):
             payload_path.write_text(json.dumps({"model": "test", "messages": []}), encoding="utf-8")
             calls: list[list[str]] = []
             stdin_values: list[str | bytes | None] = []
+            response_meta: dict[str, object] = {}
 
             def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
                 calls.append(command)
@@ -1345,7 +1399,13 @@ class ArchitectureContractTests(unittest.TestCase):
                 mock.patch.object(llm_api.time, "sleep"),
                 mock.patch("pathlib.Path.read_text", side_effect=AssertionError("payload was rebuilt as text")),
             ):
-                raw = llm_api.call_llm_api("https://example.test/v1/chat/completions", "secret", payload_path, raw_path)
+                raw = llm_api.call_llm_api(
+                    "https://example.test/v1/chat/completions",
+                    "secret",
+                    payload_path,
+                    raw_path,
+                    response_meta=response_meta,
+                )
 
             self.assertEqual(len(calls), 2)
             self.assertIn("--speed-limit", calls[0])
@@ -1357,10 +1417,41 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertNotIn("-L", calls[0])
             self.assertEqual(calls[0][calls[0].index("--max-time") + 1], "1800")
             self.assertIn('"finish_reason": "stop"', raw)
+            self.assertEqual(response_meta["transport_attempts"], 2)
+            self.assertEqual(response_meta["transport_status"], "completed")
+            self.assertTrue(response_meta["transport_retry_reasons"])
             self.assertFalse(raw_path.exists())
             self.assertEqual(stdin_values, ["Authorization: Bearer secret\n", "Authorization: Bearer secret\n"])
             self.assertNotIn("secret", " ".join(calls[0]))
             self.assertEqual(sorted(path.name for path in root.iterdir()), [])
+
+    def test_fetch_json_completion_retries_provider_envelope_without_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            response_path = root / "response.json"
+            payload_path.write_text(json.dumps({"model": "test", "messages": []}), encoding="utf-8")
+            responses = [
+                json.dumps({"choices": []}),
+                json.dumps({"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]}),
+            ]
+            response_meta: dict[str, object] = {}
+            args = SimpleNamespace(llm_api_url="https://example.test/v1/chat/completions")
+            with mock.patch.object(pipeline, "call_llm_api", side_effect=responses), mock.patch.object(
+                pipeline.time, "sleep"
+            ):
+                output = pipeline.fetch_json_completion(
+                    args,
+                    "secret",
+                    payload_path,
+                    response_path,
+                    max_attempts=2,
+                    response_meta=response_meta,
+                )
+            self.assertEqual(output, "{}")
+            self.assertEqual(response_meta["completion_attempts"], 2)
+            self.assertEqual(response_meta["status"], "completed")
+            self.assertTrue(any("missing text output" in str(reason) for reason in response_meta["retry_reasons"]))
 
     def test_small_json_request_can_set_a_shorter_transport_deadline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1531,6 +1622,16 @@ class ArchitectureContractTests(unittest.TestCase):
             "stage1_acquisition": {"status": "complete"},
             "evidence_units": [],
         }
+        cached_record = {
+            "fact_result": cached,
+            "stage_fact_artifacts": {
+                "stage1_provider_creator_A.json": {
+                    "schema_version": 1,
+                    "status": "completed",
+                    "provider_response": {},
+                }
+            },
+        }
         analysis = {
             "videos": {
                 "creator": {
@@ -1549,7 +1650,7 @@ class ArchitectureContractTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             with (
-                mock.patch.object(pipeline, "_read_cache_result", return_value=cached),
+                mock.patch.object(pipeline, "_read_cache_record", return_value=cached_record),
                 mock.patch.object(pipeline, "_run_stage1_qualification") as qualify,
                 mock.patch.object(pipeline, "_maybe_recover_video_facts", side_effect=lambda *values: values[-1]),
                 mock.patch.object(pipeline, "freeze_stage_evidence"),
@@ -1562,6 +1663,61 @@ class ArchitectureContractTests(unittest.TestCase):
                 )
         qualify.assert_not_called()
         self.assertIs(result["creator"], cached)
+
+    def test_video_fact_cache_key_binds_preprocess_file_content(self) -> None:
+        args = SimpleNamespace(
+            llm_model="test",
+            llm_api_url="https://example.test/v1/chat/completions",
+        )
+        base = {
+            "videos": {
+                "creator": {
+                    "preprocess_fingerprint": {"source_video": {"sha256": "source"}},
+                    "preprocess_artifacts": {
+                        "schema_version": 2,
+                        "files": {
+                            "transcript.srt": {
+                                "size_bytes": 3,
+                                "mtime_ns": 100,
+                                "sha256": "old",
+                            }
+                        },
+                    },
+                }
+            },
+            "product_foundation": {},
+        }
+        changed = json.loads(json.dumps(base))
+        changed["videos"]["creator"]["preprocess_artifacts"]["files"]["transcript.srt"]["sha256"] = "new"
+        self.assertNotEqual(
+            pipeline._video_fact_cache_key(args, base, "creator"),
+            pipeline._video_fact_cache_key(args, changed, "creator"),
+        )
+
+    def test_stage_fact_artifacts_round_trip_through_cache_helpers(self) -> None:
+        artifact = {"schema_version": 1, "status": "completed", "provider_response": {"ok": True}}
+        with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
+            source = Path(source_tmp)
+            target = Path(target_tmp)
+            (source / "stage1_provider_creator_A.json").write_text(
+                json.dumps(artifact), encoding="utf-8"
+            )
+            snapshot = pipeline._stage_fact_artifacts_for_cache(source, "creator")
+            self.assertEqual(snapshot["stage1_provider_creator_A.json"], artifact)
+            self.assertTrue(
+                pipeline._restore_stage_fact_artifacts_from_cache(
+                    {"stage_fact_artifacts": snapshot}, target, "creator"
+                )
+            )
+            self.assertEqual(
+                json.loads((target / "stage1_provider_creator_A.json").read_text(encoding="utf-8")),
+                artifact,
+            )
+            self.assertFalse(
+                pipeline._restore_stage_fact_artifacts_from_cache(
+                    {"stage_fact_artifacts": {}}, target, "creator"
+                )
+            )
 
     def test_ocr_uses_short_single_request_timeout_with_outer_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1585,6 +1741,8 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertEqual(call.call_args.kwargs["max_time_seconds"], 90)
             self.assertEqual(call.call_args.kwargs["low_speed_time_seconds"], 45)
             self.assertEqual(call.call_args.kwargs["retries"], 0)
+            self.assertEqual(call.call_args.kwargs["request_id"], "ocr-000-2")
+            self.assertIn("provider_meta", json.loads((root / "ocr_000_attempt2_meta.json").read_text(encoding="utf-8")))
 
     def test_ocr_payload_uses_provider_minimum_image_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3224,8 +3382,14 @@ class ArchitectureContractTests(unittest.TestCase):
                 {
                     "stage": f"S{index}",
                     "severity": "large" if index == 6 else "small",
+                    "model_gap_magnitude": "large" if index == 6 else "small",
                     "creator_evidence_ids": ["C6"] if index == 6 else [],
                     "benchmark_evidence_ids": ["B6"] if index == 6 else [],
+                    "creator_time_range": "20s - 25s" if index == 6 else "",
+                    "benchmark_time_range": "18s - 22s" if index == 6 else "",
+                    "gap_type": "execution" if index == 6 else "",
+                    "benchmark_summary": "锁定的标杆证据" if index == 6 else "",
+                    "evidence": ["锁定的阶段证据"] if index == 6 else [],
                 }
                 for index in range(1, 7)
             ],
@@ -3241,11 +3405,22 @@ class ArchitectureContractTests(unittest.TestCase):
 
         merged = pipeline.merge_reconciled_improvements(
             result,
-            [{"target_stage": "S6", "title": "补购买路径", "priority": 1}],
+            [{
+                "target_stage": "S6",
+                "title": "补购买路径",
+                "priority": 99,
+                "gap_type": "forged",
+                "creator_time_range": "0s - 999s",
+                "benchmark_evidence_ids": ["FAKE"],
+            }],
             missing,
         )
         self.assertEqual(pipeline.uncovered_large_stage_codes(merged), [])
         self.assertEqual(merged["improvements"][0]["target_stage"], "S6")
+        self.assertEqual(merged["improvements"][0]["gap_type"], "execution")
+        self.assertEqual(merged["improvements"][0]["creator_time_range"], "20s - 25s")
+        self.assertEqual(merged["improvements"][0]["benchmark_evidence_ids"], ["B6"])
+        self.assertEqual(merged["improvements"][0]["priority"], 1)
 
     def test_finalized_analysis_writes_canonical_trace_back_to_main_analysis(self) -> None:
         normalized = {
@@ -4181,6 +4356,14 @@ class ArchitectureContractTests(unittest.TestCase):
             ["text"],
         )
 
+    def test_stage_synthesis_uses_provider_compatible_budget_field(self) -> None:
+        qwen_payload = build_stage_synthesis_payload("qwen3.6-plus", "input", {}, [], {})
+        generic_payload = build_stage_synthesis_payload("qwen3.7-max", "input", {}, [], {})
+        self.assertEqual(qwen_payload["max_completion_tokens"], 8192)
+        self.assertNotIn("max_tokens", qwen_payload)
+        self.assertEqual(generic_payload["max_tokens"], 8192)
+        self.assertNotIn("max_completion_tokens", generic_payload)
+
     def test_stage1_a_and_stage1_b_are_separate_contracts(self) -> None:
         analysis = {
             "product": {"name": "测试品"},
@@ -4415,10 +4598,12 @@ class ArchitectureContractTests(unittest.TestCase):
             )
             with mock.patch.object(translation, "read_llm_api_key", return_value="test-key"), mock.patch.object(
                 translation, "call_llm_api", side_effect=SystemExit("network failed")
-            ):
+            ) as call:
                 translation.translate_transcript_with_llm(args, "creator", role_dir, result)
-        self.assertEqual(result["translation_status"], "failed")
-        self.assertTrue(any("network failed" in str(item) for item in result["errors"]))
+            self.assertEqual(result["translation_status"], "failed")
+            self.assertTrue(any("network failed" in str(item) for item in result["errors"]))
+            self.assertIn("response_meta", call.call_args.kwargs)
+            self.assertTrue((role_dir / "translation_provider_meta.json").is_file())
 
     @staticmethod
     def _global_result() -> dict[str, object]:

@@ -2257,7 +2257,7 @@ with tempfile.TemporaryDirectory() as tmp:
     original_key_reader = translation_module.read_llm_api_key
     original_call = translation_module.call_llm_api
     translation_module.read_llm_api_key = lambda _args: "test-key"
-    translation_module.call_llm_api = lambda *_args: (_ for _ in ()).throw(SystemExit("network failed"))
+    translation_module.call_llm_api = lambda *_args, **_kwargs: (_ for _ in ()).throw(SystemExit("network failed"))
     try:
         translation_module.translate_transcript_with_llm(translation_args, "creator", translation_dir, translation_result)
     finally:

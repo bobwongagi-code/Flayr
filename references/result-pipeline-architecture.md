@@ -1,8 +1,9 @@
 # Result Pipeline Ownership
 
 Status: frozen implementation contract. This document describes the active
-ADR-007 segmented path. The legacy whole-object import remains compatibility
-only and must not gain new business behavior.
+ADR-007 segmented path. The live text-only path is removed and explicitly
+rejected. Whole-object JSON import remains compatibility-only and must not gain
+new business behavior.
 
 ## Four durable layers
 
@@ -16,8 +17,10 @@ Provider response
 ### Provider response
 
 - Owns only the structured response returned by one provider request.
-- Stage2 group responses are stored as `stage2_provider_<GROUP>.json` before
-  projection or normalization.
+- Stage1-A/B/C and Stage2/Stage3 responses are stored as provider artifacts
+  before projection or normalization. Every artifact binds role/phase or group,
+  model, endpoint and payload digest, and stores response hash plus retry/usage
+  metadata.
 - A completed response may be replayed only when its complete request identity
   matches: group, model, endpoint and payload digest.
 - Missing or mismatched data is a semantic rerun. It must never be silently
@@ -40,8 +43,9 @@ Provider response
 - Evidence gate, comparison scope, resolver and publishability remain separate
   testable functions. The finalizer alone writes their decisions into the
   final result.
-- Code-only changes are verified with `scripts/replay_finalization.py`; video,
-  ASR and provider calls are forbidden in this replay.
+- Code-only changes are verified with `scripts/replay_finalization.py`; it
+  requires matching provenance for the canonical result, replay context and
+  analysis input. Video, ASR and provider calls are forbidden in this replay.
 
 ### Semantic report view
 
@@ -97,7 +101,7 @@ not be interpreted as a second writer of `stage_analysis[*].analysis_status`.
 
 1. Contract fixtures for each typed state.
 2. Repeated Canonical-to-Finalized replay with byte-identical business output.
-3. Frozen Stage1 plus saved Stage2 provider-response replay.
+3. Frozen Stage1 plus saved Stage1/Stage2 provider-response replay.
 4. Fake-provider full lifecycle.
 5. Ordinary samples.
 6. Aavini boundary sample.
