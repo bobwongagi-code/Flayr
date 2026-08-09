@@ -1,0 +1,176 @@
+{
+  "schema_version": 1,
+  "spec_id": "flayr.bitter_lesson.evidence_supply_chain.v1",
+  "status": "frozen",
+  "source_documents": [
+    "flayr bitter lesson",
+    "方案:复盘:教训落地指南",
+    "references/ADR007.md",
+    "references/stage-evidence-contract.md"
+  ],
+  "layers": [
+    {
+      "id": "provider",
+      "owner": "provider_adapter",
+      "input": "provider_request",
+      "output": "provider_artifact",
+      "may_write": ["provider_artifact"],
+      "must_not_write": ["canonical_facts", "stage_judgment", "report"]
+    },
+    {
+      "id": "canonical",
+      "owner": "canonical_normalizer",
+      "input": "provider_artifact",
+      "output": "canonical_facts",
+      "may_write": ["canonical_facts", "stage_qualification"],
+      "must_not_write": ["stage_judgment", "severity", "report"]
+    },
+    {
+      "id": "finalizer",
+      "owner": "finalizer",
+      "input": "canonical_facts_and_stage_judgment",
+      "output": "final_result",
+      "may_write": ["stage_judgment", "severity", "final_result", "audit_trace"],
+      "must_not_write": ["canonical_facts", "provider_artifact"]
+    },
+    {
+      "id": "report",
+      "owner": "report_renderer",
+      "input": "final_result",
+      "output": "report",
+      "may_write": ["report"],
+      "must_not_write": ["canonical_facts", "stage_judgment", "severity"]
+    }
+  ],
+  "types": {
+    "evidence_state": {
+      "kind": "enum",
+      "values": ["captured", "explicit_absence", "uncertain", "not_observable", "budget_exhausted"]
+    },
+    "stage_gate_status": {
+      "kind": "enum",
+      "values": ["grounded", "blocked", "not_applicable", "not_comparable", "legacy"]
+    },
+    "provider_artifact": {
+      "kind": "object",
+      "required": ["schema_version", "status", "request_identity", "response_meta"],
+      "completed_requires": ["provider_response", "response_sha256"],
+      "failed_requires": ["error"]
+    },
+    "field_disposition": {
+      "kind": "object",
+      "required": ["path", "action", "reason"],
+      "action_values": ["preserved", "derived", "discarded", "blocked"]
+    }
+  },
+  "invariants": [
+    {
+      "id": "BL-LAYER-001",
+      "rule": "每层只能写入自己的输出；下游不得回写冻结的 Evidence Ledger。",
+      "test_selectors": ["test_layer_ownership_is_unique"]
+    },
+    {
+      "id": "BL-EVIDENCE-001",
+      "rule": "Stage1 原子事实和资格投影冻结后，Stage2、Phase C、Resolver、Report 只能读取。",
+      "test_selectors": ["test_stage1_handoff_is_hash_bound_and_lossless"]
+    },
+    {
+      "id": "BL-HANDOFF-001",
+      "rule": "Stage1 到 Stage2 的交接必须保留 ledger、候选、资格和来源指纹；缺失或篡改必须可诊断。",
+      "test_selectors": ["test_stage1_handoff_is_hash_bound_and_lossless"]
+    },
+    {
+      "id": "BL-UNKNOWN-001",
+      "rule": "unknown、uncertain、blocked 和 not_applicable 不得被代码默认为 medium 或 absent。",
+      "test_selectors": ["test_unknown_stage_never_becomes_publishable_severity"]
+    },
+    {
+      "id": "BL-REPLAY-001",
+      "rule": "技术重放必须验证请求身份、响应哈希和上下文；身份变化只能走语义重跑。",
+      "test_selectors": ["test_provider_artifact_replay_requires_exact_identity"]
+    },
+    {
+      "id": "BL-MECHANICAL-001",
+      "rule": "Stage3 不得写入 evidence id、时间范围、gap type 或 priority；这些字段由代码投影。",
+      "test_selectors": ["test_stage3_cannot_author_mechanical_fields"]
+    },
+    {
+      "id": "BL-RETRY-001",
+      "rule": "每个 provider 请求必须持久化 logical request id、尝试次数、重试原因和 usage。",
+      "test_selectors": ["test_provider_artifact_keeps_retry_metadata"]
+    },
+    {
+      "id": "BL-ORDER-001",
+      "rule": "验收顺序固定为 fixture、offline replay、fake provider、ordinary sample、boundary sample。",
+      "test_selectors": ["test_verification_order_is_frozen"]
+    }
+  ],
+  "change_scope": {
+    "max_files": 8,
+    "max_added_lines": 900,
+    "max_deleted_lines": 150,
+    "allowed_globs": [
+      "README.md",
+      "references/bitter-lesson-frozen-spec.json",
+      "references/bitter-lesson-implementation-audit.md",
+      "scripts/check_change_scope.py",
+      "scripts/run-tests.sh",
+      "scripts/verify_bitter_lesson_contract.py",
+      "tests/test_bitter_lesson_contract.py"
+    ],
+    "forbidden_globs": [
+      ".github/**",
+      "runs/**",
+      "outputs/**",
+      "jobs*.json",
+      "scripts/flayr.py",
+      "scripts/flayr_core/**",
+      "references/analysis-output-schema.json"
+    ]
+  },
+  "non_goals": [
+    "本批次不改变 Stage1、Stage2、Phase C、Resolver 或报告业务逻辑。",
+    "本批次不重新跑真实视频、不调用模型、不修改模型选择。",
+    "本批次不把历史样本准确率提升数字写进规则或规格。",
+    "本批次不允许把测试改成实现的镜像；契约测试必须先于实现变化冻结。"
+  ],
+  "verification_order": [
+    "fixture",
+    "offline_replay",
+    "fake_provider",
+    "ordinary_sample",
+    "boundary_sample"
+  ],
+  "ambiguities": [
+    {
+      "id": "BL-A-001",
+      "question": "provider 失败时是否让其他阶段重跑？",
+      "status": "resolved",
+      "decision": "只将受影响的阶段组置为 typed unknown；其他已完成组保留，不因单组失败重跑。"
+    },
+    {
+      "id": "BL-A-002",
+      "question": "Stage3 是否可以重新编写证据链接和时间范围？",
+      "status": "resolved",
+      "decision": "不可以；Stage3 只输出 prose 和 target_stage，机械字段由 Stage2 结果确定性投影。"
+    },
+    {
+      "id": "BL-A-003",
+      "question": "缺失、未知和不适用是否可以使用同一个默认状态？",
+      "status": "resolved",
+      "decision": "不可以；unknown、blocked、not_applicable、not_comparable 和 legacy 必须分别表达。"
+    },
+    {
+      "id": "BL-A-004",
+      "question": "历史兼容输入是否可以继续走旧的整对象模型路径？",
+      "status": "resolved",
+      "decision": "只能作为显式兼容导入；生产默认入口拒绝 text-only 旧路径。"
+    }
+  ],
+  "frozen_contract_test_files": [
+    "tests/test_bitter_lesson_contract.py"
+  ],
+  "frozen_contract_test_hashes": {
+    "tests/test_bitter_lesson_contract.py": "78b528543d6363d309a02cf0662f18da2c7b2b4a030bffc9d2817f645fa03ff1"
+  }
+}

@@ -16,6 +16,8 @@ if [[ -z "$PYTHON_BIN" ]]; then
 fi
 
 "$PYTHON_BIN" scripts/check_release.py
+"$PYTHON_BIN" scripts/verify_bitter_lesson_contract.py
+"$PYTHON_BIN" scripts/check_change_scope.py --base-ref HEAD
 if [[ "${FLAYR_COVERAGE:-0}" == "1" ]]; then
   "$PYTHON_BIN" -m coverage run --branch -m unittest discover -s tests -v
 else

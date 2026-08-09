@@ -243,3 +243,24 @@ python3 scripts/replay_finalization.py <source-run> <new-output-dir>
 6. **证据可追溯**：每个结论都绑定时间点和画面/口播证据
 7. **GMV 导向**：所有建议围绕停留、信任、下单转化
 8. **本地化**：话术用达人原语言，适配东南亚市场
+
+## 八、Bitter Lesson 落地门禁
+
+Flayr 的结论来自证据供应链，不是一次模型调用。冻结的层边界、字段类型、不变量、
+非目标和验收顺序位于 [`references/bitter-lesson-frozen-spec.json`](references/bitter-lesson-frozen-spec.json)。
+实现前后的判断清单位于 [`references/bitter-lesson-implementation-audit.md`](references/bitter-lesson-implementation-audit.md)。
+
+测试前会验证冻结规格和契约测试哈希：
+
+```bash
+PYTHONPATH=scripts python3 scripts/verify_bitter_lesson_contract.py
+```
+
+开始一次代码批次前，必须用冻结的文件和行数预算检查范围；超出预算就拆批次，不能在同一批次继续扩张：
+
+```bash
+PYTHONPATH=scripts python3 scripts/check_change_scope.py --base-ref HEAD
+```
+
+真实视频的验收顺序固定为 `fixture -> offline replay -> fake provider -> ordinary sample -> boundary sample`。
+真实视频不再同时承担开发调试、回归验证和最终验收三种角色。
