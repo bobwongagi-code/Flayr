@@ -76,6 +76,7 @@ from .api import (
     can_send_standalone_audio,
 )
 from .analysis_contract import AnalysisContractError, validate_normalized_analysis_contract
+from .json_codec import ResponseParseError
 from .parse import (
     normalize_analysis_result,
     normalize_category_profile,
@@ -126,7 +127,11 @@ from .stage_fact_artifacts import (
     reusable_stage_fact_response,
     stage_fact_artifact_path,
 )
-from .provider_artifacts import provider_call_with_artifact
+from .provider_artifacts import (
+    ProviderCallError,
+    ProviderReplayError,
+    provider_call_with_artifact,
+)
 from .media import select_role_visual_inputs, select_stage_recovery_visual_inputs
 from ..finalization import facade as finalization_facade
 from ..postprocess import apply_postprocess_chain, apply_segmented_postprocess_chain
@@ -152,6 +157,53 @@ from ..postprocess.validate import (
     validate_quality_contract,
     validate_stage_ownership,
 )
+
+
+class AnalysisPipelineError(RuntimeError):
+    """One typed failure at a named analysis-pipeline boundary."""
+
+    def __init__(self, phase: str, failure_kind: str, cause: BaseException) -> None:
+        self.phase = str(phase)
+        self.failure_kind = str(failure_kind)
+        self.cause_type = cause.__class__.__name__
+        detail = str(cause).strip() or self.cause_type
+        super().__init__(detail)
+
+
+def _run_pipeline_phase(phase: str, failure_kind: str, operation: Any) -> Any:
+    """Preserve the phase that failed instead of calling every failure an LLM error."""
+    try:
+        return operation()
+    except AnalysisPipelineError:
+        raise
+    except ProviderReplayError as exc:
+        raise AnalysisPipelineError(phase, "provider_replay", exc) from exc
+    except ProviderCallError as exc:
+        raise AnalysisPipelineError(phase, "provider_call", exc) from exc
+    except (StageFactArtifactError, StageGroupArtifactError) as exc:
+        raise AnalysisPipelineError(phase, "provider_replay", exc) from exc
+    except ResponseParseError as exc:
+        raise AnalysisPipelineError(phase, "response_parse", exc) from exc
+    except (Exception, SystemExit) as exc:
+        raise AnalysisPipelineError(phase, failure_kind, exc) from exc
+
+
+def _localized_failure_kind(
+    exc: BaseException,
+    *,
+    execution_source: str,
+    default: str,
+) -> str:
+    """Classify an isolated failure without turning it into a global model error."""
+    if execution_source == "replay" or isinstance(
+        exc, (ProviderReplayError, StageFactArtifactError, StageGroupArtifactError)
+    ):
+        return "provider_replay"
+    if isinstance(exc, ResponseParseError):
+        return "response_parse"
+    if isinstance(exc, ProviderCallError):
+        return "provider_call"
+    return default
 
 
 # 修改 build_video_fact_payload 的语义合同后必须递增，避免旧 facts 与新判断规则混用。
@@ -2215,28 +2267,30 @@ def run_segmented_stage_pipeline(
     api_key: str,
 ) -> dict[str, Any]:
     """Run the frozen Stage2/Stage3 path without whole-object model repair."""
-    handoff = _build_stage1_to_stage2_handoff(facts, analysis)
-    handoff_issues = _stage1_to_stage2_handoff_issues(handoff, facts, analysis)
-    handoff["integrity"] = {
-        "algorithm": "sha256",
-        "sha256": _stable_digest(
-            {
-                "version": handoff["version"],
-                "pipeline": handoff["pipeline"],
-                "roles": handoff["roles"],
-                "validation_status": "failed" if handoff_issues else "passed",
-                "validation_issues": handoff_issues,
-            }
-        ),
-        "validation_status": "failed" if handoff_issues else "passed",
-        "validation_issues": handoff_issues,
-        "preservation_target": "100% of Stage1 ledger IDs and hashes are represented in the handoff",
-    }
-    write_json(run_dir / "stage1_to_stage2_handoff.json", handoff)
-    if handoff_issues:
-        raise SystemExit(
-            "Stage1 到 Stage2 交接校验失败：" + ", ".join(handoff_issues)
-        )
+    def materialize_handoff() -> dict[str, Any]:
+        value = _build_stage1_to_stage2_handoff(facts, analysis)
+        issues = _stage1_to_stage2_handoff_issues(value, facts, analysis)
+        value["integrity"] = {
+            "algorithm": "sha256",
+            "sha256": _stable_digest(
+                {
+                    "version": value["version"],
+                    "pipeline": value["pipeline"],
+                    "roles": value["roles"],
+                    "validation_status": "failed" if issues else "passed",
+                    "validation_issues": issues,
+                }
+            ),
+            "validation_status": "failed" if issues else "passed",
+            "validation_issues": issues,
+            "preservation_target": "100% of Stage1 ledger IDs and hashes are represented in the handoff",
+        }
+        write_json(run_dir / "stage1_to_stage2_handoff.json", value)
+        if issues:
+            raise SystemExit("Stage1 到 Stage2 交接校验失败：" + ", ".join(issues))
+        return value
+
+    handoff = _run_pipeline_phase("stage1_handoff", "handoff", materialize_handoff)
     stage_results: list[dict[str, Any]] = []
     group_records: list[dict[str, Any]] = []
     any_group_failed = False
@@ -2263,6 +2317,7 @@ def run_segmented_stage_pipeline(
             execution_source = "provider"
             parsed: dict[str, Any] | None = None
             if replay_source is not None:
+                execution_source = "replay"
                 try:
                     parsed, response_meta = _read_replayable_stage_group(
                         replay_source,
@@ -2270,10 +2325,10 @@ def run_segmented_stage_pipeline(
                         payload=payload,
                         args=args,
                     )
-                    execution_source = "replay"
                 except StageGroupArtifactError as exc:
                     if not provider_fallback_allowed:
                         raise SystemExit(f"阶段组 {label} 无法离线重放：{exc}") from exc
+                    execution_source = "provider"
             if parsed is None:
                 write_json(request_path, payload)
                 response_text = fetch_json_completion(
@@ -2324,7 +2379,18 @@ def run_segmented_stage_pipeline(
             stage_results.extend(projected)
         except (OSError, ValueError, RuntimeError, SystemExit, json.JSONDecodeError) as exc:
             any_group_failed = True
-            record.update({"status": "failed", "error": str(exc)})
+            record.update(
+                {
+                    "status": "failed",
+                    "failure_kind": _localized_failure_kind(
+                        exc,
+                        execution_source=execution_source,
+                        default="provider_call_or_validation",
+                    ),
+                    "cause_type": exc.__class__.__name__,
+                    "error": str(exc),
+                }
+            )
             write_json(
                 provider_artifact_path,
                 failed_stage_group_artifact(
@@ -2361,6 +2427,7 @@ def run_segmented_stage_pipeline(
         synthesis_payload = build_stage_synthesis_payload(args.llm_model, analysis_input, facts, stage_results, analysis)
         parsed: dict[str, Any] | None = None
         if replay_source is not None:
+            synthesis_execution_source = "replay"
             try:
                 parsed, synthesis_response_meta = _read_replayable_stage_group(
                     replay_source,
@@ -2368,10 +2435,10 @@ def run_segmented_stage_pipeline(
                     payload=synthesis_payload,
                     args=args,
                 )
-                synthesis_execution_source = "replay"
             except StageGroupArtifactError as exc:
                 if not provider_fallback_allowed:
                     raise SystemExit(f"Stage3 synthesis 无法离线重放：{exc}") from exc
+                synthesis_execution_source = "provider"
         if parsed is None:
             write_json(synthesis_request, synthesis_payload)
             response_text = fetch_json_completion(
@@ -2398,7 +2465,15 @@ def run_segmented_stage_pipeline(
         synthesis = parsed
     except (OSError, ValueError, RuntimeError, SystemExit, json.JSONDecodeError) as exc:
         synthesis_status = "failed"
-        synthesis = {"synthesis_error": str(exc)}
+        synthesis = {
+            "synthesis_error": str(exc),
+            "failure_kind": _localized_failure_kind(
+                exc,
+                execution_source=synthesis_execution_source,
+                default="provider_call_or_validation",
+            ),
+            "cause_type": exc.__class__.__name__,
+        }
         any_group_failed = True
         write_json(
             synthesis_provider_artifact,
@@ -2560,7 +2635,11 @@ def run_large_model_analysis(
     if brand_proposition:
         analysis["brand_proposition"] = brand_proposition
     # Step-0：先确立品的商业地基（特征+命题），贯穿喂给阶段1 观察 + 阶段2 判断。
-    foundation = establish_product_foundation(args, analysis, run_dir, api_key)
+    foundation = _run_pipeline_phase(
+        "product_foundation",
+        "provider_or_normalization",
+        lambda: establish_product_foundation(args, analysis, run_dir, api_key),
+    )
     if foundation:
         analysis["product_foundation"] = foundation
     foundation_status = str(analysis.get("product_foundation_status") or "unknown").strip().lower()
@@ -2570,25 +2649,49 @@ def run_large_model_analysis(
             "Step-0 产品地基未完成；默认阻断后续分析，避免把未经验证的产品证明或内联猜测发布为完成结果。"
             " 如需审计性降级运行，请显式使用 --allow-degraded。"
         )
-    facts = run_video_fact_extraction(args, analysis, run_dir, api_key)
+    facts = _run_pipeline_phase(
+        "stage1_evidence",
+        "evidence_supply_chain",
+        lambda: run_video_fact_extraction(args, analysis, run_dir, api_key),
+    )
     if args.llm_dry_run:
         print("LLM dry run: fact request payloads constructed in memory; no request artifacts retained")
         return None
-    maybe_run_absolute_execution_shadow(args, analysis, facts, run_dir, api_key)
-    comparison_contract = establish_comparison_eligibility(args, facts, run_dir, api_key)
+    _run_pipeline_phase(
+        "absolute_execution_shadow",
+        "shadow_evaluation",
+        lambda: maybe_run_absolute_execution_shadow(args, analysis, facts, run_dir, api_key),
+    )
+    comparison_contract = _run_pipeline_phase(
+        "comparison_eligibility",
+        "provider_or_normalization",
+        lambda: establish_comparison_eligibility(args, facts, run_dir, api_key),
+    )
     analysis["comparison_contract"] = comparison_contract
     analysis["comparison_eligibility"] = comparison_contract
     if comparison_contract.get("overall_status") in {"not_comparable", "uncertain"}:
-        _apply_non_comparable_result(analysis, facts, comparison_contract, run_dir)
+        _run_pipeline_phase(
+            "comparison_resolution",
+            "deterministic_pipeline",
+            lambda: _apply_non_comparable_result(analysis, facts, comparison_contract, run_dir),
+        )
         return None
-    analysis_input = analysis_input_path.read_text(encoding="utf-8")
-    segmented_result = run_segmented_stage_pipeline(
-        args,
-        analysis,
-        analysis_input,
-        facts,
-        run_dir,
-        api_key,
+    analysis_input = _run_pipeline_phase(
+        "analysis_input",
+        "artifact_read",
+        lambda: analysis_input_path.read_text(encoding="utf-8"),
+    )
+    segmented_result = _run_pipeline_phase(
+        "stage2_judgment",
+        "handoff_or_judgment",
+        lambda: run_segmented_stage_pipeline(
+            args,
+            analysis,
+            analysis_input,
+            facts,
+            run_dir,
+            api_key,
+        ),
     )
     segmented_result["analysis_run_metadata"] = {
         "llm_model": str(args.llm_model or ""),
@@ -2596,24 +2699,36 @@ def run_large_model_analysis(
         "multimodal_input": True,
         "pipeline": "segmented_stage_v1",
     }
-    live_result = _apply_live_postprocess_chain(
-        args=args,
-        api_key=api_key,
-        raw_result=segmented_result,
-        analysis_input=analysis_input,
-        run_dir=run_dir,
-        analysis=analysis,
-        locked_video_understanding=facts,
+    live_result = _run_pipeline_phase(
+        "postprocess",
+        "deterministic_pipeline",
+        lambda: _apply_live_postprocess_chain(
+            args=args,
+            api_key=api_key,
+            raw_result=segmented_result,
+            analysis_input=analysis_input,
+            run_dir=run_dir,
+            analysis=analysis,
+            locked_video_understanding=facts,
+        ),
     )
-    normalized = finalize_analysis_result(
-        live_result,
-        analysis,
-        analysis_input,
-        locked_video_understanding=facts,
+    normalized = _run_pipeline_phase(
+        "finalization",
+        "finalizer",
+        lambda: finalize_analysis_result(
+            live_result,
+            analysis,
+            analysis_input,
+            locked_video_understanding=facts,
+        ),
     )
     # finalize_analysis_result is the single authority for the publish status.
     result_path = run_dir / "analysis_result.json"
-    write_json(result_path, normalized)
+    _run_pipeline_phase(
+        "publish_artifact",
+        "artifact_write",
+        lambda: write_json(result_path, normalized),
+    )
     return result_path, normalized
 
 
@@ -4132,6 +4247,7 @@ def _run_stage1_qualification(
             )
             response: dict[str, Any] | None = None
             if replay_source is not None:
+                execution_source = "replay"
                 try:
                     response, response_meta, _source_artifact = _read_replayable_stage_fact(
                         replay_source,
@@ -4141,10 +4257,10 @@ def _run_stage1_qualification(
                         payload=payload,
                         args=args,
                     )
-                    execution_source = "replay"
                 except StageFactArtifactError:
                     if not provider_fallback_allowed:
                         raise
+                    execution_source = "provider"
             if response is None:
                 write_json(request_path, payload)
                 response_text = fetch_json_completion(
@@ -4248,6 +4364,12 @@ def _run_stage1_qualification(
                 {
                     "group": targets,
                     "status": "failed",
+                    "failure_kind": _localized_failure_kind(
+                        exc,
+                        execution_source=execution_source,
+                        default="provider_call_or_validation",
+                    ),
+                    "cause_type": exc.__class__.__name__,
                     "provider_artifact": artifact_path.name,
                     "failure_reason": safe_error[:500] or type(exc).__name__,
                 }

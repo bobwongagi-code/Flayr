@@ -28,7 +28,9 @@ from flayr_core.asr import (
     run_online_asr,
 )
 from flayr_core.llm.api import can_analyze_native_audio, provider_capabilities, read_llm_api_key
+from flayr_core.llm.provider_artifacts import ProviderCallError, ProviderReplayError
 from flayr_core.llm.pipeline import (
+    AnalysisPipelineError,
     apply_finalized_analysis_result,
     merge_analysis_result,
     run_comparison_scope_preflight,
@@ -93,6 +95,7 @@ _RUN_OUTPUT_FILES = frozenset(
         "creator_report.html",
         "degraded_manifest.json",
         "final_derived_result.json",
+        "failure.json",
         "postprocess_change_log.json",
         "product_foundation.json",
         "raw_model_response.json",
@@ -114,7 +117,28 @@ _RUN_OUTPUT_PREFIXES = (
 )
 
 
-def _record_run_failure(run_dir: Path, reason: str) -> None:
+def _record_run_failure(
+    run_dir: Path,
+    reason: str,
+    *,
+    failure_kind: str = "pipeline",
+    phase: str = "",
+    cause_type: str = "",
+) -> None:
+    try:
+        write_json(
+            run_dir / "failure.json",
+            {
+                "schema_version": 1,
+                "status": "failed",
+                "failure_kind": str(failure_kind or "pipeline"),
+                "phase": str(phase or ""),
+                "cause_type": str(cause_type or ""),
+                "reason": str(reason or "")[:500],
+            },
+        )
+    except OSError:
+        pass
     try:
         recover_run_state(run_dir, "FAILED", reason=reason[:500])
     except RunStateError:
@@ -192,7 +216,19 @@ def main() -> int:
         for role, path in inputs.items():
             videos[role] = process_video(role, path, run_dir, deps, args, budget=budget)
     except Exception as exc:
-        _record_run_failure(run_dir, f"素材处理失败：{exc}")
+        if isinstance(exc, ProviderReplayError):
+            failure_kind = "provider_replay"
+        elif isinstance(exc, ProviderCallError):
+            failure_kind = "provider_call"
+        else:
+            failure_kind = "media_processing"
+        _record_run_failure(
+            run_dir,
+            f"素材处理失败：{exc}",
+            failure_kind=failure_kind,
+            phase="preprocessing",
+            cause_type=exc.__class__.__name__,
+        )
         raise
 
     try:
@@ -220,8 +256,23 @@ def main() -> int:
     if args.llm_model and not args.analysis_result_json:
         try:
             completed = run_large_model_analysis(args, analysis, analysis_input_path, run_dir)
+        except AnalysisPipelineError as exc:
+            _record_run_failure(
+                run_dir,
+                f"分析管线失败（{exc.phase}/{exc.failure_kind}）：{exc}",
+                failure_kind=exc.failure_kind,
+                phase=exc.phase,
+                cause_type=exc.cause_type,
+            )
+            raise
         except (Exception, SystemExit) as exc:
-            _record_run_failure(run_dir, f"LLM 分析失败：{exc}")
+            _record_run_failure(
+                run_dir,
+                f"分析编排失败：{exc}",
+                failure_kind="analysis_orchestration",
+                phase="analysis_entrypoint",
+                cause_type=exc.__class__.__name__,
+            )
             raise
         if completed:
             llm_result_path, normalized_result = completed

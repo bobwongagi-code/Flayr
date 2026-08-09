@@ -62,6 +62,7 @@ EXPECTED_TYPES = {
     "provider_artifact": {
         "kind": "object",
         "required": ["schema_version", "status", "request_identity", "response_meta"],
+        "response_meta_required": ["logical_request_id", "completion_attempts", "retry_reasons", "usage"],
         "completed_requires": ["provider_response", "response_sha256"],
         "failed_requires": ["error"],
     },
@@ -72,14 +73,20 @@ EXPECTED_TYPES = {
     },
 }
 REQUIRED_INVARIANT_SELECTORS = {
-    "BL-LAYER-001": ("test_layer_ownership_is_unique",),
+    "BL-LAYER-001": (
+        "test_layer_ownership_is_unique",
+        "test_runtime_field_ownership_gate_rejects_unauthorized_writer",
+    ),
     "BL-EVIDENCE-001": ("test_stage1_handoff_is_hash_bound_and_lossless",),
     "BL-HANDOFF-001": ("test_stage1_handoff_is_hash_bound_and_lossless",),
     "BL-UNKNOWN-001": ("test_unknown_stage_never_becomes_publishable_severity",),
     "BL-REPLAY-001": ("test_provider_artifact_replay_requires_exact_identity",),
     "BL-MECHANICAL-001": ("test_stage3_cannot_author_mechanical_fields",),
     "BL-RETRY-001": ("test_provider_artifact_keeps_retry_metadata",),
-    "BL-ORDER-001": ("test_verification_order_is_frozen",),
+    "BL-ORDER-001": (
+        "test_verification_order_is_frozen",
+        "test_verification_order_blocks_boundary_until_prerequisites_pass",
+    ),
 }
 
 

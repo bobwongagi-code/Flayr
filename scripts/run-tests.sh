@@ -27,3 +27,4 @@ else
 fi
 "$PYTHON_BIN" scripts/check_prompt_reachability.py
 "$PYTHON_BIN" scripts/verify_analysis_contracts.py
+"$PYTHON_BIN" scripts/audit_result_field_ownership.py --check

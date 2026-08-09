@@ -39,7 +39,7 @@
 ## 当前 runtime-fix 批次改动边界
 
 本次任务明确授权修复冻结教训在真实运行链路中的缺口，因此不再沿用前一批“只改门禁、不改 pipeline”的范围。当前批次由
-`references/bitter-lesson-runtime-fix-scope.json` 单独声明：最多 36 个文件、1500 行新增、400 行删除，并精确列出允许的生产和评估路径。
+`references/bitter-lesson-runtime-fix-scope.json` 单独声明：最多 44 个文件、2200 行新增、700 行删除，并精确列出允许的生产和评估路径。
 旧的冻结批次范围仍保留，不能通过修改旧 scope 来掩盖本次越界。
 
 本批次没有调用模型、没有重跑视频、没有修改运行产物；所有行为变更由 fixture、离线重放和单元测试验证。
@@ -73,6 +73,17 @@ PYTHONPATH=scripts python3 scripts/check_change_scope.py --base-ref HEAD --spec 
 | 变更范围 | CI 使用完整历史和真实 base SHA，读取当前 runtime-fix scope | 否 |
 
 本批次没有调用模型或真实视频。结构化行为变更均有代码契约测试覆盖；提交前必须再执行一次对抗式 review，重点尝试绕过 legacy、replay、scope、unknown 和 Step-0 门禁。
+
+## 外部深度 Review 缺口关闭
+
+| Review 缺口 | 运行时修复 | 负向验证 |
+|---|---|---|
+| Provider 请求、重试和 usage 元数据仍可选 | 普通、Stage1 和阶段组 artifact 的 schema 均强制 `logical_request_id`、`completion_attempts`、`retry_reasons`、`usage`；缺失字段拒绝完成和重放 | 缺元数据的 completed artifact 构造失败；响应篡改和身份变化拒绝 replay |
+| 验证顺序 marker 可由调用者自报哈希 | marker 只能由 verifier runner 在命令成功且证据文件确实变化后生成，并绑定当前 commit、完整源码状态、执行记录、证据哈希和前序 marker 哈希 | 缺前序、失败命令、未变化证据、篡改证据和陈旧源码状态均拒绝 |
+| 管线内部错误统一显示成 LLM 失败 | 全链路写入 `failure.json` 的 `phase`、`failure_kind`、`cause_type`；provider call、provider replay、response parse、handoff、finalizer 和 artifact write 分开；局部阶段失败也保留分类 | 类型化 phase 测试、严格 replay 测试、阶段组局部失败测试 |
+| 唯一写入者只存在于声明 | 字段所有权扫描器的 `--check` 成为 `run-tests.sh` 强制门禁，新生产写入点若不在冻结 owner allowlist 中直接失败 | 在 report 层新增 `severity` 写入的 fixture 被门禁拒绝 |
+
+Artifact schema 升级会显式拒绝旧的无元数据 replay 产物。该行为是有意的兼容性边界：旧产物仍可作为审计材料保存，但不能伪装成满足当前可重放合同的技术重放输入。
 
 ## 对抗式复盘
 

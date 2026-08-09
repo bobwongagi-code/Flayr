@@ -39,7 +39,7 @@ from flayr_core.artifacts import (
 from flayr_core.llm import api as llm_api
 from flayr_core.llm import media as llm_media
 from flayr_core.llm import pipeline
-from flayr_core.llm.provider_artifacts import read_provider_artifact
+from flayr_core.llm.provider_artifacts import ProviderReplayError, read_provider_artifact
 from flayr_core.llm.analysis_contract import (
     AnalysisContractError,
     validate_normalized_analysis_contract,
@@ -105,7 +105,8 @@ from flayr_core.postprocess.derive import (
     _s6_cta_exec,
 )
 from flayr_core.postprocess.global_diagnosis import materialize_global_diagnosis
-from flayr_core.verification_order import assert_verification_order, write_verification_marker
+from flayr_core.verification_order import assert_verification_order, run_verification_stage
+from scripts.audit_result_field_ownership import inventory, ownership_violations
 from flayr_core.video_evidence import build_transcript_pack, parse_srt_time_range
 from flayr_core.postprocess.repair import (
     align_stage_flag_evidence,
@@ -885,7 +886,7 @@ class ArchitectureContractTests(unittest.TestCase):
             path.write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "status": "completed",
                         "request_identity": {},
                     }
@@ -898,10 +899,15 @@ class ArchitectureContractTests(unittest.TestCase):
             path.write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "status": "partial",
                         "request_identity": {},
-                        "response_meta": {},
+                        "response_meta": {
+                            "logical_request_id": "fixture",
+                            "completion_attempts": 1,
+                            "retry_reasons": [],
+                            "usage": {},
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -909,29 +915,49 @@ class ArchitectureContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "status invalid"):
                 read_provider_artifact(path)
 
-    def test_verification_marker_metadata_cannot_override_contract_fields(self) -> None:
+    def test_verification_marker_requires_a_successful_command_and_changed_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            marker = write_verification_marker(
-                Path(tmp),
+            root = Path(tmp)
+            evidence = root / "fixture.txt"
+            marker = run_verification_stage(
+                root,
                 "fixture",
-                metadata={
-                    "schema_version": 99,
-                    "stage": "ordinary_sample",
-                    "status": "failed",
-                    "proof": {
-                        "source_commit": "0" * 40,
-                        "scope_sha256": "1" * 64,
-                        "evidence_sha256": "2" * 64,
-                        "command_sha256": "3" * 64,
-                    },
-                },
+                command=[
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; "
+                    f"Path({str(evidence)!r}).write_text('passed', encoding='utf-8')",
+                ],
+                evidence_paths=[evidence],
+                repo_root=ROOT,
             )
             value = json.loads(marker.read_text(encoding="utf-8"))
-            self.assertEqual(value["schema_version"], 2)
+            self.assertEqual(value["schema_version"], 3)
             self.assertEqual(value["stage"], "fixture")
             self.assertEqual(value["status"], "passed")
-            self.assertEqual(value["proof"]["source_commit"], "0" * 40)
+            self.assertNotEqual(value["proof"]["source_commit"], "0" * 40)
             self.assertRegex(value["proof"]["proof_sha256"], r"^[0-9a-f]{64}$")
+            assert_verification_order(root, "offline_replay", repo_root=ROOT)
+
+            unchanged = root / "unchanged.txt"
+            unchanged.write_text("same", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "not changed"):
+                run_verification_stage(
+                    root,
+                    "offline_replay",
+                    command=[sys.executable, "-c", "pass"],
+                    evidence_paths=[unchanged],
+                    repo_root=ROOT,
+                )
+
+    def test_result_field_ownership_gate_rejects_new_runtime_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            writer = root / "scripts" / "flayr_core" / "report.py"
+            writer.parent.mkdir(parents=True)
+            writer.write_text("result['severity'] = 'large'\n", encoding="utf-8")
+            result = inventory(root, ("severity",))
+            self.assertIn("unauthorized production writer", " ".join(ownership_violations(result)))
 
     def test_operator_primary_selling_point_creates_trusted_route(self) -> None:
         foundation = {
@@ -4722,6 +4748,7 @@ class ArchitectureContractTests(unittest.TestCase):
                     "_call_asr_endpoint",
                     side_effect=AssertionError("identity mismatch must not call ASR provider"),
                 ) as mismatch_call,
+                self.assertRaisesRegex(ProviderReplayError, "identity mismatch"),
             ):
                 mismatch_result = {"errors": []}
                 asr.run_online_asr(
@@ -4735,7 +4762,6 @@ class ArchitectureContractTests(unittest.TestCase):
                     mismatch_result,
                     provider_replay_from=root / "first",
                 )
-            self.assertEqual(mismatch_result["transcription_status"], "failed")
             mismatch_call.assert_not_called()
             mismatch_artifact = json.loads((mismatch_role / "provider_asr.json").read_text(encoding="utf-8"))
             self.assertEqual(mismatch_artifact["status"], "failed")

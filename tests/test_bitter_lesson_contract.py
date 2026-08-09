@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from flayr_core.llm import pipeline as pipeline_module  # noqa: E402
 from flayr_core.llm.pipeline import (  # noqa: E402
     _build_stage1_to_stage2_handoff,
     _normalize_segmented_stage,
@@ -25,8 +27,10 @@ from flayr_core.llm.pipeline import (  # noqa: E402
 )
 from flayr_core.llm.parse import normalize_severity  # noqa: E402
 from flayr_core.llm.provider_artifacts import (  # noqa: E402
+    ProviderArtifactError,
     provider_call_with_artifact,
 )
+from scripts.audit_result_field_ownership import inventory, ownership_violations  # noqa: E402
 from flayr_core.llm.stage_fact_artifacts import (  # noqa: E402
     completed_stage_fact_artifact,
     failed_stage_fact_artifact,
@@ -37,19 +41,34 @@ from scripts.verify_bitter_lesson_contract import FrozenContractError, load_spec
 from flayr_core.verification_order import (  # noqa: E402
     VerificationOrderError,
     assert_verification_order,
-    write_verification_marker,
+    run_verification_stage,
 )
 
 
-def _marker_metadata() -> dict[str, object]:
+def _provider_meta(request_id: str = "fixture-request") -> dict[str, object]:
     return {
-        "proof": {
-            "source_commit": "0" * 40,
-            "scope_sha256": "1" * 64,
-            "evidence_sha256": "2" * 64,
-            "command_sha256": "3" * 64,
-        }
+        "logical_request_id": request_id,
+        "completion_attempts": 1,
+        "retry_reasons": [],
+        "usage": {},
     }
+
+
+def _run_verifier(root: Path, stage: str, *, content: str = "passed") -> Path:
+    evidence = root / f"{stage}.evidence.txt"
+    command = [
+        sys.executable,
+        "-c",
+        "from pathlib import Path; "
+        f"Path({str(evidence)!r}).write_text({content!r}, encoding='utf-8')",
+    ]
+    return run_verification_stage(
+        root,
+        stage,
+        command=command,
+        evidence_paths=[evidence],
+        repo_root=ROOT,
+    )
 
 
 class BitterLessonContractTests(unittest.TestCase):
@@ -137,7 +156,7 @@ class BitterLessonContractTests(unittest.TestCase):
             response={"evidence_units": [{"id": "C1"}]},
             model="test-model",
             api_url="https://example.test/v1",
-            response_meta={"logical_request_id": "fixture-1", "completion_attempts": 1},
+            response_meta=_provider_meta("fixture-1"),
         )
         response, meta = reusable_stage_fact_response(
             artifact,
@@ -212,11 +231,24 @@ class BitterLessonContractTests(unittest.TestCase):
             model="test-model",
             api_url="https://example.test/v1",
             error="provider timeout",
-            response_meta={"logical_request_id": "request-2", "completion_attempts": 3},
+            response_meta={
+                **_provider_meta("request-2"),
+                "completion_attempts": 3,
+            },
         )
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(failed["error"], "provider timeout")
         self.assertEqual(failed["response_meta"]["completion_attempts"], 3)
+        with self.assertRaisesRegex(ProviderArtifactError, "missing required fields"):
+            completed_stage_fact_artifact(
+                role="benchmark",
+                phase="A",
+                payload={"model": "test"},
+                response={"evidence_units": []},
+                model="test-model",
+                api_url="https://example.test/v1",
+                response_meta={"logical_request_id": "incomplete"},
+            )
 
     def test_auxiliary_provider_artifact_replay_is_strict_and_durable(self) -> None:
         payload = {"messages": [{"role": "user", "content": "fixture"}]}
@@ -225,9 +257,11 @@ class BitterLessonContractTests(unittest.TestCase):
             artifact_path = root / "provider_phase_c.json"
             calls = {"count": 0}
 
+            live_meta = _provider_meta("live-request")
+
             def live_call() -> tuple[dict[str, object], dict[str, object]]:
                 calls["count"] += 1
-                return {"choices": [{"message": {"content": "{}"}}]}, {"attempts": 1}
+                return {"choices": [{"message": {"content": "{}"}}]}, live_meta
 
             response, metadata, source = provider_call_with_artifact(
                 artifact_path=artifact_path,
@@ -237,11 +271,12 @@ class BitterLessonContractTests(unittest.TestCase):
                 model="test-model",
                 api_url="https://example.test/v1",
                 call=live_call,
+                response_meta=live_meta,
             )
             self.assertEqual(source, "live")
             self.assertEqual(calls["count"], 1)
             self.assertIn("choices", response)
-            self.assertEqual(metadata["attempts"], 1)
+            self.assertEqual(metadata["completion_attempts"], 1)
 
             replay_dir = root / "replay"
             replay_dir.mkdir()
@@ -253,6 +288,7 @@ class BitterLessonContractTests(unittest.TestCase):
                 model="test-model",
                 api_url="https://example.test/v1",
                 call=lambda: (_ for _ in ()).throw(AssertionError("replay called provider")),
+                response_meta={},
             )
             self.assertEqual(replay_source, "technical_replay")
             self.assertEqual(replay_response, response)
@@ -266,6 +302,7 @@ class BitterLessonContractTests(unittest.TestCase):
                     model="test-model",
                     api_url="https://example.test/v1",
                     call=lambda: (_ for _ in ()).throw(AssertionError("mismatch called provider")),
+                    response_meta={},
                 )
             mismatch_artifact = json.loads((replay_dir / artifact_path.name).read_text(encoding="utf-8"))
             self.assertEqual(mismatch_artifact["status"], "failed")
@@ -278,6 +315,7 @@ class BitterLessonContractTests(unittest.TestCase):
                     replay_root=root,
                     call_kind="phase_c_review",
                     payload=payload,
+                    response_meta={},
                     model="test-model",
                     api_url="https://example.test/v1",
                     call=lambda: (_ for _ in ()).throw(AssertionError("in-place replay called provider")),
@@ -306,7 +344,7 @@ class BitterLessonContractTests(unittest.TestCase):
             self.assertEqual(saved["response_meta"]["execution_source"], "live")
 
             empty_error_artifact = Path(directory) / "provider_failed_empty_error.json"
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(RuntimeError):
                 provider_call_with_artifact(
                     artifact_path=empty_error_artifact,
                     replay_root=None,
@@ -314,6 +352,7 @@ class BitterLessonContractTests(unittest.TestCase):
                     payload={"fixture": True},
                     model="test-model",
                     api_url="https://example.test/v1",
+                    response_meta={},
                     call=lambda: (_ for _ in ()).throw(SystemExit()),
                 )
             saved_empty_error = json.loads(empty_error_artifact.read_text(encoding="utf-8"))
@@ -373,15 +412,85 @@ class BitterLessonContractTests(unittest.TestCase):
             with self.assertRaises(VerificationOrderError):
                 assert_verification_order(root, "boundary_sample")
             for stage in ("fixture", "offline_replay", "fake_provider", "ordinary_sample"):
-                write_verification_marker(root, stage, metadata=_marker_metadata())
+                _run_verifier(root, stage)
             assert_verification_order(root, "boundary_sample")
-            tampered = json.loads((root / "ordinary_sample.json").read_text(encoding="utf-8"))
-            tampered["proof"]["evidence_sha256"] = "9" * 64
-            (root / "ordinary_sample.json").write_text(json.dumps(tampered), encoding="utf-8")
+            (root / "ordinary_sample.evidence.txt").write_text("tampered", encoding="utf-8")
             with self.assertRaises(VerificationOrderError):
                 assert_verification_order(root, "boundary_sample")
-            write_verification_marker(root, "ordinary_sample", metadata=_marker_metadata())
+            _run_verifier(root, "ordinary_sample", content="passed-again")
             assert_verification_order(root, "boundary_sample")
+
+    def test_verification_marker_is_stale_after_source_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            repo = base / "repo"
+            root = base / "verification"
+            repo.mkdir()
+            source = repo / "source.py"
+            source.write_text("VALUE = 1\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "source.py"], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "-c",
+                    "user.name=Flayr Test",
+                    "-c",
+                    "user.email=flayr@example.test",
+                    "commit",
+                    "-qm",
+                    "fixture",
+                ],
+                check=True,
+            )
+            evidence = root / "fixture.txt"
+            run_verification_stage(
+                root,
+                "fixture",
+                command=[
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; "
+                    f"Path({str(evidence)!r}).write_text('passed', encoding='utf-8')",
+                ],
+                evidence_paths=[evidence],
+                repo_root=repo,
+            )
+            source.write_text("VALUE = 2\n", encoding="utf-8")
+            with self.assertRaisesRegex(VerificationOrderError, "stale for current source"):
+                assert_verification_order(root, "offline_replay", repo_root=repo)
+
+    def test_runtime_field_ownership_gate_rejects_unauthorized_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "scripts" / "flayr_core" / "report.py"
+            path.parent.mkdir(parents=True)
+            path.write_text("result['severity'] = 'large'\n", encoding="utf-8")
+            violations = ownership_violations(inventory(root, ("severity",)))
+            self.assertTrue(any("unauthorized production writer" in item for item in violations))
+
+    def test_pipeline_failure_preserves_phase_and_kind(self) -> None:
+        with self.assertRaises(Exception) as caught:
+            pipeline_module._run_pipeline_phase(
+                "finalization",
+                "finalizer",
+                lambda: (_ for _ in ()).throw(ValueError("invalid canonical result")),
+            )
+        error = caught.exception
+        self.assertEqual(getattr(error, "phase", None), "finalization")
+        self.assertEqual(getattr(error, "failure_kind", None), "finalizer")
+
+        with self.assertRaises(Exception) as parse_caught:
+            pipeline_module._run_pipeline_phase(
+                "stage2_judgment",
+                "judgment",
+                lambda: (_ for _ in ()).throw(
+                    pipeline_module.ResponseParseError("invalid provider JSON")
+                ),
+            )
+        self.assertEqual(parse_caught.exception.failure_kind, "response_parse")
 
     def test_default_text_entrypoint_is_rejected(self) -> None:
         args = argparse.Namespace(llm_include_images=False, llm_dry_run=True)

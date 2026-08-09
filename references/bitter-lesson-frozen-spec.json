@@ -54,6 +54,7 @@
     "provider_artifact": {
       "kind": "object",
       "required": ["schema_version", "status", "request_identity", "response_meta"],
+      "response_meta_required": ["logical_request_id", "completion_attempts", "retry_reasons", "usage"],
       "completed_requires": ["provider_response", "response_sha256"],
       "failed_requires": ["error"]
     },
@@ -67,7 +68,7 @@
     {
       "id": "BL-LAYER-001",
       "rule": "每层只能写入自己的输出；下游不得回写冻结的 Evidence Ledger。",
-      "test_selectors": ["test_layer_ownership_is_unique"]
+      "test_selectors": ["test_layer_ownership_is_unique", "test_runtime_field_ownership_gate_rejects_unauthorized_writer"]
     },
     {
       "id": "BL-EVIDENCE-001",
@@ -102,7 +103,7 @@
     {
       "id": "BL-ORDER-001",
       "rule": "验收顺序固定为 fixture、offline replay、fake provider、ordinary sample、boundary sample。",
-      "test_selectors": ["test_verification_order_is_frozen"]
+      "test_selectors": ["test_verification_order_is_frozen", "test_verification_order_blocks_boundary_until_prerequisites_pass"]
     }
   ],
   "change_scope": {
@@ -171,6 +172,6 @@
     "tests/test_bitter_lesson_contract.py"
   ],
   "frozen_contract_test_hashes": {
-    "tests/test_bitter_lesson_contract.py": "51f3327bacec81551f69a4e0663fa3a83a064a6ebf531e6717527811d93fa688"
+    "tests/test_bitter_lesson_contract.py": "254919b22b39d854b352ee9cfb0b6c5411b5f15cccca1b3abd8da882f0510172"
   }
 }

@@ -10,6 +10,10 @@ import re
 from typing import Any
 
 
+class ResponseParseError(SystemExit):
+    """Provider text could not be converted into the required JSON object."""
+
+
 def parse_json_text(text: str) -> dict[str, Any]:
     """解析 LLM 返回的 JSON 文本，必要时做轻度修复。"""
     cleaned = text.strip()
@@ -24,9 +28,9 @@ def parse_json_text(text: str) -> dict[str, Any]:
         try:
             result = json.loads(repaired)
         except json.JSONDecodeError:
-            raise SystemExit(f"LLM output is not valid JSON: {exc}") from exc
+            raise ResponseParseError(f"LLM output is not valid JSON: {exc}") from exc
     if not isinstance(result, dict):
-        raise SystemExit("LLM output JSON must be an object.")
+        raise ResponseParseError("LLM output JSON must be an object.")
     return result
 
 

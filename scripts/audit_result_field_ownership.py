@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Inventory reads and writes of critical analysis-result fields.
 
-This is a conservative migration aid, not a type checker. It reports every
-literal Python access and every literal reference in non-Python repository
-files so a field cannot be declared unused from a local call-path reading
-alone.
+The inventory remains conservative rather than pretending to be a type
+checker. In ``--check`` mode, however, literal production writes are a CI
+boundary: a critical field may only be mutated by its declared owner modules.
 """
 
 from __future__ import annotations
@@ -35,6 +34,57 @@ DEFAULT_FIELDS = (
 )
 EXCLUDED_PARTS = {".git", ".venv", "__pycache__", "runs", "output"}
 TEXT_SUFFIXES = {".html", ".js", ".json", ".md", ".mjs", ".sh"}
+PRODUCTION_PREFIX = "scripts/flayr_core/"
+PRODUCTION_WRITE_POLICY = {
+    "analysis_status": {
+        "scripts/flayr_core/llm/pipeline.py",
+        "scripts/flayr_core/stage_evidence_contracts.py",
+    },
+    "benchmark_evidence_ids": {
+        "scripts/flayr_core/postprocess/repair_evidence.py",
+        "scripts/flayr_core/postprocess/utils.py",
+    },
+    "creator_evidence_ids": {
+        "scripts/flayr_core/postprocess/repair_evidence.py",
+        "scripts/flayr_core/postprocess/utils.py",
+    },
+    "comparison_status": {
+        "scripts/flayr_core/llm/pipeline.py",
+        "scripts/flayr_core/postprocess/repair_stages.py",
+    },
+    "model_gap_magnitude": {"scripts/flayr_core/llm/pipeline.py"},
+    "model_severity": {
+        "scripts/flayr_core/llm/pipeline.py",
+        "scripts/flayr_core/postprocess/derive.py",
+    },
+    "severity": {
+        "scripts/flayr_core/llm/compact_eval.py",
+        "scripts/flayr_core/llm/pipeline.py",
+        "scripts/flayr_core/postprocess/derive.py",
+    },
+    "severity_derivation": {
+        "scripts/flayr_core/finalization/equivalence.py",
+        "scripts/flayr_core/llm/pipeline.py",
+        "scripts/flayr_core/postprocess/derive.py",
+    },
+    "stage2_candidate_status": {"scripts/flayr_core/llm/pipeline.py"},
+    "stage2_pipeline_status": {"scripts/flayr_core/llm/pipeline.py"},
+    "stage_analysis": {
+        "scripts/flayr_core/llm/parse.py",
+        "scripts/flayr_core/llm/pipeline.py",
+        "scripts/flayr_core/postprocess/repair_claims.py",
+    },
+    "stage_evidence_gate": {
+        "scripts/flayr_core/llm/pipeline.py",
+        "scripts/flayr_core/stage_evidence_contracts.py",
+    },
+    "stage_evidence_links": {"scripts/flayr_core/stage_evidence_contracts.py"},
+    "stage_handoff_status": {"scripts/flayr_core/llm/pipeline.py"},
+    "video_understanding": {
+        "scripts/flayr_core/llm/pipeline.py",
+        "scripts/flayr_core/postprocess/repair_claims.py",
+    },
+}
 
 
 def _literal_string(node: ast.AST | None) -> str | None:
@@ -112,14 +162,41 @@ def inventory(root: Path, fields: tuple[str, ...]) -> dict[str, list[dict[str, A
     return result
 
 
+def ownership_violations(result: dict[str, list[dict[str, Any]]]) -> list[str]:
+    """Reject new production writers outside the frozen layer-owner modules."""
+    violations: list[str] = []
+    for field, uses in result.items():
+        allowed = PRODUCTION_WRITE_POLICY.get(field, set())
+        for use in uses:
+            path = str(use.get("path") or "")
+            if use.get("operation") != "write" or not path.startswith(PRODUCTION_PREFIX):
+                continue
+            if path not in allowed:
+                violations.append(
+                    f"{field}: unauthorized production writer {path}:{use.get('line', 0)}"
+                )
+    return sorted(violations)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--field", action="append", dest="fields")
+    parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     root = args.root.expanduser().resolve()
     fields = tuple(dict.fromkeys(args.fields or DEFAULT_FIELDS))
-    print(json.dumps(inventory(root, fields), ensure_ascii=False, indent=2))
+    result = inventory(root, fields)
+    if args.check:
+        violations = ownership_violations(result)
+        if violations:
+            print("result field ownership check failed:")
+            for violation in violations:
+                print(f"- {violation}")
+            return 1
+        print("result field ownership check passed")
+        return 0
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 

@@ -17,6 +17,15 @@ from flayr_core.llm.stage_fact_artifacts import (
 from flayr_core.llm.stage_group_artifacts import request_identity as stage_group_request_identity
 
 
+def _provider_meta(request_id: str = "fixture-request") -> dict:
+    return {
+        "logical_request_id": request_id,
+        "completion_attempts": 1,
+        "retry_reasons": [],
+        "usage": {},
+    }
+
+
 class StageFactArtifactTests(unittest.TestCase):
     def setUp(self) -> None:
         self.payload = {
@@ -125,6 +134,7 @@ class StageFactArtifactTests(unittest.TestCase):
             model="qwen-test",
             api_url="https://example.test/v1/chat/completions",
             error="provider timeout",
+            response_meta=_provider_meta("failed-request"),
         )
         with self.assertRaisesRegex(StageFactArtifactError, "not completed"):
             reusable_stage_fact_response(

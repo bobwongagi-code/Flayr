@@ -425,9 +425,25 @@ class StageEvidenceContractTests(unittest.TestCase):
             response_for(STAGE1_QUALIFICATION_GROUPS[2]),
             response_for(STAGE1_QUALIFICATION_GROUPS[3]),
         ]
+        response_iterator = iter(responses)
+
+        def provider_call(*_args, **kwargs):
+            response = next(response_iterator)
+            if isinstance(response, Exception):
+                raise response
+            kwargs["response_meta"].update(
+                {
+                    "logical_request_id": "stage1-qualification-provider",
+                    "transport_attempts": 1,
+                    "transport_retry_reasons": [],
+                    "usage": {},
+                }
+            )
+            return response
+
         with tempfile.TemporaryDirectory() as tmp, patch(
             "flayr_core.llm.pipeline.fetch_json_completion",
-            side_effect=responses,
+            side_effect=provider_call,
         ):
             result = _run_stage1_qualification(
                 args,
@@ -444,6 +460,10 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(
             [record["status"] for record in qualification["group_records"]],
             ["completed", "failed", "completed", "completed"],
+        )
+        self.assertEqual(
+            qualification["group_records"][1]["failure_kind"],
+            "provider_call_or_validation",
         )
         checks = stage_evidence_check_map(result)
         self.assertEqual(checks["S1"]["reason"], "fixture group completed")
@@ -1181,12 +1201,23 @@ class StageEvidenceContractTests(unittest.TestCase):
             ],
         }
         with tempfile.TemporaryDirectory() as tmp_dir:
+            def provider_call(*_args, **kwargs):
+                kwargs["response_meta"].update(
+                    {
+                        "logical_request_id": "stage1-recovery-provider",
+                        "transport_attempts": 1,
+                        "transport_retry_reasons": [],
+                        "usage": {},
+                    }
+                )
+                return json.dumps(recovery_response)
+
             with patch(
                 "flayr_core.llm.pipeline.build_video_fact_recovery_payload",
                 return_value={"messages": []},
             ), patch(
                 "flayr_core.llm.pipeline.fetch_json_completion",
-                return_value=json.dumps(recovery_response),
+                side_effect=provider_call,
             ):
                 result = _maybe_recover_video_facts(
                     args,

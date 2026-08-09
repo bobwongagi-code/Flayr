@@ -18,6 +18,15 @@ from flayr_core.llm.stage_group_artifacts import (
 )
 
 
+def _provider_meta(request_id: str = "fixture-request") -> dict:
+    return {
+        "logical_request_id": request_id,
+        "completion_attempts": 1,
+        "retry_reasons": [],
+        "usage": {},
+    }
+
+
 class StageGroupArtifactTests(unittest.TestCase):
     def setUp(self) -> None:
         self.group = ("S1", "S2")
@@ -49,6 +58,7 @@ class StageGroupArtifactTests(unittest.TestCase):
             response=self.response,
             model="qwen-test",
             api_url="https://example.test/v1/chat/completions",
+            response_meta=_provider_meta(),
         )
 
     def test_completed_response_round_trips_only_for_identical_request(self) -> None:
@@ -156,6 +166,7 @@ class StageGroupPipelineReplayTests(unittest.TestCase):
             response=self._response(group),
             model=self.model,
             api_url=self.api_url,
+            response_meta=_provider_meta(f"replay-{'-'.join(group)}"),
         )
         stage_group_artifact_path(root, group).write_text(
             json.dumps(artifact),
@@ -234,8 +245,9 @@ class StageGroupPipelineReplayTests(unittest.TestCase):
                 if group != missing:
                     self._write_completed(source, group)
 
-            def fetch_response(_args, _api_key, request_path, _response_path, **_kwargs):
+            def fetch_response(_args, _api_key, request_path, _response_path, **kwargs):
                 payload = json.loads(Path(request_path).read_text(encoding="utf-8"))
+                kwargs["response_meta"].update(_provider_meta("resume-provider"))
                 return json.dumps(self._response(payload["group"]))
 
             fetch_mock = unittest.mock.Mock(side_effect=fetch_response)

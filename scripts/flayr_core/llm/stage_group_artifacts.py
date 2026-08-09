@@ -15,9 +15,14 @@ from typing import Any, Mapping, Sequence
 
 from .artifact_identity import identity_value as _identity_value
 from .artifact_identity import stable_sha256 as _stable_sha256
+from .provider_artifacts import (
+    ProviderArtifactError,
+    failed_provider_response_meta,
+    validated_provider_response_meta,
+)
 
 
-STAGE_GROUP_ARTIFACT_SCHEMA_VERSION = 2
+STAGE_GROUP_ARTIFACT_SCHEMA_VERSION = 3
 
 
 class StageGroupArtifactError(ValueError):
@@ -60,7 +65,7 @@ def completed_stage_group_artifact(
     response: Mapping[str, Any],
     model: str,
     api_url: str,
-    response_meta: Mapping[str, Any] | None = None,
+    response_meta: Mapping[str, Any],
 ) -> dict[str, Any]:
     identity = request_identity(
         group=group,
@@ -75,7 +80,9 @@ def completed_stage_group_artifact(
         "request_identity": identity,
         "response_sha256": _stable_sha256(response_copy),
         "provider_response": response_copy,
-        "response_meta": copy.deepcopy(dict(response_meta or {})),
+        "response_meta": validated_provider_response_meta(
+            dict(response_meta), completed=True
+        ),
     }
 
 
@@ -86,7 +93,7 @@ def failed_stage_group_artifact(
     model: str,
     api_url: str,
     error: str,
-    response_meta: Mapping[str, Any] | None = None,
+    response_meta: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema_version": STAGE_GROUP_ARTIFACT_SCHEMA_VERSION,
@@ -98,7 +105,9 @@ def failed_stage_group_artifact(
             api_url=api_url,
         ),
         "error": str(error)[:1000],
-        "response_meta": copy.deepcopy(dict(response_meta or {})),
+        "response_meta": failed_provider_response_meta(
+            dict(response_meta), execution_source=str(response_meta.get("execution_source") or "live")
+        ),
     }
 
 
@@ -129,6 +138,10 @@ def reusable_stage_group_response(
     response_copy = copy.deepcopy(dict(response))
     if artifact.get("response_sha256") != _stable_sha256(response_copy):
         raise StageGroupArtifactError("stage group provider response hash mismatch")
+    try:
+        validated_provider_response_meta(artifact.get("response_meta"), completed=True)
+    except ProviderArtifactError as exc:
+        raise StageGroupArtifactError(f"stage group provider metadata invalid: {exc}") from exc
     return response_copy
 
 
@@ -139,4 +152,15 @@ def read_stage_group_artifact(path: Path) -> dict[str, Any]:
         raise StageGroupArtifactError(f"stage group artifact is unreadable: {path}") from exc
     if not isinstance(value, dict):
         raise StageGroupArtifactError("stage group artifact must be a JSON object")
+    if value.get("schema_version") != STAGE_GROUP_ARTIFACT_SCHEMA_VERSION:
+        raise StageGroupArtifactError("stage group artifact schema version mismatch")
+    status = value.get("status")
+    if status not in {"completed", "failed"}:
+        raise StageGroupArtifactError("stage group artifact status is invalid")
+    try:
+        validated_provider_response_meta(
+            value.get("response_meta"), completed=status == "completed"
+        )
+    except ProviderArtifactError as exc:
+        raise StageGroupArtifactError(f"stage group provider metadata invalid: {exc}") from exc
     return value

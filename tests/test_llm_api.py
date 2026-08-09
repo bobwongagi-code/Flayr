@@ -67,6 +67,18 @@ class LlmApiContractTests(unittest.TestCase):
         )
         analysis = {"videos": {"creator": {}}}
         provider_response = "{}"
+
+        def provider_call(*_args, **kwargs):
+            kwargs["response_meta"].update(
+                {
+                    "logical_request_id": "stage1-resume-provider",
+                    "transport_attempts": 1,
+                    "transport_retry_reasons": [],
+                    "usage": {},
+                }
+            )
+            return provider_response
+
         with tempfile.TemporaryDirectory() as tmp:
             args.stage1_resume_from = Path(tmp) / "missing-stage1"
             run_dir = Path(tmp) / "run"
@@ -82,7 +94,7 @@ class LlmApiContractTests(unittest.TestCase):
                 ),
                 mock.patch(
                     "flayr_core.llm.pipeline.fetch_json_completion",
-                    return_value=provider_response,
+                    side_effect=provider_call,
                 ) as fetch,
                 mock.patch(
                     "flayr_core.llm.pipeline.normalize_video_fact_result",

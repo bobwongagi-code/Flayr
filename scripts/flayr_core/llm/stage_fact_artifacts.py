@@ -9,9 +9,14 @@ from typing import Any, Mapping, Sequence
 
 from .artifact_identity import identity_value as _identity_value
 from .artifact_identity import stable_sha256 as _stable_sha256
+from .provider_artifacts import (
+    ProviderArtifactError,
+    failed_provider_response_meta,
+    validated_provider_response_meta,
+)
 
 
-STAGE_FACT_ARTIFACT_SCHEMA_VERSION = 1
+STAGE_FACT_ARTIFACT_SCHEMA_VERSION = 2
 
 
 class StageFactArtifactError(ValueError):
@@ -69,7 +74,7 @@ def completed_stage_fact_artifact(
     model: str,
     api_url: str,
     group: Sequence[str] | None = None,
-    response_meta: Mapping[str, Any] | None = None,
+    response_meta: Mapping[str, Any],
     artifact_name: str = "",
 ) -> dict[str, Any]:
     identity = request_identity(
@@ -88,7 +93,9 @@ def completed_stage_fact_artifact(
         "request_identity": identity,
         "response_sha256": _stable_sha256(response_copy),
         "provider_response": response_copy,
-        "response_meta": copy.deepcopy(dict(response_meta or {})),
+        "response_meta": validated_provider_response_meta(
+            dict(response_meta), completed=True
+        ),
     }
 
 
@@ -102,7 +109,7 @@ def failed_stage_fact_artifact(
     error: str,
     group: Sequence[str] | None = None,
     artifact_name: str = "",
-    response_meta: Mapping[str, Any] | None = None,
+    response_meta: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema_version": STAGE_FACT_ARTIFACT_SCHEMA_VERSION,
@@ -117,7 +124,9 @@ def failed_stage_fact_artifact(
             group=group,
         ),
         "error": str(error or "Stage1 provider request failed")[:1000],
-        "response_meta": copy.deepcopy(dict(response_meta or {})),
+        "response_meta": failed_provider_response_meta(
+            dict(response_meta), execution_source=str(response_meta.get("execution_source") or "live")
+        ),
     }
 
 
@@ -153,7 +162,11 @@ def reusable_stage_fact_response(
     if artifact.get("response_sha256") != _stable_sha256(response):
         raise StageFactArtifactError("Stage1 provider response hash mismatch")
     meta = artifact.get("response_meta")
-    return copy.deepcopy(response), copy.deepcopy(meta) if isinstance(meta, dict) else {}
+    try:
+        validated_meta = validated_provider_response_meta(meta, completed=True)
+    except ProviderArtifactError as exc:
+        raise StageFactArtifactError(f"Stage1 provider metadata invalid: {exc}") from exc
+    return copy.deepcopy(response), validated_meta
 
 
 def read_stage_fact_artifact(path: Path) -> dict[str, Any]:
@@ -163,4 +176,15 @@ def read_stage_fact_artifact(path: Path) -> dict[str, Any]:
         raise StageFactArtifactError(f"cannot read Stage1 artifact: {path}") from exc
     if not isinstance(value, dict):
         raise StageFactArtifactError(f"Stage1 artifact must be an object: {path}")
+    if value.get("schema_version") != STAGE_FACT_ARTIFACT_SCHEMA_VERSION:
+        raise StageFactArtifactError(f"Stage1 artifact schema version mismatch: {path}")
+    status = value.get("status")
+    if status not in {"completed", "failed"}:
+        raise StageFactArtifactError(f"Stage1 artifact status invalid: {path}")
+    try:
+        validated_provider_response_meta(
+            value.get("response_meta"), completed=status == "completed"
+        )
+    except ProviderArtifactError as exc:
+        raise StageFactArtifactError(f"Stage1 provider metadata invalid: {exc}") from exc
     return value

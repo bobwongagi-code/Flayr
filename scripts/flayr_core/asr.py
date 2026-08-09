@@ -143,11 +143,15 @@ def run_online_asr(
         result["transcription_provider_meta"] = response_meta
         result["transcription_execution_source"] = execution_source
     except (OSError, SystemExit, ValueError, ResourceBudgetExceeded) as exc:
+        if provider_replay_from is not None:
+            raise
         result["transcription_provider_meta"] = live_meta
         result["transcription_execution_source"] = "failed"
         _mark_asr_failed(transcript_path, result, f"online ASR request failed: {exc}")
         return
     except Exception as exc:  # noqa: BLE001 - ASR failure must remain a typed, durable run outcome.
+        if provider_replay_from is not None:
+            raise
         result["transcription_provider_meta"] = live_meta
         result["transcription_execution_source"] = "failed"
         _mark_asr_failed(transcript_path, result, f"online ASR unexpected failure: {exc}")
@@ -244,11 +248,19 @@ def _call_asr_endpoint(
         raise SystemExit("online ASR requires curl, but curl was not found")
 
     active_budget = budget or current_budget()
-    logical_request_id = uuid.uuid4().hex
+    logical_request_id = (
+        str(response_meta.get("logical_request_id") or "").strip()
+        if isinstance(response_meta, dict)
+        else ""
+    ) or uuid.uuid4().hex
     if isinstance(response_meta, dict):
         response_meta.update(
             {
+                "logical_request_id": logical_request_id,
                 "request_id": logical_request_id,
+                "completion_attempts": 0,
+                "retry_reasons": [],
+                "usage": {},
                 "provider": "fun-asr",
                 "api_url": api_url,
                 "model": str(payload.get("model") or ""),
@@ -305,6 +317,10 @@ def _call_asr_endpoint(
         ]
         last_error = ""
         for attempt in range(ASR_RETRIES + 1):
+            if isinstance(response_meta, dict):
+                response_meta["completion_attempts"] = attempt + 1
+                if last_error:
+                    response_meta["retry_reasons"].append(last_error[:200])
             if active_budget is not None:
                 active_budget.reserve_api_call(
                     request_size,
@@ -331,6 +347,8 @@ def _call_asr_endpoint(
                     raise ValueError(f"online ASR returned invalid JSON: {exc}") from exc
                 if not isinstance(parsed, dict):
                     raise ValueError("online ASR response must be a JSON object")
+                if isinstance(response_meta, dict) and isinstance(parsed.get("usage"), dict):
+                    response_meta["usage"] = parsed["usage"]
                 return parsed
             diagnostic = _strip_http_status(completed.stderr).strip()
             last_error = diagnostic or completed.stdout.strip() or "curl failed"
