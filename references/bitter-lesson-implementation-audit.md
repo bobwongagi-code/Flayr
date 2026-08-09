@@ -1,6 +1,6 @@
 # Bitter Lesson 落地审计
 
-状态：`implementation complete; adversarial review passed; ready for commit`
+状态：`implementation complete; adversarial review passed`
 规格：[`bitter-lesson-frozen-spec.json`](bitter-lesson-frozen-spec.json)
 
 ## 实施前审计
@@ -12,6 +12,9 @@
 | 缺失与 unknown 是否可合并 | 报告可能把未知显示为失败或 medium | `unknown`、`blocked`、`not_applicable`、`not_comparable`、`legacy` 分开 |
 | 旧整对象入口是否保留 | 生产路径可能绕过分段合同 | 必须显式 `--legacy-import`，导入结果只作 audit-only degraded，不发布当前 severity |
 | 旧结果导入是否触发当前 provider | 历史审计可能被当前 ASR/OCR/翻译配置阻断或产生新调用 | legacy import 只做本地确定性预处理，ASR/OCR/翻译标记 `not_requested_legacy_import` |
+| ASR 是否属于可重放的 provider 调用 | 在线 Fun-ASR 失败或重跑可能丢失原始响应，导致音频证据无法复核 | ASR 使用标准 `provider_asr.json`，严格校验请求身份、响应哈希和 replay 来源 |
+| 原始模型响应是否可辨识 | 分段 provider bundle、普通 provider payload 和评估响应可能共用 `raw_model_response.json` | 文件和 provenance 都写入 `source_format`，不再靠文件名猜测来源 |
+| 独立评估是否可重放 | compact/cohort/control 直接调用 provider，可能只能重新请求而不能技术重放 | 单模型、cohort、model-independent 和 video-control 入口统一暴露严格 replay |
 | 真实视频何时运行 | 真实调用会同时改变多个变量 | 固定顺序：fixture → offline replay → fake provider → ordinary → boundary |
 
 实施前没有未决的规格问题。任何新出现的语义判断必须先补入冻结规格，不能在代码中临时决定。
@@ -36,7 +39,7 @@
 ## 当前 runtime-fix 批次改动边界
 
 本次任务明确授权修复冻结教训在真实运行链路中的缺口，因此不再沿用前一批“只改门禁、不改 pipeline”的范围。当前批次由
-`references/bitter-lesson-runtime-fix-scope.json` 单独声明：最多 24 个文件、1500 行新增、400 行删除，并精确列出允许的生产路径。
+`references/bitter-lesson-runtime-fix-scope.json` 单独声明：最多 36 个文件、1500 行新增、400 行删除，并精确列出允许的生产和评估路径。
 旧的冻结批次范围仍保留，不能通过修改旧 scope 来掩盖本次越界。
 
 本批次没有调用模型、没有重跑视频、没有修改运行产物；所有行为变更由 fixture、离线重放和单元测试验证。
@@ -62,7 +65,8 @@ PYTHONPATH=scripts python3 scripts/check_change_scope.py --base-ref HEAD --spec 
 | retry 记录 | provider metadata 持久化 request id、attempt、reason、usage | 否 |
 | 旧 JSON 入口 | 默认拒绝；显式 legacy import 后强制 audit-only degraded | 否 |
 | legacy import 的预处理副作用 | 只生成本地媒体/证据目录，不启动当前 ASR、OCR、翻译 provider | 否 |
-| 辅助 provider 调用 | Step-0、Phase C、S4、OCR、翻译等均落 durable artifact，并支持严格技术重放 | 否 |
+| 辅助 provider 调用 | Step-0、Phase C、S4、ASR、OCR、翻译和独立评估均落 durable artifact，并支持严格技术重放 | 否 |
+| 原始响应来源 | provider response 和 segmented provider bundle 通过 `source_format` 显式区分 | 否 |
 | 未知 severity | 缺失/非法值保持 `None`，不再隐式变成 `medium` | 否 |
 | Step-0 失败 | 默认阻断；只有显式 `--allow-degraded` 才允许继续 | 否 |
 | 真实样本顺序 | `--verification-stage` 缺少前置 passed marker 时直接拒绝 | 否 |
@@ -74,5 +78,6 @@ PYTHONPATH=scripts python3 scripts/check_change_scope.py --base-ref HEAD --spec 
 
 - 冻结规格校验现在锁定四层的精确读写边界、四类类型定义和八个不变量集合；仅保留字段存在检查不足以阻止语义漂移。
 - `run-tests.sh` 固定执行规格校验和变更范围门禁；CI checkout 使用完整历史，并将 PR base/push before SHA 传给 scope gate，不能再用空的 `HEAD` diff 冒充检查。
-- 契约测试覆盖成功 provider、失败 provider、精确重放、Stage1 账本完整性、unknown 不发布、机械字段不由 Stage3 写入、legacy import、辅助 provider artifact 和验证顺序门禁。
+- 契约测试覆盖成功 provider、失败 provider、精确重放、ASR artifact、Stage1 账本完整性、unknown 不发布、机械字段不由 Stage3 写入、legacy import、辅助 provider artifact、预检无持久化副作用和验证顺序门禁。
+- 技术重放强制源目录与输出目录分离；高层入口在清理旧文件前拒绝原地重放，避免删除或覆盖原始 provider artifact。
 - 本地全量 unittest、compileall、diff 检查、提示词可达性、分析契约和字段所有权审计应全部通过；质量门禁若因环境缺少 `ruff` 不能运行，必须在提交结果中明确列出，不能宣称全绿。

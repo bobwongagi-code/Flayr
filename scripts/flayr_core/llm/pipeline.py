@@ -212,9 +212,10 @@ def _write_raw_model_response(
     *,
     result: dict[str, Any] | None = None,
     raw_text: str | None = None,
+    source_format: str | None = None,
     overwrite: bool = False,
 ) -> None:
-    """Preserve the original model payload before normalization or repair."""
+    """Preserve the provider payload or an explicitly named provider bundle."""
     path = run_dir / "raw_model_response.json"
     if path.exists() and not overwrite:
         return
@@ -224,7 +225,9 @@ def _write_raw_model_response(
             record["parsed_result"] = result
         write_json(path, record)
     elif isinstance(result, dict):
-        write_json(path, result)
+        record = copy.deepcopy(result)
+        record["source_format"] = str(source_format or "provider_response")
+        write_json(path, record)
     else:
         write_json(path, {"source_format": "raw_text", "raw_text": ""})
 
@@ -523,6 +526,7 @@ def finalize_canonical_analysis_result(
     expected_stage1_hashes: dict[str, str] | None = None,
     raw_snapshot: dict[str, Any] | None = None,
     audit: PostprocessAudit | None = None,
+    persist_artifacts: bool = True,
 ) -> dict[str, Any]:
     """Apply deterministic finalization to one immutable canonical snapshot.
 
@@ -530,7 +534,7 @@ def finalize_canonical_analysis_result(
     is therefore safe for code-only replay after a gate, resolver, validation,
     or report change.
     """
-    artifact_dir = _analysis_artifact_dir(analysis)
+    artifact_dir = _analysis_artifact_dir(analysis) if persist_artifacts else None
     if artifact_dir is not None:
         artifact_dir.mkdir(parents=True, exist_ok=True)
     if audit is None and artifact_dir is not None:
@@ -622,6 +626,11 @@ def finalize_canonical_analysis_result(
             "schema_version": 2,
             "result_contract": ANALYSIS_RESULT_CONTRACT.metadata(),
             "raw_model_response": "raw_model_response.json" if raw_snapshot is not None else None,
+            "raw_model_response_format": (
+                str(raw_snapshot.get("source_format") or "provider_response")
+                if isinstance(raw_snapshot, dict)
+                else None
+            ),
             "validated_normalized_result": "validated_normalized_result.json",
             # The replay gate validates the bytes on disk, not the compact
             # in-memory canonical digest.  write_json intentionally uses
@@ -652,9 +661,16 @@ def finalize_analysis_result(
     analysis: dict[str, Any],
     analysis_input: str,
     locked_video_understanding: dict[str, Any] | None = None,
+    *,
+    persist_artifacts: bool = True,
 ) -> dict[str, Any]:
-    """所有 LLM 结果入口共用的唯一规范化、修补和校验链。"""
-    artifact_dir = _analysis_artifact_dir(analysis)
+    """所有 LLM 结果入口共用的规范化、修补和校验链。
+
+    ``persist_artifacts=False`` is an in-memory preflight used only to select
+    optional Phase C work. It cannot create or overwrite lifecycle artifacts;
+    the publish pass remains the sole durable finalization boundary.
+    """
+    artifact_dir = _analysis_artifact_dir(analysis) if persist_artifacts else None
     if artifact_dir is not None:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         _write_raw_model_response(artifact_dir, result=result)
@@ -796,6 +812,7 @@ def finalize_analysis_result(
         expected_stage1_hashes=expected_stage1_hashes,
         raw_snapshot=raw_snapshot,
         audit=audit,
+        persist_artifacts=persist_artifacts,
     )
 
 
@@ -894,7 +911,12 @@ def merge_analysis_result(
         artifact_dir = _analysis_artifact_dir(analysis)
         if artifact_dir is not None:
             artifact_dir.mkdir(parents=True, exist_ok=True)
-            _write_raw_model_response(artifact_dir, result=result, overwrite=True)
+            _write_raw_model_response(
+                artifact_dir,
+                result=result,
+                source_format="legacy_import_result",
+                overwrite=True,
+            )
         normalized = _mark_legacy_import_result(
             _legacy_import_envelope(result),
             source_path=result_path,
@@ -931,7 +953,12 @@ def merge_analysis_result(
     artifact_dir = _analysis_artifact_dir(analysis)
     if artifact_dir is not None:
         artifact_dir.mkdir(parents=True, exist_ok=True)
-        _write_raw_model_response(artifact_dir, result=result, overwrite=True)
+        _write_raw_model_response(
+            artifact_dir,
+            result=result,
+            source_format="external_result",
+            overwrite=True,
+        )
     if segmented:
         normalized = finalize_analysis_result(
             result,
@@ -2256,7 +2283,7 @@ def run_segmented_stage_pipeline(
                 "usage": response_meta.get("usage", {}),
             })
             stage_results.extend(projected)
-        except (OSError, ValueError, SystemExit, json.JSONDecodeError) as exc:
+        except (OSError, ValueError, RuntimeError, SystemExit, json.JSONDecodeError) as exc:
             any_group_failed = True
             record.update({"status": "failed", "error": str(exc)})
             write_json(
@@ -2330,7 +2357,7 @@ def run_segmented_stage_pipeline(
             ),
         )
         synthesis = parsed
-    except (OSError, ValueError, SystemExit, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, RuntimeError, SystemExit, json.JSONDecodeError) as exc:
         synthesis_status = "failed"
         synthesis = {"synthesis_error": str(exc)}
         any_group_failed = True
@@ -2349,6 +2376,7 @@ def run_segmented_stage_pipeline(
     synthesis = _prepare_segmented_synthesis(synthesis, stage_results)
     unresolved_stages = _segmented_stage_unresolved(stage_results)
     raw_bundle = {
+        "source_format": "segmented_provider_bundle",
         "pipeline": "segmented_stage_v1",
         "stage_groups": group_records,
         "synthesis_status": synthesis_status,
@@ -2359,7 +2387,12 @@ def run_segmented_stage_pipeline(
         "unresolved_stages": unresolved_stages,
         "synthesis": synthesis,
     }
-    _write_raw_model_response(run_dir, result=raw_bundle, overwrite=True)
+    _write_raw_model_response(
+        run_dir,
+        result=raw_bundle,
+        source_format="segmented_provider_bundle",
+        overwrite=True,
+    )
     candidate_status = (
         "degraded" if any_group_failed or unresolved_stages else "completed"
     )
@@ -2602,7 +2635,7 @@ def maybe_run_absolute_execution_shadow(
                 "execution_source": execution_source,
             }
             write_json(run_dir / f"absolute_execution_{role}.json", parsed)
-        except (OSError, ValueError, SystemExit, json.JSONDecodeError) as exc:
+        except (OSError, ValueError, RuntimeError, SystemExit, json.JSONDecodeError) as exc:
             audit["errors"].append(f"{role}: {exc}")
     audit["status"] = "completed" if len(audit["roles"]) == 2 else "partial" if audit["roles"] else "failed"
     analysis["absolute_execution_shadow"] = audit
@@ -2992,7 +3025,7 @@ def maybe_refine_low_confidence_stages(
             allowed_stage_codes=stage_codes,
             fallback_improvements=raw_result.get("improvements"),
         )
-    except (SystemExit, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, RuntimeError, SystemExit, json.JSONDecodeError) as exc:
         result["phase_c_review"] = {
             "schema_version": PHASE_C_REVIEW_SCHEMA_VERSION,
             "mode": PHASE_C_REVIEW_MODE,
@@ -3570,8 +3603,19 @@ def _process_llm_result(
     analysis_input: str,
     locked_video_understanding: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """兼容内部调用点；实际处理统一委托给 finalize_analysis_result。"""
-    return finalize_analysis_result(result, analysis, analysis_input, locked_video_understanding)
+    """Run the in-memory preflight needed to choose optional review work."""
+    # Preflight is allowed to derive a candidate for Phase C selection, but it
+    # must not mutate the provider-owned response that the publish pass later
+    # stores as raw_model_response.json.
+    candidate = copy.deepcopy(result)
+    analysis_candidate = copy.deepcopy(analysis)
+    return finalize_analysis_result(
+        candidate,
+        analysis_candidate,
+        analysis_input,
+        locked_video_understanding,
+        persist_artifacts=False,
+    )
 
 
 # ---------------------------------------------------------------------------

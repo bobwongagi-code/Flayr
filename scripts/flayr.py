@@ -170,7 +170,8 @@ def main() -> int:
     deps = check_dependencies(args)
     inputs = validate_inputs(args)
     if args.verification_stage:
-        assert_verification_order(args.verification_root, args.verification_stage)
+        if args.verification_stage != "production":
+            assert_verification_order(args.verification_root, args.verification_stage)
     source_durations: dict[str, float] = {}
     for role, path in inputs.items():
         budget.preflight_source(path)
@@ -523,14 +524,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--provider-replay-from",
         type=Path,
         help=(
-            "Strictly replay auxiliary provider artifacts (Step-0, Phase C, S4 verifier and postprocess). "
+            "Strictly replay provider artifacts (including ASR, Step-0, Phase C, S4 verifier and postprocess). "
             "A missing or mismatched artifact never falls back to a live provider call."
         ),
     )
     parser.add_argument(
         "--verification-stage",
-        choices=("fixture", "offline_replay", "fake_provider", "ordinary_sample", "boundary_sample"),
-        help="Evaluation stage; when set, the frozen prerequisite markers are mandatory.",
+        choices=("production", "fixture", "offline_replay", "fake_provider", "ordinary_sample", "boundary_sample"),
+        required=True,
+        help=(
+            "Execution intent. Use production for normal product runs; evaluation stages require "
+            "the frozen prerequisite markers."
+        ),
     )
     parser.add_argument(
         "--verification-root",
@@ -681,9 +686,14 @@ def validate_inputs(args: argparse.Namespace) -> dict[str, Path]:
         args.provider_replay_from = args.provider_replay_from.expanduser().resolve()
         if not args.provider_replay_from.is_dir():
             raise SystemExit(f"--provider-replay-from must be an existing run directory: {args.provider_replay_from}")
-    if args.verification_stage:
+        if args.output_dir and args.output_dir.expanduser().resolve() == args.provider_replay_from:
+            raise SystemExit(
+                "--output-dir must differ from --provider-replay-from; "
+                "in-place replay could overwrite replay artifacts"
+            )
+    if args.verification_stage != "production":
         if not args.verification_root:
-            raise SystemExit("--verification-stage requires --verification-root")
+            raise SystemExit("evaluation --verification-stage requires --verification-root")
         args.verification_root = args.verification_root.expanduser().resolve()
 
     for option in (
@@ -1252,13 +1262,16 @@ def _process_video_generation(
         run_online_asr(
             args.asr_api_url,
             args.asr_model,
-            read_asr_api_key(args),
+            "" if getattr(args, "provider_replay_from", None) else read_asr_api_key(args),
             args.asr_language,
             Path(result["audio_path"]),
             role_dir,
             transcript_path,
             result,
             budget=budget,
+            provider_replay_from=(
+                Path(args.provider_replay_from) if getattr(args, "provider_replay_from", None) else None
+            ),
         )
     else:
         write_text(transcript_path, ASR_AUDIO_PLACEHOLDER + "\n")

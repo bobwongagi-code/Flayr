@@ -86,6 +86,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--request-timeout-seconds", type=int, default=600)
     parser.add_argument(
+        "--provider-replay-from",
+        type=Path,
+        default=None,
+        help="Strictly replay provider_compact_eval.json from a prior isolated evaluation output.",
+    )
+    parser.add_argument(
         "--max-stage-evidence-ids",
         type=int,
         default=None,
@@ -109,6 +115,10 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.request_timeout_seconds < 60 or args.request_timeout_seconds > 1800:
         raise SystemExit("--request-timeout-seconds must be between 60 and 1800")
+    if args.provider_replay_from is not None:
+        args.provider_replay_from = args.provider_replay_from.expanduser().resolve()
+        if not args.provider_replay_from.is_dir():
+            raise SystemExit(f"--provider-replay-from must be an existing evaluation directory: {args.provider_replay_from}")
     if args.max_stage_evidence_ids is not None and not 1 <= args.max_stage_evidence_ids <= 16:
         raise SystemExit("--max-stage-evidence-ids must be between 1 and 16")
     if args.max_stage_evidence_ids is not None and args.variant != "evidence_grounded":
@@ -142,6 +152,7 @@ def main() -> int:
             "output_budget_field": args.output_budget_field,
             "request_timeout_seconds": args.request_timeout_seconds,
             "evaluation_role": args.evaluation_role,
+            "provider_replay_from": args.provider_replay_from,
         }
         if args.variant == "evidence_grounded":
             result = run_compact_evaluation(

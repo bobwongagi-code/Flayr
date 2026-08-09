@@ -41,6 +41,17 @@ from flayr_core.verification_order import (  # noqa: E402
 )
 
 
+def _marker_metadata() -> dict[str, object]:
+    return {
+        "proof": {
+            "source_commit": "0" * 40,
+            "scope_sha256": "1" * 64,
+            "evidence_sha256": "2" * 64,
+            "command_sha256": "3" * 64,
+        }
+    }
+
+
 class BitterLessonContractTests(unittest.TestCase):
     def test_layer_ownership_is_unique(self) -> None:
         spec = load_spec()
@@ -234,7 +245,7 @@ class BitterLessonContractTests(unittest.TestCase):
 
             replay_dir = root / "replay"
             replay_dir.mkdir()
-            replay_response, _, replay_source = provider_call_with_artifact(
+            replay_response, replay_metadata, replay_source = provider_call_with_artifact(
                 artifact_path=replay_dir / artifact_path.name,
                 replay_root=root,
                 call_kind="phase_c_review",
@@ -245,9 +256,10 @@ class BitterLessonContractTests(unittest.TestCase):
             )
             self.assertEqual(replay_source, "technical_replay")
             self.assertEqual(replay_response, response)
+            self.assertEqual(replay_metadata["execution_source"], "technical_replay")
             with self.assertRaises(ValueError):
                 provider_call_with_artifact(
-                    artifact_path=replay_dir / "mismatch.json",
+                    artifact_path=replay_dir / artifact_path.name,
                     replay_root=root,
                     call_kind="phase_c_review",
                     payload={"changed": True},
@@ -255,6 +267,22 @@ class BitterLessonContractTests(unittest.TestCase):
                     api_url="https://example.test/v1",
                     call=lambda: (_ for _ in ()).throw(AssertionError("mismatch called provider")),
                 )
+            mismatch_artifact = json.loads((replay_dir / artifact_path.name).read_text(encoding="utf-8"))
+            self.assertEqual(mismatch_artifact["status"], "failed")
+            self.assertIn("identity mismatch", mismatch_artifact["error"])
+
+            source_before = artifact_path.read_bytes()
+            with self.assertRaisesRegex(ValueError, "output must differ"):
+                provider_call_with_artifact(
+                    artifact_path=artifact_path,
+                    replay_root=root,
+                    call_kind="phase_c_review",
+                    payload=payload,
+                    model="test-model",
+                    api_url="https://example.test/v1",
+                    call=lambda: (_ for _ in ()).throw(AssertionError("in-place replay called provider")),
+                )
+            self.assertEqual(artifact_path.read_bytes(), source_before)
 
     def test_failed_provider_artifact_keeps_failure_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -273,7 +301,9 @@ class BitterLessonContractTests(unittest.TestCase):
                 )
             saved = json.loads(artifact.read_text(encoding="utf-8"))
             self.assertEqual(saved["status"], "failed")
-            self.assertEqual(saved["response_meta"], metadata)
+            self.assertEqual(saved["response_meta"]["logical_request_id"], metadata["logical_request_id"])
+            self.assertEqual(saved["response_meta"]["completion_attempts"], metadata["completion_attempts"])
+            self.assertEqual(saved["response_meta"]["execution_source"], "live")
 
             empty_error_artifact = Path(directory) / "provider_failed_empty_error.json"
             with self.assertRaises(SystemExit):
@@ -343,14 +373,15 @@ class BitterLessonContractTests(unittest.TestCase):
             with self.assertRaises(VerificationOrderError):
                 assert_verification_order(root, "boundary_sample")
             for stage in ("fixture", "offline_replay", "fake_provider", "ordinary_sample"):
-                write_verification_marker(root, stage)
+                write_verification_marker(root, stage, metadata=_marker_metadata())
             assert_verification_order(root, "boundary_sample")
-            (root / "ordinary_sample.json").write_text(
-                json.dumps({"schema_version": 1, "stage": "fixture", "status": "passed"}),
-                encoding="utf-8",
-            )
+            tampered = json.loads((root / "ordinary_sample.json").read_text(encoding="utf-8"))
+            tampered["proof"]["evidence_sha256"] = "9" * 64
+            (root / "ordinary_sample.json").write_text(json.dumps(tampered), encoding="utf-8")
             with self.assertRaises(VerificationOrderError):
                 assert_verification_order(root, "boundary_sample")
+            write_verification_marker(root, "ordinary_sample", metadata=_marker_metadata())
+            assert_verification_order(root, "boundary_sample")
 
     def test_default_text_entrypoint_is_rejected(self) -> None:
         args = argparse.Namespace(llm_include_images=False, llm_dry_run=True)

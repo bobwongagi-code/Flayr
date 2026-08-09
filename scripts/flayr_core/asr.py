@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .llm.api import audio_to_mp3_data_url, read_llm_api_key
+from .llm.provider_artifacts import provider_call_with_artifact
 from .network import DEFAULT_QWEN_API_HOSTS, OutboundURLPolicyError, validate_outbound_url
 from .resources import ResourceBudgetExceeded, current_budget
 from .utils import run_command, write_json, write_text
@@ -61,8 +62,17 @@ def run_online_asr(
     result: dict[str, Any],
     *,
     budget: Any = None,
+    provider_replay_from: Path | None = None,
 ) -> None:
     """Transcribe one local audio artifact through the approved Fun-ASR endpoint."""
+    if provider_replay_from is not None:
+        replay_role_dir = (provider_replay_from / role_dir.name).expanduser().resolve()
+        if replay_role_dir == role_dir.expanduser().resolve():
+            result["transcription_status"] = "failed"
+            result.setdefault("errors", []).append(
+                "online ASR replay output must differ from the replay source"
+            )
+            return
     segments_path = role_dir / "transcript.srt"
     words_path = role_dir / "transcript.words.json"
     json_path = role_dir / "transcript.json"
@@ -74,8 +84,12 @@ def run_online_asr(
     result["transcription_backend"] = "fun-asr"
     result["transcription_model"] = model
     result["transcription_api_url"] = api_url
+    result["transcription_provider_artifact"] = None
+    result["transcription_execution_source"] = None
+    result["transcription_provider_meta"] = {}
 
-    if not api_key:
+    replay_requested = provider_replay_from is not None
+    if not api_key and not replay_requested:
         _mark_asr_failed(
             transcript_path,
             result,
@@ -100,17 +114,43 @@ def run_online_asr(
         return
 
     payload = _build_asr_payload(model, data_url, requested_language)
+    provider_artifact_path = role_dir / "provider_asr.json"
+    result["transcription_provider_artifact"] = provider_artifact_path.name
+    replay_root = provider_replay_from / role_dir.name if provider_replay_from is not None else None
+    live_meta: dict[str, Any] = {}
 
     try:
-        response = _call_asr_endpoint(
-            api_url,
-            api_key,
-            payload,
-            role_dir,
-            budget=budget,
+        response, response_meta, execution_source = provider_call_with_artifact(
+            artifact_path=provider_artifact_path,
+            replay_root=replay_root,
+            call_kind="asr",
+            payload=payload,
+            model=model,
+            api_url=api_url,
+            response_meta=live_meta,
+            call=lambda: (
+                _call_asr_endpoint(
+                    api_url,
+                    api_key,
+                    payload,
+                    role_dir,
+                    budget=budget,
+                    response_meta=live_meta,
+                ),
+                live_meta,
+            ),
         )
+        result["transcription_provider_meta"] = response_meta
+        result["transcription_execution_source"] = execution_source
     except (OSError, SystemExit, ValueError, ResourceBudgetExceeded) as exc:
+        result["transcription_provider_meta"] = live_meta
+        result["transcription_execution_source"] = "failed"
         _mark_asr_failed(transcript_path, result, f"online ASR request failed: {exc}")
+        return
+    except Exception as exc:  # noqa: BLE001 - ASR failure must remain a typed, durable run outcome.
+        result["transcription_provider_meta"] = live_meta
+        result["transcription_execution_source"] = "failed"
+        _mark_asr_failed(transcript_path, result, f"online ASR unexpected failure: {exc}")
         return
 
     write_json(json_path, response)
@@ -194,6 +234,7 @@ def _call_asr_endpoint(
     role_dir: Path,
     *,
     budget: Any = None,
+    response_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
         validated = validate_outbound_url(api_url)
@@ -204,6 +245,15 @@ def _call_asr_endpoint(
 
     active_budget = budget or current_budget()
     logical_request_id = uuid.uuid4().hex
+    if isinstance(response_meta, dict):
+        response_meta.update(
+            {
+                "request_id": logical_request_id,
+                "provider": "fun-asr",
+                "api_url": api_url,
+                "model": str(payload.get("model") or ""),
+            }
+        )
     request_limit = (
         active_budget.limits.max_single_request_bytes
         if active_budget is not None
@@ -271,6 +321,9 @@ def _call_asr_endpoint(
                 budget=active_budget,
             )
             status = _parse_http_status(completed.stderr)
+            if isinstance(response_meta, dict):
+                response_meta["last_http_status"] = status
+                response_meta["attempts"] = attempt + 1
             if completed.returncode == 0 and status is not None and 200 <= status < 300:
                 try:
                     parsed = json.loads(completed.stdout)

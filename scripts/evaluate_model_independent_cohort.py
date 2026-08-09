@@ -243,6 +243,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--request-timeout-seconds", type=int, default=600)
     parser.add_argument(
+        "--provider-replay-from",
+        type=Path,
+        default=None,
+        help="Strictly replay provider_compact_eval.json from a prior cohort output root.",
+    )
+    parser.add_argument(
         "--max-stage-evidence-ids",
         type=int,
         default=None,
@@ -255,6 +261,15 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.request_timeout_seconds < 60 or args.request_timeout_seconds > 1800:
         raise SystemExit("--request-timeout-seconds must be between 60 and 1800")
+    if args.provider_replay_from is not None:
+        args.provider_replay_from = args.provider_replay_from.expanduser().resolve()
+        if not args.provider_replay_from.is_dir():
+            raise SystemExit(f"--provider-replay-from must be an existing cohort output root: {args.provider_replay_from}")
+        if args.output_root.expanduser().resolve() == args.provider_replay_from:
+            raise SystemExit(
+                "--output-root must differ from --provider-replay-from; "
+                "in-place replay could delete or overwrite replay artifacts"
+            )
     if args.max_stage_evidence_ids is not None and not 1 <= args.max_stage_evidence_ids <= 16:
         raise SystemExit("--max-stage-evidence-ids must be between 1 and 16")
     manifest = _read_manifest(args.manifest.expanduser().resolve())
@@ -314,6 +329,7 @@ def main() -> int:
         "source_commit": current_code_commit(),
         "judgment_schema_version": MODEL_INDEPENDENT_SCHEMA_VERSION,
         "contract_limits": {**contract_limits, "output_budget": args.output_budget},
+        "provider_replay_from": str(args.provider_replay_from) if args.provider_replay_from else None,
         "samples": [],
     }
     for sample, base_bundle, source_identity in preflight:
@@ -409,6 +425,13 @@ def main() -> int:
                     request_timeout_seconds=args.request_timeout_seconds,
                     evaluation_role=args.evaluation_role,
                     max_stage_evidence_ids=args.max_stage_evidence_ids,
+                    provider_replay_from=(
+                        args.provider_replay_from
+                        / sample_components[sample["sample_id"]]
+                        / model_components[model]
+                        if args.provider_replay_from is not None
+                        else None
+                    ),
                 )
                 sample_record["results"].append(
                     {

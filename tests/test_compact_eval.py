@@ -11,6 +11,7 @@ from unittest.mock import patch
 from scripts.flayr_core.llm import compact_eval
 from scripts.flayr_core.llm.compact_eval import (
     COMPACT_EVAL_SCHEMA_VERSION,
+    CompactEvaluationError,
     MODEL_INDEPENDENT_SCHEMA_VERSION,
     S4_FACT_STATE_SCHEMA_VERSION,
     S4_FREE_TEXT_STEPS_SCHEMA_VERSION,
@@ -848,6 +849,7 @@ class CompactEvalContractTests(unittest.TestCase):
             bundle = load_frozen_compact_bundle(_write_bundle(root), include_images=False)
             result = _result()
             raw_response = {
+                "source_format": "forged_source_label",
                 "choices": [{"message": {"content": json.dumps(result, ensure_ascii=False)}}]
             }
 
@@ -890,12 +892,75 @@ class CompactEvalContractTests(unittest.TestCase):
             self.assertEqual(outcome["provider_meta"]["logical_request_id"], "compact-fake-1")
             self.assertEqual(call.call_count, 1)
             self.assertTrue((output_dir / "compact_evaluation.json").is_file())
+            provider_artifact = json.loads((output_dir / "provider_compact_eval.json").read_text(encoding="utf-8"))
+            self.assertEqual(provider_artifact["status"], "completed")
+            self.assertEqual(provider_artifact["response_meta"]["execution_source"], "live")
+            raw_provider_response = json.loads((output_dir / "raw_model_response.json").read_text(encoding="utf-8"))
+            self.assertEqual(raw_provider_response["source_format"], "provider_response")
+            self.assertEqual(raw_provider_response["choices"][0]["message"]["content"], raw_response["choices"][0]["message"]["content"])
             metadata = json.loads((output_dir / "compact_request_metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["contract_limits"]["max_stage_evidence_ids"], 8)
             self.assertEqual(metadata["experiment"]["baseline"], 4)
             self.assertTrue(metadata["experiment"]["single_variable"])
             self.assertFalse((output_dir / "analysis_result.json").exists())
             self.assertFalse((output_dir / "_SUCCESS.json").exists())
+
+            replay_dir = root / "replay"
+            with patch.object(compact_eval, "call_llm_api", side_effect=AssertionError("replay called provider")):
+                replay_outcome = compact_eval.run_compact_evaluation(
+                    model="test-model",
+                    bundle=bundle,
+                    output_dir=replay_dir,
+                    api_url="https://example.test/v1/chat/completions",
+                    api_key_args=SimpleNamespace(),
+                    output_budget=4096,
+                    gt_stages={f"S{i}": "small" for i in range(1, 7)},
+                    max_stage_evidence_ids=8,
+                    provider_replay_from=output_dir,
+                )
+            self.assertEqual(replay_outcome["status"], "completed")
+            self.assertEqual(replay_outcome["execution_source"], "technical_replay")
+            self.assertEqual(replay_outcome["provider_meta"]["execution_source"], "technical_replay")
+            replay_artifact = json.loads((replay_dir / "provider_compact_eval.json").read_text(encoding="utf-8"))
+            self.assertEqual(replay_artifact["response_meta"]["execution_source"], "technical_replay")
+
+    def test_missing_api_key_leaves_a_typed_failure_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundle = load_frozen_compact_bundle(_write_bundle(root), include_images=False)
+            output_dir = root / "missing-key"
+            with patch.object(compact_eval, "read_llm_api_key", return_value=""):
+                outcome = compact_eval.run_compact_evaluation(
+                    model="test-model",
+                    bundle=bundle,
+                    output_dir=output_dir,
+                    api_url="https://example.test/v1/chat/completions",
+                    api_key_args=SimpleNamespace(),
+                )
+
+            self.assertEqual(outcome["status"], "request_failed")
+            self.assertEqual(outcome["failure_class"], "credential_unavailable")
+            self.assertEqual(outcome["execution_source"], "not_started")
+            self.assertIsNone(outcome["provider_artifact"])
+            self.assertTrue((output_dir / "compact_failure.json").is_file())
+            self.assertFalse((output_dir / "provider_compact_eval.json").exists())
+
+    def test_replay_rejects_in_place_output_before_deleting_source_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundle = load_frozen_compact_bundle(_write_bundle(root), include_images=False)
+            source_marker = root / "provider_compact_eval.json"
+            source_marker.write_text("source-artifact", encoding="utf-8")
+            with self.assertRaisesRegex(CompactEvaluationError, "output must differ"):
+                compact_eval.run_compact_evaluation(
+                    model="test-model",
+                    bundle=bundle,
+                    output_dir=root,
+                    api_url="https://example.test/v1/chat/completions",
+                    api_key_args=SimpleNamespace(),
+                    provider_replay_from=root,
+                )
+            self.assertEqual(source_marker.read_text(encoding="utf-8"), "source-artifact")
 
     def test_invalid_response_stops_at_contract_without_repair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

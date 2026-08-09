@@ -247,6 +247,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="max_completion_tokens",
     )
     parser.add_argument("--request-timeout-seconds", type=int, default=600)
+    parser.add_argument(
+        "--provider-replay-from",
+        type=Path,
+        default=None,
+        help="Strictly replay provider_compact_eval.json from a prior control output root.",
+    )
     return parser
 
 
@@ -258,6 +264,15 @@ def main() -> int:
         raise SystemExit("--dual-repeats must be between 1 and 5")
     if args.request_timeout_seconds < 60 or args.request_timeout_seconds > 1800:
         raise SystemExit("--request-timeout-seconds must be between 60 and 1800")
+    if args.provider_replay_from is not None:
+        args.provider_replay_from = args.provider_replay_from.expanduser().resolve()
+        if not args.provider_replay_from.is_dir():
+            raise SystemExit(f"--provider-replay-from must be an existing control output root: {args.provider_replay_from}")
+        if args.output_root.expanduser().resolve() == args.provider_replay_from:
+            raise SystemExit(
+                "--output-root must differ from --provider-replay-from; "
+                "in-place replay could delete or overwrite replay artifacts"
+            )
     output_root = args.output_root.expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     source_run = args.run_dir.expanduser().resolve()
@@ -283,6 +298,7 @@ def main() -> int:
         "promotion_note": "control diagnostics are calibration artifacts, not a model-selection decision",
         "models": list(args.models),
         "conditions": list(args.conditions),
+        "provider_replay_from": str(args.provider_replay_from) if args.provider_replay_from else None,
         "frozen_video_inputs": [
             {
                 "role": item["role"],
@@ -318,6 +334,14 @@ def main() -> int:
                     output_budget_field=args.output_budget_field,
                     request_timeout_seconds=args.request_timeout_seconds,
                     evaluation_role=args.evaluation_role,
+                    provider_replay_from=(
+                        args.provider_replay_from
+                        / _safe_component(condition)
+                        / _safe_component(model)
+                        / f"repeat-{repeat:02d}"
+                        if args.provider_replay_from is not None
+                        else None
+                    ),
                 )
                 parsed = result.get("result") if result.get("status") == "completed" else None
                 resource_used = result.get("resource_budget", {}).get("used", {})

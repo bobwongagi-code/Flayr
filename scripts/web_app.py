@@ -1376,6 +1376,8 @@ class JobStore:
             str(job["selling_point"]),
             "--output-dir",
             str(job["run_dir"]),
+            "--verification-stage",
+            "production",
         ]
         model = os.environ.get("FLAYR_LLM_MODEL", "").strip()
         if model:

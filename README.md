@@ -123,6 +123,7 @@ python3 scripts/flayr.py \
   --llm-api-url https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions \
   --max-total-wall-time 3600 \
   --llm-api-key-env DASHSCOPE_API_KEY \
+  --verification-stage production \
   improve
 ```
 
@@ -185,6 +186,8 @@ python3 scripts/flayr.py \
 | `video_facts_{benchmark,creator}.json` | 阶段一单视频事实清单 |
 | `stage1_provider_{role}_{A|B|C}*.json` | Stage1-A/B/C provider 原始 JSON、完整请求身份、响应哈希、重试与 usage 元数据；可用 `--stage1-replay-from` 严格重放 |
 | `stage2_provider_{GROUP}.json` | Stage2/Stage3 provider 原始 JSON、请求身份、响应哈希、重试与 usage 元数据；可用 `--stage2-replay-from` 严格重放 |
+| `provider_asr.json` | Fun-ASR 原始响应、请求身份、响应哈希和执行来源；可随主运行严格技术重放 |
+| `provider_compact_eval.json` | 独立 compact/cohort/control provider 原始响应；各评估入口支持严格技术重放 |
 | `transcript.txt` / `.srt` / `.zh.txt` | 转写与翻译 |
 | `frames/` `focus_frames/` | 抽取的关键帧 |
 | `frames/analysis_manifest.json` / `analysis_stage_frames.json` | 由镜头、字幕、变化点和词级 ASR 边界共同生成的 canonical 模型输入帧集 |

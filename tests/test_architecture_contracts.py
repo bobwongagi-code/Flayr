@@ -306,6 +306,8 @@ class ArchitectureContractTests(unittest.TestCase):
                 mock.patch.object(pipeline, "validate_quality_contract", no_op),
                 mock.patch.object(pipeline, "stage_evidence_link_issues", return_value=[]),
                 mock.patch.object(pipeline, "stage_evidence_immutability_issues", return_value=[]),
+                mock.patch.object(pipeline, "normalize_analysis_result", return_value=canonical),
+                mock.patch.object(pipeline, "validate_normalized_analysis_contract"),
             ):
                 pipeline.finalize_canonical_analysis_result(
                     pipeline.CanonicalAnalysisResult.from_mapping(canonical),
@@ -320,6 +322,57 @@ class ArchitectureContractTests(unittest.TestCase):
             )["postprocess_provenance"]
             serialized_hash = hashlib.sha256(validated_path.read_bytes()).hexdigest()
             self.assertEqual(provenance["validated_normalized_sha256"], serialized_hash)
+
+    def test_preflight_finalization_does_not_persist_lifecycle_artifacts(self) -> None:
+        canonical = {"stage_analysis": []}
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            analysis = {"run_dir": str(run_dir)}
+            no_op = mock.Mock()
+            with (
+                mock.patch.object(pipeline, "apply_postprocess_chain", no_op),
+                mock.patch.object(pipeline, "reconcile_stage_evidence_links", no_op),
+                mock.patch.object(pipeline, "validate_evidence_alignment", no_op),
+                mock.patch.object(pipeline, "validate_stage_ownership", no_op),
+                mock.patch.object(pipeline, "sanitize_health_recommendations", no_op),
+                mock.patch.object(pipeline, "sanitize_child_toothpaste_recommendations", no_op),
+                mock.patch.object(pipeline, "stabilize_improvement_priorities", no_op),
+                mock.patch.object(pipeline, "ground_improvement_evidence", no_op),
+                mock.patch.object(pipeline, "validate_analysis_dimensions", no_op),
+                mock.patch.object(pipeline, "validate_recommendation_safety", no_op),
+                mock.patch.object(pipeline, "validate_creator_script_language", no_op),
+                mock.patch.object(pipeline, "remove_unverified_brand_models", no_op),
+                mock.patch.object(pipeline, "_clamp_result_time_ranges", no_op),
+                mock.patch.object(pipeline, "materialize_global_diagnosis", no_op),
+                mock.patch.object(pipeline, "validate_quality_contract", no_op),
+                mock.patch.object(pipeline, "stage_evidence_link_issues", return_value=[]),
+                mock.patch.object(pipeline, "stage_evidence_immutability_issues", return_value=[]),
+                mock.patch.object(pipeline, "normalize_analysis_result", return_value=canonical),
+                mock.patch.object(pipeline, "validate_normalized_analysis_contract"),
+            ):
+                pipeline.finalize_analysis_result(
+                    canonical,
+                    analysis,
+                    "analysis input",
+                    persist_artifacts=False,
+                )
+            self.assertEqual(list(run_dir.iterdir()), [])
+
+    def test_preflight_finalization_does_not_mutate_provider_response(self) -> None:
+        raw = {"stage_analysis": [], "nested": {"source": "provider"}}
+        analysis = {"run_dir": "/tmp/flayr-preflight-test", "state": "authoritative"}
+
+        def mutate(candidate, candidate_analysis, *_args, **_kwargs):
+            candidate["nested"]["source"] = "normalized"
+            candidate_analysis["state"] = "mutated"
+            return candidate
+
+        with mock.patch.object(pipeline, "finalize_analysis_result", side_effect=mutate):
+            returned = pipeline._process_llm_result(raw, analysis, "analysis input", None)
+
+        self.assertEqual(raw["nested"]["source"], "provider")
+        self.assertEqual(analysis["state"], "authoritative")
+        self.assertEqual(returned["nested"]["source"], "normalized")
 
     @staticmethod
     def _multimodal(
@@ -840,12 +893,24 @@ class ArchitectureContractTests(unittest.TestCase):
             marker = write_verification_marker(
                 Path(tmp),
                 "fixture",
-                metadata={"schema_version": 99, "stage": "ordinary_sample", "status": "failed"},
+                metadata={
+                    "schema_version": 99,
+                    "stage": "ordinary_sample",
+                    "status": "failed",
+                    "proof": {
+                        "source_commit": "0" * 40,
+                        "scope_sha256": "1" * 64,
+                        "evidence_sha256": "2" * 64,
+                        "command_sha256": "3" * 64,
+                    },
+                },
             )
-            self.assertEqual(
-                json.loads(marker.read_text(encoding="utf-8")),
-                {"schema_version": 1, "stage": "fixture", "status": "passed"},
-            )
+            value = json.loads(marker.read_text(encoding="utf-8"))
+            self.assertEqual(value["schema_version"], 2)
+            self.assertEqual(value["stage"], "fixture")
+            self.assertEqual(value["status"], "passed")
+            self.assertEqual(value["proof"]["source_commit"], "0" * 40)
+            self.assertRegex(value["proof"]["proof_sha256"], r"^[0-9a-f]{64}$")
 
     def test_operator_primary_selling_point_creates_trusted_route(self) -> None:
         foundation = {
@@ -1036,13 +1101,21 @@ class ArchitectureContractTests(unittest.TestCase):
         validate_chain_relationships(result, {"s3_flags_required": True, "s4_flags_required": True})
 
     def test_full_multimodal_analysis_is_the_cli_default(self) -> None:
-        args = flayr.build_parser().parse_args(["compare"])
+        args = flayr.build_parser().parse_args(["compare", "--verification-stage", "production"])
         self.assertTrue(args.llm_include_images)
-        legacy = flayr.build_parser().parse_args(["--no-llm-include-images", "compare"])
+        legacy = flayr.build_parser().parse_args(
+            ["--no-llm-include-images", "compare", "--verification-stage", "production"]
+        )
         self.assertFalse(legacy.llm_include_images)
 
+    def test_cli_requires_explicit_execution_intent(self) -> None:
+        with self.assertRaises(SystemExit):
+            flayr.build_parser().parse_args(["compare"])
+
     def test_legacy_text_entrypoint_is_explicitly_rejected(self) -> None:
-        args = flayr.build_parser().parse_args(["--no-llm-include-images", "compare"])
+        args = flayr.build_parser().parse_args(
+            ["--no-llm-include-images", "compare", "--verification-stage", "production"]
+        )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with self.assertRaisesRegex(SystemExit, "text-only LLM"):
@@ -1069,6 +1142,8 @@ class ArchitectureContractTests(unittest.TestCase):
                     str(benchmark),
                     "--creator-video",
                     str(creator),
+                    "--verification-stage",
+                    "production",
                     "--analysis-result-json",
                     str(result),
                 ]
@@ -1082,6 +1157,8 @@ class ArchitectureContractTests(unittest.TestCase):
                     str(benchmark),
                     "--creator-video",
                     str(creator),
+                    "--verification-stage",
+                    "production",
                     "--analysis-result-json",
                     str(result),
                     "--legacy-import",
@@ -1985,10 +2062,12 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(full_analysis_output_fields("other-model"), {"max_tokens": 32768})
 
     def test_cli_exposes_an_explicit_run_wall_time_budget(self) -> None:
-        default_args = flayr.build_parser().parse_args(["compare"])
+        default_args = flayr.build_parser().parse_args(["compare", "--verification-stage", "production"])
         self.assertEqual(default_args.max_total_wall_time, 1800.0)
         self.assertEqual(default_args.asr_model, "fun-asr-flash-2026-06-15")
-        extended_args = flayr.build_parser().parse_args(["compare", "--max-total-wall-time", "3600"])
+        extended_args = flayr.build_parser().parse_args(
+            ["compare", "--max-total-wall-time", "3600", "--verification-stage", "production"]
+        )
         self.assertEqual(extended_args.max_total_wall_time, 3600.0)
 
     def test_llm_transfer_closed_error_is_retryable(self) -> None:
@@ -4504,6 +4583,127 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertTrue(result["transcript_words_available"])
             self.assertEqual(transcript.read_text(encoding="utf-8").strip(), "new transcript")
             self.assertIn("new transcript", (role_dir / "transcript.srt").read_text(encoding="utf-8"))
+
+    def test_online_asr_persists_and_strictly_replays_provider_artifact(self) -> None:
+        response = {
+            "output": {
+                "sentence": {
+                    "begin_time": 100,
+                    "end_time": 900,
+                    "text": "replay transcript",
+                    "words": [{"text": "replay", "begin_time": 100, "end_time": 500}],
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_role = root / "first" / "benchmark"
+            second_role = root / "second" / "benchmark"
+            first_role.mkdir(parents=True)
+            second_role.mkdir(parents=True)
+            first_audio = first_role / "audio.wav"
+            second_audio = second_role / "audio.wav"
+            first_audio.write_bytes(b"same-audio")
+            second_audio.write_bytes(b"same-audio")
+            with mock.patch.object(asr, "audio_to_mp3_data_url", return_value="data:audio/mpeg;base64,AA=="), mock.patch.object(
+                asr, "_call_asr_endpoint", return_value=response
+            ) as call:
+                first_result = {"errors": []}
+                asr.run_online_asr(
+                    asr.DEFAULT_FUN_ASR_API_URL,
+                    asr.DEFAULT_FUN_ASR_MODEL,
+                    "test-key",
+                    "en",
+                    first_audio,
+                    first_role,
+                    first_role / "transcript.txt",
+                    first_result,
+                )
+            self.assertEqual(first_result["transcription_status"], "completed")
+            self.assertEqual(call.call_count, 1)
+            saved = json.loads((first_role / "provider_asr.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["status"], "completed")
+            self.assertEqual(saved["request_identity"]["call_kind"], "asr")
+            self.assertEqual(saved["response_meta"]["execution_source"], "live")
+
+            with (
+                mock.patch.object(asr, "audio_to_mp3_data_url", return_value="data:audio/mpeg;base64,AA=="),
+                mock.patch.object(
+                    asr,
+                    "_call_asr_endpoint",
+                    side_effect=AssertionError("strict replay must not call ASR provider"),
+                ) as replay_call,
+            ):
+                replay_result = {"errors": []}
+                asr.run_online_asr(
+                    asr.DEFAULT_FUN_ASR_API_URL,
+                    asr.DEFAULT_FUN_ASR_MODEL,
+                    "",
+                    "en",
+                    second_audio,
+                    second_role,
+                    second_role / "transcript.txt",
+                    replay_result,
+                    provider_replay_from=root / "first",
+                )
+            self.assertEqual(replay_result["transcription_status"], "completed")
+            self.assertEqual(replay_result["transcription_execution_source"], "technical_replay")
+            replay_call.assert_not_called()
+            replay_saved = json.loads((second_role / "provider_asr.json").read_text(encoding="utf-8"))
+            self.assertEqual(replay_saved["response_meta"]["execution_source"], "technical_replay")
+
+            mismatch_role = root / "mismatch" / "benchmark"
+            mismatch_role.mkdir(parents=True)
+            mismatch_audio = mismatch_role / "audio.wav"
+            mismatch_audio.write_bytes(b"same-audio")
+            with (
+                mock.patch.object(asr, "audio_to_mp3_data_url", return_value="data:audio/mpeg;base64,AA=="),
+                mock.patch.object(
+                    asr,
+                    "_call_asr_endpoint",
+                    side_effect=AssertionError("identity mismatch must not call ASR provider"),
+                ) as mismatch_call,
+            ):
+                mismatch_result = {"errors": []}
+                asr.run_online_asr(
+                    asr.DEFAULT_FUN_ASR_API_URL,
+                    "different-asr-model",
+                    "",
+                    "en",
+                    mismatch_audio,
+                    mismatch_role,
+                    mismatch_role / "transcript.txt",
+                    mismatch_result,
+                    provider_replay_from=root / "first",
+                )
+            self.assertEqual(mismatch_result["transcription_status"], "failed")
+            mismatch_call.assert_not_called()
+            mismatch_artifact = json.loads((mismatch_role / "provider_asr.json").read_text(encoding="utf-8"))
+            self.assertEqual(mismatch_artifact["status"], "failed")
+            self.assertIn("identity mismatch", mismatch_artifact["error"])
+
+    def test_online_asr_replay_does_not_clear_in_place_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            role_dir = root / "benchmark"
+            role_dir.mkdir(parents=True)
+            transcript = role_dir / "transcript.txt"
+            transcript.write_text("source transcript\n", encoding="utf-8")
+            result = {"errors": []}
+            asr.run_online_asr(
+                asr.DEFAULT_FUN_ASR_API_URL,
+                asr.DEFAULT_FUN_ASR_MODEL,
+                "",
+                "en",
+                role_dir / "missing.wav",
+                role_dir,
+                transcript,
+                result,
+                provider_replay_from=root,
+            )
+            self.assertEqual(transcript.read_text(encoding="utf-8"), "source transcript\n")
+            self.assertEqual(result["transcription_status"], "failed")
+            self.assertIn("output must differ", result["errors"][-1])
 
     def test_online_asr_does_not_reuse_unrelated_llm_key(self) -> None:
         args = SimpleNamespace(

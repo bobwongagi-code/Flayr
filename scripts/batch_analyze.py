@@ -210,6 +210,8 @@ def build_command(
         job["benchmark"],
         "--output-dir",
         str(out_dir),
+        "--verification-stage",
+        "production",
         "--reuse-preprocessing",
         *(trusted_args or []),
         *common_args,

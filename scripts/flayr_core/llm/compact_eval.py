@@ -28,6 +28,7 @@ from ..stage_catalog import DEFAULT_STAGES
 from ..utils import write_bytes, write_json
 from ..video import probe_duration_seconds
 from .api import call_llm_api, extract_chat_completion_text, image_to_data_url, read_llm_api_key, video_to_data_url
+from .provider_artifacts import provider_call_with_artifact
 from .parse import parse_json_text
 
 
@@ -2562,6 +2563,7 @@ def _run_isolated_evaluation(
     output_budget: int,
     output_budget_field: str,
     request_timeout_seconds: int,
+    provider_replay_from: Path | None = None,
     gt_stages: dict[str, str] | None = None,
     diagnostics: Any = None,
     max_stage_evidence_ids: int | None = None,
@@ -2570,6 +2572,13 @@ def _run_isolated_evaluation(
     if evaluation_role not in EVALUATION_ROLES:
         raise CompactEvaluationError(f"unsupported evaluation_role: {evaluation_role}")
     output_dir = output_dir.expanduser().resolve()
+    if provider_replay_from is not None:
+        replay_root = provider_replay_from.expanduser().resolve()
+        if output_dir == replay_root:
+            raise CompactEvaluationError(
+                "provider replay output must differ from the replay source; "
+                "in-place evaluation could delete or overwrite replay artifacts"
+            )
     output_dir.mkdir(parents=True, exist_ok=True)
     for stale_name in (
         "compact_evaluation.json",
@@ -2591,6 +2600,7 @@ def _run_isolated_evaluation(
         "s5_audit_evaluation.json",
         "s5_audit_failure.json",
         "raw_model_response.json",
+        "provider_compact_eval.json",
         ".compact-request.json",
     ):
         (output_dir / stale_name).unlink(missing_ok=True)
@@ -2653,9 +2663,19 @@ def _run_isolated_evaluation(
         }
     )
     write_json(output_dir / "compact_request_metadata.json", metadata)
-    api_key = read_llm_api_key(api_key_args)
-    if not api_key:
-        raise CompactEvaluationError("LLM API key is unavailable")
+    replay_requested = provider_replay_from is not None
+    api_key = "" if replay_requested else read_llm_api_key(api_key_args)
+    if not api_key and not replay_requested:
+        failure = {
+            "status": "request_failed",
+            **metadata,
+            "failure_class": "credential_unavailable",
+            "error": "LLM API key is unavailable",
+            "provider_artifact": None,
+            "execution_source": "not_started",
+        }
+        write_json(output_dir / failure_filename, failure)
+        return failure
     limits = ResourceLimits(
         max_total_wall_time=min(max(float(request_timeout_seconds) + 30.0, 60.0), 1800.0),
         max_llm_calls=1,
@@ -2666,24 +2686,43 @@ def _run_isolated_evaluation(
     budget = ResourceBudget(limits)
     token = budget.activate()
     raw_path = output_dir / "raw_model_response.json"
+    provider_artifact_path = output_dir / "provider_compact_eval.json"
     response_meta: dict[str, Any] = {}
+    execution_source = "technical_replay" if replay_requested else "live"
     try:
         payload_path = output_dir / ".compact-request.json"
         write_json(payload_path, payload)
-        raw_text = call_llm_api(
-            api_url,
-            api_key,
-            payload_path,
-            raw_path,
-            max_time_seconds=request_timeout_seconds,
-            low_speed_time_seconds=min(180, max(30, request_timeout_seconds)),
-            retries=0,
-            budget=budget,
+        provider_response, response_meta, execution_source = provider_call_with_artifact(
+            artifact_path=provider_artifact_path,
+            replay_root=provider_replay_from,
             call_kind=call_kind,
-            cleanup_raw=False,
+            payload=payload,
+            model=model,
+            api_url=api_url,
             response_meta=response_meta,
+            call=lambda: (
+                json.loads(
+                    call_llm_api(
+                        api_url,
+                        api_key,
+                        payload_path,
+                        raw_path,
+                        max_time_seconds=request_timeout_seconds,
+                        low_speed_time_seconds=min(180, max(30, request_timeout_seconds)),
+                        retries=0,
+                        budget=budget,
+                        call_kind=call_kind,
+                        cleanup_raw=False,
+                        response_meta=response_meta,
+                    )
+                ),
+                response_meta,
+            ),
         )
-        response = json.loads(raw_text)
+        response = provider_response
+        raw_record = deepcopy(response) if isinstance(response, dict) else {"provider_response": response}
+        raw_record["source_format"] = "provider_response"
+        write_json(raw_path, raw_record)
         content = extract_chat_completion_text(response)
         parsed = parse_json_text(content)
         errors = validator(parsed)
@@ -2696,6 +2735,8 @@ def _run_isolated_evaluation(
                 "contract_error_codes": _contract_error_codes(errors),
                 "candidate_result": parsed,
                 "provider_meta": response_meta,
+                "provider_artifact": provider_artifact_path.name,
+                "execution_source": execution_source,
                 "resource_budget": budget.snapshot(),
             }
             if diagnostics is not None:
@@ -2707,6 +2748,8 @@ def _run_isolated_evaluation(
             **metadata,
             "result": parsed,
             "provider_meta": response_meta,
+            "provider_artifact": provider_artifact_path.name,
+            "execution_source": execution_source,
             "resource_budget": budget.snapshot(),
         }
         if variant == "visual_extraction_on_raw_video":
@@ -2724,6 +2767,8 @@ def _run_isolated_evaluation(
             "failure_class": "resource_limit",
             "error": str(exc)[:1000],
             "provider_meta": response_meta,
+            "provider_artifact": provider_artifact_path.name,
+            "execution_source": execution_source,
             "resource_budget": budget.snapshot(),
         }
         write_json(output_dir / failure_filename, failure)
@@ -2735,17 +2780,8 @@ def _run_isolated_evaluation(
             "failure_class": "response_parse",
             "error": str(exc)[:1000],
             "provider_meta": response_meta,
-            "resource_budget": budget.snapshot(),
-        }
-        write_json(output_dir / failure_filename, failure)
-        return failure
-    except SystemExit as exc:
-        failure = {
-            "status": "request_failed",
-            **metadata,
-            "failure_class": "provider_or_transport",
-            "error": str(exc)[:1000],
-            "provider_meta": response_meta,
+            "provider_artifact": provider_artifact_path.name,
+            "execution_source": execution_source,
             "resource_budget": budget.snapshot(),
         }
         write_json(output_dir / failure_filename, failure)
@@ -2757,6 +2793,34 @@ def _run_isolated_evaluation(
             "failure_class": "input_or_contract_setup",
             "error": str(exc)[:1000],
             "provider_meta": response_meta,
+            "provider_artifact": provider_artifact_path.name,
+            "execution_source": execution_source,
+            "resource_budget": budget.snapshot(),
+        }
+        write_json(output_dir / failure_filename, failure)
+        return failure
+    except ValueError as exc:
+        failure = {
+            "status": "request_failed",
+            **metadata,
+            "failure_class": "provider_replay_or_contract",
+            "error": str(exc)[:1000],
+            "provider_meta": response_meta,
+            "provider_artifact": provider_artifact_path.name,
+            "execution_source": execution_source,
+            "resource_budget": budget.snapshot(),
+        }
+        write_json(output_dir / failure_filename, failure)
+        return failure
+    except SystemExit as exc:
+        failure = {
+            "status": "request_failed",
+            **metadata,
+            "failure_class": "provider_or_transport",
+            "error": str(exc)[:1000],
+            "provider_meta": response_meta,
+            "provider_artifact": provider_artifact_path.name,
+            "execution_source": execution_source,
             "resource_budget": budget.snapshot(),
         }
         write_json(output_dir / failure_filename, failure)
@@ -2768,6 +2832,20 @@ def _run_isolated_evaluation(
             "failure_class": "io_or_transport",
             "error": str(exc)[:1000],
             "provider_meta": response_meta,
+            "provider_artifact": provider_artifact_path.name,
+            "execution_source": execution_source,
+            "resource_budget": budget.snapshot(),
+        }
+        write_json(output_dir / failure_filename, failure)
+        return failure
+    except Exception as exc:  # noqa: BLE001 — isolated evaluation must leave a durable failure artifact.
+        failure = {
+            "status": "request_failed",
+            **metadata,
+            "failure_class": "unexpected_provider_or_validator_error",
+            "error": str(exc)[:1000],
+            "provider_meta": response_meta,
+            "provider_artifact": provider_artifact_path.name,
             "resource_budget": budget.snapshot(),
         }
         write_json(output_dir / failure_filename, failure)
@@ -2789,6 +2867,7 @@ def run_compact_evaluation(
     gt_stages: dict[str, str] | None = None,
     evaluation_role: str = "model_calibration",
     max_stage_evidence_ids: int | None = None,
+    provider_replay_from: Path | None = None,
 ) -> dict[str, Any]:
     """Run the original evidence-grounded compact contract in isolation."""
     payload = build_compact_eval_payload(
@@ -2819,6 +2898,7 @@ def run_compact_evaluation(
         output_budget=output_budget,
         output_budget_field=output_budget_field,
         request_timeout_seconds=request_timeout_seconds,
+        provider_replay_from=provider_replay_from,
         gt_stages=gt_stages,
         diagnostics=diagnose_compact_evidence_references,
         max_stage_evidence_ids=max_stage_evidence_ids,
@@ -2849,6 +2929,7 @@ def run_model_independent_evaluation(
     request_timeout_seconds: int = 600,
     evaluation_role: str = "model_calibration",
     max_stage_evidence_ids: int | None = None,
+    provider_replay_from: Path | None = None,
 ) -> dict[str, Any]:
     """Run the frozen protocol's model-independent judgment layer."""
     payload = build_model_independent_payload(
@@ -2879,6 +2960,7 @@ def run_model_independent_evaluation(
         output_budget=output_budget,
         output_budget_field=output_budget_field,
         request_timeout_seconds=request_timeout_seconds,
+        provider_replay_from=provider_replay_from,
         gt_stages=None,
         diagnostics=diagnose_compact_evidence_references,
         max_stage_evidence_ids=max_stage_evidence_ids,
@@ -2910,6 +2992,7 @@ def run_severity_only_evaluation(
     request_timeout_seconds: int = 600,
     gt_stages: dict[str, str] | None = None,
     evaluation_role: str = "model_calibration",
+    provider_replay_from: Path | None = None,
 ) -> dict[str, Any]:
     """Run severity judgment on one shared, validated fact package."""
     payload = build_severity_only_payload(
@@ -2936,6 +3019,7 @@ def run_severity_only_evaluation(
         output_budget=output_budget,
         output_budget_field=output_budget_field,
         request_timeout_seconds=request_timeout_seconds,
+        provider_replay_from=provider_replay_from,
         gt_stages=gt_stages,
     )
 
@@ -2951,6 +3035,7 @@ def run_visual_extraction_evaluation(
     output_budget_field: str = "max_tokens",
     request_timeout_seconds: int = 600,
     evaluation_role: str = "model_calibration",
+    provider_replay_from: Path | None = None,
 ) -> dict[str, Any]:
     """Run visual fact extraction over fixed frames, without severity judgment."""
     if bundle.input_mode != "raw_video_only":
@@ -2986,6 +3071,7 @@ def run_visual_extraction_evaluation(
         output_budget=output_budget,
         output_budget_field=output_budget_field,
         request_timeout_seconds=request_timeout_seconds,
+        provider_replay_from=provider_replay_from,
     )
 
 
@@ -3000,6 +3086,7 @@ def run_s4_single_pass_evaluation(
     output_budget_field: str = "max_tokens",
     request_timeout_seconds: int = 600,
     evaluation_role: str = "model_calibration",
+    provider_replay_from: Path | None = None,
 ) -> dict[str, Any]:
     """Run the one-call structured S4 control against immutable facts."""
 
@@ -3026,6 +3113,7 @@ def run_s4_single_pass_evaluation(
         output_budget=output_budget,
         output_budget_field=output_budget_field,
         request_timeout_seconds=request_timeout_seconds,
+        provider_replay_from=provider_replay_from,
     )
 
 
@@ -3040,6 +3128,7 @@ def run_s4_free_text_steps_evaluation(
     output_budget_field: str = "max_tokens",
     request_timeout_seconds: int = 600,
     evaluation_role: str = "model_calibration",
+    provider_replay_from: Path | None = None,
 ) -> dict[str, Any]:
     """Run the one-call five-step free-text S4 control on immutable facts."""
 
@@ -3066,6 +3155,7 @@ def run_s4_free_text_steps_evaluation(
         output_budget=output_budget,
         output_budget_field=output_budget_field,
         request_timeout_seconds=request_timeout_seconds,
+        provider_replay_from=provider_replay_from,
     )
 
 
@@ -3080,6 +3170,7 @@ def run_s4_fact_state_evaluation(
     output_budget_field: str = "max_tokens",
     request_timeout_seconds: int = 600,
     evaluation_role: str = "model_calibration",
+    provider_replay_from: Path | None = None,
 ) -> dict[str, Any]:
     """Run S4 fact-state classification without severity or resolver logic."""
     payload = build_s4_fact_state_payload(
@@ -3105,6 +3196,7 @@ def run_s4_fact_state_evaluation(
         output_budget=output_budget,
         output_budget_field=output_budget_field,
         request_timeout_seconds=request_timeout_seconds,
+        provider_replay_from=provider_replay_from,
     )
 
 
@@ -3119,6 +3211,7 @@ def run_s4_judgment_evaluation(
     output_budget_field: str = "max_tokens",
     request_timeout_seconds: int = 600,
     evaluation_role: str = "model_calibration",
+    provider_replay_from: Path | None = None,
 ) -> dict[str, Any]:
     """Run S4 relation/gap judgment from an immutable fact-state bundle."""
     payload = build_s4_judgment_payload(
@@ -3144,6 +3237,7 @@ def run_s4_judgment_evaluation(
         output_budget=output_budget,
         output_budget_field=output_budget_field,
         request_timeout_seconds=request_timeout_seconds,
+        provider_replay_from=provider_replay_from,
     )
 
 
@@ -3158,6 +3252,7 @@ def run_s5_audit_evaluation(
     output_budget_field: str = "max_tokens",
     request_timeout_seconds: int = 600,
     evaluation_role: str = "model_calibration",
+    provider_replay_from: Path | None = None,
 ) -> dict[str, Any]:
     """Run the S5 trust-state audit; it never writes production severity."""
     payload = build_s5_audit_payload(
@@ -3183,4 +3278,5 @@ def run_s5_audit_evaluation(
         output_budget=output_budget,
         output_budget_field=output_budget_field,
         request_timeout_seconds=request_timeout_seconds,
+        provider_replay_from=provider_replay_from,
     )

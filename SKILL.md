@@ -24,7 +24,8 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/Flayr/scripts/flayr.py" improve \
   --benchmark-video "/path/to/benchmark.mp4" \
   --creator-video "/path/to/creator.mp4" \
   --product-name "Product name" \
-  --product-price "39"
+  --product-price "39" \
+  --verification-stage production
 ```
 
 When working from this repository directly, use:
@@ -32,7 +33,8 @@ When working from this repository directly, use:
 ```bash
 python3 scripts/flayr.py improve \
   --benchmark-video "/path/to/benchmark.mp4" \
-  --creator-video "/path/to/creator.mp4"
+  --creator-video "/path/to/creator.mp4" \
+  --verification-stage production
 ```
 
 ## Workflow
