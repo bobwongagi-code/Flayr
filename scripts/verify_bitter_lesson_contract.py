@@ -105,11 +105,10 @@ def load_spec(path: Path = SPEC_PATH) -> dict[str, Any]:
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    # Git may materialize the same tracked text with CRLF on Windows. The
+    # frozen contract locks source content, not checkout-specific newlines.
+    data = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return hashlib.sha256(data).hexdigest()
 
 
 def _require_nonempty_list(value: Any, name: str) -> list[Any]:

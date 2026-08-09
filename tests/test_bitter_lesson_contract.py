@@ -37,7 +37,12 @@ from flayr_core.llm.stage_fact_artifacts import (  # noqa: E402
     reusable_stage_fact_response,
 )
 from scripts.check_change_scope import EMPTY_TREE_SHA, _changed_paths, check_scope  # noqa: E402
-from scripts.verify_bitter_lesson_contract import FrozenContractError, load_spec, validate_spec  # noqa: E402
+from scripts.verify_bitter_lesson_contract import (  # noqa: E402
+    FrozenContractError,
+    _sha256,
+    load_spec,
+    validate_spec,
+)
 from flayr_core.verification_order import (  # noqa: E402
     VerificationOrderError,
     assert_verification_order,
@@ -72,6 +77,15 @@ def _run_verifier(root: Path, stage: str, *, content: str = "passed") -> Path:
 
 
 class BitterLessonContractTests(unittest.TestCase):
+    def test_frozen_contract_hash_is_checkout_newline_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lf = root / "lf.py"
+            crlf = root / "crlf.py"
+            lf.write_bytes(b"VALUE = 1\nVALUE = 2\n")
+            crlf.write_bytes(b"VALUE = 1\r\nVALUE = 2\r\n")
+            self.assertEqual(_sha256(lf), _sha256(crlf))
+
     def test_layer_ownership_is_unique(self) -> None:
         spec = load_spec()
         validate_spec(spec)
