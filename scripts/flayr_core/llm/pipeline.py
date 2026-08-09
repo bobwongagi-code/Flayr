@@ -126,6 +126,7 @@ from .stage_fact_artifacts import (
     reusable_stage_fact_response,
     stage_fact_artifact_path,
 )
+from .provider_artifacts import provider_call_with_artifact
 from .media import select_role_visual_inputs, select_stage_recovery_visual_inputs
 from ..finalization import facade as finalization_facade
 from ..postprocess import apply_postprocess_chain, apply_segmented_postprocess_chain
@@ -169,6 +170,14 @@ def _analysis_artifact_dir(analysis: dict[str, Any]) -> Path | None:
         return Path(str(value)).expanduser().resolve()
     except (OSError, RuntimeError, TypeError, ValueError):
         return None
+
+
+def _full_provider_replay_requested(args: argparse.Namespace) -> bool:
+    """Return whether every LLM provider boundary has a strict replay source."""
+    return all(
+        getattr(args, name, None)
+        for name in ("provider_replay_from", "stage1_replay_from", "stage2_replay_from")
+    )
 
 
 def _clamp_result_time_ranges(result: dict[str, Any], analysis: dict[str, Any]) -> None:
@@ -328,7 +337,7 @@ def run_comparison_scope_preflight(
     事实与资格文件仍按完整链路同名落盘，因此后续可在同一目录继续运行完整分析。
     """
     api_key = read_llm_api_key(args).strip()
-    if not api_key and not args.llm_dry_run:
+    if not api_key and not args.llm_dry_run and not getattr(args, "provider_replay_from", None):
         raise SystemExit("比较资格预检需要 LLM API key。")
     facts = run_video_identity_extraction(args, analysis, run_dir, api_key)
     if args.llm_dry_run:
@@ -351,17 +360,22 @@ def apply_finalized_analysis_result(
     """把已完成校验的结果写回主 analysis；此处不得再次做后处理。"""
     phase_c_review = normalized.get("phase_c_review")
     AnalysisResult.from_mapping(normalized).project_into(analysis)
+    for metadata_key in ("analysis_import_mode", "legacy_import"):
+        if metadata_key in normalized:
+            analysis[metadata_key] = copy.deepcopy(normalized[metadata_key])
     if isinstance(phase_c_review, dict):
         analysis["phase_c_review"] = phase_c_review
     pipeline_status = str(normalized.get("stage2_pipeline_status") or "completed").strip().lower()
-    if pipeline_status in {"degraded", "failed"}:
+    if pipeline_status in {"degraded", "failed"} or str(
+        analysis.get("product_foundation_status") or ""
+    ).strip().lower() in {"degraded", "failed"}:
         analysis["improvements_status"] = "degraded"
         analysis["analysis_run_state"] = "degraded"
     else:
         analysis["improvements_status"] = "llm_completed"
         analysis["analysis_run_state"] = "completed"
     analysis["analysis_source"] = {
-        "type": "large_model_json",
+        "type": "legacy_import" if analysis.get("analysis_import_mode") == "legacy" else "large_model_json",
         "path": str(result_path),
         "merged_at": dt.datetime.now().isoformat(timespec="seconds"),
     }
@@ -785,9 +799,108 @@ def finalize_analysis_result(
     )
 
 
-def merge_analysis_result(analysis: dict[str, Any], result_path: Path, analysis_input: str) -> None:
+def _mark_legacy_import_result(
+    normalized: dict[str, Any],
+    *,
+    source_path: Path,
+) -> dict[str, Any]:
+    """Keep imported historical output visible without treating it as grounded."""
+    source_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    normalized["analysis_import_mode"] = "legacy"
+    normalized["legacy_import"] = {
+        "source_path": str(source_path),
+        "source_sha256": source_digest,
+        "status": "audit_only",
+        "reason": "外部旧结果未经过当前 Stage1/Stage2 事实合同，只能用于历史审计。",
+    }
+    normalized["stage2_pipeline_status"] = "degraded"
+    normalized["stage2_candidate_status"] = "degraded"
+    normalized["analysis_run_state"] = "degraded"
+    for stage in normalized.get("stage_analysis", []):
+        if not isinstance(stage, dict):
+            continue
+        stage["severity"] = None
+        stage["model_severity"] = None
+        stage["stage_evidence_gate"] = {
+            "status": "legacy",
+            "analysis_allowed": False,
+            "reason_code": "legacy_import",
+            "reason": "历史导入结果不属于当前 grounded 分析。",
+            "source": "legacy_import",
+        }
+        stage["analysis_status"] = "legacy_evidence_contract"
+        stage["analysis_reason"] = "历史导入结果仅供审计，未发布当前 severity。"
+        stage["severity_derivation"] = {
+            "status": "legacy",
+            "severity": None,
+            "model_severity": None,
+            "resolver": "legacy_import_block",
+            "phase_c_candidate": False,
+            "constraints": [],
+            "reason": "历史导入结果不产生当前 severity。",
+        }
+    return normalized
+
+
+def _legacy_import_envelope(raw: dict[str, Any]) -> dict[str, Any]:
+    """Project an old result into an audit-only envelope without revalidating it.
+
+    Historical results deliberately do not have to satisfy the current
+    normalized contract. Keep only fields the runtime projection understands,
+    provide harmless empty shapes for report consumers, and let the legacy
+    marker clear all publishable severity before projection.
+    """
+    envelope = {
+        field: copy.deepcopy(raw[field])
+        for field in ANALYSIS_RESULT_CONTRACT.projection_fields
+        if field in raw
+    }
+    defaults: dict[str, Any] = {
+        "one_line_summary": "历史结果，仅供审计。",
+        "executive_summary": "",
+        "holistic_assessment": {},
+        "product_visibility": {},
+        "loop_closure": {},
+        "video_understanding": {},
+        "stage_analysis": [],
+        "improvements": [],
+    }
+    for field, default in defaults.items():
+        envelope.setdefault(field, default)
+    if not isinstance(envelope.get("stage_analysis"), list):
+        envelope["stage_analysis"] = []
+    if not isinstance(envelope.get("improvements"), list):
+        envelope["improvements"] = []
+    if not isinstance(envelope.get("video_understanding"), dict):
+        envelope["video_understanding"] = {}
+    return envelope
+
+
+def merge_analysis_result(
+    analysis: dict[str, Any],
+    result_path: Path,
+    analysis_input: str,
+    *,
+    legacy_import: bool = False,
+) -> None:
     """把外部 analysis_result.json 经唯一处理链后合并入 analysis。"""
-    result = json.loads(result_path.read_text(encoding="utf-8"))
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"analysis result JSON 无法读取或解析：{result_path}") from exc
+    if not isinstance(result, dict):
+        raise SystemExit("analysis result JSON 必须是对象，不能是数组或标量。")
+    if legacy_import:
+        artifact_dir = _analysis_artifact_dir(analysis)
+        if artifact_dir is not None:
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            _write_raw_model_response(artifact_dir, result=result, overwrite=True)
+        normalized = _mark_legacy_import_result(
+            _legacy_import_envelope(result),
+            source_path=result_path,
+        )
+        apply_finalized_analysis_result(analysis, normalized, result_path)
+        return
     segmented = str(result.get("stage2_pipeline_version") or "").strip() == "segmented_stage_v1"
     if segmented:
         analysis["stage2_pipeline_version"] = "segmented_stage_v1"
@@ -2360,7 +2473,7 @@ def run_large_model_analysis(
             "生产分析必须使用 Stage1 + segmented Stage2/Stage3 多模态链路。"
         )
     api_key = read_llm_api_key(args).strip()
-    if not api_key and not args.llm_dry_run:
+    if not api_key and not args.llm_dry_run and not _full_provider_replay_requested(args):
         keychain_hint = ""
         if args.llm_api_key_keychain_service:
             keychain_hint = f" or Keychain service {args.llm_api_key_keychain_service}"
@@ -2374,10 +2487,17 @@ def run_large_model_analysis(
     )
     if brand_proposition:
         analysis["brand_proposition"] = brand_proposition
-    # Step-0：先确立品的商业地基（特征+命题），贯穿喂给阶段1 观察 + 阶段2 判断；失败则下游内联兜底。
+    # Step-0：先确立品的商业地基（特征+命题），贯穿喂给阶段1 观察 + 阶段2 判断。
     foundation = establish_product_foundation(args, analysis, run_dir, api_key)
     if foundation:
         analysis["product_foundation"] = foundation
+    foundation_status = str(analysis.get("product_foundation_status") or "unknown").strip().lower()
+    if foundation_status in {"failed", "degraded"} and not getattr(args, "allow_degraded", False):
+        write_json(run_dir / "analysis.json", analysis)
+        raise SystemExit(
+            "Step-0 产品地基未完成；默认阻断后续分析，避免把未经验证的产品证明或内联猜测发布为完成结果。"
+            " 如需审计性降级运行，请显式使用 --allow-degraded。"
+        )
     facts = run_video_fact_extraction(args, analysis, run_dir, api_key)
     if args.llm_dry_run:
         print("LLM dry run: fact request payloads constructed in memory; no request artifacts retained")
@@ -2450,19 +2570,37 @@ def maybe_run_absolute_execution_shadow(
             response_path = run_dir / f"llm_absolute_execution_{role}_response.json"
             payload = build_absolute_execution_shadow_payload(args.llm_model, role, facts, analysis)
             write_json(request_path, payload)
-            response_meta: dict[str, Any] = {}
-            response_text = fetch_json_completion(
-                args,
-                api_key,
-                request_path,
-                response_path,
-                response_meta=response_meta,
+            live_meta: dict[str, Any] = {}
+            response, response_meta, execution_source = provider_call_with_artifact(
+                artifact_path=run_dir / f"provider_absolute_execution_{role}.json",
+                replay_root=getattr(args, "provider_replay_from", None),
+                call_kind=f"absolute_execution_shadow:{role}",
+                payload=payload,
+                model=args.llm_model,
+                api_url=args.llm_api_url,
+                response_meta=live_meta,
+                call=lambda: (
+                    parse_json_text(
+                        fetch_json_completion(
+                            args,
+                            api_key,
+                            request_path,
+                            response_path,
+                            response_meta=live_meta,
+                        )
+                    ),
+                    live_meta,
+                ),
             )
-            parsed = normalize_absolute_execution_shadow(role, parse_json_text(response_text))
+            parsed = normalize_absolute_execution_shadow(role, response)
             if parsed is None:
                 raise SystemExit("单侧审计缺少完整 S1-S4 枚举输出")
             audit["roles"][role] = parsed
             audit["provider_meta"][role] = response_meta
+            audit.setdefault("provider_artifacts", {})[role] = {
+                "path": f"provider_absolute_execution_{role}.json",
+                "execution_source": execution_source,
+            }
             write_json(run_dir / f"absolute_execution_{role}.json", parsed)
         except (OSError, ValueError, SystemExit, json.JSONDecodeError) as exc:
             audit["errors"].append(f"{role}: {exc}")
@@ -2628,7 +2766,7 @@ def merge_reconciled_improvements(
         not in {"not_directly_comparable", "not_applicable"}
     ]
     stage_severity = {
-        stage_code(stage.get("stage")): str(stage.get("severity") or "medium").strip().lower()
+        stage_code(stage.get("stage")): str(stage.get("severity") or "uncertain").strip().lower()
         for stage in merged.get("stage_analysis", [])
         if isinstance(stage, dict)
     }
@@ -2652,7 +2790,7 @@ def merge_reconciled_improvements(
     severity_rank = {"large": 0, "medium": 1, "small": 2}
     combined.sort(
         key=lambda item: (
-            severity_rank.get(stage_severity.get(stage_code(item.get("target_stage")), "medium"), 1),
+            severity_rank.get(stage_severity.get(stage_code(item.get("target_stage")), "uncertain"), 3),
             0 if stage_code(item.get("target_stage")) in projected_codes else 1,
             _safe_priority(item.get("priority")),
         )
@@ -2692,16 +2830,31 @@ def maybe_reconcile_final_improvements(
         if key in result
     }
     response_meta: dict[str, Any] = {}
+    live_meta: dict[str, Any] = {}
     try:
-        raw_text = call_llm_api(
-            args.llm_api_url,
-            api_key,
-            request_path,
-            response_path,
-            budget=getattr(args, "_resource_budget", None),
-            response_meta=response_meta,
+        provider_response, response_meta, execution_source = provider_call_with_artifact(
+            artifact_path=run_dir / "provider_improvement_reconciliation.json",
+            replay_root=getattr(args, "provider_replay_from", None),
+            call_kind="improvement_reconciliation",
+            payload=payload,
+            model=args.llm_model,
+            api_url=args.llm_api_url,
+            response_meta=live_meta,
+            call=lambda: (
+                json.loads(
+                    call_llm_api(
+                        args.llm_api_url,
+                        api_key,
+                        request_path,
+                        response_path,
+                        budget=getattr(args, "_resource_budget", None),
+                        response_meta=live_meta,
+                    )
+                ),
+                live_meta,
+            ),
         )
-        parsed = parse_json_text(extract_chat_completion_text(json.loads(raw_text)))
+        parsed = parse_json_text(extract_chat_completion_text(provider_response))
         additions = parsed.get("improvements") if isinstance(parsed.get("improvements"), list) else []
         merged = merge_reconciled_improvements(result, additions, missing)
         reconciled = _process_llm_result(
@@ -2719,6 +2872,7 @@ def maybe_reconcile_final_improvements(
             "requested_stages": missing,
             "reason": f"最终提升点补全失败：{exc}",
             "provider_meta": response_meta,
+            "provider_artifact": "provider_improvement_reconciliation.json",
         }
         _refresh_final_derived_artifact(analysis, result, ("improvement_reconciliation",))
         return result
@@ -2726,8 +2880,10 @@ def maybe_reconcile_final_improvements(
     reconciled["improvement_reconciliation"] = {
         "applied": True,
         "requested_stages": missing,
-        "response_retention": "ephemeral",
+        "response_retention": "durable",
         "provider_meta": response_meta,
+        "provider_artifact": "provider_improvement_reconciliation.json",
+        "execution_source": execution_source,
     }
     _refresh_final_derived_artifact(
         analysis,
@@ -2801,16 +2957,31 @@ def maybe_refine_low_confidence_stages(
     review_response_path = run_dir / "llm_stage_review_response.json"
     write_json(review_request_path, review_payload)
     response_meta: dict[str, Any] = {}
+    live_meta: dict[str, Any] = {}
     try:
-        review_raw_text = call_llm_api(
-            args.llm_api_url,
-            api_key,
-            review_request_path,
-            review_response_path,
-            budget=getattr(args, "_resource_budget", None),
-            response_meta=response_meta,
+        provider_response, response_meta, execution_source = provider_call_with_artifact(
+            artifact_path=run_dir / "provider_phase_c.json",
+            replay_root=getattr(args, "provider_replay_from", None),
+            call_kind="phase_c_review",
+            payload=review_payload,
+            model=args.llm_model,
+            api_url=args.llm_api_url,
+            response_meta=live_meta,
+            call=lambda: (
+                json.loads(
+                    call_llm_api(
+                        args.llm_api_url,
+                        api_key,
+                        review_request_path,
+                        review_response_path,
+                        budget=getattr(args, "_resource_budget", None),
+                        response_meta=live_meta,
+                    )
+                ),
+                live_meta,
+            ),
         )
-        review_text = extract_chat_completion_text(json.loads(review_raw_text))
+        review_text = extract_chat_completion_text(provider_response)
         review_result = parse_json_text(review_text)
         refined = apply_stage_review_updates(
             result,
@@ -2831,6 +3002,7 @@ def maybe_refine_low_confidence_stages(
             "reason": f"低置信阶段回看失败：{exc}",
             "patches": [],
             "provider_meta": response_meta,
+            "provider_artifact": "provider_phase_c.json",
         }
         _refresh_final_derived_artifact(analysis, result, ("phase_c_review",))
         return result
@@ -2841,8 +3013,10 @@ def maybe_refine_low_confidence_stages(
         "snapshot_schema": PHASE_C_PATCH_SNAPSHOT_SCHEMA,
         "requested_stages": stage_codes,
         "applied": True,
-        "response_retention": "ephemeral",
+        "response_retention": "durable",
         "provider_meta": response_meta,
+        "provider_artifact": "provider_phase_c.json",
+        "execution_source": execution_source,
         "notes": review_result.get("review_notes", []),
         "patches": _phase_c_patch_snapshots(result, refined, review_result),
     }
@@ -3412,10 +3586,11 @@ def establish_product_foundation(
 ) -> dict[str, Any] | None:
     """Step-0：看视频前先据产品事实 + 品类世界知识确立品的商业地基（category_profile 特征 +
     product_profile 命题），存 product_foundation.json 并返回，供阶段1 观察、阶段2 判断、4d 政策消费。
-    失败返回 None，下游回退到阶段2 内联产出——主分析始终能跑完出报告（架构不变量）。"""
+    失败返回 None，并写入 failed 状态；调用方必须显式选择是否允许 degraded。"""
     if not has_product_foundation_anchor(analysis):
+        analysis["product_foundation_status"] = "not_applicable"
         print(
-            "Step-0 跳过：缺少品类/卖点/目标用户/人工命题等可靠锚点，退回阶段2 视频推断（避免仅凭品牌名空猜）。",
+            "Step-0 跳过：缺少品类/卖点/目标用户/人工命题等可靠锚点；状态记为 not_applicable。",
             flush=True,
         )
         return None
@@ -3430,6 +3605,10 @@ def establish_product_foundation(
         )
         if foundation is not None:
             _stamp_proof_contract_source(foundation, analysis)
+            cached_reason = product_foundation_validation_reason(foundation.get("product_profile"))
+            analysis["product_foundation_status"] = "degraded" if cached_reason else "completed"
+            if cached_reason:
+                analysis["product_foundation_error"] = f"缓存的 Step-0 产品证明合同未闭合：{cached_reason}"
             return foundation
     payload = build_product_foundation_payload(args.llm_model, analysis)
     request_path = run_dir / "llm_product_foundation_request.json"
@@ -3438,23 +3617,40 @@ def establish_product_foundation(
     write_json(request_path, payload)
     if args.llm_dry_run:
         request_path.unlink(missing_ok=True)
+        analysis["product_foundation_status"] = "deferred_dry_run"
         return None
     try:
-        result_text = fetch_json_completion(
-            args,
-            api_key,
-            request_path,
-            response_path,
-            request_max_time_seconds=240,
+        response, initial_meta, _ = provider_call_with_artifact(
+            artifact_path=run_dir / "provider_product_foundation.json",
+            replay_root=getattr(args, "provider_replay_from", None),
+            call_kind="product_foundation",
+            payload=payload,
+            model=args.llm_model,
+            api_url=args.llm_api_url,
             response_meta=provider_meta["initial"],
+            call=lambda: (
+                parse_json_text(
+                    fetch_json_completion(
+                        args,
+                        api_key,
+                        request_path,
+                        response_path,
+                        request_max_time_seconds=240,
+                        response_meta=provider_meta["initial"],
+                    )
+                ),
+                provider_meta["initial"],
+            ),
         )
-        raw = parse_json_text(result_text)
+        provider_meta["initial"] = initial_meta
+        raw = response
         foundation = {
             "category_profile": normalize_category_profile(raw.get("category_profile")),
             "product_profile": normalize_product_profile(raw.get("product_profile")),
         }
         _stamp_proof_contract_source(foundation, analysis)
         validation_reason = product_foundation_validation_reason(foundation.get("product_profile"))
+        repaired_reason = ""
         if validation_reason:
             repair_payload = build_product_foundation_repair_payload(
                 args.llm_model,
@@ -3465,15 +3661,30 @@ def establish_product_foundation(
             repair_request_path = run_dir / "llm_product_foundation_repair_request.json"
             repair_response_path = run_dir / "llm_product_foundation_repair_response.json"
             write_json(repair_request_path, repair_payload)
-            repair_text = fetch_json_completion(
-                args,
-                api_key,
-                repair_request_path,
-                repair_response_path,
-                request_max_time_seconds=240,
+            repaired_response, repair_meta, _ = provider_call_with_artifact(
+                artifact_path=run_dir / "provider_product_foundation_repair.json",
+                replay_root=getattr(args, "provider_replay_from", None),
+                call_kind="product_foundation_repair",
+                payload=repair_payload,
+                model=args.llm_model,
+                api_url=args.llm_api_url,
                 response_meta=provider_meta["repair"],
+                call=lambda: (
+                    parse_json_text(
+                        fetch_json_completion(
+                            args,
+                            api_key,
+                            repair_request_path,
+                            repair_response_path,
+                            request_max_time_seconds=240,
+                            response_meta=provider_meta["repair"],
+                        )
+                    ),
+                    provider_meta["repair"],
+                ),
             )
-            repaired_raw = parse_json_text(repair_text)
+            provider_meta["repair"] = repair_meta
+            repaired_raw = repaired_response
             foundation = {
                 "category_profile": normalize_category_profile(repaired_raw.get("category_profile")),
                 "product_profile": normalize_product_profile(repaired_raw.get("product_profile")),
@@ -3505,14 +3716,21 @@ def establish_product_foundation(
                         "validation_reason": f"Step-0 重答后仍无有效产品证明合同：{repaired_reason}",
                     }
                     foundation["product_profile"]["visual_proof_points"] = []
+        foundation_status = "completed"
+        if repaired_reason:
+            foundation_status = "degraded"
+            analysis["product_foundation_error"] = f"Step-0 产品证明合同未闭合：{repaired_reason}"
         if not foundation["category_profile"] and not foundation["product_profile"]:
             raise ValueError("category_profile 与 product_profile 均为空")
-    except Exception as exc:  # noqa: BLE001
-        print(f"Step-0 品地基确立失败，回退到阶段2 内联产出：{exc}", flush=True)
+    except (Exception, SystemExit) as exc:  # noqa: BLE001
+        analysis["product_foundation_status"] = "failed"
+        analysis["product_foundation_error"] = str(exc)[:500]
+        print(f"Step-0 品地基确立失败，状态记为 failed：{exc}", flush=True)
         write_json(run_dir / "product_foundation_provider_meta.json", provider_meta)
         return None
     write_json(run_dir / "product_foundation_provider_meta.json", provider_meta)
     _write_cache_result(cache_path, {**cache_key, "foundation": foundation})
+    analysis["product_foundation_status"] = foundation_status
     return foundation
 
 
@@ -3527,19 +3745,34 @@ def establish_comparison_eligibility(
     request_path = run_dir / "llm_comparison_eligibility_request.json"
     response_path = run_dir / "llm_comparison_eligibility_response.json"
     response_meta: dict[str, Any] = {}
+    execution_source = "live"
     write_json(request_path, payload)
     try:
-        result_text = fetch_json_completion(
-            args,
-            api_key,
-            request_path,
-            response_path,
+        response, response_meta, execution_source = provider_call_with_artifact(
+            artifact_path=run_dir / "provider_comparison_eligibility.json",
+            replay_root=getattr(args, "provider_replay_from", None),
+            call_kind="comparison_eligibility",
+            payload=payload,
+            model=args.llm_model,
+            api_url=args.llm_api_url,
             response_meta=response_meta,
+            call=lambda: (
+                parse_json_text(
+                    fetch_json_completion(
+                        args,
+                        api_key,
+                        request_path,
+                        response_path,
+                        response_meta=response_meta,
+                    )
+                ),
+                response_meta,
+            ),
         )
-        eligibility = normalize_comparison_contract(parse_json_text(result_text))
+        eligibility = normalize_comparison_contract(response)
         if eligibility["overall_status"] == "uncertain" and not eligibility["reason"]:
             eligibility["reason"] = "双侧产品身份不足以确认产品级比较资格。"
-    except Exception as exc:  # 资格层不允许阻断主分析；uncertain 会阻止后续误用为直接产品比较。
+    except (Exception, SystemExit) as exc:  # 资格层不允许阻断主分析；uncertain 会阻止后续误用为直接产品比较。
         eligibility = normalize_comparison_contract(
             {"reason": f"产品级比较资格判定失败，保守按 uncertain 处理：{exc}"}
         )
@@ -3551,6 +3784,10 @@ def establish_comparison_eligibility(
     write_json(run_dir / "comparison_contract.json", eligibility)
     write_json(run_dir / "comparison_eligibility.json", eligibility)
     write_json(run_dir / "comparison_provider_meta.json", response_meta)
+    write_json(
+        run_dir / "comparison_provider_artifact_ref.json",
+        {"path": "provider_comparison_eligibility.json", "execution_source": execution_source},
+    )
     return eligibility
 
 
@@ -5196,16 +5433,34 @@ def run_video_identity_extraction(
         if args.llm_dry_run:
             request_path.unlink(missing_ok=True)
             continue
-        response_meta: dict[str, Any] = {}
-        result_text = fetch_json_completion(
-            args,
-            api_key,
-            request_path,
-            response_path,
-            response_meta=response_meta,
+        live_meta: dict[str, Any] = {}
+        response, response_meta, execution_source = provider_call_with_artifact(
+            artifact_path=run_dir / f"provider_video_identity_{role}.json",
+            replay_root=getattr(args, "provider_replay_from", None),
+            call_kind=f"video_identity:{role}",
+            payload=payload,
+            model=args.llm_model,
+            api_url=args.llm_api_url,
+            response_meta=live_meta,
+            call=lambda: (
+                parse_json_text(
+                    fetch_json_completion(
+                        args,
+                        api_key,
+                        request_path,
+                        response_path,
+                        response_meta=live_meta,
+                    )
+                ),
+                live_meta,
+            ),
         )
-        identity = {"product_identity": normalize_video_product_identity(parse_json_text(result_text).get("product_identity"))}
+        identity = {"product_identity": normalize_video_product_identity(response.get("product_identity"))}
         identities[role] = identity
         write_json(result_path, identity)
         write_json(run_dir / f"video_identity_{role}_provider_meta.json", response_meta)
+        write_json(
+            run_dir / f"video_identity_{role}_provider_artifact_ref.json",
+            {"path": f"provider_video_identity_{role}.json", "execution_source": execution_source},
+        )
     return identities

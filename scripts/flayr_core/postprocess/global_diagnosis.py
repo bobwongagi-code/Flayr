@@ -560,13 +560,17 @@ def _commercial_priorities(result: dict[str, Any], findings: list[dict[str, Any]
     }
     for code, stage in _stage_map(result).items():
         gate = stage.get("stage_evidence_gate") if isinstance(stage.get("stage_evidence_gate"), dict) else {}
-        if gate.get("status") == "blocked":
+        if gate.get("status") in {"blocked", "legacy", "not_applicable", "not_comparable"}:
             # The model severity is retained in audit trace, but an ungrounded
             # stage cannot become a commercial priority or drive a report.
             continue
         if str(stage.get("comparison_status") or "") in {"not_directly_comparable", "not_applicable"}:
             continue
-        severity = str(stage.get("severity") or "small")
+        severity = str(stage.get("severity") or "").strip().lower()
+        if severity not in {"large", "medium", "small"}:
+            # Missing/unknown severity is not a low-severity conclusion. It
+            # must stay out of commercial prioritization until grounded.
+            continue
         if severity == "small" and code not in improvements_by_stage:
             continue
         tier = {"large": "P1", "medium": "P3", "small": "P5"}.get(severity, "P3")

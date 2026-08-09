@@ -17,6 +17,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
@@ -38,6 +40,8 @@ jobs:
         shell: bash
         env:
           FLAYR_COVERAGE: "1"
+          FLAYR_SCOPE_SPEC: references/bitter-lesson-runtime-fix-scope.json
+          FLAYR_SCOPE_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || 'HEAD' }}
         run: bash scripts/run-tests.sh
       - name: Quality gates
         shell: bash

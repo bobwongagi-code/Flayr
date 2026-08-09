@@ -39,6 +39,7 @@ from flayr_core.artifacts import (
 from flayr_core.llm import api as llm_api
 from flayr_core.llm import media as llm_media
 from flayr_core.llm import pipeline
+from flayr_core.llm.provider_artifacts import read_provider_artifact
 from flayr_core.llm.analysis_contract import (
     AnalysisContractError,
     validate_normalized_analysis_contract,
@@ -96,6 +97,7 @@ from flayr_core.postprocess.chain import finalize_severity_after_repairs, stamp_
 from flayr_core.postprocess.audit import PostprocessAudit, build_field_sources
 from flayr_core.postprocess.derive import _derive_one, _s3_usage_exec, _s4_effect_exec, _s6_cta_exec
 from flayr_core.postprocess.global_diagnosis import materialize_global_diagnosis
+from flayr_core.verification_order import assert_verification_order, write_verification_marker
 from flayr_core.video_evidence import build_transcript_pack, parse_srt_time_range
 from flayr_core.postprocess.repair import (
     align_stage_flag_evidence,
@@ -413,6 +415,7 @@ class ArchitectureContractTests(unittest.TestCase):
         benchmark = self._multimodal("benchmark", compensation=False)
         stage = {
             "stage": "S1 Hook",
+            "model_severity": "medium",
             "creator_execution": 0.5,
             "benchmark_execution": 2.0,
             "creator_multimodal": creator,
@@ -427,6 +430,7 @@ class ArchitectureContractTests(unittest.TestCase):
     def test_multimodal_s1_is_not_reinflated_by_legacy_anchor_gap(self) -> None:
         stage = {
             "stage": "S1 Hook",
+            "model_severity": "medium",
             "creator_execution": 0.5,
             "benchmark_execution": 2.0,
             "creator_multimodal": self._multimodal("creator", effect="effective", compensation=False),
@@ -561,6 +565,7 @@ class ArchitectureContractTests(unittest.TestCase):
 
         stage = {
             "stage": "S4 效果呈现",
+            "model_severity": "medium",
             "creator_s4": effect_flag("clear", False),
             "benchmark_s4": effect_flag("strong", True),
             "creator_multimodal": self._multimodal("creator", effect="effective", compensation=False),
@@ -791,6 +796,57 @@ class ArchitectureContractTests(unittest.TestCase):
         route = next(item for item in result["global_diagnosis"]["findings"] if item["id"] == "selling_point_route")
         self.assertEqual(route["impact"], "major")
 
+    def test_unknown_stage_severity_does_not_become_commercial_priority(self) -> None:
+        result = self._global_result()
+        for stage in result["stage_analysis"]:
+            stage["severity"] = None
+        materialize_global_diagnosis(result, {})
+        self.assertFalse(
+            any(item.get("source") == "stage" for item in result["commercial_priorities"])
+        )
+
+    def test_provider_replay_rejects_malformed_completed_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "provider.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "completed",
+                        "request_identity": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "response metadata missing"):
+                read_provider_artifact(path)
+
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "partial",
+                        "request_identity": {},
+                        "response_meta": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "status invalid"):
+                read_provider_artifact(path)
+
+    def test_verification_marker_metadata_cannot_override_contract_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = write_verification_marker(
+                Path(tmp),
+                "fixture",
+                metadata={"schema_version": 99, "stage": "ordinary_sample", "status": "failed"},
+            )
+            self.assertEqual(
+                json.loads(marker.read_text(encoding="utf-8")),
+                {"schema_version": 1, "stage": "fixture", "status": "passed"},
+            )
+
     def test_operator_primary_selling_point_creates_trusted_route(self) -> None:
         foundation = {
             "product_profile": {
@@ -996,6 +1052,42 @@ class ArchitectureContractTests(unittest.TestCase):
                     root / "analysis_input.md",
                     root,
                 )
+
+    def test_external_analysis_import_requires_explicit_legacy_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            benchmark = root / "benchmark.mp4"
+            creator = root / "creator.mp4"
+            result = root / "analysis_result.json"
+            benchmark.write_bytes(b"fixture")
+            creator.write_bytes(b"fixture")
+            result.write_text("{}", encoding="utf-8")
+            args = flayr.build_parser().parse_args(
+                [
+                    "compare",
+                    "--benchmark-video",
+                    str(benchmark),
+                    "--creator-video",
+                    str(creator),
+                    "--analysis-result-json",
+                    str(result),
+                ]
+            )
+            with self.assertRaisesRegex(SystemExit, "--analysis-result-json"):
+                flayr.validate_inputs(args)
+            args = flayr.build_parser().parse_args(
+                [
+                    "compare",
+                    "--benchmark-video",
+                    str(benchmark),
+                    "--creator-video",
+                    str(creator),
+                    "--analysis-result-json",
+                    str(result),
+                    "--legacy-import",
+                ]
+            )
+            self.assertEqual(set(flayr.validate_inputs(args)), {"benchmark", "creator"})
 
     def test_cli_does_not_accept_abbreviated_protected_network_flags(self) -> None:
         with self.assertRaises(SystemExit):
@@ -1594,6 +1686,129 @@ class ArchitectureContractTests(unittest.TestCase):
                 foundation = pipeline.establish_product_foundation(args, analysis, root, "secret")
             self.assertEqual(foundation["category_profile"]["category"], "散粉")
             request.assert_not_called()
+
+    def test_product_foundation_failure_is_explicit_not_a_silent_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = SimpleNamespace(
+                reuse_preprocessing=False,
+                llm_dry_run=False,
+                llm_model="test",
+                llm_api_url="https://example.test/v1/chat/completions",
+                provider_replay_from=None,
+                product_name="测试产品",
+                product_category="散粉",
+                product_notes="",
+                target_user="",
+                primary_selling_point="",
+                core_selling_points="",
+                product_price="",
+                product_tier="mid",
+                target_market="CN",
+                proposition_key="",
+                comparison_scope_override=None,
+            )
+            analysis = {"product": {"category": "散粉"}}
+            with mock.patch.object(
+                pipeline,
+                "fetch_json_completion",
+                side_effect=SystemExit("provider unavailable"),
+            ):
+                self.assertIsNone(pipeline.establish_product_foundation(args, analysis, root, "secret"))
+            self.assertEqual(analysis["product_foundation_status"], "failed")
+            self.assertTrue((root / "provider_product_foundation.json").is_file())
+
+    def test_product_foundation_valid_response_is_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(
+                reuse_preprocessing=False,
+                llm_dry_run=False,
+                llm_model="test",
+                llm_api_url="https://example.test/v1/chat/completions",
+                provider_replay_from=None,
+                product_name="测试产品",
+                product_category="散粉",
+                product_notes="",
+                target_user="",
+                primary_selling_point="",
+                core_selling_points="",
+                product_price="",
+                product_tier="mid",
+                target_market="CN",
+                proposition_key="",
+                comparison_scope_override=None,
+            )
+            valid = {
+                "category_profile": {"category": "散粉", "painpoints": ["油光"]},
+                "product_profile": {
+                    "physical_task": "把面部油光变成哑光定妆",
+                    "core_selling_points": ["控油定妆"],
+                    "short_video_proof_plan": {
+                        "candidates": [
+                            {
+                                "id": "P1",
+                                "selling_point": "控油定妆",
+                                "visual_space": "high",
+                                "functional_centrality": "high",
+                                "comprehension_cost": "low",
+                                "delivery_stage": "S4",
+                                "proof_mode": "instant_visual",
+                            }
+                        ],
+                        "s4_anchor_candidate_id": "P1",
+                    },
+                    "proof_contract": {
+                        "anchor_candidate_id": "P1",
+                        "mode": "instant_visual",
+                        "consumer_outcome": "油光变哑光",
+                        "signal_type": "state_change",
+                        "observable_signal": "目标区域油光反光减弱",
+                        "before_state": "油光明显",
+                        "after_state": "反光减弱",
+                        "proof_condition": "同一光线近景拍摄",
+                    },
+                },
+            }
+            analysis = {"product": {"category": "散粉"}}
+            with mock.patch.object(
+                pipeline,
+                "provider_call_with_artifact",
+                return_value=(valid, {}, "live"),
+            ):
+                foundation = pipeline.establish_product_foundation(args, analysis, Path(tmp), "secret")
+            self.assertIsNotNone(foundation)
+            self.assertEqual(analysis["product_foundation_status"], "completed")
+
+    def test_product_foundation_semantic_failure_is_degraded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(
+                reuse_preprocessing=False,
+                llm_dry_run=False,
+                llm_model="test",
+                llm_api_url="https://example.test/v1/chat/completions",
+                provider_replay_from=None,
+                product_name="测试产品",
+                product_category="散粉",
+                product_notes="",
+                target_user="",
+                primary_selling_point="",
+                core_selling_points="",
+                product_price="",
+                product_tier="mid",
+                target_market="CN",
+                proposition_key="",
+                comparison_scope_override=None,
+            )
+            invalid = {"category_profile": {"category": "散粉"}, "product_profile": {}}
+            analysis = {"product": {"category": "散粉"}}
+            with mock.patch.object(
+                pipeline,
+                "provider_call_with_artifact",
+                side_effect=[(invalid, {}, "live"), (invalid, {}, "live")],
+            ):
+                foundation = pipeline.establish_product_foundation(args, analysis, Path(tmp), "secret")
+            self.assertIsNotNone(foundation)
+            self.assertEqual(analysis["product_foundation_status"], "degraded")
 
     def test_cache_record_rejects_stale_or_incomplete_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2721,7 +2936,7 @@ class ArchitectureContractTests(unittest.TestCase):
         validate_s3_s4_hard_fact_consistency(result)
         trace = _derive_one(
             "S4",
-            result["stage_analysis"][3],
+            {**result["stage_analysis"][3], "model_severity": "medium"},
             {"S4": 1.0},
             [],
             facts={
@@ -2818,7 +3033,7 @@ class ArchitectureContractTests(unittest.TestCase):
         validate_s3_s4_hard_fact_consistency(s3_result)
         s3_trace = _derive_one(
             "S3",
-            {"creator_execution": 0.0, "benchmark_execution": 1.0,
+            {"model_severity": "medium", "creator_execution": 0.0, "benchmark_execution": 1.0,
              "creator_s3": missing_s3, "benchmark_s3": complete_s3,
              "_postprocess_state": s3_result["stage_analysis"][2]["_postprocess_state"]},
             {"S3": 1.0},
@@ -2860,7 +3075,7 @@ class ArchitectureContractTests(unittest.TestCase):
         validate_s3_s4_hard_fact_consistency(s4_result)
         s4_trace = _derive_one(
             "S4",
-            {"creator_execution": 0.0, "benchmark_execution": 2.0,
+            {"model_severity": "medium", "creator_execution": 0.0, "benchmark_execution": 2.0,
              "creator_s4": missing_s4, "benchmark_s4": complete_s4,
              "_postprocess_state": s4_result["stage_analysis"][3]["_postprocess_state"]},
             {"S4": 1.0},
@@ -4155,6 +4370,47 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertFalse((role_dir / "transcript.srt").exists())
             self.assertTrue((role_dir / "_preprocess.json").is_file())
             self.assertEqual(list(run_dir.glob(".creator.generation-*")), [])
+
+    def test_legacy_import_preprocessing_never_calls_current_providers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            source = root / "source.mp4"
+            source.write_bytes(b"video")
+            args = self._cache_args()
+            args.legacy_import = True
+            args.translate_with_llm = True
+            args.with_ocr = True
+            args.llm_model = "vision-model"
+            args.llm_api_url = "https://example.test/v1"
+            deps = self._cache_deps()
+
+            def fake_extract_audio(_video: Path, audio_path: Path, result: dict[str, object]) -> None:
+                audio_path.write_bytes(b"audio")
+                result["audio_path"] = str(audio_path)
+
+            with (
+                mock.patch.object(flayr, "extract_frames"),
+                mock.patch.object(flayr, "extract_audio", side_effect=fake_extract_audio),
+                mock.patch.object(flayr, "analyze_audio_quality", return_value={}),
+                mock.patch.object(flayr, "run_online_asr") as asr_call,
+                mock.patch.object(flayr, "translate_transcript_with_llm") as translation_call,
+                mock.patch.object(flayr, "build_subtitle_track") as ocr_call,
+                mock.patch.object(flayr, "compute_shake_metric", return_value={}),
+                mock.patch.object(flayr, "build_shot_track", return_value={"status": "skipped", "shots": []}),
+                mock.patch.object(flayr, "extract_anchor_frames"),
+                mock.patch.object(flayr, "classify_speech_mode", return_value={}),
+                mock.patch.object(flayr, "build_video_evidence_artifacts", return_value={}),
+            ):
+                result = flayr.process_video("creator", source, run_dir, deps, args)
+
+            asr_call.assert_not_called()
+            translation_call.assert_not_called()
+            ocr_call.assert_not_called()
+            self.assertEqual(result["transcription_status"], "not_requested_legacy_import")
+            self.assertEqual(result["translation_status"], "not_requested_legacy_import")
+            self.assertEqual(result["subtitle_track_status"], "not_requested_legacy_import")
 
     def test_preprocess_promotion_rewrites_nested_json_paths_and_refreshes_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

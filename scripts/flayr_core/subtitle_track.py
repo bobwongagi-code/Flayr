@@ -30,6 +30,7 @@ from .artifacts import (
     sample_evenly,
 )
 from .llm.api import call_llm_api, extract_chat_completion_text, image_to_data_url
+from .llm.provider_artifacts import provider_call_with_artifact
 from .resources import ResourceBudget, ResourceBudgetExceeded, current_budget, finite_nonnegative
 from .utils import write_json
 
@@ -59,6 +60,7 @@ def build_subtitle_track(
     model: str = OCR_MODEL,
     interval_sec: float = SAMPLE_INTERVAL_SEC,
     budget: ResourceBudget | None = None,
+    provider_replay_from: Path | None = None,
 ) -> dict[str, Any]:
     """对单个视频的抽帧做字幕 OCR，产出 subtitle_track.json 并返回结果。
 
@@ -69,7 +71,7 @@ def build_subtitle_track(
     frames = _merge_ocr_frame_entries(info)
     if not frames:
         return _empty_track("no_frames")
-    if not api_key.strip():
+    if not api_key.strip() and provider_replay_from is None:
         return _empty_track("no_api_key")
     if not str(api_url or "").strip() or not str(model or "").strip():
         return _empty_track("no_vision_provider")
@@ -83,6 +85,11 @@ def build_subtitle_track(
 
     raw_dir = role_dir / "ocr_raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
+    replay_raw_dir = (
+        provider_replay_from / role_dir.name / "ocr_raw"
+        if provider_replay_from is not None
+        else None
+    )
 
     frame_results: list[dict[str, Any]] = []
     for index, entry in enumerate(sampled):
@@ -95,7 +102,14 @@ def build_subtitle_track(
         if not frame_path.is_file():
             continue
         lines, status = ocr_frame_with_retry(
-            frame_path, api_key, api_url, model, raw_dir, index, budget=budget
+            frame_path,
+            api_key,
+            api_url,
+            model,
+            raw_dir,
+            index,
+            budget=budget,
+            provider_replay_from=replay_raw_dir,
         )
         frame_results.append(
             {
@@ -224,6 +238,7 @@ def ocr_frame_with_retry(
     raw_dir: Path,
     index: int,
     budget: ResourceBudget | None = None,
+    provider_replay_from: Path | None = None,
 ) -> tuple[list[str], str]:
     """对单帧 OCR；返回纯坐标无文字时重试一次，仍失败则标 ocr_unreadable。"""
     for attempt in range(2):
@@ -231,22 +246,40 @@ def ocr_frame_with_retry(
         response_path = raw_dir / f"ocr_{index:03d}_resp.json"
         meta_path = raw_dir / f"ocr_{index:03d}_attempt{attempt + 1}_meta.json"
         response_meta: dict[str, Any] = {}
-        write_json(request_path, build_ocr_payload(frame_path, model))
+        live_meta: dict[str, Any] = {}
+        payload = build_ocr_payload(frame_path, model)
+        write_json(request_path, payload)
         try:
-            raw = call_llm_api(
-                api_url,
-                api_key,
-                request_path,
-                response_path,
-                max_time_seconds=OCR_REQUEST_MAX_TIME_SECONDS,
-                low_speed_time_seconds=OCR_REQUEST_LOW_SPEED_TIME_SECONDS,
-                retries=0,
-                budget=budget,
-                call_kind="ocr",
-                request_id=f"ocr-{index:03d}-{attempt + 1}",
-                response_meta=response_meta,
+            provider_response, response_meta, execution_source = provider_call_with_artifact(
+                artifact_path=raw_dir / f"provider_ocr_{index:03d}_attempt{attempt + 1}.json",
+                replay_root=provider_replay_from,
+                call_kind=f"ocr:{index:03d}:{attempt + 1}",
+                payload=payload,
+                model=model,
+                api_url=api_url,
+                response_meta=live_meta,
+                call=lambda: (
+                    json.loads(
+                        call_llm_api(
+                            api_url,
+                            api_key,
+                            request_path,
+                            response_path,
+                            max_time_seconds=OCR_REQUEST_MAX_TIME_SECONDS,
+                            low_speed_time_seconds=OCR_REQUEST_LOW_SPEED_TIME_SECONDS,
+                            retries=0,
+                            budget=budget,
+                            call_kind="ocr",
+                            request_id=f"ocr-{index:03d}-{attempt + 1}",
+                            response_meta=live_meta,
+                        )
+                    ),
+                    live_meta,
+                ),
             )
-        except SystemExit as exc:
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 — live OCR is optional; replay remains strict.
+            if provider_replay_from is not None:
+                raise
             write_json(
                 meta_path,
                 {
@@ -255,6 +288,7 @@ def ocr_frame_with_retry(
                     "status": "failed",
                     "error": str(exc)[:500],
                     "provider_meta": response_meta,
+                    "provider_artifact": f"provider_ocr_{index:03d}_attempt{attempt + 1}.json",
                 },
             )
             if "budget" in str(exc).lower() or "exceeded" in str(exc).lower():
@@ -263,8 +297,10 @@ def ocr_frame_with_retry(
                 continue
             return [], f"ocr_request_failed: {str(exc)[:80]}"
         try:
-            text = extract_chat_completion_text(json.loads(raw))
-        except (SystemExit, json.JSONDecodeError) as exc:
+            text = extract_chat_completion_text(provider_response)
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 — malformed live OCR is retried.
+            if provider_replay_from is not None:
+                raise
             write_json(
                 meta_path,
                 {
@@ -273,6 +309,7 @@ def ocr_frame_with_retry(
                     "status": "invalid_response",
                     "error": str(exc)[:500],
                     "provider_meta": response_meta,
+                    "provider_artifact": f"provider_ocr_{index:03d}_attempt{attempt + 1}.json",
                 },
             )
             if attempt == 0:
@@ -287,6 +324,8 @@ def ocr_frame_with_retry(
                 "status": "completed" if lines else "empty_ocr",
                 "line_count": len(lines),
                 "provider_meta": response_meta,
+                "provider_artifact": f"provider_ocr_{index:03d}_attempt{attempt + 1}.json",
+                "execution_source": execution_source,
             },
         )
         if lines:

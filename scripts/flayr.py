@@ -59,6 +59,7 @@ from flayr_core.speech_mode import classify_speech_mode
 from flayr_core.subtitle_track import build_subtitle_track
 from flayr_core.translation import sync_chinese_translation, translate_transcript_with_llm
 from flayr_core.utils import write_json, write_text
+from flayr_core.verification_order import assert_verification_order
 from flayr_core.video import (
     extract_audio,
     extract_anchor_frames,
@@ -168,6 +169,8 @@ def main() -> int:
 
     deps = check_dependencies(args)
     inputs = validate_inputs(args)
+    if args.verification_stage:
+        assert_verification_order(args.verification_root, args.verification_stage)
     source_durations: dict[str, float] = {}
     for role, path in inputs.items():
         budget.preflight_source(path)
@@ -197,7 +200,7 @@ def main() -> int:
         _record_run_failure(run_dir, f"分析初始化失败：{exc}")
         raise
     analysis_input_path = write_analysis_input(run_dir, analysis)
-    transcription_issues = _transcription_issues(videos)
+    transcription_issues = [] if args.legacy_import else _transcription_issues(videos)
     if transcription_issues and args.mode != "scope" and not getattr(args, "allow_degraded", False):
         analysis["degraded_flags"] = transcription_issues
         write_json(run_dir / "analysis.json", analysis)
@@ -223,7 +226,12 @@ def main() -> int:
             llm_result_path, normalized_result = completed
             apply_finalized_analysis_result(analysis, normalized_result, llm_result_path)
     elif args.analysis_result_json:
-        merge_analysis_result(analysis, args.analysis_result_json, analysis_input_path.read_text(encoding="utf-8"))
+        merge_analysis_result(
+            analysis,
+            args.analysis_result_json,
+            analysis_input_path.read_text(encoding="utf-8"),
+            legacy_import=args.legacy_import,
+        )
     if args.mode in {"compare", "improve"} and analysis.get("analysis_run_state") == "not_run":
         if not getattr(args, "allow_degraded", False):
             write_json(run_dir / "analysis.json", analysis)
@@ -431,7 +439,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--analysis-result-json",
         type=Path,
-        help="Optional large-model analysis JSON to merge into analysis.json and report.html.",
+        help=(
+            "Optional historical analysis JSON. It is accepted only with --legacy-import and is "
+            "always published as audit-only degraded output."
+        ),
+    )
+    parser.add_argument(
+        "--legacy-import",
+        action="store_true",
+        help="Explicitly import --analysis-result-json as legacy audit data; never as a current completed run.",
     )
     stage2_reuse = parser.add_mutually_exclusive_group()
     stage2_reuse.add_argument(
@@ -502,6 +518,24 @@ def build_parser() -> argparse.ArgumentParser:
             "Without this flag, missing analysis exits non-zero. "
             "When set, the run is marked degraded and no success manifest is written."
         ),
+    )
+    parser.add_argument(
+        "--provider-replay-from",
+        type=Path,
+        help=(
+            "Strictly replay auxiliary provider artifacts (Step-0, Phase C, S4 verifier and postprocess). "
+            "A missing or mismatched artifact never falls back to a live provider call."
+        ),
+    )
+    parser.add_argument(
+        "--verification-stage",
+        choices=("fixture", "offline_replay", "fake_provider", "ordinary_sample", "boundary_sample"),
+        help="Evaluation stage; when set, the frozen prerequisite markers are mandatory.",
+    )
+    parser.add_argument(
+        "--verification-root",
+        type=Path,
+        help="Directory containing passed verification-order markers.",
     )
     parser.add_argument(
         "--llm-include-images",
@@ -640,6 +674,17 @@ def validate_inputs(args: argparse.Namespace) -> dict[str, Path]:
 
     if args.analysis_result_json:
         args.analysis_result_json = validate_optional_file(args.analysis_result_json, "--analysis-result-json")
+    if bool(args.analysis_result_json) != bool(args.legacy_import):
+        raise SystemExit("--analysis-result-json 必须与显式 --legacy-import 一起使用，不能把旧结果伪装成当前完成结果。")
+
+    if args.provider_replay_from:
+        args.provider_replay_from = args.provider_replay_from.expanduser().resolve()
+        if not args.provider_replay_from.is_dir():
+            raise SystemExit(f"--provider-replay-from must be an existing run directory: {args.provider_replay_from}")
+    if args.verification_stage:
+        if not args.verification_root:
+            raise SystemExit("--verification-stage requires --verification-root")
+        args.verification_root = args.verification_root.expanduser().resolve()
 
     for option in (
         "stage1_replay_from",
@@ -1134,6 +1179,7 @@ def _process_video_generation(
     budget: ResourceBudget | None = None,
 ) -> dict[str, Any]:
     """Build one isolated role generation; callers publish it only after completion."""
+    legacy_import = bool(getattr(args, "legacy_import", False))
     frames_dir = role_dir / "frames"
     focus_frames_dir = role_dir / "focus_frames"
     role_dir.mkdir(parents=True, exist_ok=True)
@@ -1195,7 +1241,14 @@ def _process_video_generation(
         result["errors"].append("ffmpeg missing: skipped frame and audio extraction")
 
     transcript_path = role_dir / "transcript.txt"
-    if result["audio_path"]:
+    if legacy_import:
+        # Historical JSON import is an audit-only path. It may still build
+        # deterministic local media artifacts for the report, but it must not
+        # start a new ASR/OCR/translation request.
+        write_text(transcript_path, ASR_AUDIO_PLACEHOLDER + "\n")
+        result["transcription_status"] = "not_requested_legacy_import"
+        result["errors"].append("online ASR skipped for legacy import")
+    elif result["audio_path"]:
         run_online_asr(
             args.asr_api_url,
             args.asr_model,
@@ -1213,8 +1266,11 @@ def _process_video_generation(
         result["errors"].append("online ASR skipped because audio extraction failed")
 
     result["transcript_path"] = str(transcript_path)
-    sync_chinese_translation(role_dir, result)
-    if args.translate_with_llm:
+    if legacy_import:
+        result["translation_status"] = "not_requested_legacy_import"
+    else:
+        sync_chinese_translation(role_dir, result)
+    if args.translate_with_llm and not legacy_import:
         translate_transcript_with_llm(args, role, role_dir, result)
 
     # 晃动信号：本地 ffmpeg vmafmotion 确定性指标（零成本）。severe 时 derive 对
@@ -1230,7 +1286,11 @@ def _process_video_generation(
     # 没 key/调试时降级为 disabled，不影响主流程。
     result["subtitle_track_status"] = "disabled_by_policy"
     result["subtitle_track_path"] = None
-    should_ocr, ocr_key, ocr_disabled_reason = resolve_ocr_policy(args)
+    if legacy_import:
+        result["subtitle_track_status"] = "not_requested_legacy_import"
+        should_ocr, ocr_key, ocr_disabled_reason = False, "", "not_requested_legacy_import"
+    else:
+        should_ocr, ocr_key, ocr_disabled_reason = resolve_ocr_policy(args)
     if should_ocr:
         subtitle_track = build_subtitle_track(
             role_dir,
@@ -1239,11 +1299,12 @@ def _process_video_generation(
             api_url=args.llm_api_url,
             model=args.llm_model,
             budget=budget,
+            provider_replay_from=getattr(args, "provider_replay_from", None),
         )
         result["subtitle_track_status"] = subtitle_track.get("status")
         if subtitle_track.get("segments"):
             result["subtitle_track_path"] = str(role_dir / "subtitle_track.json")
-    else:
+    elif not legacy_import:
         result["subtitle_track_status"] = ocr_disabled_reason
 
     # The adaptive base corpus is bounded, not the final evidence corpus. Add
@@ -1350,6 +1411,11 @@ def resolve_ocr_policy(args: argparse.Namespace) -> tuple[bool, str, str]:
         mode = getattr(args, "ocr_mode", "auto")
     if mode == "off" or getattr(args, "llm_dry_run", False):
         return False, "", "disabled_by_policy"
+    if getattr(args, "provider_replay_from", None):
+        # A strict technical replay must not require a live provider secret.
+        # The artifact identity still binds the replay to the exact model and
+        # endpoint, so this does not weaken provider selection.
+        return True, "", ""
     api_key = read_llm_api_key(args).strip()
     if not api_key:
         return False, "", "disabled_no_ocr_key"

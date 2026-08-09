@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "name": "bitter-lesson-runtime-fix-2026-08-09",
+  "change_scope": {
+    "max_files": 24,
+    "max_added_lines": 1500,
+    "max_deleted_lines": 400,
+    "allowed_globs": [
+      ".github/workflows/tests.yml",
+      "references/bitter-lesson-frozen-spec.json",
+      "references/bitter-lesson-implementation-audit.md",
+      "references/bitter-lesson-runtime-fix-scope.json",
+      "scripts/check_change_scope.py",
+      "scripts/flayr.py",
+      "scripts/flayr_core/llm/parse.py",
+      "scripts/flayr_core/llm/pipeline.py",
+      "scripts/flayr_core/llm/provider_artifacts.py",
+      "scripts/flayr_core/llm/s4_visual_verifier.py",
+      "scripts/flayr_core/postprocess/chain.py",
+      "scripts/flayr_core/postprocess/derive.py",
+      "scripts/flayr_core/postprocess/global_diagnosis.py",
+      "scripts/flayr_core/postprocess/repair_stages.py",
+      "scripts/flayr_core/report.py",
+      "scripts/flayr_core/subtitle_track.py",
+      "scripts/flayr_core/translation.py",
+      "scripts/flayr_core/verification_order.py",
+      "scripts/run-tests.sh",
+      "tests/test_architecture_contracts.py",
+      "tests/test_bitter_lesson_contract.py",
+      "tests/test_derive_resolver.py"
+    ],
+    "forbidden_globs": [
+      "runs/**",
+      "outputs/**",
+      "jobs*.json",
+      "scripts/**/__pycache__/**"
+    ]
+  }
+}

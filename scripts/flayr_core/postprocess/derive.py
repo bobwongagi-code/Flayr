@@ -477,9 +477,9 @@ class SeverityConstraint(NamedTuple):
     evidence_ids: tuple[str, ...] = ()
 
 
-def _normalize_model_severity(value: Any) -> str:
+def _normalize_model_severity(value: Any) -> str | None:
     normalized = str(value or "").strip().lower()
-    return normalized if normalized in SEVERITY_RANK else "medium"
+    return normalized if normalized in SEVERITY_RANK else None
 
 
 def _flag_evidence_ids(flag: Any) -> tuple[str, ...]:
@@ -572,7 +572,7 @@ def _has_required_evidence(creator: dict[str, Any], benchmark: dict[str, Any]) -
 
 
 def resolve_severity(
-    model_severity: str,
+    model_severity: str | None,
     floors: tuple[SeverityConstraint, ...] = (),
     ceilings: tuple[SeverityConstraint, ...] = (),
 ) -> dict[str, Any]:
@@ -583,6 +583,16 @@ def resolve_severity(
     floor_rank = max((SEVERITY_RANK[item.level] for item in ordered_floors), default=0)
     ceiling_rank = min((SEVERITY_RANK[item.level] for item in ordered_ceilings), default=len(SEVERITIES) - 1)
     constraints = tuple(sorted((*ordered_floors, *ordered_ceilings), key=lambda item: (item.kind, item.level, item.rule, item.reason)))
+    if model is None:
+        return {
+            "severity": None,
+            "status": "unknown",
+            "model_severity": None,
+            "floor": SEVERITIES[floor_rank] if ordered_floors else None,
+            "ceiling": SEVERITIES[ceiling_rank] if ordered_ceilings else None,
+            "constraints": constraints,
+            "phase_c_candidate": False,
+        }
     if floor_rank > ceiling_rank:
         return {
             "severity": model,

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .llm.api import call_llm_api, extract_chat_completion_text, read_llm_api_key
+from .llm.provider_artifacts import provider_call_with_artifact
 from .utils import read_optional_text, write_json, write_text
 
 
@@ -92,6 +93,7 @@ def translate_transcript_with_llm(
     raw_path = role_dir / "translation_response.json"
     provider_meta_path = role_dir / "translation_provider_meta.json"
     response_meta: dict[str, Any] = {}
+    live_meta: dict[str, Any] = {}
     write_json(payload_path, payload)
     if args.llm_dry_run:
         payload_path.unlink(missing_ok=True)
@@ -99,38 +101,49 @@ def translate_transcript_with_llm(
         return
 
     try:
-        api_key = read_llm_api_key(args).strip()
-        if not api_key:
+        replay_requested = getattr(args, "provider_replay_from", None) is not None
+        api_key = read_llm_api_key(args).strip() if not replay_requested else ""
+        if not api_key and not replay_requested:
             result["translation_status"] = "failed"
             result["errors"].append("translation skipped: LLM API key missing")
             return
 
         budget = getattr(args, "_resource_budget", None)
-        raw_text = (
-            call_llm_api(
-                args.llm_api_url,
-                api_key,
-                payload_path,
-                raw_path,
-                budget=budget,
-                response_meta=response_meta,
-            )
-            if budget is not None
-            else call_llm_api(
-                args.llm_api_url,
-                api_key,
-                payload_path,
-                raw_path,
-                response_meta=response_meta,
-            )
+        provider_response, response_meta, execution_source = provider_call_with_artifact(
+            artifact_path=role_dir / "provider_translation.json",
+            replay_root=(
+                Path(args.provider_replay_from) / role_dir.name
+                if getattr(args, "provider_replay_from", None)
+                else None
+            ),
+            call_kind=f"translation:{role}",
+            payload=payload,
+            model=model,
+            api_url=args.llm_api_url,
+            response_meta=live_meta,
+            call=lambda: (
+                json.loads(
+                    call_llm_api(
+                        args.llm_api_url,
+                        api_key,
+                        payload_path,
+                        raw_path,
+                        budget=budget,
+                        response_meta=live_meta,
+                    )
+                ),
+                live_meta,
+            ),
         )
         write_json(
             provider_meta_path,
             {"schema_version": 1, "status": "completed", "provider_meta": response_meta},
         )
-        translated = extract_chat_completion_text(json.loads(raw_text)).strip()
+        translated = extract_chat_completion_text(provider_response).strip()
         translated = sanitize_translation_claims(translated, str(args.product_name or ""))
     except SystemExit as exc:
+        if getattr(args, "provider_replay_from", None) is not None:
+            raise
         write_json(
             provider_meta_path,
             {
@@ -143,7 +156,9 @@ def translate_transcript_with_llm(
         result["translation_status"] = "failed"
         result["errors"].append(f"translation failed: {str(exc)[:200]}")
         return
-    except Exception as exc:  # noqa: BLE001 — 可选翻译失败不得中断主分析。
+    except Exception as exc:  # noqa: BLE001 — live optional translation may degrade.
+        if getattr(args, "provider_replay_from", None) is not None:
+            raise
         write_json(
             provider_meta_path,
             {
@@ -181,10 +196,13 @@ def translate_transcript_with_llm(
                 json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest(),
             "provider_meta": response_meta,
+            "provider_artifact": "provider_translation.json",
         },
     )
     result["translation_status"] = "completed"
     result["translation_provider_meta"] = response_meta
+    result["translation_provider_artifact"] = "provider_translation.json"
+    result["translation_execution_source"] = execution_source
     result["translation_source"] = {
         "type": "llm",
         "model": model,

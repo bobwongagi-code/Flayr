@@ -17,6 +17,7 @@ from ..postprocess.repair import validate_s3_s4_hard_fact_consistency, stabilize
 from ..utils import write_json, write_text
 from .api import call_llm_api, extract_chat_completion_text, image_to_data_url, video_to_data_url
 from .parse import normalize_demo_flag, normalize_s4_effect_salience, normalize_s4_effect_type, parse_json_text
+from .provider_artifacts import provider_call_with_artifact
 from ..stage_evidence_contracts import STAGE_EVIDENCE_CONTRACT_VERSION, qualified_stage_evidence_ids, stage_evidence_readiness
 
 
@@ -56,29 +57,47 @@ def maybe_apply_s4_visual_verifier(
     response_path = run_dir / "llm_s4_visual_verifier_response.json"
     write_json(request_path, payload)
     response_meta: dict[str, Any] = {}
+    live_meta: dict[str, Any] = {}
     try:
-        raw_text = call_llm_api(
-            getattr(args, "llm_api_url"),
-            api_key,
-            request_path,
-            response_path,
-            budget=getattr(args, "_resource_budget", None),
-            response_meta=response_meta,
+        provider_response, response_meta, execution_source = provider_call_with_artifact(
+            artifact_path=run_dir / "provider_s4_visual_verifier.json",
+            replay_root=getattr(args, "provider_replay_from", None),
+            call_kind="s4_visual_verifier",
+            payload=payload,
+            model=getattr(args, "llm_model", ""),
+            api_url=getattr(args, "llm_api_url", ""),
+            response_meta=live_meta,
+            call=lambda: (
+                json.loads(
+                    call_llm_api(
+                        getattr(args, "llm_api_url"),
+                        api_key,
+                        request_path,
+                        response_path,
+                        budget=getattr(args, "_resource_budget", None),
+                        response_meta=live_meta,
+                    )
+                ),
+                live_meta,
+            ),
         )
-        parsed = parse_json_text(extract_chat_completion_text(json.loads(raw_text)))
+        parsed = parse_json_text(extract_chat_completion_text(provider_response))
         applied = apply_s4_visual_verifier_result(result, parsed, analysis, review_s4=review_s4)
     except (Exception, SystemExit) as exc:  # verifier 是降级增强，不允许拖垮主链
         result["s4_visual_verifier"] = {
             "applied": False,
             "reason": f"S4 视觉复核失败：{exc}",
             "provider_meta": response_meta,
+            "provider_artifact": "provider_s4_visual_verifier.json",
         }
         return result
 
     result["s4_visual_verifier"] = {
         "applied": applied,
-        "response_retention": "ephemeral",
+        "response_retention": "durable",
         "provider_meta": response_meta,
+        "provider_artifact": "provider_s4_visual_verifier.json",
+        "execution_source": execution_source,
         "reason": (
             "已用原片时序复核覆盖 S3 使用真实性与 S4 视觉质量字段。"
             if applied and review_s4

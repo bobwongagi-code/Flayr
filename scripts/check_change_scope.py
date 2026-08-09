@@ -13,6 +13,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC_PATH = ROOT / "references" / "bitter-lesson-frozen-spec.json"
+EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
 def _git(*args: str) -> str:
@@ -31,9 +32,29 @@ def _matches(path: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(path, pattern) or path_obj.match(pattern) for pattern in patterns)
 
 
+def _is_zero_ref(ref: str) -> bool:
+    normalized = str(ref or "").strip()
+    return not normalized or (len(normalized) == 40 and set(normalized) == {"0"})
+
+
 def _changed_paths(base_ref: str) -> set[str]:
     changed: set[str] = set()
-    for line in _git("diff", "--name-only", "--no-renames", base_ref, "--").splitlines():
+    if _is_zero_ref(base_ref):
+        # An all-zero push SHA means there is no remote base. Compare against
+        # the complete current tree, not HEAD^ or only the tip commit;
+        # otherwise an initial branch push can hide older out-of-scope
+        # commits from the scope gate.
+        diff_args = (
+            "diff",
+            "--name-only",
+            "--no-renames",
+            EMPTY_TREE_SHA,
+            "HEAD",
+            "--",
+        )
+    else:
+        diff_args = ("diff", "--name-only", "--no-renames", base_ref, "--")
+    for line in _git(*diff_args).splitlines():
         if line.strip():
             changed.add(line.strip())
     for line in _git("ls-files", "--others", "--exclude-standard").splitlines():
@@ -45,7 +66,17 @@ def _changed_paths(base_ref: str) -> set[str]:
 def _line_counts(base_ref: str, changed: set[str]) -> tuple[int, int]:
     added = 0
     deleted = 0
-    numstat = _git("diff", "--numstat", "--no-renames", base_ref, "--")
+    if _is_zero_ref(base_ref):
+        numstat = _git(
+            "diff",
+            "--numstat",
+            "--no-renames",
+            EMPTY_TREE_SHA,
+            "HEAD",
+            "--",
+        )
+    else:
+        numstat = _git("diff", "--numstat", "--no-renames", base_ref, "--")
     for line in numstat.splitlines():
         parts = line.split("\t", 2)
         if len(parts) != 3 or parts[2] not in changed:

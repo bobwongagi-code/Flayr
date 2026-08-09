@@ -17,7 +17,9 @@ fi
 
 "$PYTHON_BIN" scripts/check_release.py
 "$PYTHON_BIN" scripts/verify_bitter_lesson_contract.py
-"$PYTHON_BIN" scripts/check_change_scope.py --base-ref HEAD
+SCOPE_SPEC="${FLAYR_SCOPE_SPEC:-references/bitter-lesson-frozen-spec.json}"
+SCOPE_BASE_REF="${FLAYR_SCOPE_BASE_REF:-HEAD}"
+"$PYTHON_BIN" scripts/check_change_scope.py --base-ref "$SCOPE_BASE_REF" --spec "$SCOPE_SPEC"
 if [[ "${FLAYR_COVERAGE:-0}" == "1" ]]; then
   "$PYTHON_BIN" -m coverage run --branch -m unittest discover -s tests -v
 else

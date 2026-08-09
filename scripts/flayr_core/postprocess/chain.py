@@ -68,7 +68,8 @@ from ..stage_evidence_contracts import materialize_stage_evidence_gates
 def stamp_product_foundation(normalized: dict[str, Any], analysis: dict[str, Any] | None) -> None:
     """Step-0 品地基权威覆盖：若上游已确立 product_foundation（特征+命题），用它覆盖结果里的
     category_profile/product_profile，杜绝阶段2 内联现编的漂移；下游 derive(4d) 因此读到权威值。
-    无地基（如离线复跑、Step-0 失败兜底）则原样保留模型产出，主分析照常跑完。"""
+    无地基时保留已有结果以支持离线审计/兼容导入；实时入口在 Step-0 failed/degraded
+    且未显式允许降级时会在进入主分析前阻断，不在这里静默兜底。"""
     foundation = (analysis or {}).get("product_foundation") or {}
     if foundation.get("category_profile"):
         normalized["category_profile"] = foundation["category_profile"]

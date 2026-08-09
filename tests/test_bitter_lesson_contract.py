@@ -18,15 +18,27 @@ from flayr_core.llm.pipeline import (  # noqa: E402
     _normalize_segmented_stage,
     _project_synthesis_improvements,
     _stage1_to_stage2_handoff_issues,
+    _mark_legacy_import_result,
+    _full_provider_replay_requested,
+    merge_analysis_result,
     run_large_model_analysis,
+)
+from flayr_core.llm.parse import normalize_severity  # noqa: E402
+from flayr_core.llm.provider_artifacts import (  # noqa: E402
+    provider_call_with_artifact,
 )
 from flayr_core.llm.stage_fact_artifacts import (  # noqa: E402
     completed_stage_fact_artifact,
     failed_stage_fact_artifact,
     reusable_stage_fact_response,
 )
-from scripts.check_change_scope import check_scope  # noqa: E402
+from scripts.check_change_scope import EMPTY_TREE_SHA, _changed_paths, check_scope  # noqa: E402
 from scripts.verify_bitter_lesson_contract import FrozenContractError, load_spec, validate_spec  # noqa: E402
+from flayr_core.verification_order import (  # noqa: E402
+    VerificationOrderError,
+    assert_verification_order,
+    write_verification_marker,
+)
 
 
 class BitterLessonContractTests(unittest.TestCase):
@@ -182,7 +194,6 @@ class BitterLessonContractTests(unittest.TestCase):
         )
         self.assertEqual(artifact["response_meta"]["completion_attempts"], 2)
         self.assertEqual(artifact["response_meta"]["retry_reasons"], ["invalid JSON"])
-
         failed = failed_stage_fact_artifact(
             role="benchmark",
             phase="B",
@@ -195,6 +206,151 @@ class BitterLessonContractTests(unittest.TestCase):
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(failed["error"], "provider timeout")
         self.assertEqual(failed["response_meta"]["completion_attempts"], 3)
+
+    def test_auxiliary_provider_artifact_replay_is_strict_and_durable(self) -> None:
+        payload = {"messages": [{"role": "user", "content": "fixture"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_path = root / "provider_phase_c.json"
+            calls = {"count": 0}
+
+            def live_call() -> tuple[dict[str, object], dict[str, object]]:
+                calls["count"] += 1
+                return {"choices": [{"message": {"content": "{}"}}]}, {"attempts": 1}
+
+            response, metadata, source = provider_call_with_artifact(
+                artifact_path=artifact_path,
+                replay_root=None,
+                call_kind="phase_c_review",
+                payload=payload,
+                model="test-model",
+                api_url="https://example.test/v1",
+                call=live_call,
+            )
+            self.assertEqual(source, "live")
+            self.assertEqual(calls["count"], 1)
+            self.assertIn("choices", response)
+            self.assertEqual(metadata["attempts"], 1)
+
+            replay_dir = root / "replay"
+            replay_dir.mkdir()
+            replay_response, _, replay_source = provider_call_with_artifact(
+                artifact_path=replay_dir / artifact_path.name,
+                replay_root=root,
+                call_kind="phase_c_review",
+                payload=payload,
+                model="test-model",
+                api_url="https://example.test/v1",
+                call=lambda: (_ for _ in ()).throw(AssertionError("replay called provider")),
+            )
+            self.assertEqual(replay_source, "technical_replay")
+            self.assertEqual(replay_response, response)
+            with self.assertRaises(ValueError):
+                provider_call_with_artifact(
+                    artifact_path=replay_dir / "mismatch.json",
+                    replay_root=root,
+                    call_kind="phase_c_review",
+                    payload={"changed": True},
+                    model="test-model",
+                    api_url="https://example.test/v1",
+                    call=lambda: (_ for _ in ()).throw(AssertionError("mismatch called provider")),
+                )
+
+    def test_failed_provider_artifact_keeps_failure_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            metadata = {"logical_request_id": "req-1", "completion_attempts": 2}
+            artifact = Path(directory) / "provider_failed.json"
+            with self.assertRaisesRegex(RuntimeError, "provider down"):
+                provider_call_with_artifact(
+                    artifact_path=artifact,
+                    replay_root=None,
+                    call_kind="comparison_eligibility",
+                    payload={"fixture": True},
+                    model="test-model",
+                    api_url="https://example.test/v1",
+                    response_meta=metadata,
+                    call=lambda: (_ for _ in ()).throw(RuntimeError("provider down")),
+                )
+            saved = json.loads(artifact.read_text(encoding="utf-8"))
+            self.assertEqual(saved["status"], "failed")
+            self.assertEqual(saved["response_meta"], metadata)
+
+            empty_error_artifact = Path(directory) / "provider_failed_empty_error.json"
+            with self.assertRaises(SystemExit):
+                provider_call_with_artifact(
+                    artifact_path=empty_error_artifact,
+                    replay_root=None,
+                    call_kind="comparison_eligibility",
+                    payload={"fixture": True},
+                    model="test-model",
+                    api_url="https://example.test/v1",
+                    call=lambda: (_ for _ in ()).throw(SystemExit()),
+                )
+            saved_empty_error = json.loads(empty_error_artifact.read_text(encoding="utf-8"))
+            self.assertEqual(saved_empty_error["error"], "SystemExit")
+
+    def test_unknown_severity_stays_unknown(self) -> None:
+        self.assertIsNone(normalize_severity(None))
+        self.assertIsNone(normalize_severity("not-a-severity"))
+
+    def test_legacy_import_is_audit_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "analysis_result.json"
+            source.write_text(
+                json.dumps({"stage_analysis": [{"stage": "S1", "severity": "large"}]}),
+                encoding="utf-8",
+            )
+            normalized = _mark_legacy_import_result(
+                {"stage_analysis": [{"stage": "S1", "severity": "large"}]},
+                source_path=source,
+            )
+            stage = normalized["stage_analysis"][0]
+            self.assertEqual(normalized["analysis_import_mode"], "legacy")
+            self.assertEqual(normalized["analysis_run_state"], "degraded")
+            self.assertEqual(stage["stage_evidence_gate"]["status"], "legacy")
+            self.assertIsNone(stage["severity"])
+
+    def test_legacy_import_accepts_old_minimal_shape_without_current_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "analysis_result.json"
+            source.write_text(
+                json.dumps({"stage_analysis": [{"stage": "S1", "severity": "large"}]}),
+                encoding="utf-8",
+            )
+            analysis = {"run_dir": str(root), "mode": "compare", "videos": {}}
+            merge_analysis_result(analysis, source, "", legacy_import=True)
+            self.assertEqual(analysis["analysis_import_mode"], "legacy")
+            self.assertEqual(analysis["analysis_run_state"], "degraded")
+            self.assertEqual(analysis["stage_analysis"][0]["stage_evidence_gate"]["status"], "legacy")
+            self.assertIsNone(analysis["stage_analysis"][0]["severity"])
+
+    def test_legacy_import_rejects_non_object_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "analysis_result.json"
+            source.write_text("[]", encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "必须是对象"):
+                merge_analysis_result(
+                    {"run_dir": directory, "mode": "compare", "videos": {}},
+                    source,
+                    "",
+                    legacy_import=True,
+                )
+
+    def test_verification_order_blocks_boundary_until_prerequisites_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaises(VerificationOrderError):
+                assert_verification_order(root, "boundary_sample")
+            for stage in ("fixture", "offline_replay", "fake_provider", "ordinary_sample"):
+                write_verification_marker(root, stage)
+            assert_verification_order(root, "boundary_sample")
+            (root / "ordinary_sample.json").write_text(
+                json.dumps({"schema_version": 1, "stage": "fixture", "status": "passed"}),
+                encoding="utf-8",
+            )
+            with self.assertRaises(VerificationOrderError):
+                assert_verification_order(root, "boundary_sample")
 
     def test_default_text_entrypoint_is_rejected(self) -> None:
         args = argparse.Namespace(llm_include_images=False, llm_dry_run=True)
@@ -214,6 +370,28 @@ class BitterLessonContractTests(unittest.TestCase):
             with mock.patch("scripts.check_change_scope._line_counts", return_value=(1, 0)):
                 issues = check_scope(spec, "HEAD")
         self.assertTrue(any("forbidden path" in issue for issue in issues))
+
+    def test_zero_base_scope_compares_complete_tree(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def fake_git(*args: str) -> str:
+            calls.append(args)
+            return ""
+
+        with mock.patch("scripts.check_change_scope._git", side_effect=fake_git):
+            _changed_paths("0" * 40)
+        self.assertEqual(calls[0][:4], ("diff", "--name-only", "--no-renames", EMPTY_TREE_SHA))
+        self.assertEqual(calls[0][4:], ("HEAD", "--"))
+
+    def test_full_provider_replay_can_run_without_live_key(self) -> None:
+        args = argparse.Namespace(
+            provider_replay_from=Path("/replay/auxiliary"),
+            stage1_replay_from=Path("/replay/stage1"),
+            stage2_replay_from=Path("/replay/stage2"),
+        )
+        self.assertTrue(_full_provider_replay_requested(args))
+        args.stage2_replay_from = None
+        self.assertFalse(_full_provider_replay_requested(args))
 
 
 if __name__ == "__main__":

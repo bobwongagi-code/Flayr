@@ -810,7 +810,7 @@ def stabilize_improvement_priorities(result: dict[str, Any]) -> None:
     severity_rank = {"large": 0, "medium": 1, "small": 2}
     filtered.sort(
         key=lambda item: (
-            severity_rank.get(str(stages.get(improvement_stage_code(item), {}).get("severity") or "medium"), 1),
+            severity_rank.get(str(stages.get(improvement_stage_code(item), {}).get("severity") or "uncertain"), 3),
             int(item.get("priority") or 99),
         )
     )

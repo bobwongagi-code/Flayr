@@ -1136,13 +1136,13 @@ def normalize_video_understanding(
     return normalized
 
 
-def normalize_severity(value: Any) -> str:
-    severity = str(value or "medium").strip().lower()
+def normalize_severity(value: Any) -> str | None:
+    severity = str(value or "").strip().lower()
     # LLM 有时输出 high/low 而非 large/small，做兼容映射
     alias = {"high": "large", "low": "small", "big": "large", "minor": "small"}
     severity = alias.get(severity, severity)
     if severity not in {"large", "medium", "small"}:
-        return "medium"
+        return None
     return severity
 
 

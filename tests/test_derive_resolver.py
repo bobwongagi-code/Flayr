@@ -513,7 +513,12 @@ class DeriveResolverTests(unittest.TestCase):
         self.assertEqual(evaluation["status"], "precondition_missing")
         self.assertEqual(evaluation["reason_code"], "repair_incomplete")
 
-        result = {"stage_analysis": [{}, {"creator_s2": creator, "benchmark_s2": benchmark}]}
+        result = {
+            "stage_analysis": [
+                {},
+                {"model_severity": "small", "creator_s2": creator, "benchmark_s2": benchmark},
+            ]
+        }
         validate_s2_hard_fact_consistency(result)
         with_marker = _derive_one("S2", result["stage_analysis"][1], facts=facts)
         self.assertEqual(with_marker["severity"], "medium")

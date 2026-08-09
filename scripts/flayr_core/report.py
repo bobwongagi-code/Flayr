@@ -960,9 +960,9 @@ def severity_value(value: Any) -> str | None:
     return severity if severity in {"large", "medium", "small"} else None
 
 
-def normalize_severity(value: Any) -> str:
+def normalize_severity(value: Any) -> str | None:
     """Normalize legacy completed results; unavailable values stay out of rendering paths."""
-    return severity_value(value) or "medium"
+    return severity_value(value)
 
 
 def escape(value: Any) -> str:
