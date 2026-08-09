@@ -1612,7 +1612,9 @@ def _segmented_support_status(units: list[dict[str, Any]]) -> str:
         return "supported"
     if has_voice:
         return "voice_only"
-    return "visual_only"
+    if has_visual:
+        return "visual_only"
+    return "unknown"
 
 
 def _sanitize_segmented_flag(value: Any, qualified_ids: set[str]) -> Any:
@@ -1730,7 +1732,7 @@ def _normalize_segmented_stage(
             str(unit.get("visual_fact") or "").strip()
             for unit in units
             if str(unit.get("visual_fact") or "").strip()
-        ][:5]
+        ]
         output[f"{role}_support_status"] = _segmented_support_status(units)
         output[f"{role}_quote"] = next(
             (
@@ -1797,7 +1799,15 @@ def _normalize_segmented_stage(
             output["model_gap_magnitude"] = magnitude if magnitude in {"none", "small", "medium", "large", "uncertain"} else "uncertain"
             output["stage_handoff_status"] = "grounded"
 
-    output["gap_type"] = "execution"
+    # ``gap_type`` is a semantic Stage2 judgment, not a Stage3-owned field.
+    # Preserve it only after the evidence handoff and stage state are closed;
+    # an unknown/blocked stage must not inherit a diagnosis from raw prose.
+    raw_gap_type = str(raw.get("gap_type") or "").strip().lower()
+    output["gap_type"] = (
+        raw_gap_type
+        if output["stage_state"] == "completed" and raw_gap_type in {"structural", "execution", "resource", "unknown"}
+        else "unknown"
+    )
     output["gap_summary"] = [output["judgment_reason"] or "待基于阶段证据复核。"]
     output["evidence"] = [output["judgment_reason"] or "阶段证据由代码交接。"]
     output["gap"] = output["judgment_reason"] or "阶段差距待复核。"
@@ -1819,11 +1829,14 @@ def _normalize_segmented_stage(
     output["benchmark_module_id"] = "unknown"
     output["module_fit"] = "unknown"
     output["module_fit_reason"] = output["judgment_reason"]
-    output["task_completion"] = "complete" if output.get("stage_handoff_status") == "grounded" else "missing"
+    # Grounded evidence only proves that the handoff is usable; it does not
+    # prove the creator completed the stage.  Keep the legacy field unknown
+    # unless a separate semantic producer supplies it.
+    output["task_completion"] = None
     output["voice_performance"] = {
         "pace": "unknown",
         "energy": "unknown",
-        "key_pause": False,
+        "key_pause": None,
         "note": "由阶段证据交接。",
     }
     output["benchmark_execution"] = None
@@ -1846,7 +1859,32 @@ def _normalize_segmented_stage(
 def _deterministic_product_visibility(facts: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
     """Project product visibility from immutable creator facts, without LLM estimation."""
     side = facts.get("creator") if isinstance(facts.get("creator"), dict) else {}
-    duration = float((analysis.get("videos", {}).get("creator", {}) or {}).get("duration_seconds") or 0.0)
+    raw_duration = (analysis.get("videos", {}).get("creator", {}) or {}).get("duration_seconds")
+    try:
+        duration = float(raw_duration)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if not math.isfinite(duration) or duration <= 0:
+        return {
+            "first_appearance_sec": None,
+            "total_screen_time_sec": None,
+            "video_duration_sec": None,
+            "ratio": None,
+            "estimation_note": "达人视频时长缺失或无效，无法从时间区间计算产品出镜统计，需人工复核。",
+        }
+    visibility_observed = any(
+        isinstance(unit, dict)
+        and (unit.get("product_visible") is True or unit.get("product_visible") is False)
+        for unit in side.get("evidence_units") or []
+    )
+    if not visibility_observed:
+        return {
+            "first_appearance_sec": None,
+            "total_screen_time_sec": None,
+            "video_duration_sec": round(duration, 3),
+            "ratio": None,
+            "estimation_note": "Stage1 未提供明确的 product_visible 观察，不能把未知当作产品未出镜，需人工复核。",
+        }
     intervals: list[tuple[float, float]] = []
     for unit in side.get("evidence_units") or []:
         if not isinstance(unit, dict) or unit.get("product_visible") is not True:
@@ -1863,13 +1901,13 @@ def _deterministic_product_visibility(facts: dict[str, Any], analysis: dict[str,
             merged.append([start, end])
     total = sum(end - start for start, end in merged)
     first = merged[0][0] if merged else 0.0
-    ratio = total / duration if duration > 0 else 0.0
+    ratio = total / duration
     return {
         "first_appearance_sec": round(first, 3),
         "total_screen_time_sec": round(total, 3),
         "video_duration_sec": round(duration, 3),
         "ratio": round(min(max(ratio, 0.0), 1.0), 6),
-        "estimation_note": "由代码从达人 Stage1 evidence_units 的 product_visible 标记合并区间计算。",
+        "estimation_note": "由代码从达人 Stage1 evidence_units 的明确 product_visible 标记合并区间计算。",
     }
 
 
@@ -1884,7 +1922,7 @@ def _deterministic_improvement(stage_results: list[dict[str, Any]]) -> list[dict
         "title": f"优先复核{stage}阶段证据",
         "target_stage": stage,
         "gmv_impact": "待基于完整阶段证据确认",
-        "gap_type": selected.get("gap_type") or "execution",
+        "gap_type": selected.get("gap_type") if selected.get("gap_type") in {"structural", "execution", "resource", "unknown"} else "unknown",
         "time_range": selected.get("creator_time_range") or "",
         "creator_time_range": selected.get("creator_time_range") or "",
         "benchmark_time_range": selected.get("benchmark_time_range") or "",
@@ -1936,8 +1974,9 @@ def _project_synthesis_improvements(
                 "actions": [str(value).strip() for value in actions if str(value).strip()][:5],
                 "gmv_reason": str(item.get("gmv_reason") or "避免把证据未知误写成业务缺陷").strip(),
                 "gmv_impact": str(item.get("gmv_impact") or "待基于完整阶段证据确认").strip(),
-                # All fields below are deterministic projections from Stage2.
-                "gap_type": stage.get("gap_type") or "execution",
+                # Stage3 can supply prose only.  gap_type is projected from
+                # the already-closed Stage2 result.
+                "gap_type": stage.get("gap_type") if stage.get("gap_type") in {"structural", "execution", "resource", "unknown"} else "unknown",
                 "time_range": stage.get("time_range") or "",
                 "creator_time_range": stage.get("creator_time_range") or "",
                 "benchmark_time_range": stage.get("benchmark_time_range") or "",
@@ -4343,15 +4382,24 @@ def run_video_fact_extraction(
         parsed_response: dict[str, Any] | None = None
         try:
             if stage1_replay_source is not None:
-                parsed_response, response_meta, _source_artifact = _read_replayable_stage_fact(
-                    stage1_replay_source,
-                    role=role,
-                    phase="A",
-                    group=None,
-                    payload=payload,
-                    args=args,
-                )
-                execution_source = "replay"
+                try:
+                    parsed_response, response_meta, _source_artifact = _read_replayable_stage_fact(
+                        stage1_replay_source,
+                        role=role,
+                        phase="A",
+                        group=None,
+                        payload=payload,
+                        args=args,
+                    )
+                    execution_source = "replay"
+                except StageFactArtifactError:
+                    # Strict replay is a reproducibility operation and must
+                    # fail closed. Resume is local recovery: a missing or
+                    # stale Stage1-A artifact may be regenerated by the
+                    # provider, while still preserving the failure in the new
+                    # run's artifact ledger if that call also fails.
+                    if not _provider_fallback_allowed:
+                        raise
             if parsed_response is None:
                 write_json(request_path, payload)
                 result_text = fetch_json_completion(

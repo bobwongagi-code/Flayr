@@ -59,7 +59,11 @@ from flayr_core.postprocess.repair_stages import (
     align_timed_cta_from_transcript,
     apply_comparison_eligibility,
 )
-from flayr_core.postprocess.global_diagnosis import _attention_side_status, _dominant_selling_point
+from flayr_core.postprocess.global_diagnosis import (
+    _attention_side_status,
+    _dominant_selling_point,
+    _selling_side_status,
+)
 from flayr_core.report import stage_report_severity, stage_skipped
 from flayr_core.postprocess.validate import (
     validate_evidence_alignment,
@@ -763,6 +767,10 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(projected["stage_handoff_status"], "handoff_loss")
         self.assertEqual(projected["benchmark_evidence_ids"], [])
         self.assertEqual(projected["creator_evidence_ids"], [])
+        self.assertEqual(projected["benchmark_support_status"], "unknown")
+        self.assertEqual(projected["creator_support_status"], "unknown")
+        self.assertIsNone(projected["task_completion"])
+        self.assertEqual(projected["gap_type"], "unknown")
 
     def test_closed_comparison_scope_keeps_qualified_facts_without_model_references(self) -> None:
         facts = {
@@ -2110,6 +2118,32 @@ class StageEvidenceContractTests(unittest.TestCase):
             "qualified",
         )
 
+    def test_global_selling_point_does_not_treat_unknown_share_as_zero(self) -> None:
+        side = {
+            "selling_point_observations": [
+                {
+                    "candidate_id": "unknown",
+                    "visual_share": None,
+                    "speech_share": None,
+                    "evidence_ids": ["C1"],
+                }
+            ]
+        }
+        self.assertIsNone(_dominant_selling_point(side, {"C1"}))
+
+    def test_global_selling_point_proof_unknown_does_not_become_fact(self) -> None:
+        side = {
+            "selling_point_observations": [{
+                "candidate_id": "P1",
+                "visual_share": 0.8,
+                "speech_share": None,
+                "proof_signal_present": None,
+                "evidence_ids": ["C1"],
+            }]
+        }
+        self.assertEqual(_selling_side_status(side, "P1", {"C1"})[0], "unknown")
+        self.assertEqual(_selling_side_status(side, "P2", {"C1"})[0], "unknown")
+
     def test_global_attention_does_not_treat_unqualified_observation_as_clean_or_dirty(self) -> None:
         side = self._active_side("C", "unknown")
         side["gate_observation_status"] = {"attention_scan": "complete"}
@@ -2794,6 +2828,67 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertTrue(flag["exists"])
         self.assertNotIn("C_NO_CTA", {unit["id"] for unit in result["video_understanding"]["creator"]["evidence_units"]})
         self.assertEqual(result["stage_analysis"][5]["creator_evidence_ids"], [])
+
+    def test_present_s6_evidence_does_not_turn_incomplete_cta_into_absence(self) -> None:
+        result = {
+            "stage_analysis": [{} for _ in range(6)],
+            "video_understanding": {
+                "benchmark": self._active_side("B", "present"),
+                "creator": self._active_side("C", "present"),
+            },
+        }
+        creator_flag = {
+            "exists": True,
+            "direct_order_met": None,
+            "action_path_clear": None,
+            "soft_purchase_invitation_met": None,
+            "offer_or_incentive_clear": None,
+            "ending_position_met": True,
+            "evidence_ids": ["C6"],
+        }
+        result["stage_analysis"][5] = {
+            "stage": "S6",
+            "creator_s6": creator_flag,
+            "creator_evidence_ids": ["C6"],
+        }
+
+        reconcile_unsupported_cta(result)
+
+        self.assertTrue(creator_flag["exists"])
+        self.assertEqual(creator_flag["_cta_source_status"], "unknown")
+        self.assertEqual(creator_flag["evidence_ids"], ["C6"])
+        self.assertEqual(result["stage_analysis"][5]["creator_evidence_ids"], ["C6"])
+        self.assertNotIn(
+            "C_NO_CTA",
+            {unit["id"] for unit in result["video_understanding"]["creator"]["evidence_units"]},
+        )
+
+    def test_numeric_cta_flags_do_not_bypass_unknown_guard(self) -> None:
+        result = {
+            "stage_analysis": [{} for _ in range(6)],
+            "video_understanding": {
+                "benchmark": self._active_side("B", "present"),
+                "creator": self._active_side("C", "present"),
+            },
+        }
+        result["stage_analysis"][5] = {
+            "stage": "S6",
+            "creator_s6": {
+                "exists": True,
+                "direct_order_met": 0,
+                "action_path_clear": 0,
+                "soft_purchase_invitation_met": None,
+                "offer_or_incentive_clear": None,
+                "evidence_ids": ["C6"],
+            },
+            "creator_evidence_ids": ["C6"],
+        }
+
+        reconcile_unsupported_cta(result)
+
+        flag = result["stage_analysis"][5]["creator_s6"]
+        self.assertTrue(flag["exists"])
+        self.assertEqual(flag["_cta_source_status"], "unknown")
 
     def test_active_s5_reconciliation_never_uses_unqualified_source_ids(self) -> None:
         side = self._active_side("C", "unknown")

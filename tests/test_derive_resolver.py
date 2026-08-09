@@ -1167,6 +1167,10 @@ class DeriveResolverTests(unittest.TestCase):
         normalized = normalize_s3_flags({"usage_process_visible": True})
         self.assertIsNotNone(normalized)
         self.assertIsNone(normalized["process_framing_met"])
+        self.assertIsNone(normalized["missing_selling_points"])
+
+        explicit_empty = normalize_s3_flags({"missing_selling_points": []})
+        self.assertEqual(explicit_empty["missing_selling_points"], [])
 
     def test_s5_source_status_preserves_missing_uncertain_and_explicit_absence(self) -> None:
         normalized = normalize_video_understanding(

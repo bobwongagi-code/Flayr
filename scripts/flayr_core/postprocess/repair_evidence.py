@@ -855,6 +855,28 @@ def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
         if readiness_by_role[role] not in {"legacy", "present"}:
             cta[f"{role}_evidence_ids"] = []
             continue
+        # A present Stage1 ledger does not make an incomplete Stage2 CTA flag
+        # authoritative. Missing direct/path/soft-invitation facts are
+        # unknown, not proof that ``exists`` is false. Leave the flag and
+        # references untouched so validation can surface the missing contract
+        # instead of repair inventing an absence.
+        if flag.get("exists") is True:
+            direct_or_path_observed = (
+                flag.get("direct_order_met"),
+                flag.get("action_path_clear"),
+            )
+            has_explicit_direct_or_path = any(value is True for value in direct_or_path_observed)
+            if not has_explicit_direct_or_path and any(
+                not isinstance(value, bool) for value in direct_or_path_observed
+            ):
+                flag["_cta_source_status"] = "unknown"
+                continue
+            if not has_explicit_direct_or_path and any(
+                not isinstance(flag.get(key), bool)
+                for key in ("soft_purchase_invitation_met", "offer_or_incentive_clear")
+            ):
+                flag["_cta_source_status"] = "unknown"
+                continue
         if flag.get("exists") is True and not has_direct_or_path and not has_valid_soft_invitation:
             # S6 的“软促单”必须同时有面向用户的购买邀请和明确利益点。
             # 只有在 Stage1 资格已完成、且确实有可核验引用时，才允许把模型 flag
@@ -1222,7 +1244,7 @@ def ground_stage_visual_evidence(result: dict[str, Any]) -> None:
                 for value in stage.get(f"{role}_visual_evidence", [])
                 if re.search(r"未核验|未验证|待复核", str(value))
             ]
-            stage[f"{role}_visual_evidence"] = list(dict.fromkeys([*facts, *cautions]))[:5]
+            stage[f"{role}_visual_evidence"] = list(dict.fromkeys([*facts, *cautions]))
 
 
 def ground_improvement_evidence(result: dict[str, Any]) -> None:

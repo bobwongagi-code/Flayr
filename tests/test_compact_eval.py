@@ -317,6 +317,10 @@ def _s5_audit_result() -> dict:
 class CompactEvalContractTests(unittest.TestCase):
     def test_contract_limits_describe_each_variant_without_hidden_fields(self) -> None:
         self.assertEqual(
+            contract_limits_for_variant("model_independent")["max_stage_frame_inputs_per_stage"],
+            4,
+        )
+        self.assertEqual(
             contract_limits_for_variant("model_independent")["max_overall_reason_chars"],
             320,
         )
@@ -338,6 +342,24 @@ class CompactEvalContractTests(unittest.TestCase):
         self.assertEqual(contract_limits_for_variant("s4_single_pass")["max_stage_evidence_ids"], 8)
         self.assertEqual(contract_limits_for_variant("s4_free_text_steps")["max_comparison_chars"], 240)
         self.assertEqual(contract_limits_for_variant("s5_audit")["max_decision_basis_chars"], 320)
+
+    def test_stage_frame_overflow_fails_closed_instead_of_silently_truncating(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run = _write_bundle(Path(tmp))
+            manifest_path = run / "creator" / "frames" / "stage_frames.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for index in range(1, 5):
+                manifest.append(
+                    {
+                        "stage": "S1 Hook",
+                        "timestamp_seconds": 1.25 + index,
+                        "path": str(run / "creator" / "frames" / f"extra_{index}.jpg"),
+                    }
+                )
+                (run / "creator" / "frames" / f"extra_{index}.jpg").write_bytes(SAMPLE_JPEG)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(CompactEvaluationError, "explicit contract maximum is 4"):
+                load_frozen_compact_bundle(run, include_images=True)
 
     def test_s4_structure_controls_have_distinct_contracts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

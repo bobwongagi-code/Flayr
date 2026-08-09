@@ -138,10 +138,22 @@ def _dominant_selling_point(
             }
             if not evidence_ids.intersection(allowed_evidence_ids):
                 continue
+        # A missing share is unknown, not zero.  Do not elect a dominant
+        # selling point from an observation that has no quantitative support.
+        shares = (item.get("visual_share"), item.get("speech_share"))
+        if not any(isinstance(value, (int, float)) and not isinstance(value, bool) for value in shares):
+            continue
         candidates.append(item)
     if not candidates:
         return None
-    return max(candidates, key=lambda item: max(float(item.get("visual_share") or 0), float(item.get("speech_share") or 0)))
+    return max(
+        candidates,
+        key=lambda item: max(
+            float(value)
+            for value in (item.get("visual_share"), item.get("speech_share"))
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ),
+    )
 
 
 def _selling_side_status(
@@ -152,9 +164,18 @@ def _selling_side_status(
     dominant = _dominant_selling_point(side, allowed_evidence_ids)
     if not dominant or not anchor_id:
         return "unknown", dominant
+    proof_signal = dominant.get("proof_signal_present")
     if str(dominant.get("candidate_id") or "") == anchor_id:
-        return ("aligned" if dominant.get("proof_signal_present") is not False else "unproven"), dominant
-    return ("alternate_proven" if dominant.get("proof_signal_present") is True else "misaligned"), dominant
+        if proof_signal is True:
+            return "aligned", dominant
+        if proof_signal is False:
+            return "unproven", dominant
+        return "unknown", dominant
+    if proof_signal is True:
+        return "alternate_proven", dominant
+    if proof_signal is False:
+        return "misaligned", dominant
+    return "unknown", dominant
 
 
 def _selling_point_finding(result: dict[str, Any], creator: dict[str, Any], benchmark: dict[str, Any]) -> dict[str, Any]:
@@ -187,7 +208,7 @@ def _selling_point_finding(result: dict[str, Any], creator: dict[str, Any], benc
     creator_status, dominant = _selling_side_status(
         creator, anchor_id, qualified_ids_by_role["creator"]
     )
-    benchmark_status, _ = _selling_side_status(
+    benchmark_status, benchmark_dominant = _selling_side_status(
         benchmark, anchor_id, qualified_ids_by_role["benchmark"]
     )
     evidence_ids = [str(value) for value in (dominant or {}).get("evidence_ids") or [] if str(value).strip()]
@@ -206,6 +227,19 @@ def _selling_point_finding(result: dict[str, Any], creator: dict[str, Any], benc
             "selling_point_route", "unknown", creator_status, benchmark_status, "unknown",
             "现有事实不足以确认达人是否把最适合短视频证明的卖点作为主路线。",
             "不据此改动 S2-S4 判断。", "补齐卖点占比与证明信号后再判断。", evidence_ids, [], "low",
+        )
+    # A missing benchmark observation means there is no comparison-side fact;
+    # it must not erase a creator-side, explicitly supported route finding.
+    # An existing dominant observation with an unknown proof signal is
+    # different: that fact is present but cannot be treated as proven.
+    if (creator_status == "unknown" and dominant) or (
+        benchmark_status == "unknown" and benchmark_dominant
+    ):
+        return _finding(
+            "selling_point_route", "unknown", creator_status, benchmark_status, "unknown",
+            "卖点证明信号未知，不能确认主路线是否已经被事实支持。",
+            "不把缺失或不确定的证明信号当作已证明或已错位。",
+            "补齐对应的证明事实后再判断卖点路线。", evidence_ids, [], "low",
         )
     if creator_status == "aligned":
         return _finding(

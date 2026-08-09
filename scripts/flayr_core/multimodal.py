@@ -164,7 +164,10 @@ def multimodal_execution(stage_id: str, stage: dict[str, Any], role: str, base_e
         flag = stage.get(f"{role}_s3")
         if isinstance(flag, dict):
             missing = flag.get("missing_selling_points")
-            no_missing = not isinstance(missing, list) or not any(str(item).strip() for item in missing)
+            # Missing is unknown, not an explicit empty comparison result.
+            # Only an observed [] may satisfy this part of the enhancement
+            # predicate; otherwise multimodal context must not promote S3.
+            no_missing = isinstance(missing, list) and not any(str(item).strip() for item in missing)
             hard_process_met = (
                 (flag.get("usage_process_visible") is True or flag.get("real_usage_met") is True)
                 and flag.get("core_selling_point_visible") is True
@@ -207,7 +210,7 @@ def sanitize_audio_observations(
         stage["voice_performance"] = {
             "pace": "未评估",
             "energy": "未评估",
-            "key_pause": False,
+            "key_pause": None,
             "note": "当前模型未直接感知音轨，不评价语气、BGM或音效。",
         }
         for role in ("creator", "benchmark"):

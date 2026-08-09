@@ -47,6 +47,19 @@ _S1_REPAIR_STATE_KEY = "s1_hook_boundaries"
 _S1_REPAIR_STATE_VALUES = {"repaired", "validated"}
 
 
+def _unknown_execution_pair(*, redline: bool | None = None) -> dict[str, Any]:
+    """Return an explicit unknown diagnostic instead of scoring missing flags as failures."""
+    return {
+        "redline": redline,
+        "creator_exec": None,
+        "bench_exec": None,
+    }
+
+
+def _explicit_bool_fields(flag: dict[str, Any], keys: tuple[str, ...]) -> bool:
+    return all(isinstance(flag.get(key), bool) for key in keys)
+
+
 class _Endorsement(NamedTuple):
     """该侧硬背书聚合结果。具名避免 (verbal, visual, available) 位置元组解包错位。"""
     verbal: bool      # 口播/字幕出现硬背书来源词
@@ -90,18 +103,29 @@ def _s1_hook_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
     c = stage.get("creator_hook")
     b = stage.get("benchmark_hook")
     if not isinstance(c, dict) or not isinstance(b, dict):
-        return None
+        return _unknown_execution_pair() if isinstance(c, dict) or isinstance(b, dict) else None
     if b.get("exists") is True and c.get("exists") is False:
         return {"redline": True}
-    c_met = sum(1 for v in (c.get("dims") or {}).values() if v is True)
-    b_met = sum(1 for v in (b.get("dims") or {}).values() if v is True)
-    c_exec, b_exec = c_met / 4 * 2, b_met / 4 * 2
-    # landing 封顶：钩子没打穿（landing_met=false）→ 该侧执行分最高 1.0，结构件齐全也不算"出色"。
-    if c.get("landing_met") is False:
-        c_exec = min(c_exec, 1.0)
-    if b.get("landing_met") is False:
-        b_exec = min(b_exec, 1.0)
-    return {"redline": False, "creator_exec": c_exec, "bench_exec": b_exec}
+
+    def side_exec(flag: dict[str, Any]) -> float | None:
+        # 明确没有 Hook 是一个完整的事实，不应因没有“不适用”的维度而变成 unknown。
+        if flag.get("exists") is False:
+            return 0.0
+        if flag.get("exists") is not True:
+            return None
+        if not _explicit_bool_fields(flag, ("landing_met",)):
+            return None
+        dims = flag.get("dims")
+        if not isinstance(dims, dict) or not _explicit_bool_fields(dims, ("camera", "copy", "sound", "rhythm")):
+            return None
+        met = sum(1 for key in ("camera", "copy", "sound", "rhythm") if dims.get(key) is True)
+        execution = met / 4 * 2
+        # landing 封顶：钩子没打穿（landing_met=false）→ 该侧执行分最高 1.0。
+        if flag.get("landing_met") is False:
+            execution = min(execution, 1.0)
+        return execution
+
+    return {"redline": False, "creator_exec": side_exec(c), "bench_exec": side_exec(b)}
 
 
 def _s2_contract_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
@@ -112,11 +136,26 @@ def _s2_contract_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
     c = stage.get("creator_s2")
     b = stage.get("benchmark_s2")
     if not isinstance(c, dict) or not isinstance(b, dict):
-        return None
+        return _unknown_execution_pair() if isinstance(c, dict) or isinstance(b, dict) else None
 
-    def side_exec(flag: dict[str, Any]) -> float:
+    # ``merged_with_s3`` is a routing marker, not an execution fact.  Older
+    # canonical stage records predate it; its absence must not erase an
+    # otherwise complete diagnostic observation.  The severity rule itself
+    # remains strict and requires the marker before it can act.
+    required = ("handoff_met", "product_identity_clear", "product_role_clear")
+
+    def side_exec(flag: dict[str, Any]) -> float | None:
         if flag.get("exists") is False:
             return 0.0
+        if flag.get("exists") is not True:
+            return None
+        if not _explicit_bool_fields(flag, required):
+            return None
+        if not (
+            isinstance(flag.get("computed_s1_s2_compatible"), bool)
+            or isinstance(flag.get("s1_s2_compatible"), bool)
+        ):
+            return None
         # S1 缺失会让 S2 没有可承接对象，但如果产品身份和解决方案角色已经清楚，
         # 这个问题应由 S1 承担，避免在 S2 重复计罚。
         if (
@@ -144,7 +183,7 @@ def _s2_contract_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
     return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
 
 
-def _s3_strong_scene(flag: dict[str, Any]) -> bool:
+def _s3_strong_scene(flag: dict[str, Any]) -> bool | None:
     """S3 场景/表现层是否把使用过程做厚。
 
     S3 主轴是"动作里证明核心卖点"。多场景/丰富度只是表现层，不能补偿核心卖点缺口；
@@ -152,7 +191,9 @@ def _s3_strong_scene(flag: dict[str, Any]) -> bool:
     （多角度/多卖点/时间变化/角色互动等），避免把"结构存在"误当"执行出色"。
     """
     missing = flag.get("missing_selling_points")
-    has_missing_core = isinstance(missing, list) and any(str(item).strip() for item in missing)
+    if not isinstance(missing, list):
+        return None
+    has_missing_core = any(str(item).strip() for item in missing)
     if has_missing_core:
         return False
     if flag.get("action_proof_met") is False:
@@ -165,21 +206,35 @@ def _s3_strong_scene(flag: dict[str, Any]) -> bool:
         return False
     mode = str(flag.get("scene_mode") or "unknown")
     if mode == "single_scene":
+        if not _explicit_bool_fields(
+            flag,
+            ("single_scene_continuity_met", "single_scene_variation_met", "continuity_met", "richness_met"),
+        ):
+            return None
         return (
             (flag.get("single_scene_continuity_met") is True or flag.get("continuity_met") is True)
             and (flag.get("richness_met") is True or flag.get("single_scene_variation_met") is True)
         )
     if mode == "multi_scene":
+        if not _explicit_bool_fields(
+            flag,
+            ("multi_scene_logic_met", "multi_scene_transition_met", "multi_scene_role_adaptation_met"),
+        ):
+            return None
         return (
             flag.get("multi_scene_logic_met") is True
             and flag.get("multi_scene_transition_met") is True
             and flag.get("multi_scene_role_adaptation_met") is True
         )
     if mode == "multi_person":
+        if not _explicit_bool_fields(flag, ("role_design_met", "role_interaction_met")):
+            return None
         return flag.get("role_design_met") is True and flag.get("role_interaction_met") is True
     if mode == "hybrid":
+        if not _explicit_bool_fields(flag, ("continuity_met", "richness_met")):
+            return None
         return flag.get("continuity_met") is True and flag.get("richness_met") is True
-    return flag.get("continuity_met") is True and flag.get("richness_met") is True
+    return None
 
 
 def _s3_usage_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
@@ -187,11 +242,21 @@ def _s3_usage_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
     c = stage.get("creator_s3")
     b = stage.get("benchmark_s3")
     if not isinstance(c, dict) or not isinstance(b, dict):
-        return None
+        return _unknown_execution_pair() if isinstance(c, dict) or isinstance(b, dict) else None
+    required = (
+        "mouth_only_or_static", "result_only_without_process", "usage_process_visible",
+        "real_usage_met", "core_selling_point_visible", "action_proof_met", "action_target_contact_met",
+        "action_application_change_visible", "critical_action_continuity_met", "fake_or_staged",
+        "usage_context_fit",
+    )
 
-    def side_exec(flag: dict[str, Any]) -> float:
+    def side_exec(flag: dict[str, Any]) -> float | None:
         if flag.get("exists") is False:
             return 0.0
+        if flag.get("exists") is not True:
+            return None
+        if not _explicit_bool_fields(flag, required):
+            return None
         if flag.get("mouth_only_or_static") is True:
             return 0.0
         if flag.get("result_only_without_process") is True:
@@ -216,7 +281,8 @@ def _s3_usage_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
         missing = flag.get("missing_selling_points")
         if isinstance(missing, list) and any(str(item).strip() for item in missing):
             return 1.0
-        return 2.0 if _s3_strong_scene(flag) else 1.0
+        strong_scene = _s3_strong_scene(flag)
+        return None if strong_scene is None else (2.0 if strong_scene else 1.0)
 
     return {"creator_exec": side_exec(c), "bench_exec": side_exec(b)}
 
@@ -297,7 +363,12 @@ def _s4_effect_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
     c = stage.get("creator_s4")
     b = stage.get("benchmark_s4")
     if not isinstance(c, dict) or not isinstance(b, dict):
-        return None
+        return _unknown_execution_pair() if isinstance(c, dict) or isinstance(b, dict) else None
+    required = (
+        "effect_visible", "tamper_or_cut_risk", "requires_close_inspection", "effect_proposition_matched",
+        "effect_attribution_supported", "process_linked_effect",
+        "closeup_or_focus_met", "effect_maximized", "comparison_control_met",
+    )
 
     def explicit_quality_keys(flag: dict[str, Any]) -> bool:
         return flag.get("visual_difference_observed") in {True, False} or flag.get("module_constraints_met") in {True, False}
@@ -307,9 +378,24 @@ def _s4_effect_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
             return True
         return flag.get("visual_difference_observed") is True and flag.get("module_constraints_met") is True
 
-    def side_exec(flag: dict[str, Any]) -> float:
+    def side_exec(flag: dict[str, Any]) -> float | None:
+        effect_state = flag.get("effect_evidence_state")
+        # effect_evidence_state=none is a complete absence fact.  A contradictory
+        # visible=true or an uncertain state must remain unknown, not be scored.
+        if effect_state == "uncertain":
+            return None
+        if effect_state == "none":
+            return None if flag.get("effect_visible") is True else 0.0
+        if flag.get("effect_visible") is False:
+            return 0.0
+        if not _explicit_bool_fields(flag, required):
+            return None
+        if str(flag.get("effect_type") or "") in {"", "unknown"} or str(flag.get("effect_salience") or "") in {"", "unknown"}:
+            return None
+        if (flag.get("visual_difference_observed") is None) != (flag.get("module_constraints_met") is None):
+            return None
         salience = str(flag.get("effect_salience") or "none")
-        if flag.get("effect_visible") is False or salience == "none":
+        if salience == "none":
             return 0.0
         if flag.get("tamper_or_cut_risk") is True:
             return 0.5
@@ -353,12 +439,23 @@ def _s5_trust_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
     c = stage.get("creator_s5")
     b = stage.get("benchmark_s5")
     if not isinstance(c, dict) or not isinstance(b, dict):
-        return None
+        return _unknown_execution_pair() if isinstance(c, dict) or isinstance(b, dict) else None
+    required = (
+        "independent_trust_purpose", "duplicates_other_stage", "risky_or_unsupported",
+        "product_relevance_met", "voice_only", "trust_source_credible", "trust_claim_specific",
+        "trust_source_visible",
+    )
     valid_bases = {"authority", "traceable_data", "independent_user", "social_consensus", "process_transparency"}
 
-    def side_exec(flag: dict[str, Any]) -> float:
+    def side_exec(flag: dict[str, Any]) -> float | None:
         if flag.get("exists") is False:
             return 0.0
+        if flag.get("exists") is not True:
+            return None
+        if not _explicit_bool_fields(flag, required):
+            return None
+        if str(flag.get("trust_evidence_type") or "") in {"", "unknown"} or str(flag.get("trust_basis") or "") in {"", "unknown"}:
+            return None
         trust_type = str(flag.get("trust_evidence_type") or "unknown")
         trust_basis = str(flag.get("trust_basis") or "unknown")
         if trust_type in {"none", "unknown"}:
@@ -427,29 +524,39 @@ def _s6_cta_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
     c = stage.get("creator_s6")
     b = stage.get("benchmark_s6")
     if not isinstance(c, dict) or not isinstance(b, dict):
-        return None
+        return _unknown_execution_pair() if isinstance(c, dict) or isinstance(b, dict) else None
+    required = ("ending_position_met", "direct_order_met", "action_path_clear", "compliance_risk")
 
-    def side_exec(flag: dict[str, Any]) -> float:
+    def side_exec(flag: dict[str, Any]) -> float | None:
         if flag.get("exists") is False:
             return 0.0
+        if flag.get("exists") is not True:
+            return None
+        if not _explicit_bool_fields(flag, required):
+            return None
         if flag.get("ending_position_met") is not True:
             return 0.0
         direct = flag.get("direct_order_met") is True
         path = flag.get("action_path_clear") is True
-        soft_invitation = flag.get("soft_purchase_invitation_met") is True
+        soft_value = flag.get("soft_purchase_invitation_met")
+        soft_invitation = soft_value is True
         fit_value = flag.get("module_fit_met")
         fit = fit_value is True
-        amplifier = any(
-            flag.get(key) is True
-            for key in ("offer_or_incentive_clear", "urgency_met", "product_value_recalled")
-        )
+        amplifier_values = [flag.get(key) for key in ("offer_or_incentive_clear", "urgency_met", "product_value_recalled")]
+        amplifier = any(value is True for value in amplifier_values)
         if flag.get("compliance_risk") is True:
             return 0.5 if direct or path or soft_invitation else 0.0
         if not direct and not path:
+            if soft_value is not True and soft_value is not False:
+                return None
             # 结尾的"感兴趣/需要的朋友 + 明确优惠"仍是软促单：没有路径，绝对质量仍弱，
             # 但不能与完全没有面向用户购买动作混为一谈。
-            if soft_invitation and flag.get("offer_or_incentive_clear") is True:
-                return 1.5 if fit else 1.0
+            if soft_invitation:
+                offer_value = flag.get("offer_or_incentive_clear")
+                if offer_value is not True and offer_value is not False:
+                    return None
+                if offer_value is True:
+                    return 1.5 if fit else 1.0
             if soft_invitation:
                 return 0.5
             return 0.0

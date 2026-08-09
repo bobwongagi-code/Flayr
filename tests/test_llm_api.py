@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
@@ -26,10 +27,210 @@ from flayr_core.llm.api import (  # noqa: E402
 )
 from flayr_core.llm.media import build_evidence_sensory_inputs  # noqa: E402
 from flayr_core.llm.payload import build_video_fact_payload  # noqa: E402
-from flayr_core.llm.pipeline import run_video_fact_extraction  # noqa: E402
+from flayr_core.llm.pipeline import (  # noqa: E402
+    _deterministic_product_visibility,
+    run_video_fact_extraction,
+)
+from flayr_core.llm.parse import (  # noqa: E402
+    adapt_misnested_analysis_result,
+    normalize_attention_competitors,
+    normalize_attention_scan_audit,
+    normalize_comparison_contract,
+    normalize_evidence,
+    normalize_fact_evidence_checklist,
+    normalize_hook_flags,
+    normalize_loop_closure,
+    normalize_presentation_overlays,
+    normalize_product_coverage,
+    normalize_ratio,
+    normalize_selling_point_observations,
+    normalize_stage_evidence_contract_version,
+    normalize_support_status,
+    normalize_structure_event_checks,
+    normalize_task_completion,
+    normalize_variant_decision_rule,
+    normalize_variant_unit_fields,
+)
+from flayr_core.llm.stage_fact_artifacts import StageFactArtifactError  # noqa: E402
 
 
 class LlmApiContractTests(unittest.TestCase):
+    def test_stage1_resume_falls_back_to_provider_when_a_artifact_is_missing(self) -> None:
+        args = Namespace(
+            llm_image_limit=8,
+            llm_dry_run=False,
+            llm_model="qwen-test",
+            llm_api_url="https://example.test/v1/chat/completions",
+            stage1_replay_from=None,
+            stage1_resume_from=None,
+            _resource_budget=None,
+        )
+        analysis = {"videos": {"creator": {}}}
+        provider_response = "{}"
+        with tempfile.TemporaryDirectory() as tmp:
+            args.stage1_resume_from = Path(tmp) / "missing-stage1"
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            with (
+                mock.patch(
+                    "flayr_core.llm.pipeline.select_role_visual_inputs",
+                    return_value=[],
+                ),
+                mock.patch(
+                    "flayr_core.llm.pipeline.build_video_fact_payload",
+                    return_value={"messages": []},
+                ),
+                mock.patch(
+                    "flayr_core.llm.pipeline.fetch_json_completion",
+                    return_value=provider_response,
+                ) as fetch,
+                mock.patch(
+                    "flayr_core.llm.pipeline.normalize_video_fact_result",
+                    return_value={"evidence_units": []},
+                ),
+                mock.patch(
+                    "flayr_core.llm.pipeline.build_stage1_acquisition_manifest",
+                    return_value={"provider_artifacts": []},
+                ),
+                mock.patch(
+                    "flayr_core.llm.pipeline._run_stage1_qualification",
+                    side_effect=lambda _args, _analysis, _run_dir, _key, _role, facts: facts,
+                ),
+                mock.patch(
+                    "flayr_core.llm.pipeline._maybe_recover_video_facts",
+                    side_effect=lambda _args, _analysis, _run_dir, _key, _role, facts: facts,
+                ),
+                mock.patch("flayr_core.llm.pipeline.freeze_stage_evidence"),
+            ):
+                result = run_video_fact_extraction(args, analysis, run_dir, "secret")
+            fetch.assert_called_once()
+            self.assertIn("creator", result)
+            artifact = json.loads(
+                (run_dir / "stage1_provider_creator_A.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(artifact["status"], "completed")
+
+    def test_stage1_strict_replay_does_not_fall_back_to_provider(self) -> None:
+        args = Namespace(
+            llm_image_limit=8,
+            llm_dry_run=False,
+            llm_model="qwen-test",
+            llm_api_url="https://example.test/v1/chat/completions",
+            stage1_replay_from=None,
+            stage1_resume_from=None,
+            _resource_budget=None,
+        )
+        analysis = {"videos": {"creator": {}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            args.stage1_replay_from = Path(tmp) / "missing-stage1"
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            with (
+                mock.patch(
+                    "flayr_core.llm.pipeline.select_role_visual_inputs",
+                    return_value=[],
+                ),
+                mock.patch(
+                    "flayr_core.llm.pipeline.build_video_fact_payload",
+                    return_value={"messages": []},
+                ),
+                mock.patch(
+                    "flayr_core.llm.pipeline.fetch_json_completion",
+                ) as fetch,
+            ):
+                with self.assertRaises(StageFactArtifactError):
+                    run_video_fact_extraction(args, analysis, run_dir, "secret")
+
+        fetch.assert_not_called()
+
+    def test_evidence_normalization_is_lossless_unless_limit_is_explicit(self) -> None:
+        values = [f"E{index}" for index in range(1, 9)]
+
+        self.assertEqual(normalize_evidence(values), values)
+        self.assertEqual(normalize_evidence(values, max_items=4), values[:4])
+
+    def test_missing_observations_stay_unknown_and_lists_are_not_silently_truncated(self) -> None:
+        selling_points = [
+            {"id": f"SP{index}", "text": f"point-{index}"}
+            for index in range(1, 8)
+        ]
+        competitors = [
+            {"id": f"AC{index}", "object_label": f"object-{index}"}
+            for index in range(1, 8)
+        ]
+
+        self.assertIsNone(normalize_product_coverage(None))
+        self.assertEqual(normalize_product_coverage("none"), "none")
+        self.assertEqual(
+            normalize_structure_event_checks({}, {"B1"})[0]["status"],
+            "unknown",
+        )
+        self.assertIsNone(
+            normalize_structure_event_checks(
+                [{"module_id": "S1-A"}], {"B1"}
+            )[0]["present"]
+        )
+        self.assertIsNone(normalize_attention_scan_audit({}, set())["recording_equipment_visible"])
+        self.assertIsNone(normalize_variant_decision_rule({}, set())["speech_explains_choice"])
+        self.assertIsNone(normalize_fact_evidence_checklist([{"item": "x"}], set())[0]["covered"])
+        self.assertEqual(len(normalize_selling_point_observations(selling_points, set())), 7)
+        self.assertEqual(len(normalize_attention_competitors(competitors, set())), 7)
+        self.assertIsNone(normalize_hook_flags({"dims": {}})["dims"]["camera"])
+        self.assertEqual(normalize_support_status(None, "a quote"), "unknown")
+        self.assertIsNone(normalize_task_completion(None))
+        self.assertEqual(normalize_presentation_overlays(None), ["unknown"])
+        self.assertEqual(normalize_presentation_overlays([]), ["none"])
+        self.assertEqual(normalize_presentation_overlays(["closeup", "not-a-real-overlay"]), ["unknown"])
+        self.assertIsNone(normalize_ratio(True))
+        self.assertIsNone(normalize_stage_evidence_contract_version(True))
+        self.assertIsNone(normalize_loop_closure({})["pain_resolved_in_s4"])
+        adapted = adapt_misnested_analysis_result({"stage_analysis": [], "product_visibility": {}})
+        self.assertIsNone(adapted["product_visibility"]["ratio"])
+        self.assertIsNone(adapted["loop_closure"]["suspense_revealed"])
+
+    def test_missing_ratios_and_variant_shares_stay_unknown(self) -> None:
+        self.assertIsNone(normalize_ratio(None))
+        self.assertIsNone(normalize_ratio("not-a-ratio"))
+        normalized = normalize_variant_unit_fields(
+            {
+                "variant_ids": ["black"],
+                "variant_visual_shares": {"black": None},
+                "variant_speech_shares": {},
+                "variant_relation_mode": "single_focus",
+                "comparison_purpose_explicit": None,
+            }
+        )
+        self.assertEqual(normalized["variant_visual_shares"], {"black": None})
+        self.assertFalse(normalized["variant_attribution_confident"])
+        self.assertFalse(normalized["variant_data_valid"])
+
+    def test_product_visibility_does_not_invent_zeroes_without_explicit_facts(self) -> None:
+        unknown = _deterministic_product_visibility(
+            {"creator": {"evidence_units": [{"id": "C1", "time_range": "0s - 1s"}]}},
+            {"videos": {"creator": {"duration_seconds": 10.0}}},
+        )
+        self.assertIsNone(unknown["first_appearance_sec"])
+        self.assertIsNone(unknown["ratio"])
+
+        absent = _deterministic_product_visibility(
+            {"creator": {"evidence_units": [{"id": "C1", "product_visible": False, "time_range": "0s - 1s"}]}},
+            {"videos": {"creator": {"duration_seconds": 10.0}}},
+        )
+        self.assertEqual(absent["first_appearance_sec"], 0.0)
+        self.assertEqual(absent["ratio"], 0.0)
+
+    def test_missing_shared_job_facts_do_not_qualify_as_strong_substitutes(self) -> None:
+        contract = normalize_comparison_contract(
+            {
+                "identity_relation": "different_product",
+                "substitution_relation": "strong_substitute",
+                "shared_job": {},
+            }
+        )
+
+        self.assertEqual(contract["substitution_relation"], "partial_substitute")
+        self.assertIsNone(contract["shared_job"]["same_consumer_job"])
+
     def test_fact_extraction_uses_full_per_request_image_limit_for_each_role(self) -> None:
         args = mock.Mock(
             llm_image_limit=12,

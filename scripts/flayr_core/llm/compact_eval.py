@@ -59,6 +59,7 @@ COMPACT_OUTPUT_BUDGET = 8192
 COMPACT_MAX_REASON_CHARS = 240
 COMPACT_MAX_BASIS_CHARS = 320
 COMPACT_MAX_EVIDENCE_IDS = 4
+MAX_STAGE_FRAME_INPUTS_PER_STAGE = 4
 S4_MAX_EVIDENCE_IDS = 8
 S4_FREE_TEXT_MAX_CHARS = 240
 S5_MAX_EVIDENCE_IDS = 8
@@ -104,7 +105,10 @@ def _stage_evidence_id_limit(value: int | None) -> int:
 
 def contract_limits_for_variant(variant: str) -> dict[str, int]:
     """Return every numeric response limit enforced by the isolated contract."""
-    limits = {"output_budget": COMPACT_OUTPUT_BUDGET}
+    limits = {
+        "output_budget": COMPACT_OUTPUT_BUDGET,
+        "max_stage_frame_inputs_per_stage": MAX_STAGE_FRAME_INPUTS_PER_STAGE,
+    }
     if variant in {
         "evidence_grounded",
         "model_independent",
@@ -341,7 +345,12 @@ def _stage_frame_inputs(run_dir: Path, role: str) -> list[dict[str, str]]:
             for item in value
             if isinstance(item, dict) and str(item.get("stage") or "") == stage.name
         ]
-        for item in entries[:4]:
+        if len(entries) > MAX_STAGE_FRAME_INPUTS_PER_STAGE:
+            raise CompactEvaluationError(
+                f"{stage.code} has {len(entries)} frozen frame inputs; "
+                f"the explicit contract maximum is {MAX_STAGE_FRAME_INPUTS_PER_STAGE}"
+            )
+        for item in entries:
             raw_path = str(item.get("path") or "").strip()
             path = _resolve_frozen_visual_path(raw_path, run_dir)
             if not path.is_file():

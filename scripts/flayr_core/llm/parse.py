@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -71,10 +72,21 @@ def required_text(item: dict[str, Any], key: str) -> str:
     return value or f"（LLM 未填写 {key}，需人工补充）"
 
 
-def normalize_evidence(value: Any) -> list[str]:
+def normalize_evidence(value: Any, *, max_items: int | None = None) -> list[str]:
+    """Normalize evidence-like lists without silently dropping model output.
+
+    Evidence limits are contract decisions, not parser behavior.  Callers that
+    have an explicit, validated limit may pass ``max_items``; the default keeps
+    every non-empty item so an audit or downstream validator can see the full
+    provider response instead of receiving a truncated, apparently valid list.
+    """
     if isinstance(value, list):
         evidence = [str(item).strip() for item in value if str(item).strip()]
-        return evidence[:5]
+        if max_items is not None:
+            if max_items < 0:
+                raise ValueError("max_items must be non-negative")
+            return evidence[:max_items]
+        return evidence
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return []
@@ -103,14 +115,18 @@ def normalize_proposition_ids(value: Any) -> list[str]:
 
 def normalize_support_status(value: Any, quote: Any) -> str:
     status = str(value or "").strip().lower()
-    if status in {"supported", "voice_only", "visual_only", "conflict"}:
+    if status in {"supported", "voice_only", "visual_only", "conflict", "unknown", "low"}:
         return status
-    return "voice_only" if str(quote or "").strip() else "visual_only"
+    # 口播是否存在不能替代“口播/画面是否共同支撑该判断”的审计。
+    # 缺少 support_status 时保留 unknown，避免从引用形式反推事实关系。
+    return "unknown"
 
 
 def normalize_demo_flag(value: Any) -> bool | None:
-    """演示布尔通用归一（S4 has_effect_demo / S3 has_usage_demo）。返回 True/False；
-    非该阶段/null/缺失/无法解析→None；None 不触发确定性 severity 约束。
+    """归一可空观察布尔；缺失或无法解析保持 None。
+
+    ``None`` 不能被解释为 ``False``。调用方可以据此区分“明确没有”和
+    “没有采集到/无法判断”，避免未知事实被下游当作否定事实。
     容忍模型吐 bool 或 true/false/yes/no/1/0 字符串。"""
     if isinstance(value, bool):  # 必须先于 int 判（Python 中 bool 是 int 子类）
         return value
@@ -160,8 +176,8 @@ def normalize_multimodal_assessment(value: Any) -> dict[str, Any] | None:
         effect = "effective" if positive_channels else "weak"
     if effect == "strong" and any(impacts[channel] == "strong_negative" for channel in content_channels):
         effect = "effective"
-    compensation = normalize_demo_flag(value.get("compensation_applied")) is True
-    if compensation and not (
+    compensation = normalize_demo_flag(value.get("compensation_applied"))
+    if compensation is True and not (
         impacts.get(dominant) == "strong_positive"
         and any(
             impacts[channel] in {"neutral", "negative", "absent"}
@@ -272,6 +288,8 @@ def normalize_s3_scene_mode(value: Any) -> str:
 
 
 def normalize_presentation_overlays(value: Any) -> list[str]:
+    if value is None:
+        return ["unknown"]
     if isinstance(value, list):
         raw = value
     elif isinstance(value, str) and value.strip():
@@ -279,21 +297,30 @@ def normalize_presentation_overlays(value: Any) -> list[str]:
     else:
         raw = []
     overlays: list[str] = []
+    invalid = False
     for item in raw:
         key = str(item or "").strip().lower().replace("-", "_").replace(" ", "_")
         if key in _S3_PRESENTATION_OVERLAYS and key not in overlays:
             overlays.append(key)
-    return overlays or ["none"]
+        elif key:
+            invalid = True
+    # ``none`` is an explicit observation.  A missing/invalid list is unknown;
+    # do not turn an omitted observation into a negative presentation fact.
+    if invalid:
+        return ["unknown"]
+    if not raw:
+        return ["none"] if isinstance(value, list) else ["unknown"]
+    return overlays or ["unknown"]
 
 
 def normalize_s4_effect_type(value: Any) -> str:
     effect_type = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    return effect_type if effect_type in _S4_EFFECT_TYPES else "none"
+    return effect_type if effect_type in _S4_EFFECT_TYPES else "unknown"
 
 
 def normalize_s4_effect_salience(value: Any) -> str:
     salience = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    return salience if salience in _S4_EFFECT_SALIENCE else "none"
+    return salience if salience in _S4_EFFECT_SALIENCE else "unknown"
 
 
 def normalize_s5_trust_type(value: Any) -> str:
@@ -377,8 +404,9 @@ def hook_reason_window_leaks(reason: str, boundary_seconds: float | None, tolera
 
 def normalize_hook_flags(value: Any) -> dict[str, Any] | None:
     """归一单侧 S1 钩子结构化 flag。整体缺失（非 dict）→None，derive 见 None 回退模型执行分（优雅降级）。
-    形状：{exists: bool|None, type: A-G|unknown, dims:{camera/copy/sound/rhythm: bool}, anchors_proposition: bool|None}。
-    四维 dims 用 normalize_bool_flag（缺省 False=未做到）；exists/anchors 用 demo_flag 三态（None=模型没判）。"""
+    形状：{exists: bool|None, type: A-G|unknown, dims:{camera/copy/sound/rhythm: bool|None}, anchors_proposition: bool|None}。
+    四维 dims 也保留三态；若 S1 合同要求它们，缺失由 validator 阻断，不能静默变成未做到。
+    """
     if not isinstance(value, dict):
         return None
     raw_dims = value.get("dims") if isinstance(value.get("dims"), dict) else {}
@@ -394,10 +422,10 @@ def normalize_hook_flags(value: Any) -> dict[str, Any] | None:
         "exists": normalize_demo_flag(value.get("exists")),
         "type": normalize_hook_type(value.get("type")),
         "dims": {
-            "camera": normalize_bool_flag(raw_dims.get("camera")),
-            "copy": normalize_bool_flag(raw_dims.get("copy")),
-            "sound": normalize_bool_flag(raw_dims.get("sound")),
-            "rhythm": normalize_bool_flag(raw_dims.get("rhythm")),
+            "camera": normalize_demo_flag(raw_dims.get("camera")),
+            "copy": normalize_demo_flag(raw_dims.get("copy")),
+            "sound": normalize_demo_flag(raw_dims.get("sound")),
+            "rhythm": normalize_demo_flag(raw_dims.get("rhythm")),
         },
         # landing_met=钩子有没有"打穿"（type 无关三件套：对象/张力/承诺缺一即 false）。三态：None=模型没判。进 severity。
         "landing_met": landing_met,
@@ -449,10 +477,31 @@ def normalize_s3_flags(value: Any) -> dict[str, Any] | None:
     scene_mode = normalize_s3_scene_mode(value.get("scene_mode"))
     overlays = normalize_presentation_overlays(value.get("presentation_overlays"))
 
-    def mode_flag(key: str, applicable: bool) -> bool | None:
+    def mode_flag(key: str, applicable: bool | None) -> bool | None:
+        if applicable is None:
+            return None
         if not applicable:
             return False
         return normalize_demo_flag(value.get(key))
+
+    scene_mode_known = scene_mode != "unknown"
+    overlay_mode_known = "unknown" not in overlays
+    raw_missing_selling_points = value.get("missing_selling_points")
+    missing_selling_points = (
+        normalize_evidence(raw_missing_selling_points)
+        if isinstance(raw_missing_selling_points, (list, str))
+        else None
+    )
+
+    def scene_applies(target: str) -> bool | None:
+        if not scene_mode_known:
+            return None
+        return scene_mode == target
+
+    def overlay_applies(target: str) -> bool | None:
+        if not overlay_mode_known:
+            return None
+        return target in overlays
 
     return {
         "exists": normalize_demo_flag(value.get("exists")),
@@ -471,21 +520,24 @@ def normalize_s3_flags(value: Any) -> dict[str, Any] | None:
         "action_application_change_visible": normalize_demo_flag(value.get("action_application_change_visible")),
         "critical_action_continuity_met": normalize_demo_flag(value.get("critical_action_continuity_met")),
         "demonstrated_selling_points": normalize_evidence(value.get("demonstrated_selling_points")),
-        "missing_selling_points": normalize_evidence(value.get("missing_selling_points")),
+        # An omitted list means that the comparison was not completed.  Keep
+        # it distinct from an explicit [] because S3 execution derives its
+        # strong-scene result from this observation.
+        "missing_selling_points": missing_selling_points,
         "scene_mode": scene_mode,
         "usage_context_fit": normalize_demo_flag(value.get("usage_context_fit")),
         "continuity_met": normalize_demo_flag(value.get("continuity_met")),
         "richness_met": normalize_demo_flag(value.get("richness_met")),
-        "single_scene_continuity_met": mode_flag("single_scene_continuity_met", scene_mode == "single_scene"),
-        "single_scene_variation_met": mode_flag("single_scene_variation_met", scene_mode == "single_scene"),
-        "multi_scene_logic_met": mode_flag("multi_scene_logic_met", scene_mode == "multi_scene"),
-        "multi_scene_transition_met": mode_flag("multi_scene_transition_met", scene_mode == "multi_scene"),
-        "multi_scene_role_adaptation_met": mode_flag("multi_scene_role_adaptation_met", scene_mode == "multi_scene"),
-        "role_design_met": mode_flag("role_design_met", scene_mode == "multi_person"),
-        "role_interaction_met": mode_flag("role_interaction_met", scene_mode == "multi_person"),
-        "distinct_personas_met": mode_flag("distinct_personas_met", scene_mode == "multi_person"),
-        "steps_clear_met": mode_flag("steps_clear_met", "step_breakdown" in overlays),
-        "pov_immersive_met": mode_flag("pov_immersive_met", "first_person" in overlays),
+        "single_scene_continuity_met": mode_flag("single_scene_continuity_met", scene_applies("single_scene")),
+        "single_scene_variation_met": mode_flag("single_scene_variation_met", scene_applies("single_scene")),
+        "multi_scene_logic_met": mode_flag("multi_scene_logic_met", scene_applies("multi_scene")),
+        "multi_scene_transition_met": mode_flag("multi_scene_transition_met", scene_applies("multi_scene")),
+        "multi_scene_role_adaptation_met": mode_flag("multi_scene_role_adaptation_met", scene_applies("multi_scene")),
+        "role_design_met": mode_flag("role_design_met", scene_applies("multi_person")),
+        "role_interaction_met": mode_flag("role_interaction_met", scene_applies("multi_person")),
+        "distinct_personas_met": mode_flag("distinct_personas_met", scene_applies("multi_person")),
+        "steps_clear_met": mode_flag("steps_clear_met", overlay_applies("step_breakdown")),
+        "pov_immersive_met": mode_flag("pov_immersive_met", overlay_applies("first_person")),
         "presentation_overlays": overlays,
         "fake_or_staged": normalize_demo_flag(value.get("fake_or_staged")),
         "start_seconds": normalize_hook_boundary_seconds(value.get("start_seconds")),
@@ -645,7 +697,7 @@ def normalize_choice(value: Any, allowed: set[str], fallback: str) -> str:
     return normalized if normalized in allowed else fallback
 
 
-def normalize_task_completion(value: Any) -> str:
+def normalize_task_completion(value: Any) -> str | None:
     """把 task_completion 归一为 complete|partial|missing（达人侧功能完成度）。
 
     2026-06-11 门禁 T5 发现：模型原始输出是自由文本（'both_complete'/'completed'/
@@ -687,7 +739,8 @@ def normalize_task_completion(value: Any) -> str:
         return "complete"
     if re.search(r"partial|incomplete|部分|基本完成|不完整|不足|weak", text):
         return "partial"
-    return "partial"
+    # 无法识别时保持 unknown；不能把缺失或新漂移的值当作 partial。
+    return None
 
 
 def normalize_execution_score(value: Any) -> float | None:
@@ -741,8 +794,10 @@ def normalize_bool_flag(value: Any) -> bool:
     return str(value or "").strip().lower() in {"true", "yes", "1", "是", "有"}
 
 
-def normalize_product_coverage(value: Any) -> str:
-    return normalize_choice(value, {"none", "low", "medium", "high"}, "none")
+def normalize_product_coverage(value: Any) -> str | None:
+    """归一产品可见覆盖；缺失保持 None，显式 ``none`` 才表示看不到产品。"""
+    text = str(value or "").strip().lower()
+    return text if text in {"none", "low", "medium", "high"} else None
 
 
 def normalize_module_id(value: Any, index: int) -> str:
@@ -754,7 +809,7 @@ def normalize_voice_performance(value: Any) -> dict[str, Any]:
     return {
         "pace": str(item.get("pace") or "未评估").strip(),
         "energy": str(item.get("energy") or "未评估").strip(),
-        "key_pause": bool(item.get("key_pause", False)),
+        "key_pause": normalize_demo_flag(item.get("key_pause")),
         "note": str(item.get("note") or "未提供口播表现判断。").strip(),
     }
 
@@ -786,9 +841,9 @@ def normalize_product_visibility(value: Any) -> dict[str, Any]:
 def normalize_loop_closure(value: Any) -> dict[str, Any]:
     item = value if isinstance(value, dict) else {}
     return {
-        "pain_resolved_in_s4": bool(item.get("pain_resolved_in_s4", False)),
-        "benefit_delivered_in_s6": bool(item.get("benefit_delivered_in_s6", False)),
-        "suspense_revealed": bool(item.get("suspense_revealed", False)),
+        "pain_resolved_in_s4": normalize_demo_flag(item.get("pain_resolved_in_s4")),
+        "benefit_delivered_in_s6": normalize_demo_flag(item.get("benefit_delivered_in_s6")),
+        "suspense_revealed": normalize_demo_flag(item.get("suspense_revealed")),
         "suspense_reveal_time": item.get("suspense_reveal_time"),
         "note": str(item.get("note") or "未完成闭环校验。").strip(),
     }
@@ -811,7 +866,7 @@ def normalize_promise_chain(value: Any) -> dict[str, Any]:
         "s2_answer": str(item.get("s2_answer") or "未完成 S2 接应审计。").strip(),
         "s3_proof_target": str(item.get("s3_proof_target") or "未完成 S3 证明目标审计。").strip(),
         "s4_outcome": str(item.get("s4_outcome") or "未完成 S4 结果兑现审计。").strip(),
-        "chain_closed": normalize_bool_flag(item.get("chain_closed")),
+        "chain_closed": normalize_demo_flag(item.get("chain_closed")),
         "broken_at": normalize_promise_break_point(item.get("broken_at")),
         "break_reason": str(item.get("break_reason") or "未完成 S1-S4 承诺闭环审计。").strip(),
     }
@@ -822,14 +877,20 @@ def normalize_temporal_evidence_mode(value: Any) -> str:
     return mode if mode in {"full_temporal", "focused_temporal", "static_only", "unknown"} else "unknown"
 
 
-def normalize_ratio(value: Any) -> float:
+def normalize_ratio(value: Any) -> float | None:
+    """Normalize a ratio without turning a missing observation into zero."""
+    if isinstance(value, bool):
+        return None
     try:
-        return max(0.0, min(1.0, float(value)))
+        number = float(value)
     except (TypeError, ValueError):
-        return 0.0
+        return None
+    if not math.isfinite(number):
+        return None
+    return max(0.0, min(1.0, number))
 
 
-def normalize_ratio_map(value: Any) -> dict[str, float]:
+def normalize_ratio_map(value: Any) -> dict[str, float | None]:
     if not isinstance(value, dict):
         return {}
     return {
@@ -848,7 +909,7 @@ def normalize_string_list(value: Any) -> list[str]:
 def normalize_selling_point_observations(value: Any, valid_ids: set[str]) -> list[dict[str, Any]]:
     observations = value if isinstance(value, list) else []
     normalized: list[dict[str, Any]] = []
-    for index, item in enumerate(observations[:6], start=1):
+    for index, item in enumerate(observations, start=1):
         if not isinstance(item, dict):
             continue
         text = str(item.get("text") or "").strip()
@@ -862,7 +923,7 @@ def normalize_selling_point_observations(value: Any, valid_ids: set[str]) -> lis
                 "visual_share": normalize_ratio(item.get("visual_share")),
                 "speech_share": normalize_ratio(item.get("speech_share")),
                 "proof_mode_observed": str(item.get("proof_mode_observed") or "unknown").strip(),
-                "proof_signal_present": normalize_bool_flag(item.get("proof_signal_present")),
+                "proof_signal_present": normalize_demo_flag(item.get("proof_signal_present")),
                 "evidence_ids": [
                     str(evidence_id).strip()
                     for evidence_id in item.get("evidence_ids") or []
@@ -876,8 +937,8 @@ def normalize_selling_point_observations(value: Any, valid_ids: set[str]) -> lis
 def normalize_variant_decision_rule(value: Any, valid_ids: set[str]) -> dict[str, Any]:
     item = value if isinstance(value, dict) else {}
     return {
-        "speech_explains_choice": normalize_bool_flag(item.get("speech_explains_choice")),
-        "visual_comparison_present": normalize_bool_flag(item.get("visual_comparison_present")),
+        "speech_explains_choice": normalize_demo_flag(item.get("speech_explains_choice")),
+        "visual_comparison_present": normalize_demo_flag(item.get("visual_comparison_present")),
         "reason": str(item.get("reason") or "").strip(),
         "evidence_ids": [
             str(evidence_id).strip()
@@ -890,7 +951,7 @@ def normalize_variant_decision_rule(value: Any, valid_ids: set[str]) -> dict[str
 def normalize_attention_competitors(value: Any, valid_ids: set[str]) -> list[dict[str, Any]]:
     competitors = value if isinstance(value, list) else []
     normalized: list[dict[str, Any]] = []
-    for index, item in enumerate(competitors[:6], start=1):
+    for index, item in enumerate(competitors, start=1):
         if not isinstance(item, dict):
             continue
         label = str(item.get("object_label") or "").strip()
@@ -901,10 +962,10 @@ def normalize_attention_competitors(value: Any, valid_ids: set[str]) -> list[dic
                 "id": str(item.get("id") or f"AC{index}").strip(),
                 "object_label": label,
                 "time_ranges": normalize_string_list(item.get("time_ranges")),
-                "persistent_motion": normalize_bool_flag(item.get("persistent_motion")),
-                "high_salience": normalize_bool_flag(item.get("high_salience")),
-                "participates_in_product_task": normalize_bool_flag(item.get("participates_in_product_task")),
-                "occludes_proof_area": normalize_bool_flag(item.get("occludes_proof_area")),
+                "persistent_motion": normalize_demo_flag(item.get("persistent_motion")),
+                "high_salience": normalize_demo_flag(item.get("high_salience")),
+                "participates_in_product_task": normalize_demo_flag(item.get("participates_in_product_task")),
+                "occludes_proof_area": normalize_demo_flag(item.get("occludes_proof_area")),
                 "evidence_ids": [
                     str(evidence_id).strip()
                     for evidence_id in item.get("evidence_ids") or []
@@ -918,8 +979,8 @@ def normalize_attention_competitors(value: Any, valid_ids: set[str]) -> list[dic
 def normalize_attention_scan_audit(value: Any, valid_ids: set[str]) -> dict[str, Any]:
     source = value if isinstance(value, dict) else {}
     return {
-        "recording_equipment_visible": normalize_bool_flag(source.get("recording_equipment_visible")),
-        "foreground_non_task_object_visible": normalize_bool_flag(source.get("foreground_non_task_object_visible")),
+        "recording_equipment_visible": normalize_demo_flag(source.get("recording_equipment_visible")),
+        "foreground_non_task_object_visible": normalize_demo_flag(source.get("foreground_non_task_object_visible")),
         "notes": str(source.get("notes") or "").strip(),
         "evidence_ids": [
             str(evidence_id).strip()
@@ -943,11 +1004,18 @@ def normalize_variant_unit_fields(unit: dict[str, Any]) -> dict[str, Any]:
         if isinstance(source, dict)
         for value in source.values()
     )
-    totals_valid = sum(visual_shares.values()) <= 1.05 and sum(speech_shares.values()) <= 1.05
-    relation_mode = str(unit.get("variant_relation_mode") or "none").strip().lower()
-    if relation_mode not in {"single_focus", "explicit_comparison", "sequence", "ambiguous", "none"}:
-        relation_mode = "ambiguous"
-    comparison_purpose_explicit = normalize_bool_flag(unit.get("comparison_purpose_explicit"))
+    numeric_visual_shares = [value for value in visual_shares.values() if isinstance(value, (int, float))]
+    numeric_speech_shares = [value for value in speech_shares.values() if isinstance(value, (int, float))]
+    totals_valid = (
+        len(numeric_visual_shares) == len(visual_shares)
+        and len(numeric_speech_shares) == len(speech_shares)
+        and sum(numeric_visual_shares) <= 1.05
+        and sum(numeric_speech_shares) <= 1.05
+    )
+    relation_mode = str(unit.get("variant_relation_mode") or "unknown").strip().lower()
+    if relation_mode not in {"single_focus", "explicit_comparison", "sequence", "ambiguous", "none", "unknown"}:
+        relation_mode = "unknown"
+    comparison_purpose_explicit = normalize_demo_flag(unit.get("comparison_purpose_explicit"))
     required_fields_present = all(
         key in unit
         for key in (
@@ -955,19 +1023,22 @@ def normalize_variant_unit_fields(unit: dict[str, Any]) -> dict[str, Any]:
             "variant_relation_mode", "comparison_purpose_explicit",
         )
     )
-    has_variant_observation = bool(variant_ids) and bool(visual_shares or speech_shares)
+    has_variant_observation = bool(variant_ids) and bool(numeric_visual_shares or numeric_speech_shares)
     shape_valid = (
         (not variant_ids and relation_mode == "none" and not visual_shares and not speech_shares)
         or (relation_mode == "single_focus" and has_variant_observation and bool(visual_shares))
         # 比较和顺序可以跨相邻 evidence unit 完成；当前单元只出现一个变体仍是合法观察。
         or (relation_mode == "explicit_comparison" and has_variant_observation and comparison_purpose_explicit is True)
-        or (relation_mode in {"sequence", "ambiguous", "none"} and has_variant_observation)
+        or (relation_mode in {"sequence", "ambiguous"} and has_variant_observation)
     )
     variant_data_valid = required_fields_present and keys_valid and values_valid and totals_valid and shape_valid
     primary_variant_id = ""
     confident = False
-    if variant_data_valid and relation_mode == "single_focus" and visual_shares:
-        candidate_id, share = max(visual_shares.items(), key=lambda item: item[1])
+    if variant_data_valid and relation_mode == "single_focus" and numeric_visual_shares:
+        candidate_id, share = max(
+            ((candidate_id, share) for candidate_id, share in visual_shares.items() if isinstance(share, (int, float))),
+            key=lambda item: item[1],
+        )
         if share >= 0.70:
             primary_variant_id = candidate_id
             confident = True
@@ -1026,7 +1097,7 @@ def normalize_video_understanding(
                 "subtitle_fact": str(unit.get("subtitle_fact") or "").strip(),
                 "audio_fact": str(unit.get("audio_fact") or "").strip(),
                 "evidence_strength": normalize_evidence_strength(unit.get("evidence_strength")),
-                "product_visible": normalize_bool_flag(unit.get("product_visible")),
+                "product_visible": normalize_demo_flag(unit.get("product_visible")),
                 "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
                 # F 项背书劈成两个纯观察信道，替代旧的单字段硬判定：
                 "endorsement_verbal": normalize_demo_flag(unit.get("endorsement_verbal")),
@@ -1188,10 +1259,10 @@ def adapt_misnested_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
     if "stage_analysis" not in adapted and isinstance(adapted.get("product_visibility"), list):
         adapted["stage_analysis"] = adapted["product_visibility"]
         adapted["product_visibility"] = {
-            "first_appearance_sec": 0.0,
-            "total_screen_time_sec": 0.0,
-            "video_duration_sec": 0.0,
-            "ratio": 0.0,
+            "first_appearance_sec": None,
+            "total_screen_time_sec": None,
+            "video_duration_sec": None,
+            "ratio": None,
             "estimation_note": "模型将阶段数组误写入产品可见度字段；此处需人工结合报告帧复核。",
         }
     # 通用修复：product_visibility 缺 first_appearance_sec 时视为字段错位/缺失
@@ -1201,10 +1272,10 @@ def adapt_misnested_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
         if pv is not None:
             adapted["misplaced_product_visibility"] = pv
         adapted["product_visibility"] = {
-            "first_appearance_sec": 0.0,
-            "total_screen_time_sec": 0.0,
-            "video_duration_sec": 0.0,
-            "ratio": 0.0,
+            "first_appearance_sec": None,
+            "total_screen_time_sec": None,
+            "video_duration_sec": None,
+            "ratio": None,
             "estimation_note": "LLM 未输出可识别的 product_visibility 字段（first_appearance_sec 等），需人工复核。原数据保留在 misplaced_product_visibility。",
         }
     if isinstance(adapted.get("holistic_assessment"), str):
@@ -1222,10 +1293,13 @@ def adapt_misnested_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
     if not adapted.get("executive_summary"):
         adapted["executive_summary"] = adapted.get("one_line_summary")
     if not adapted.get("loop_closure"):
+        # Keep the missing object auditable.  The report/validation layer may
+        # reject an incomplete contract, but this adapter must not invent three
+        # negative facts merely to make the shape look complete.
         adapted["loop_closure"] = {
-            "pain_resolved_in_s4": False,
-            "benefit_delivered_in_s6": False,
-            "suspense_revealed": False,
+            "pain_resolved_in_s4": None,
+            "benefit_delivered_in_s6": None,
+            "suspense_revealed": None,
             "suspense_reveal_time": None,
             "note": "模型未单独输出闭环字段，需结合阶段证据复核。",
         }
@@ -1303,7 +1377,7 @@ def normalize_analysis_result(
                 "module_fit": normalize_choice(item.get("module_fit"), {"fit", "degraded", "unfit", "unknown"}, "unknown"),
                 "module_fit_reason": str(item.get("module_fit_reason") or "").strip(),
                 "task_completion": normalize_task_completion(item.get("task_completion")),
-                "gap_type": normalize_choice(item.get("gap_type"), {"structural", "execution", "resource"}, "structural"),
+                "gap_type": normalize_choice(item.get("gap_type"), {"structural", "execution", "resource", "unknown"}, "unknown"),
                 "gap_summary": normalize_evidence(item.get("gap_summary")),
                 "voice_performance": normalize_voice_performance(item.get("voice_performance")),
                 "benchmark_summary": required_text(item, "benchmark_summary"),
@@ -1416,7 +1490,7 @@ def normalize_analysis_result(
                 "title": required_text(item, "title"),
                 "target_stage": str(item.get("target_stage") or "").strip(),
                 "gmv_impact": str(item.get("gmv_impact") or "").strip(),
-                "gap_type": normalize_choice(item.get("gap_type"), {"structural", "execution", "resource"}, "structural"),
+                "gap_type": normalize_choice(item.get("gap_type"), {"structural", "execution", "resource", "unknown"}, "unknown"),
                 "time_range": required_text(item, "time_range"),
                 "creator_time_range": creator_time_range or required_text(item, "time_range"),
                 "benchmark_time_range": benchmark_time_range or required_text(item, "time_range"),
@@ -1561,11 +1635,11 @@ def normalize_comparison_contract(value: Any) -> dict[str, Any]:
 
     shared = value.get("shared_job") if isinstance(value.get("shared_job"), dict) else {}
     shared_job = {
-        "same_consumer_job": normalize_bool_flag(shared.get("same_consumer_job")),
-        "same_target_object": normalize_bool_flag(shared.get("same_target_object")),
-        "same_desired_outcome": normalize_bool_flag(shared.get("same_desired_outcome")),
-        "same_purchase_decision": normalize_bool_flag(shared.get("same_purchase_decision")),
-        "complement_or_dependency": normalize_bool_flag(shared.get("complement_or_dependency")),
+        "same_consumer_job": normalize_demo_flag(shared.get("same_consumer_job")),
+        "same_target_object": normalize_demo_flag(shared.get("same_target_object")),
+        "same_desired_outcome": normalize_demo_flag(shared.get("same_desired_outcome")),
+        "same_purchase_decision": normalize_demo_flag(shared.get("same_purchase_decision")),
+        "complement_or_dependency": normalize_demo_flag(shared.get("complement_or_dependency")),
         "reason": str(shared.get("reason") or "").strip(),
         "evidence_ids": normalize_evidence(shared.get("evidence_ids")),
     }
@@ -1692,7 +1766,7 @@ def normalize_fact_evidence_checklist(value: Any, valid_ids: set[str]) -> list[d
     return [
         {
             "item": str(item.get("item") or "").strip(),
-            "covered": normalize_bool_flag(item.get("covered")) is True,
+            "covered": normalize_demo_flag(item.get("covered")),
             "evidence_ids": [
                 str(evidence_id).strip()
                 for evidence_id in item.get("evidence_ids") or []
@@ -1739,7 +1813,7 @@ def normalize_structure_event_checks(value: Any, valid_ids: set[str]) -> list[di
             continue
         raw_status = str(item.get("status") or "").strip().lower()
         if raw_status not in {"present", "absent", "unknown", "conflict"}:
-            raw_present = normalize_bool_flag(item.get("present"))
+            raw_present = normalize_demo_flag(item.get("present"))
             raw_status = "present" if raw_present is True else "absent" if raw_present is False else "unknown"
         raw_coverage = str(item.get("coverage") or "").strip().lower()
         if raw_coverage not in {"complete", "partial", "unknown"}:
@@ -1845,7 +1919,7 @@ def normalize_video_fact_result(
             "subtitle_fact": str(unit.get("subtitle_fact") or "").strip(),
             "audio_fact": str(unit.get("audio_fact") or "").strip(),
             "evidence_strength": normalize_evidence_strength(unit.get("evidence_strength")),
-            "product_visible": normalize_bool_flag(unit.get("product_visible")),
+            "product_visible": normalize_demo_flag(unit.get("product_visible")),
             "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
             # F 项背书劈成两个纯观察信道，替代旧的单字段硬判定：
             "endorsement_verbal": normalize_demo_flag(unit.get("endorsement_verbal")),
@@ -1911,6 +1985,9 @@ def normalize_fact_time_range(value: Any, duration: Any) -> str:
 
 
 def normalize_stage_evidence_contract_version(value: Any) -> int | None:
+    # bool is an int subclass, but it is not a valid contract version.
+    if isinstance(value, bool):
+        return None
     try:
         version = int(value)
     except (TypeError, ValueError):

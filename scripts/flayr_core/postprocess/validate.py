@@ -487,10 +487,18 @@ def classify_variant_data_issues(units: Any) -> dict[str, list[str]]:
         if not unit_id or "_NO_" in unit_id.upper():
             continue
         variant_ids = unit.get("variant_ids")
+        relation_mode = str(unit.get("variant_relation_mode") or "unknown").strip().lower()
+        def has_numeric_share(field: str) -> bool:
+            value = unit.get(field)
+            return isinstance(value, dict) and any(
+                isinstance(share, (int, float)) and not isinstance(share, bool)
+                for share in value.values()
+            )
+
         has_variant_observation = bool(variant_ids) or any(
-            bool(unit.get(field))
+            has_numeric_share(field)
             for field in ("variant_visual_shares", "variant_speech_shares")
-        ) or str(unit.get("variant_relation_mode") or "none").strip().lower() != "none"
+        ) or relation_mode not in {"none", "unknown"}
         if has_variant_observation:
             observation_conflicts.append(unit_id)
         elif re.search(r"_(?:CERT_S5|CTA_SRT|STAGE_\d+)$", unit_id, re.IGNORECASE):
@@ -791,7 +799,7 @@ def validate_s3_usage_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
         overlays = flag.get("presentation_overlays")
         if not isinstance(overlays, list) or not overlays:
             errors.append(f"S3 {key}.presentation_overlays 必须是非空数组")
-        elif any(str(item) not in {"step_breakdown", "first_person", "asmr", "closeup", "none"} for item in overlays):
+        elif any(str(item) not in {"step_breakdown", "first_person", "asmr", "closeup", "none", "unknown"} for item in overlays):
             errors.append(f"S3 {key}.presentation_overlays 含非法值")
         start = flag.get("start_seconds")
         end = flag.get("end_seconds")
@@ -866,9 +874,10 @@ def validate_s4_effect_flags(result: dict[str, Any], analysis: dict[str, Any]) -
             "process_visualization",
             "aesthetic_display",
             "none",
+            "unknown",
         }:
             errors.append(f"S4 {key}.effect_type 非法")
-        if str(flag.get("effect_salience") or "").strip() not in {"none", "subtle", "clear", "strong"}:
+        if str(flag.get("effect_salience") or "").strip() not in {"none", "subtle", "clear", "strong", "unknown"}:
             errors.append(f"S4 {key}.effect_salience 必须是 none/subtle/clear/strong")
         if not str(flag.get("effect_reason") or "").strip():
             errors.append(f"S4 {key}.effect_reason 不能为空")
@@ -1147,8 +1156,8 @@ def validate_chain_relationships(result: dict[str, Any], analysis: dict[str, Any
         for key in ("s1_promise", "s2_answer", "s3_proof_target", "s4_outcome", "break_reason"):
             if not str(chain.get(key) or "").strip():
                 errors.append(f"promise_chain.{key} 不能为空")
-        if chain.get("chain_closed") not in {True, False}:
-            errors.append("promise_chain.chain_closed 必须是 bool")
+        if chain.get("chain_closed") not in {True, False, None}:
+            errors.append("promise_chain.chain_closed 必须是 bool 或 unknown")
         if str(chain.get("broken_at") or "").strip() not in {"S2", "S3", "S4", "none", "unknown"}:
             errors.append("promise_chain.broken_at 必须是 S2/S3/S4/none/unknown")
         break_reason = str(chain.get("break_reason") or "")
@@ -1220,7 +1229,11 @@ def validate_product_visibility(result: dict[str, Any], analysis: dict[str, Any]
     note = str(visibility.get("estimation_note") or "")
 
     if any(value is None for value in (first, total, duration, ratio)):
-        raise SystemExit("product_visibility 必须包含可解析的 first_appearance_sec、total_screen_time_sec、video_duration_sec、ratio。")
+        append_qa_warnings(
+            result,
+            ["[Q09] product_visibility 缺少有效统计，报告中的产品出镜数据需人工复核。"],
+        )
+        return
     assert first is not None and total is not None and duration is not None and ratio is not None
 
     if first < 0 or total < 0 or ratio < 0 or ratio > 1:

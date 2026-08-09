@@ -63,6 +63,7 @@ class AudioLayerTests(unittest.TestCase):
         sanitize_audio_observations(result, False)
         stage = result["stage_analysis"][0]
         self.assertEqual(stage["voice_performance"]["pace"], "未评估")
+        self.assertIsNone(stage["voice_performance"]["key_pause"])
         self.assertEqual(stage["creator_multimodal"]["channel_impacts"]["sound_rhythm"], "unknown")
         self.assertEqual(stage["creator_multimodal"]["channel_evidence_ids"]["sound_rhythm"], [])
         self.assertEqual(stage["creator_multimodal"]["dominant_channel"], "unknown")

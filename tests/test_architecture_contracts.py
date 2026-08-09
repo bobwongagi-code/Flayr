@@ -95,7 +95,15 @@ from flayr_core.postprocess.proposition import materialize_cross_stage_inputs, m
 from flayr_core.postprocess.utils import parse_srt_timestamp, read_srt_segments
 from flayr_core.postprocess.chain import finalize_severity_after_repairs, stamp_comparison_eligibility
 from flayr_core.postprocess.audit import PostprocessAudit, build_field_sources
-from flayr_core.postprocess.derive import _derive_one, _s3_usage_exec, _s4_effect_exec, _s6_cta_exec
+from flayr_core.postprocess.derive import (
+    _derive_one,
+    _s1_hook_exec,
+    _s2_contract_exec,
+    _s3_usage_exec,
+    _s4_effect_exec,
+    _s5_trust_exec,
+    _s6_cta_exec,
+)
 from flayr_core.postprocess.global_diagnosis import materialize_global_diagnosis
 from flayr_core.verification_order import assert_verification_order, write_verification_marker
 from flayr_core.video_evidence import build_transcript_pack, parse_srt_time_range
@@ -453,6 +461,7 @@ class ArchitectureContractTests(unittest.TestCase):
                 "integrated_effect": "strong",
             }
         )
+        self.assertIsNone(no_positive["compensation_applied"])
         self.assertEqual(no_positive["integrated_effect"], "weak")
 
     def test_channel_requirement_axis_is_canonical(self) -> None:
@@ -591,6 +600,18 @@ class ArchitectureContractTests(unittest.TestCase):
         }
         self.assertEqual(multimodal_execution("S3", complete, "creator", 1.0), 2.0)
         self.assertEqual(multimodal_execution("S3", missing, "creator", 0.0), 0.0)
+        incomplete_comparison = {
+            "creator_multimodal": assessment,
+            "creator_s3": {
+                "usage_process_visible": True,
+                "core_selling_point_visible": True,
+                "action_proof_met": True,
+                "action_target_contact_met": True,
+                "action_application_change_visible": True,
+                "critical_action_continuity_met": True,
+            },
+        }
+        self.assertEqual(multimodal_execution("S3", incomplete_comparison, "creator", 1.0), 1.0)
 
     def test_evidence_stages_cannot_be_rescued_by_atmosphere(self) -> None:
         for stage_id in ("S4", "S5", "S6"):
@@ -2766,6 +2787,44 @@ class ArchitectureContractTests(unittest.TestCase):
         }
         scores = _s6_cta_exec({"creator_s6": weak, "benchmark_s6": strong})
         self.assertEqual(scores, {"creator_exec": 0.5, "bench_exec": 2.0})
+
+    def test_explicit_absence_scores_zero_without_irrelevant_fields(self) -> None:
+        """An explicit absence is complete; missing active-side facts remain unknown."""
+        self.assertEqual(
+            _s1_hook_exec({"creator_hook": {"exists": False}, "benchmark_hook": {"exists": False}}),
+            {"redline": False, "creator_exec": 0.0, "bench_exec": 0.0},
+        )
+        self.assertEqual(
+            _s2_contract_exec({"creator_s2": {"exists": False}, "benchmark_s2": {"exists": False}}),
+            {"creator_exec": 0.0, "bench_exec": 0.0},
+        )
+        self.assertEqual(
+            _s3_usage_exec({"creator_s3": {"exists": False}, "benchmark_s3": {"exists": False}}),
+            {"creator_exec": 0.0, "bench_exec": 0.0},
+        )
+        self.assertEqual(
+            _s4_effect_exec(
+                {
+                    "creator_s4": {"effect_evidence_state": "none"},
+                    "benchmark_s4": {"effect_evidence_state": "none"},
+                }
+            ),
+            {"creator_exec": 0.0, "bench_exec": 0.0},
+        )
+        self.assertEqual(
+            _s5_trust_exec({"creator_s5": {"exists": False}, "benchmark_s5": {"exists": False}}),
+            {"creator_exec": 0.0, "bench_exec": 0.0},
+        )
+        self.assertEqual(
+            _s6_cta_exec({"creator_s6": {"exists": False}, "benchmark_s6": {"exists": False}}),
+            {"creator_exec": 0.0, "bench_exec": 0.0},
+        )
+
+        incomplete_creator = {"exists": True}
+        self.assertEqual(
+            _s3_usage_exec({"creator_s3": incomplete_creator, "benchmark_s3": {"exists": False}}),
+            {"creator_exec": None, "bench_exec": 0.0},
+        )
 
     def test_s6_soft_invitation_with_offer_is_not_absent_cta(self) -> None:
         complete = {

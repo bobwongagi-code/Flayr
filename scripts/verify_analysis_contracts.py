@@ -784,7 +784,7 @@ check(
 _nh = normalize_hook_flags({"exists": "true", "type": "S1-B：反差震惊型", "dims": {"camera": "yes", "copy": 1}})
 check("S1 parse 归一 hook_flags（type→B, dims 容错）",
       _nh["type"] == "B" and _nh["dims"]["camera"] is True and _nh["dims"]["copy"] is True
-      and _nh["dims"]["sound"] is False and _nh["exists"] is True)
+      and _nh["dims"]["sound"] is None and _nh["exists"] is True)
 
 _ns2 = normalize_s2_flags({
     "exists": "yes",

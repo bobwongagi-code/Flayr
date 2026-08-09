@@ -25,10 +25,13 @@
       "scripts/flayr_core/llm/pipeline.py",
       "scripts/flayr_core/llm/provider_artifacts.py",
       "scripts/flayr_core/llm/s4_visual_verifier.py",
+      "scripts/flayr_core/multimodal.py",
       "scripts/flayr_core/postprocess/chain.py",
       "scripts/flayr_core/postprocess/derive.py",
       "scripts/flayr_core/postprocess/global_diagnosis.py",
+      "scripts/flayr_core/postprocess/repair_evidence.py",
       "scripts/flayr_core/postprocess/repair_stages.py",
+      "scripts/flayr_core/postprocess/validate.py",
       "scripts/flayr_core/report.py",
       "scripts/flayr_core/subtitle_track.py",
       "scripts/flayr_core/translation.py",
@@ -38,7 +41,11 @@
       "tests/test_architecture_contracts.py",
       "tests/test_bitter_lesson_contract.py",
       "tests/test_compact_eval.py",
-      "tests/test_derive_resolver.py"
+      "tests/test_derive_resolver.py",
+      "tests/test_audio_layers.py",
+      "tests/test_llm_api.py",
+      "tests/test_stage_evidence_contracts.py",
+      "scripts/verify_analysis_contracts.py"
     ],
     "forbidden_globs": [
       "runs/**",
