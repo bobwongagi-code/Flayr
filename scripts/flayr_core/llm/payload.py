@@ -315,6 +315,7 @@ def _compact_comparison_facts(value: Any) -> dict[str, Any]:
                     "audio_fact": unit.get("audio_fact"),
                     "visual_evidence": unit.get("visual_evidence"),
                     "evidence_strength": unit.get("evidence_strength"),
+                    "fact_quality": unit.get("fact_quality"),
                     "trust_source_type": unit.get("trust_source_type"),
                 }
             )
@@ -553,6 +554,9 @@ def build_video_fact_payload(
             "不要判断 S1-S6 是否成立，不要把 evidence unit 归入阶段，不要输出 stage_evidence_checks。"
             "阶段归属、资格、required signal 绑定和明确不存在将在后续独立的 Stage1-B 请求中完成；"
             "functions 只能作为原子事实的功能标签，不能替代 Stage1-B 资格。"
+            "每个 evidence_unit 必须填写 fact_quality 的六个观察轴：subject、visibility、composition、completion、proof、causal_link。"
+            "这些字段只描述这条事实看得是否清楚、是否是直接对比/结果/主张以及是否有因果连接，不是阶段资格或 severity；"
+            "无法判断时填 uncertain 或 not_applicable，不要省略该对象。"
             "Stage1 输出严格禁止 severity、model_severity、gap、comparison、commercial_priority、recommendations、improvements、stage_analysis 和 stage_evidence_links；"
             "stage1_acquisition、stage1_qualification、evidence_set_* 和 stage1_recovery 是代码拥有的采集/冻结元数据，模型不得输出或覆盖；"
             "这些字段属于后续 Judgment/Resolution/Report，出现时必须拒绝，不得由代码静默丢弃。",
@@ -646,6 +650,14 @@ def build_video_fact_payload(
                             "subtitle_fact": "可读字幕；没有则留空。",
                             "audio_fact": "该时刻的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。",
                             "evidence_strength": "direct|explicit|inferred|absent；只描述该证据单元自身的事实强度，不确定或缺失留空。",
+                            "fact_quality": {
+                                "subject": "correct|incorrect|uncertain|not_applicable",
+                                "visibility": "clear|partial|obscured|uncertain|not_applicable",
+                                "composition": "central|supporting|weak|uncertain|not_applicable",
+                                "completion": "complete|partial|none|uncertain|not_applicable",
+                                "proof": "direct_comparison|result_only|claim_only|none|uncertain|not_applicable",
+                                "causal_link": "supported|weak|unsupported|uncertain|not_applicable",
+                            },
                             "product_visible": True,
                             "product_coverage": "该时段产品在画面里的视觉占比：none｜low｜medium｜high。看不到产品写 none。",
                             "endorsement_verbal": False,
@@ -803,6 +815,7 @@ def build_stage_evidence_qualification_payload(
                 "voiceover_zh": unit.get("voiceover_zh"),
                 "subtitle_fact": unit.get("subtitle_fact"),
                 "evidence_strength": unit.get("evidence_strength"),
+                "fact_quality": unit.get("fact_quality"),
                 "product_visible": unit.get("product_visible"),
                 "product_coverage": unit.get("product_coverage"),
                 "functions": unit.get("functions"),
@@ -836,6 +849,7 @@ def build_stage_evidence_qualification_payload(
             "absent 只有在相关观察范围已完整覆盖、且合同要求的信号明确未出现时才允许。离散采样、粗粒度口播或未完成覆盖不能证明 absent。",
             "not_applicable 只有在比较合同明确说明该阶段不适用时才允许，并必须在 reason 中写明依据；不能用它掩盖采集缺失。",
             "每个 signal_binding 必须引用当前输入中真实存在的 evidence_id；不得跨角色、跨视频或跨阶段创造引用。",
+            "fact_quality 是 Stage1-A 对每条观察的描述性质量元数据；只能结合输入中的这些字段判断资格，不能把缺失或 uncertain 猜成已验证。",
             "## 阶段合同",
             stage_evidence_contract_prompt(normalized_targets),
             "## 输出时必须遵守的阶段信号白名单",
@@ -948,6 +962,7 @@ def build_video_fact_recovery_payload(
                     _stage_evidence_signal_codebook(normalized_targets),
                     "这是一次追加观察，不是重新抽取整条视频；不得改写、删除或合并已有 evidence_units。",
                     "已有事实只用于避免重复，不得把它们当成可修改的模型输出。没有确认事实就返回空 candidate_evidence_units 和 unknown。",
+                    "每个新 candidate_evidence_unit 必须填写 fact_quality 的六个观察轴；无法判断时填 uncertain 或 not_applicable。",
                     "## 已锁定事实摘要（只读）",
                     json.dumps(locked_fact_summary, ensure_ascii=False, indent=2),
                     "## 输出合同",
@@ -965,6 +980,14 @@ def build_video_fact_recovery_payload(
                             "subtitle_fact": "直接读到的字幕，没有则留空",
                             "audio_fact": "直接听到的音频事实，没有则写无",
                             "evidence_strength": "direct|explicit|inferred|absent",
+                            "fact_quality": {
+                                "subject": "correct|incorrect|uncertain|not_applicable",
+                                "visibility": "clear|partial|obscured|uncertain|not_applicable",
+                                "composition": "central|supporting|weak|uncertain|not_applicable",
+                                "completion": "complete|partial|none|uncertain|not_applicable",
+                                "proof": "direct_comparison|result_only|claim_only|none|uncertain|not_applicable",
+                                "causal_link": "supported|weak|unsupported|uncertain|not_applicable",
+                            },
                             "functions": [],
                         }
                     ],
@@ -1202,6 +1225,7 @@ def _compact_stage_group_facts(
                         "subtitle_fact": unit.get("subtitle_fact"),
                         "audio_fact": unit.get("audio_fact"),
                         "evidence_strength": unit.get("evidence_strength"),
+                        "fact_quality": unit.get("fact_quality"),
                         "functions": unit.get("functions"),
                         "trust_source_signals": unit.get("trust_source_signals"),
                         "trust_source_reference": unit.get("trust_source_reference"),

@@ -98,6 +98,35 @@ def normalize_evidence_strength(value: Any) -> str | None:
     return text if text in EVIDENCE_STRENGTHS else None
 
 
+_FACT_QUALITY_VALUES = {
+    "subject": {"correct", "incorrect", "uncertain", "not_applicable"},
+    "visibility": {"clear", "partial", "obscured", "uncertain", "not_applicable"},
+    "composition": {"central", "supporting", "weak", "uncertain", "not_applicable"},
+    "completion": {"complete", "partial", "none", "uncertain", "not_applicable"},
+    "proof": {"direct_comparison", "result_only", "claim_only", "none", "uncertain", "not_applicable"},
+    "causal_link": {"supported", "weak", "unsupported", "uncertain", "not_applicable"},
+}
+
+
+def normalize_fact_quality(value: Any) -> dict[str, str | None] | None:
+    """Preserve bounded observation-quality metadata across the Stage1 handoff.
+
+    This is descriptive metadata, not a qualification decision. Invalid or
+    missing values remain ``None`` so Stage2 can see that the quality axis was
+    not established instead of receiving a silently dropped field.
+    """
+    if not isinstance(value, dict):
+        return None
+    return {
+        field: (
+            str(value.get(field)).strip().lower()
+            if str(value.get(field) or "").strip().lower() in allowed
+            else None
+        )
+        for field, allowed in _FACT_QUALITY_VALUES.items()
+    }
+
+
 def normalize_s3_usage_evidence_state(value: Any) -> str | None:
     """归一 S3 使用完成度；缺失/非法保持 None，禁止猜成 none。"""
     return normalize_evidence_state(value, S3_USAGE_EVIDENCE_STATES)
@@ -1097,6 +1126,7 @@ def normalize_video_understanding(
                 "subtitle_fact": str(unit.get("subtitle_fact") or "").strip(),
                 "audio_fact": str(unit.get("audio_fact") or "").strip(),
                 "evidence_strength": normalize_evidence_strength(unit.get("evidence_strength")),
+                "fact_quality": normalize_fact_quality(unit.get("fact_quality")),
                 "product_visible": normalize_demo_flag(unit.get("product_visible")),
                 "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
                 # F 项背书劈成两个纯观察信道，替代旧的单字段硬判定：
@@ -1126,6 +1156,13 @@ def normalize_video_understanding(
                 ):
                     if field in unit:
                         normalized_unit[field] = copy.deepcopy(unit[field])
+                # ``fact_quality`` was added after older frozen ledgers were
+                # produced. Preserve the old field shape while re-reading a
+                # trusted ledger so its immutable digest remains stable.
+                if "fact_quality" in unit:
+                    normalized_unit["fact_quality"] = copy.deepcopy(unit["fact_quality"])
+                else:
+                    normalized_unit.pop("fact_quality", None)
             normalized_units.append(normalized_unit)
         valid_ids = {unit["id"] for unit in normalized_units}
         raw_gate_status = item.get("gate_observation_status") if isinstance(item.get("gate_observation_status"), dict) else {}
@@ -1919,6 +1956,9 @@ def normalize_video_fact_result(
             "subtitle_fact": str(unit.get("subtitle_fact") or "").strip(),
             "audio_fact": str(unit.get("audio_fact") or "").strip(),
             "evidence_strength": normalize_evidence_strength(unit.get("evidence_strength")),
+            # Keep bounded observation-quality axes available to Stage1-B and
+            # Stage2; they describe the fact but do not qualify it.
+            "fact_quality": normalize_fact_quality(unit.get("fact_quality")),
             "product_visible": normalize_demo_flag(unit.get("product_visible")),
             "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
             # F 项背书劈成两个纯观察信道，替代旧的单字段硬判定：

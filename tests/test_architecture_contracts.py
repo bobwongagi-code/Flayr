@@ -4990,6 +4990,8 @@ class ArchitectureContractTests(unittest.TestCase):
         )
         primary_text = json.dumps(primary, ensure_ascii=False)
         self.assertIn("Stage1-A 原子事实合同", primary_text)
+        self.assertIn("fact_quality", primary_text)
+        self.assertIn("causal_link", primary_text)
         self.assertNotIn('"stage_evidence_checks": [', primary_text)
         self.assertNotIn('"structure_event_checks": [', primary_text)
 
@@ -5006,12 +5008,21 @@ class ArchitectureContractTests(unittest.TestCase):
                         "information": "看到产品被拿起",
                         "visual_fact": "手拿产品",
                         "evidence_strength": "direct",
+                        "fact_quality": {
+                            "subject": "correct",
+                            "visibility": "clear",
+                            "composition": "central",
+                            "completion": "complete",
+                            "proof": "none",
+                            "causal_link": "not_applicable",
+                        },
                     }
                 ],
             },
         )
         qualification_text = qualification["messages"][1]["content"][0]["text"]
         self.assertIn("Stage1-B 阶段资格投影", qualification_text)
+        self.assertIn("fact_quality", qualification_text)
         self.assertIn('"stage_evidence_checks"', qualification_text)
         self.assertEqual(
             [item.get("type") for item in qualification["messages"][1]["content"] if isinstance(item, dict)],

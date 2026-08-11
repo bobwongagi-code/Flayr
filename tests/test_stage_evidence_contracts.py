@@ -37,6 +37,7 @@ from flayr_core.llm.pipeline import (
 )
 from flayr_core.llm.payload import (
     _compact_comparison_facts,
+    _compact_stage_group_facts,
     _recovery_stage_windows,
     _replace_recovery_full_media,
     build_s1_boundary_hint_block,
@@ -1763,6 +1764,70 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(len(normalized["evidence_units"]), 10)
         self.assertFalse(normalized["evidence_budget_exceeded"])
 
+    def test_fact_quality_is_retained_in_stage_scoped_handoff(self) -> None:
+        quality = {
+            "subject": "correct",
+            "visibility": "clear",
+            "composition": "central",
+            "completion": "complete",
+            "proof": "claim_only",
+            "causal_link": "unsupported",
+        }
+        normalized = normalize_video_fact_result(
+            "creator",
+            {
+                "evidence_units": [
+                    {
+                        "id": "C1",
+                        "time_range": "1.0s - 2.0s",
+                        "information": "观察",
+                        "fact_quality": {**quality, "proof": "invented"},
+                    }
+                ]
+            },
+            self._analysis(),
+        )
+        self.assertEqual(normalized["evidence_units"][0]["fact_quality"]["subject"], "correct")
+        self.assertIsNone(normalized["evidence_units"][0]["fact_quality"]["proof"])
+        understanding = normalize_video_understanding(
+            {
+                "creator": {
+                    "evidence_units": [
+                        {
+                            "id": "C1",
+                            "time_range": "1.0s - 2.0s",
+                            "information": "观察",
+                            "fact_quality": quality,
+                        }
+                    ]
+                }
+            }
+        )
+        self.assertEqual(
+            understanding["creator"]["evidence_units"][0]["fact_quality"],
+            quality,
+        )
+
+        side = self._active_side("C")
+        side["evidence_units"][0]["fact_quality"] = quality
+        s1 = next(item for item in side["stage_evidence_checks"] if item["stage"] == "S1")
+        s1.update(
+            {
+                "status": "present",
+                "coverage": "complete",
+                "evidence_ids": ["C1"],
+                "observed_signals": list(stage_evidence_contract("S1").required_signals),
+                "missing_signals": [],
+                "signal_bindings": self._signal_bindings("S1", "C1"),
+            }
+        )
+        freeze_stage_evidence(side)
+        compact = _compact_stage_group_facts({"creator": side}, ["S1"])
+        self.assertEqual(
+            compact["creator"]["stages"]["S1"]["qualified_evidence"][0]["fact_quality"],
+            quality,
+        )
+
     def test_model_cannot_author_budget_exhaustion_state(self) -> None:
         with self.assertRaisesRegex(SystemExit, "管线字段"):
             normalize_video_fact_result(
@@ -1996,7 +2061,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             unit_id = "C1" if role_code == "C" else "B1"
             for check in checks:
                 check["evidence_ids"] = [unit_id]
-            sides["creator" if role_code == "C" else "benchmark"] = {
+            side = {
                 "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
                 "stage1_acquisition": self._active_side(role_code)["stage1_acquisition"],
                 "stage_evidence_checks": checks,
@@ -2007,9 +2072,13 @@ class StageEvidenceContractTests(unittest.TestCase):
                 }],
                 "evidence_budget_exceeded": True,
             }
+            freeze_stage_evidence(side)
+            sides["creator" if role_code == "C" else "benchmark"] = side
         result = {
             "video_understanding": sides,
             "comparison_contract": {
+                "identity_relation": "exact_product",
+                "substitution_relation": "same_solution",
                 "overall_status": "full_direct",
                 "stage_eligibility": {
                     stage: {"status": "direct", "basis": "同款"}
@@ -2019,9 +2088,19 @@ class StageEvidenceContractTests(unittest.TestCase):
             "stage_analysis": [{"stage": stage} for stage in stage_codes()],
         }
         apply_comparison_eligibility(result)
-        self.assertTrue(
-            all(stage.get("comparison_status") == "not_directly_comparable" for stage in result["stage_analysis"])
-        )
+        self.assertTrue(all("comparison_status" not in stage for stage in result["stage_analysis"]))
+        self.assertTrue(all(
+            stage["stage_evidence_gate"]["status"] == "blocked"
+            for stage in result["stage_analysis"]
+        ))
+        self.assertTrue(all(
+            stage["stage_evidence_gate"]["reason_code"] == "evidence_budget_exceeded"
+            for stage in result["stage_analysis"]
+        ))
+        self.assertTrue(all(
+            stage["analysis_status"] == "evidence_blocked"
+            for stage in result["stage_analysis"]
+        ))
 
     def test_analysis_view_exposes_only_qualified_units_for_all_stages(self) -> None:
         side = self._active_side("C", "present")
@@ -3326,6 +3405,30 @@ class StageEvidenceContractTests(unittest.TestCase):
             renormalized["gate_observation_status"],
             side["gate_observation_status"],
         )
+        self.assertEqual(stage_evidence_sha256(renormalized), expected)
+        self.assertEqual(
+            stage_evidence_snapshot_issues(renormalized, expected_sha256=expected),
+            [],
+        )
+
+    def test_trusted_normalization_keeps_legacy_fact_quality_shape_and_hash(self) -> None:
+        side = normalize_video_understanding(
+            {"creator": self._active_side("C")},
+            allow_trusted_pipeline_metadata=True,
+        )["creator"]
+        # Simulate a frozen ledger produced before fact_quality existed.
+        for unit in side["evidence_units"]:
+            unit.pop("fact_quality", None)
+        self.assertNotIn("fact_quality", side["evidence_units"][0])
+        freeze_stage_evidence(side)
+        expected = side["evidence_set_sha256"]
+
+        renormalized = normalize_video_understanding(
+            {"creator": side},
+            allow_trusted_pipeline_metadata=True,
+        )["creator"]
+
+        self.assertNotIn("fact_quality", renormalized["evidence_units"][0])
         self.assertEqual(stage_evidence_sha256(renormalized), expected)
         self.assertEqual(
             stage_evidence_snapshot_issues(renormalized, expected_sha256=expected),

@@ -2621,6 +2621,7 @@ def _stage_analysis_side_view(side: Any, target_stages: set[str] | None) -> dict
                 "visual_fact": units_by_id[unit_id].get("visual_fact"),
                 "voiceover": units_by_id[unit_id].get("voiceover"),
                 "evidence_strength": units_by_id[unit_id].get("evidence_strength"),
+                "fact_quality": units_by_id[unit_id].get("fact_quality"),
                 "functions": units_by_id[unit_id].get("functions"),
             }
             for unit_id in candidate_ids
