@@ -291,6 +291,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="severity_only",
     )
     parser.add_argument(
+        "--visual-input-mode",
+        choices=("raw_video", "frames"),
+        default="raw_video",
+        help="visual_extraction only: compare raw bounded videos or frozen stage frames.",
+    )
+    parser.add_argument(
         "--evaluation-role",
         choices=tuple(sorted(EVALUATION_ROLES)),
         default="model_calibration",
@@ -396,7 +402,11 @@ def main() -> int:
             )
             gt_stages = None
         elif args.variant == "visual_extraction":
-            bundle = load_frozen_video_bundle(run_dir)
+            bundle = (
+                load_frozen_video_bundle(run_dir)
+                if args.visual_input_mode == "raw_video"
+                else load_frozen_visual_bundle(run_dir)
+            )
             gt_stages = None
         elif args.variant in {"s4_fact_state", "s4_single_pass", "s4_free_text_steps", "s4_judgment", "s5_audit"}:
             bundle = load_frozen_compact_bundle(run_dir, include_images=False)
@@ -445,6 +455,7 @@ def main() -> int:
         "contract_limits": {**contract_limits, "output_budget": args.output_budget},
         "fact_extraction_root": str(fact_extraction_root) if fact_extraction_root else None,
         "fact_source_model": args.fact_source_model,
+        "visual_input_mode": args.visual_input_mode if args.variant == "visual_extraction" else None,
         "provider_replay_from": str(args.provider_replay_from) if args.provider_replay_from else None,
         "samples": [],
     }

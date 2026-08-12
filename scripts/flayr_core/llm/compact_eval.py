@@ -127,7 +127,11 @@ def contract_limits_for_variant(variant: str) -> dict[str, int]:
         limits["max_overall_reason_chars"] = COMPACT_MAX_BASIS_CHARS
     if variant in {"severity_scaffold", "severity_only_scaffold"}:
         limits["max_decision_basis_chars"] = COMPACT_MAX_BASIS_CHARS
-    if variant in {"visual_extraction", "visual_extraction_on_raw_video"}:
+    if variant in {
+        "visual_extraction",
+        "visual_extraction_on_raw_video",
+        "visual_extraction_on_frames",
+    }:
         limits.update(
             {
                 "max_evidence_units_per_role": EXTRACTION_MAX_UNITS,
@@ -796,6 +800,8 @@ def build_compact_eval_payload(
         "severity 只能是 small、medium、large；不要使用模型之外的分数。"
         "每侧 observation_state 只能是 none、partial、complete、uncertain。"
         "evidence_ids 只能引用同侧、对应阶段事实清单中已经存在的 ID；没有明确证据时填空数组。"
+        "如果锁定事实清单在某侧某阶段没有任何对应事实，必须将该侧 observation_state 填 none；"
+        "只有 observation_state=partial 或 complete 时才可填写 evidence_ids，且必须至少引用一个合法 ID。"
         "不能把标杆事实复制成达人事实，也不能用相邻阶段 ID 补足当前阶段。"
         f"每侧每阶段最多引用 {evidence_id_limit} 个 evidence_ids；超过这个数量会被合同拒绝。"
         "不要输出 product foundation、improvements、建议话术、长篇摘要或任何额外字段。"
@@ -861,20 +867,41 @@ def build_model_independent_payload(
         "输入事实来自本模型此前完成的视觉事实抽取，事实包已经锁定；本次不得新增、改写或删除事实。"
         "必须输出 overall 和六个阶段，阶段顺序固定为 S1 Hook、S2 产品引出、S3 使用过程、S4 效果呈现、S5 信任放大、S6 CTA。"
         "overall.winner 只能是 benchmark、creator、tie、uncertain；overall.gap 只能是 none、small、medium、large、uncertain。"
+        "overall.winner 与 overall.gap 也必须保持一致：winner=tie 时 gap 只能是 none 或 uncertain；"
+        "gap=none 时 winner 只能是 tie 或 uncertain；winner=benchmark 或 creator 时 gap 不能是 none。"
         "阶段必须把方向和大小分开填写：relation 表示该阶段谁更好，只能是 benchmark_better、creator_better、tie、uncertain；"
         "gap_magnitude 表示差距大小，只能是 none、small、medium、large、uncertain。"
         "relation=tie 时 gap_magnitude 必须是 none 或 uncertain；gap_magnitude=none 时 relation 必须是 tie 或 uncertain。"
+        "stage_judgments 必须是六个完整对象；每个对象都必须同时包含 stage、relation、gap_magnitude、confidence、creator、benchmark、rationale，不能省略任何阶段字段。"
+        "提交前逐项检查每个阶段：relation=tie 只能配 gap_magnitude=none 或 uncertain，绝对不能配 small、medium 或 large；"
         "如果 creator 更好、双方持平或事实不确定，不要为了兼容旧 severity 把它强行写成 small；请使用对应 relation 和 gap_magnitude。"
         "每侧 observation_state 只能是 none、partial、complete、uncertain。"
         "evidence_ids 只能引用同侧、对应阶段事实清单中已经存在的 ID；没有明确证据时填空数组。"
         "不能把标杆事实复制成达人事实，也不能用相邻阶段 ID 补足当前阶段。"
         f"每侧每阶段最多引用 {evidence_id_limit} 个 evidence_ids；每条 reason 和 rationale 都必须是可核对的事实依据，"
+        "即使 observation_state=none 或 uncertain，reason 也必须填写非空的简短说明（例如未观察到明确事实或当前信息不足）；"
         "不要输出隐藏推理过程、报告、improvements、derive 结果或任何额外字段。输出前检查所有 evidence_ids 的阶段归属，并确保整个 JSON 最后以一个完整的右花括号结束。"
         f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
     )
+    if bundle.video_inputs and bundle.visual_inputs:
+        representation_instruction = (
+            "附图和原始视频都只是本次判断的视觉核对上下文；锁定事实包仍是固定输入，不能借此新增、改写或删除事实。"
+        )
+    elif bundle.video_inputs:
+        representation_instruction = (
+            "本次附带的是原始视频，没有附图；原始视频只作为视觉核对上下文，不能据此新增、改写或删除锁定事实。"
+        )
+    elif bundle.visual_inputs:
+        representation_instruction = (
+            "本次附带的是固定关键帧，没有原始视频；附图只作为视觉核对上下文，不能据此新增、改写或删除锁定事实。"
+        )
+    else:
+        representation_instruction = "本次没有附带视觉输入，只能使用锁定事实包完成判断。"
     user_text = (
         "请独立完成一份整体比较和六阶段判断。只使用下面已经锁定的产品、阶段和本模型视觉事实；"
-        "这份输出将与人工初始判断分层对齐，不能根据人工结论反向调整。\n\n"
+        "这份输出将与人工初始判断分层对齐，不能根据人工结论反向调整。"
+        + representation_instruction
+        + "\n\n"
         + json.dumps(bundle.context, ensure_ascii=False, indent=2)
     )
     return _build_multimodal_payload(
@@ -2628,7 +2655,11 @@ def _run_isolated_evaluation(
             MODEL_INDEPENDENT_SCHEMA_VERSION
             if variant == "model_independent"
             else VISUAL_EXTRACTION_SCHEMA_VERSION
-            if variant in {"visual_extraction", "visual_extraction_on_raw_video"}
+            if variant in {
+                "visual_extraction",
+                "visual_extraction_on_raw_video",
+                "visual_extraction_on_frames",
+            }
             else S4_FACT_STATE_SCHEMA_VERSION
             if variant == "s4_fact_state"
             else S4_JUDGMENT_SCHEMA_VERSION
@@ -2761,7 +2792,7 @@ def _run_isolated_evaluation(
             "execution_source": execution_source,
             "resource_budget": budget.snapshot(),
         }
-        if variant == "visual_extraction_on_raw_video":
+        if variant in {"visual_extraction_on_raw_video", "visual_extraction_on_frames"}:
             result["normalized_evidence_units"] = normalize_visual_extraction_result(parsed, bundle)
         if gt_stages is not None:
             result["gt_score"] = score_compact_result(parsed, gt_stages)
@@ -3046,11 +3077,25 @@ def run_visual_extraction_evaluation(
     evaluation_role: str = "model_calibration",
     provider_replay_from: Path | None = None,
 ) -> dict[str, Any]:
-    """Run visual fact extraction over fixed frames, without severity judgment."""
-    if bundle.input_mode != "raw_video_only":
-        raise CompactEvaluationError("visual extraction requires a raw_video_only bundle")
+    """Run visual fact extraction over one frozen representation.
+
+    The contract is shared by raw-video and fixed-frame controls. The input
+    mode remains part of the artifact metadata so the two conditions cannot be
+    silently treated as interchangeable.
+    """
+    if bundle.input_mode not in {"raw_video_only", "visual_frames_only"}:
+        raise CompactEvaluationError(
+            "visual extraction requires a raw_video_only or visual_frames_only bundle"
+        )
     roles = _visual_extraction_roles(bundle)
-    source_durations = _bundle_video_durations(bundle)
+    source_durations = _source_video_durations(bundle.run_dir)
+    source_durations.update(
+        {
+            role: value
+            for role, value in _bundle_video_durations(bundle).items()
+            if role not in source_durations
+        }
+    )
     if any(role not in source_durations for role in roles):
         raise CompactEvaluationError("visual extraction requires a finite source duration for every video role")
     payload = build_visual_extraction_payload(
@@ -3073,7 +3118,11 @@ def run_visual_extraction_evaluation(
         ),
         task_role=VISUAL_EXTRACTION_ROLE,
         evaluation_role=evaluation_role,
-        variant="visual_extraction_on_raw_video",
+        variant=(
+            "visual_extraction_on_raw_video"
+            if bundle.input_mode == "raw_video_only"
+            else "visual_extraction_on_frames"
+        ),
         success_filename="visual_extraction_evaluation.json",
         failure_filename="visual_extraction_failure.json",
         call_kind="compact_extraction_eval",
