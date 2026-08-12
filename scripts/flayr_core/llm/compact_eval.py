@@ -127,11 +127,7 @@ def contract_limits_for_variant(variant: str) -> dict[str, int]:
         limits["max_overall_reason_chars"] = COMPACT_MAX_BASIS_CHARS
     if variant in {"severity_scaffold", "severity_only_scaffold"}:
         limits["max_decision_basis_chars"] = COMPACT_MAX_BASIS_CHARS
-    if variant in {
-        "visual_extraction",
-        "visual_extraction_on_raw_video",
-        "visual_extraction_on_frames",
-    }:
+    if variant in {"visual_extraction", "visual_extraction_on_raw_video"}:
         limits.update(
             {
                 "max_evidence_units_per_role": EXTRACTION_MAX_UNITS,
@@ -2655,11 +2651,7 @@ def _run_isolated_evaluation(
             MODEL_INDEPENDENT_SCHEMA_VERSION
             if variant == "model_independent"
             else VISUAL_EXTRACTION_SCHEMA_VERSION
-            if variant in {
-                "visual_extraction",
-                "visual_extraction_on_raw_video",
-                "visual_extraction_on_frames",
-            }
+            if variant in {"visual_extraction", "visual_extraction_on_raw_video"}
             else S4_FACT_STATE_SCHEMA_VERSION
             if variant == "s4_fact_state"
             else S4_JUDGMENT_SCHEMA_VERSION
@@ -2792,7 +2784,7 @@ def _run_isolated_evaluation(
             "execution_source": execution_source,
             "resource_budget": budget.snapshot(),
         }
-        if variant in {"visual_extraction_on_raw_video", "visual_extraction_on_frames"}:
+        if variant == "visual_extraction_on_raw_video":
             result["normalized_evidence_units"] = normalize_visual_extraction_result(parsed, bundle)
         if gt_stages is not None:
             result["gt_score"] = score_compact_result(parsed, gt_stages)
@@ -3083,10 +3075,8 @@ def run_visual_extraction_evaluation(
     mode remains part of the artifact metadata so the two conditions cannot be
     silently treated as interchangeable.
     """
-    if bundle.input_mode not in {"raw_video_only", "visual_frames_only"}:
-        raise CompactEvaluationError(
-            "visual extraction requires a raw_video_only or visual_frames_only bundle"
-        )
+    if bundle.input_mode != "raw_video_only":
+        raise CompactEvaluationError("visual extraction requires a raw_video_only bundle")
     roles = _visual_extraction_roles(bundle)
     source_durations = _source_video_durations(bundle.run_dir)
     source_durations.update(
@@ -3118,11 +3108,7 @@ def run_visual_extraction_evaluation(
         ),
         task_role=VISUAL_EXTRACTION_ROLE,
         evaluation_role=evaluation_role,
-        variant=(
-            "visual_extraction_on_raw_video"
-            if bundle.input_mode == "raw_video_only"
-            else "visual_extraction_on_frames"
-        ),
+        variant="visual_extraction_on_raw_video",
         success_filename="visual_extraction_evaluation.json",
         failure_filename="visual_extraction_failure.json",
         call_kind="compact_extraction_eval",

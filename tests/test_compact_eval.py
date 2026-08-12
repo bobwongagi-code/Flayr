@@ -333,10 +333,6 @@ class CompactEvalContractTests(unittest.TestCase):
             contract_limits_for_variant("visual_extraction_on_raw_video")["max_evidence_units_per_role"],
             12,
         )
-        self.assertEqual(
-            contract_limits_for_variant("visual_extraction_on_frames")["max_evidence_units_per_role"],
-            12,
-        )
         self.assertEqual(contract_limits_for_variant("model_independent")["stage_count"], 6)
         self.assertEqual(
             contract_limits_for_variant("severity_only_scaffold")["stage_count"],
