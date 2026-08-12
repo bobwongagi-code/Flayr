@@ -53,6 +53,7 @@ IMAGE_DATA_URL_MAX_BYTES = 8 * 1024 * 1024
 DEFAULT_SINGLE_REQUEST_BYTES = 64 * 1024 * 1024
 SSE_MAX_EVENT_BYTES = 4 * 1024 * 1024
 LLM_TRANSPORT_DIAGNOSTIC_BYTES = 64 * 1024
+RETIRED_MODEL_PREFIXES = ("qwen3-vl-flash",)
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,14 @@ def can_send_standalone_audio(api_url: str, model: str = "") -> bool:
 def can_analyze_native_audio(api_url: str, model: str = "") -> bool:
     """Return the matrix decision for direct waveform perception."""
     return provider_capabilities(api_url, model).native_audio_analysis
+
+
+def reject_retired_model(model: str) -> None:
+    """Block retired models at the shared provider boundary before any network call."""
+    normalized = str(model or "").strip().lower()
+    for prefix in RETIRED_MODEL_PREFIXES:
+        if normalized == prefix or normalized.startswith(f"{prefix}-"):
+            raise SystemExit(f"model has been retired and cannot be called: {model}")
 
 
 def _curl_resolve_entries(validated: ValidatedOutboundURL) -> tuple[str, ...]:
@@ -359,6 +368,7 @@ def call_llm_api(
             payload_path.unlink(missing_ok=True)
     if not isinstance(payload, dict):
         raise SystemExit("LLM request payload must be a JSON object")
+    reject_retired_model(str(payload.get("model") or ""))
     payload["stream"] = True
     stream_options = payload.get("stream_options")
     if not isinstance(stream_options, dict):

@@ -518,7 +518,7 @@ class CompactEvalContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bundle = load_frozen_compact_bundle(_write_bundle(Path(tmp)), include_images=False)
             payload = build_compact_eval_payload(
-                "qwen3-vl-flash",
+                "qwen3-vl-plus",
                 bundle,
                 output_budget=4096,
                 output_budget_field="max_completion_tokens",
@@ -603,7 +603,7 @@ class CompactEvalContractTests(unittest.TestCase):
             run = _write_bundle(Path(tmp))
             bundle = load_frozen_visual_bundle(run, include_images=False)
             self.assertEqual(bundle.input_mode, "visual_frames_only")
-            payload = build_visual_extraction_payload("qwen3-vl-flash", bundle, output_budget=4096)
+            payload = build_visual_extraction_payload("qwen3-vl-plus", bundle, output_budget=4096)
             self.assertIn("不测 severity", payload["messages"][0]["content"])
             self.assertEqual(validate_visual_extraction_result(_extraction_result()), [])
             invalid = _extraction_result()

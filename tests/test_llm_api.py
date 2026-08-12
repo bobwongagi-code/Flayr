@@ -23,6 +23,7 @@ from flayr_core.llm.api import (  # noqa: E402
     is_retryable_error,
     parse_curl_http_status,
     provider_capabilities,
+    reject_retired_model,
     strip_curl_http_status,
 )
 from flayr_core.llm.media import build_evidence_sensory_inputs  # noqa: E402
@@ -55,6 +56,13 @@ from flayr_core.llm.stage_fact_artifacts import StageFactArtifactError  # noqa: 
 
 
 class LlmApiContractTests(unittest.TestCase):
+    def test_retired_vl_flash_models_are_rejected(self) -> None:
+        for model in ("qwen3-vl-flash", "qwen3-vl-flash-2026-01-01"):
+            with self.subTest(model=model), self.assertRaisesRegex(SystemExit, "model has been retired"):
+                reject_retired_model(model)
+
+        reject_retired_model("qwen3-vl-plus")
+
     def test_stage1_resume_falls_back_to_provider_when_a_artifact_is_missing(self) -> None:
         args = Namespace(
             llm_image_limit=8,

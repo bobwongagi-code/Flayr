@@ -25,6 +25,7 @@
       "scripts/evaluate_video_controls.py",
       "scripts/flayr.py",
       "scripts/flayr_core/asr.py",
+      "scripts/flayr_core/llm/api.py",
       "scripts/flayr_core/llm/compact_eval.py",
       "scripts/flayr_core/llm/json_codec.py",
       "scripts/flayr_core/llm/parse.py",
