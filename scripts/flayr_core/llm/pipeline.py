@@ -5152,14 +5152,20 @@ def _maybe_recover_video_facts(
         include_budget=False,
         include_coverage_audit=False,
     )
-    # An explicit negative S6 result is closed enough to be actionable, but a
-    # missed tail CTA is costly and common in noisy/local-language speech.
-    # Open one bounded S6 tail review; the recovery prompt still requires
-    # semantic confirmation and may keep the result absent.
+    # A missed tail CTA is costly and common in noisy/local-language speech.
+    # Open one bounded S6 tail review whenever S6 is unresolved and already
+    # belongs to this single recovery pass; the prompt still requires semantic
+    # confirmation and may keep the result unknown/absent.
     s6_check = stage_evidence_check_map(facts).get("S6")
     s6_explicitly_absent = (
         isinstance(s6_check, dict)
         and str(s6_check.get("status") or "").strip().lower() == "absent"
+    )
+    s6_status = str(s6_check.get("status") or "").strip().lower() if isinstance(s6_check, dict) else ""
+    s6_coverage = str(s6_check.get("coverage") or "").strip().lower() if isinstance(s6_check, dict) else ""
+    s6_tail_review_required = (
+        "S6" in set(primary_targets)
+        and not (s6_status == "present" and s6_coverage == "complete")
     )
     if s6_explicitly_absent and "S6" not in primary_targets:
         primary_targets.append("S6")
@@ -5184,6 +5190,8 @@ def _maybe_recover_video_facts(
         trigger_reasons.append("stage_evidence_incomplete")
     if s6_explicitly_absent:
         trigger_reasons.append("s6_absent_tail_review")
+    elif s6_tail_review_required:
+        trigger_reasons.append("s6_unclosed_tail_review")
     if contract_issues:
         trigger_reasons.append("stage_evidence_contract_invalid")
     if not targets and not trigger_reasons:

@@ -1730,6 +1730,7 @@ def normalize_comparison_contract(
         raw = raw_stage_eligibility.get(stage) if isinstance(raw_stage_eligibility.get(stage), dict) else {}
         raw_status = normalize_choice(raw.get("status"), _STAGE_COMPARISON_STATUSES, "not_comparable")
         status = raw_status
+        raw_basis = str(raw.get("basis") or "").strip()
         raw_s5_scope_source = (
             str(raw.get("status_source") or "").strip().lower()
             if stage == "S5"
@@ -1762,9 +1763,22 @@ def normalize_comparison_contract(
                 status = "structural"
             else:
                 status = "not_comparable"
+        if (
+            identity_relation in {"exact_product", "same_product_family"}
+            and status == "direct"
+            and raw_status != "direct"
+        ):
+            # Product relationship and Stage1 evidence readiness are separate
+            # axes.  A provider may conservatively report ``not_comparable``
+            # because a stage has unknown evidence, but that must not survive
+            # as the basis text after code-owned scope normalization says the
+            # same product is directly comparable.  The evidence gate carries
+            # the unresolved state downstream; this contract records only the
+            # product-level scope.
+            raw_basis = "产品关系允许该阶段直接比较；Stage1 证据资格由独立证据门禁判断。"
         stage_eligibility[stage] = {
             "status": status,
-            "basis": str(raw.get("basis") or "").strip(),
+            "basis": raw_basis,
             "shared_contract": str(raw.get("shared_contract") or "").strip(),
             "restrictions": normalize_evidence(raw.get("restrictions")),
             "evidence_ids": normalize_evidence(raw.get("evidence_ids")),

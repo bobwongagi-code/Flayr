@@ -2486,6 +2486,24 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(contract["comparable_stages"], ["S1", "S2", "S3", "S4", "S5", "S6"])
         self.assertTrue(all(item["status"] == "direct" for item in contract["stage_eligibility"].values()))
 
+    def test_scope_normalization_does_not_keep_provider_not_comparable_basis(self) -> None:
+        contract = normalize_comparison_contract(
+            {
+                "identity_relation": "same_product_family",
+                "substitution_relation": "same_solution",
+                "stage_eligibility": {
+                    "S6": {
+                        "status": "not_comparable",
+                        "basis": "达人侧资格未知，无法比较 CTA。",
+                    }
+                },
+            }
+        )
+        s6 = contract["stage_eligibility"]["S6"]
+        self.assertEqual(s6["status"], "direct")
+        self.assertIn("证据资格", s6["basis"])
+        self.assertNotIn("无法比较", s6["basis"])
+
     def test_s5_not_applicable_requires_code_owned_bilateral_fact_marker(self) -> None:
         provider_scope = normalize_comparison_contract(
             {
@@ -5276,6 +5294,80 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn('"effect_attribution"', text)
         self.assertNotIn('"stop_trigger"', text)
         self.assertNotIn('"product_identity"', text)
+
+    def test_stage1_recovery_exposes_candidates_and_reviews_unclosed_s6_tail(self) -> None:
+        analysis = {
+            "product": {"name": "测试品"},
+            "videos": {"creator": {"duration_seconds": 60.0}},
+        }
+        facts = {
+            "evidence_units": [],
+            "stage_evidence_checks": [
+                {
+                    "stage": "S6",
+                    "status": "unknown",
+                    "coverage": "unknown",
+                    "evidence_ids": [],
+                    "observed_signals": [],
+                    "missing_signals": [],
+                }
+            ],
+            "candidate_evidence_ids_by_stage": {"S6": ["C7"]},
+            "candidate_observations_by_stage": {
+                "S6": [
+                    {
+                        "id": "C7",
+                        "time_range": "51.3s - 59.1s",
+                        "voiceover": "bek kuning",
+                        "functions": ["S6_cta"],
+                    }
+                ]
+            },
+        }
+        payload = build_video_fact_recovery_payload(
+            "test-model",
+            "creator",
+            analysis,
+            [],
+            facts,
+            ["S6"],
+        )
+        text = payload["messages"][1]["content"][0]["text"]
+        self.assertIn("未资格化恢复线索", text)
+        self.assertIn('"candidate_observations_by_stage"', text)
+        self.assertIn('"id": "C7"', text)
+        self.assertIn("beg kuning", text)
+        self.assertIn("S6 尾段 CTA 定向复核", text)
+        self.assertNotIn("当前 Stage1 明确把 S6 判为 absent", text)
+
+    def test_stage1_recovery_does_not_tail_review_closed_s6(self) -> None:
+        analysis = {
+            "product": {"name": "测试品"},
+            "videos": {"creator": {"duration_seconds": 60.0}},
+        }
+        facts = {
+            "evidence_units": [],
+            "stage_evidence_checks": [
+                {
+                    "stage": "S6",
+                    "status": "present",
+                    "coverage": "complete",
+                    "evidence_ids": ["C7"],
+                    "observed_signals": ["explicit_action", "purchase_path"],
+                    "missing_signals": [],
+                }
+            ],
+        }
+        payload = build_video_fact_recovery_payload(
+            "test-model",
+            "creator",
+            analysis,
+            [],
+            facts,
+            ["S6"],
+        )
+        text = payload["messages"][1]["content"][0]["text"]
+        self.assertNotIn("S6 尾段 CTA 定向复核", text)
 
     def test_stage1_recovery_prompt_excludes_execution_provenance(self) -> None:
         analysis = {

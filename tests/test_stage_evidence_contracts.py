@@ -1188,6 +1188,18 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertGreaterEqual(windows[0][2], 15.0)
         self.assertEqual(windows[1][2], 60.0)
 
+        tail_windows = _recovery_stage_windows(
+            analysis,
+            "creator",
+            ["S3", "S6"],
+            s6_tail_review=True,
+        )
+        self.assertEqual([item[0] for item in tail_windows], ["S3", "S6"])
+        # The normal recovery padding is retained around the last-ten-second
+        # tail window; the bounded review therefore starts at 49.5s here.
+        self.assertGreaterEqual(tail_windows[-1][1], 49.5)
+        self.assertEqual(tail_windows[-1][2], 60.0)
+
     def test_recovery_media_never_falls_back_to_full_video(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

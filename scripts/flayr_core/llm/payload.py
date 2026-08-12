@@ -949,10 +949,25 @@ def build_video_fact_recovery_payload(
         for item in current_facts.get("stage_evidence_checks") or []
         if isinstance(item, dict)
     }
-    s6_explicitly_absent = (
-        "S6" in target_set
-        and str(current_checks.get("S6", {}).get("status") or "").strip().lower() == "absent"
-    )
+    s6_current_status = str(current_checks.get("S6", {}).get("status") or "").strip().lower()
+    s6_current_coverage = str(current_checks.get("S6", {}).get("coverage") or "").strip().lower()
+    s6_explicitly_absent = "S6" in target_set and s6_current_status == "absent"
+    candidate_observations = current_facts.get("candidate_observations_by_stage")
+    candidate_observations = candidate_observations if isinstance(candidate_observations, dict) else {}
+    candidate_observations = {
+        str(stage).strip().upper()[:2]: [
+            dict(item) for item in items if isinstance(item, dict)
+        ]
+        for stage, items in candidate_observations.items()
+        if str(stage).strip().upper()[:2] in target_set and isinstance(items, list)
+    }
+    candidate_ids_by_stage = current_facts.get("candidate_evidence_ids_by_stage")
+    candidate_ids_by_stage = candidate_ids_by_stage if isinstance(candidate_ids_by_stage, dict) else {}
+    candidate_ids_by_stage = {
+        str(stage).strip().upper()[:2]: [str(item).strip() for item in items if str(item).strip()]
+        for stage, items in candidate_ids_by_stage.items()
+        if str(stage).strip().upper()[:2] in target_set and isinstance(items, list)
+    }
     locked_fact_summary = {
         "evidence_units": [
             dict(item)
@@ -966,10 +981,19 @@ def build_video_fact_recovery_payload(
             and str(item.get("stage") or "").strip().upper()[:2] in target_set
         ],
     }
+    recovery_candidate_summary = {
+        # These observations are deliberately kept in a separate recovery lane.
+        # They are not qualified facts, but hiding them from Stage1-C makes it
+        # impossible for one bounded re-observation to close a missed stage.
+        "candidate_evidence_ids_by_stage": candidate_ids_by_stage,
+        "candidate_observations_by_stage": candidate_observations,
+    }
     recovery_system = (
         "你是 Flayr Stage1 的定向证据复核器。只输出严格 JSON。"
         "这是一次且仅一次的事实恢复，不得改写、删除或合并已有 evidence_units，"
         "只能补充当前视频中可直接观察到的新 candidate_evidence_units，并重新给出目标阶段资格。"
+        "候选观察是未资格化的恢复线索，不是事实；必须结合其内容、时间和本轮媒体独立核实，"
+        "不得仅凭 functions、关键词或旧资格表把候选直接升级为证据。"
         "没有确认事实就写空数组和 unknown，不得为了让阶段成立而推断。"
     )
     payload["messages"][0]["content"] = recovery_system
@@ -986,15 +1010,22 @@ def build_video_fact_recovery_payload(
         api_url=api_url,
         model=model,
         budget=budget,
-        s6_tail_review=s6_explicitly_absent,
+        s6_tail_review=(
+            "S6" in target_set
+            and not (s6_current_status == "present" and s6_current_coverage == "complete")
+        ),
     )
     s6_tail_review_block = (
         "## S6 尾段 CTA 定向复核\n"
-        "当前 Stage1 明确把 S6 判为 absent。本轮只对原始视频最后 8-12 秒做一次漏检复核；"
+        "当前 S6 资格未闭合（可能是 absent、unknown 或 conflict）。本轮只对原始视频最后 8-12 秒做一次漏检复核；"
         "不要因为出现关键词就直接判定 CTA，必须确认完整语义、说话对象、画面路径和真实时间。\n"
         "马来/东南亚电商口语可能用 beg kuning、bakul kuning、yellow bag/cart，或 tekan、klik、tap、beli、order、checkout、link 等表达；"
-        "这些只是检索线索，不是自动等价规则。确认后才可新增带原句/中文翻译和时间范围的 S6 evidence；未确认就保持 absent，不要脑补。"
-    ) if s6_explicitly_absent else ""
+        "这些只是检索线索，不是自动等价规则。若完整语义确认了购买行动和可执行路径，必须把 explicit_action 与 purchase_path"
+        "分别绑定到同一条或对应的候选 evidence_id，并将 S6 返回为 present/complete；若未确认，保持 unknown 或在完整覆盖后返回 absent，不要脑补。"
+    ) if (
+        "S6" in target_set
+        and not (s6_current_status == "present" and s6_current_coverage == "complete")
+    ) else ""
     payload["messages"][1]["content"] = [
         {
             "type": "text",
@@ -1006,11 +1037,23 @@ def build_video_fact_recovery_payload(
                     "## 目标阶段信号白名单",
                     _stage_evidence_signal_codebook(normalized_targets),
                     "这是一次追加观察，不是重新抽取整条视频；不得改写、删除或合并已有 evidence_units。",
-                    "已有事实只用于避免重复，不得把它们当成可修改的模型输出。没有确认事实就返回空 candidate_evidence_units 和 unknown。",
+                    "已有资格化事实只用于避免重复，不得把它们当成可修改的模型输出。候选观察位于恢复线索区，必须逐条核实后才能被当前响应引用；"
+                    "如果候选内容不满足目标阶段 required_signals，要明确拒绝它，不得仅因 functions 标签而引用。",
+                    "present 必须同时满足 coverage=complete、required_signals 全部 observed、每个 required signal 都绑定真实 evidence_id；"
+                    "absent 只有在本轮覆盖完整、没有任何合格 evidence_id 且 required_signals 均明确 missing 时才允许。"
+                    "只看了尾段或局部窗口时不得返回 absent，应返回 unknown/partial。",
+                    "coverage 指目标阶段的复核范围，不要求重新扫描整条视频；如果本轮已完整检查所提供的目标阶段窗口，"
+                    "应标记 coverage=complete。S6 尾段定向复核只足以确认发现的 CTA，不足以单独证明 S6 全阶段 absent。",
+                    "S5 是可选的信任放大阶段，不得根据品类先验强行要求或关闭；品牌/logo/产品身份本身不等于 source_basis，"
+                    "只有实际来源、报告、认证、用户原话或过程信息才可作为合格背书依据。",
+                    "若候选观察的 functions 含 S6_cta，必须检查其完整口播、字幕、画面和时间范围；"
+                    "不能把它静默丢掉后仍返回 S6 absent/unknown，除非在 reason 中说明独立核查为何不成立。",
                     "每个新 candidate_evidence_unit 必须填写 fact_quality 的六个观察轴；无法判断时填 uncertain 或 not_applicable。",
                     s6_tail_review_block,
                     "## 已锁定事实摘要（只读）",
                     json.dumps(locked_fact_summary, ensure_ascii=False, indent=2),
+                    "## 未资格化恢复线索（只作核实提示，不是事实；不得仅凭这些线索输出 present）",
+                    json.dumps(recovery_candidate_summary, ensure_ascii=False, indent=2),
                     "## 输出合同",
                     json.dumps(
                         {
