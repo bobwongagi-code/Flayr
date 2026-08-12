@@ -52,7 +52,7 @@ Stage1 还必须带一份代码生成的 `stage1_acquisition`。它只记录本�
 
 Stage1 不能输出或推导 `severity`、双方比较、差距、商业优先级、建议、报告结论或 `stage_evidence_links`。这些字段即使嵌套在别的对象中，也必须在 active contract 下拒绝，而不是静默丢弃。
 
-当前生产实现把 Stage1-A 和 Stage1-B 作为两个独立请求执行：Stage1-A 使用媒体输入，只产生原子观察；Stage1-B 是无媒体的只读资格投影，只读取已归一化的 `evidence_units` 和代码拥有的采集状态。Stage1-B 进一步按 `S1+S2 / S3+S4 / S5 / S6` 四个独立阶段组请求，避免一个阶段组的跨阶段引用、超时或 JSON 失败清空其他组；代码只合并成功组，失败组单独置为 `unknown`。Stage1-A 响应中的阶段资格字段不再作为权威输入；Stage1-B 失败时保留原子账本，并将失败阶段交给一次有边界的 Stage1-C 决定是否需要补观察。
+当前生产实现把 Stage1-A 和 Stage1-B 作为两个独立请求执行：Stage1-A 固定使用 canonical 帧/时间线、窗口安全 ASR 与 OCR，只产生原子观察；即使 provider 支持原生视频，首次抽取也不发送整支视频。Stage1-B 是无媒体的只读资格投影，只读取已归一化的 `evidence_units` 和代码拥有的采集状态。Stage1-B 进一步按 `S1+S2 / S3+S4 / S5 / S6` 四个独立阶段组请求，避免一个阶段组的跨阶段引用、超时或 JSON 失败清空其他组；代码只合并成功组，失败组单独置为 `unknown`。Stage1-A 响应中的阶段资格字段不再作为权威输入；Stage1-B 失败时保留原子账本，并将失败阶段交给一次有边界的 Stage1-C 决定是否需要补观察。
 
 ### C. 定向缺口补观察
 
@@ -60,8 +60,7 @@ Stage1 不能输出或推导 `severity`、双方比较、差距、商业优先�
 不再代表第二次全片 coverage audit。补观察只接收目标阶段、目标时间窗口和目标渠道的聚焦素材，并可看到
 只读的当前阶段摘要，不能修改或删除 primary `evidence_units`，也不能比较双方或输出下游判断。
 
-只有以下情况才允许进入 Stage1-C：必需槽位为 `unknown`、候选事实的时间/渠道无法确认、决定性事实只在一侧
-出现且另一侧仍有可观察素材，或硬事实之间出现机械冲突。每个角色、每个阶段最多一次；补观察仍不足时保持
+只有以下情况才允许进入 Stage1-C：必需槽位为 `unknown`、阶段覆盖未闭合、候选事实的时间/渠道无法确认、S3/S4 连续动作或效果链无法由离散帧确认、S6 尾段仍未闭合，或硬事实之间出现机械冲突。触发原因使用稳定代码 `stage_coverage_incomplete`、`temporal_continuity_uncertain`、`evidence_qualification_conflict`、`s6_tail_unclosed`。每个角色最多一次，多个目标阶段合并进同一请求；补观察仍不足时保持
 `unknown` 或 `conflict`，不递归重试。
 
 补观察返回候选原子事实和目标阶段资格，代码随后追加 Evidence Ledger、重新运行目标阶段投影，并生成
@@ -75,6 +74,8 @@ Stage1 不能输出或推导 `severity`、双方比较、差距、商业优先�
 候选事实始终保留在交接的 candidate lane 中，不得支撑 relation、gap、floor、ceiling 或最终 severity。没有缺口
 时，`stage1_recovery.status=not_needed`，不强制制造一次额外模型请求；这时由 primary Stage1 qualification
 和代码拥有的 acquisition checks 提供资格。该规则对 S1-S6 共用，不为 S4 或单个样本增加例外。
+
+每次 Stage1-C 原生视频调用必须记录目标阶段、实际时间窗、触发原因、请求字节、耗时、执行来源和有效补丁摘要。原生视频编码或 provider 失败只会留下审计记录并保持目标阶段 `unknown`，不得回退到整片扫描、重复调用或伪造负事实。
 
 ### B. 阶段资格投影
 
@@ -93,6 +94,10 @@ Stage1 不能输出或推导 `severity`、双方比较、差距、商业优先�
 `signal_bindings` 是 S1-S6 共用的泛化约束。例如 S4 不能因为一条证据同时出现在阶段列表中，就默认它同时证明“结果可见”和“结果由本品操作造成”；这两个信号必须分别绑定。一个原子事实可以支持多个信号，但每次绑定都必须留下可追溯关系。
 
 Stage1 完成后由代码对全部规范化观察字段、`stage1_acquisition`、`stage1_coverage_audit`、`evidence_units` 和 `stage_evidence_checks` 生成 `evidence_set_sha256`，并标记 `evidence_set_status=frozen`。从这一刻起，Stage2、Repair、Phase C 和 Resolver 都只能读取它；任意事实内容、时间、归属、采集能力、覆盖审计、门控观察或阶段资格变化都会使运行失败。阶段链接是可变的判断投影，不进入事实哈希。
+
+Stage2 只消费冻结 facts 的纯文本投影，不接收视频或音频。Phase C 可以在独立覆盖、资格、连续性或 resolver 冲突信号出现时读取目标原生视频窗口，但只能校验既有事实资格并返回受限补丁；模型自报低置信不能单独触发，Phase C 不能新增 `evidence_units`、改写 severity 或创建第二份事实账本。
+
+旧 `s4_visual_verifier` 字段和解析函数只用于读取历史产物与离线 fixture；生产主链不再独立调用该 provider。S3/S4 的原生视频连续性或效果资格复核必须进入同一 Phase C 候选集，共享其一次调用预算和受限补丁合同。
 
 ## Stage1 到后续分析的唯一交接
 

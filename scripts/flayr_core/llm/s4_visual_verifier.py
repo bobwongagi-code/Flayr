@@ -1,8 +1,8 @@
-"""S3/S4 visual verifier：独立复核使用过程与效果呈现的视觉质量。
+"""Legacy S3/S4 visual-verifier contract helpers.
 
-主分析模型容易把"准备动作"误写成真实使用，或把"结构存在"自证成"效果成立"。
-本模块只看 S3/S4 evidence 对应帧和适用的产品视觉命题，不读取主分析的 severity，
-专门复核实际目标接触、关键动作连续性与效果差异是否真的可见。
+Production native-video review is owned exclusively by Phase C. This module
+keeps payload/result helpers for historical artifacts and offline fixtures; it
+must not call a provider or create a second live review path.
 """
 
 from __future__ import annotations
@@ -14,101 +14,14 @@ from typing import Any
 from ..artifacts import format_seconds, parse_time_range_seconds, parse_timestamp_seconds, select_frames_for_time_range
 from ..postprocess.chain import finalize_severity_after_repairs
 from ..postprocess.repair import validate_s3_s4_hard_fact_consistency, stabilize_improvement_priorities
-from ..utils import write_json, write_text
-from .api import call_llm_api, extract_chat_completion_text, image_to_data_url, video_to_data_url
-from .parse import normalize_demo_flag, normalize_s4_effect_salience, normalize_s4_effect_type, parse_json_text
-from .provider_artifacts import provider_call_with_artifact
+from .api import image_to_data_url, video_to_data_url
+from .parse import normalize_demo_flag, normalize_s4_effect_salience, normalize_s4_effect_type
 from ..stage_evidence_contracts import STAGE_EVIDENCE_CONTRACT_VERSION, qualified_stage_evidence_ids, stage_evidence_readiness
 
 
 TEMPORAL_REVIEW_FPS = 3.0
 TEMPORAL_REVIEW_MAX_WIDTH = 480
 TEMPORAL_REVIEW_PADDING_SECONDS = 1.0
-
-
-def maybe_apply_s4_visual_verifier(
-    *,
-    args: Any,
-    api_key: str,
-    result: dict[str, Any],
-    analysis: dict[str, Any],
-    run_dir: Path,
-) -> dict[str, Any]:
-    """独立复核 S3 真实使用与 S4 视觉差异；失败时只写状态，不中断主流程。"""
-    if getattr(args, "llm_dry_run", False):
-        return result
-    s4 = _s4_stage(result)
-    if not s4:
-        return result
-    contract_reason = _visual_verifier_skip_reason(result)
-    review_s4 = not bool(contract_reason)
-    payload = build_s4_visual_verifier_payload(
-        getattr(args, "llm_model", ""),
-        result,
-        analysis,
-        review_s4=review_s4,
-        budget=getattr(args, "_resource_budget", None),
-    )
-    if payload is None:
-        result["s4_visual_verifier"] = {"applied": False, "reason": "缺少 S3/S4 帧证据，跳过视觉复核。"}
-        return result
-
-    request_path = run_dir / "llm_s4_visual_verifier_request.json"
-    response_path = run_dir / "llm_s4_visual_verifier_response.json"
-    write_json(request_path, payload)
-    response_meta: dict[str, Any] = {}
-    live_meta: dict[str, Any] = {}
-    try:
-        provider_response, response_meta, execution_source = provider_call_with_artifact(
-            artifact_path=run_dir / "provider_s4_visual_verifier.json",
-            replay_root=getattr(args, "provider_replay_from", None),
-            call_kind="s4_visual_verifier",
-            payload=payload,
-            model=getattr(args, "llm_model", ""),
-            api_url=getattr(args, "llm_api_url", ""),
-            response_meta=live_meta,
-            call=lambda: (
-                json.loads(
-                    call_llm_api(
-                        getattr(args, "llm_api_url"),
-                        api_key,
-                        request_path,
-                        response_path,
-                        budget=getattr(args, "_resource_budget", None),
-                        response_meta=live_meta,
-                    )
-                ),
-                live_meta,
-            ),
-        )
-        parsed = parse_json_text(extract_chat_completion_text(provider_response))
-        applied = apply_s4_visual_verifier_result(result, parsed, analysis, review_s4=review_s4)
-    except (Exception, SystemExit) as exc:  # verifier 是降级增强，不允许拖垮主链
-        result["s4_visual_verifier"] = {
-            "applied": False,
-            "reason": f"S4 视觉复核失败：{exc}",
-            "provider_meta": response_meta,
-            "provider_artifact": "provider_s4_visual_verifier.json",
-        }
-        return result
-
-    result["s4_visual_verifier"] = {
-        "applied": applied,
-        "response_retention": "durable",
-        "provider_meta": response_meta,
-        "provider_artifact": "provider_s4_visual_verifier.json",
-        "execution_source": execution_source,
-        "reason": (
-            "已用原片时序复核覆盖 S3 使用真实性与 S4 视觉质量字段。"
-            if applied and review_s4
-            else "已用原片时序复核覆盖 S3 使用真实性；S4 未满足独立覆盖合同。"
-            if applied
-            else "S3/S4 视觉复核返回空结果。"
-        ),
-    }
-    if contract_reason:
-        result["s4_visual_verifier"]["s4_skip_reason"] = contract_reason
-    return result
 
 
 def build_s4_visual_verifier_payload(

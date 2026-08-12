@@ -41,6 +41,7 @@ from flayr_core.llm.payload import (
     _recovery_stage_windows,
     _replace_recovery_full_media,
     build_s1_boundary_hint_block,
+    build_video_fact_recovery_payload,
 )
 from flayr_core.postprocess.derive import _derive_one, derive_severity_from_facts
 from flayr_core.postprocess.claims_my import reconcile_certification_ownership
@@ -1173,6 +1174,11 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(result["stage1_recovery"]["status"], "focused_recovery_with_unresolved")
         self.assertEqual(result["stage1_coverage_audit"]["status"], "partial")
         self.assertEqual(result["stage1_recovery"]["recovery_mode"], "stage1_c_focused_once")
+        self.assertIn("stage_coverage_incomplete", result["stage1_recovery"]["trigger_reasons"])
+        self.assertIn("temporal_continuity_uncertain", result["stage1_recovery"]["trigger_reasons"])
+        self.assertIn("s6_tail_unclosed", result["stage1_recovery"]["trigger_reasons"])
+        self.assertEqual(result["stage1_recovery"]["effective_patch"]["candidate_units_added"], 0)
+        self.assertGreaterEqual(result["stage1_recovery"]["elapsed_seconds"], 0)
 
     def test_recovery_windows_use_canonical_stage_codes_and_merge_adjacent_stages(self) -> None:
         analysis = {
@@ -1238,6 +1244,31 @@ class StageEvidenceContractTests(unittest.TestCase):
             clip.assert_called_once()
             self.assertGreater(clip.call_args.kwargs["duration"], 0)
             self.assertLess(clip.call_args.kwargs["start"], 15.0)
+
+    def test_recovery_payload_does_not_encode_full_standalone_audio_first(self) -> None:
+        with patch(
+            "flayr_core.llm.payload.build_video_fact_payload",
+            return_value={
+                "model": "test-model",
+                "messages": [
+                    {"role": "system", "content": "primary"},
+                    {"role": "user", "content": [{"type": "text", "text": "primary"}]},
+                ],
+            },
+        ) as primary_builder, patch(
+            "flayr_core.llm.payload._replace_recovery_full_media",
+            return_value=[],
+        ):
+            build_video_fact_recovery_payload(
+                "test-model",
+                "creator",
+                self._analysis(),
+                [],
+                {"evidence_units": [], "stage_evidence_checks": []},
+                ["S4"],
+                api_url="https://example.invalid/api",
+            )
+        self.assertFalse(primary_builder.call_args.kwargs["include_standalone_audio"])
 
     def test_focused_recovery_preserves_candidate_without_qualifying_it(self) -> None:
         facts = self._active_side("C")
@@ -1313,6 +1344,9 @@ class StageEvidenceContractTests(unittest.TestCase):
             ["C_REC_S4"],
         )
         self.assertEqual(view["qualified_stage_evidence_ids"]["S4"], [])
+        recovery_meta = result["stage1_recovery"]
+        self.assertEqual(recovery_meta["effective_patch"]["candidate_units_added"], 1)
+        self.assertIn("S4", recovery_meta["effective_patch"]["unresolved_stages"])
 
     def test_recovery_blocks_only_stage_with_remaining_structural_issue(self) -> None:
         facts = self._active_side("C", "unknown")

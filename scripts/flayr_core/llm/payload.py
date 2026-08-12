@@ -473,38 +473,33 @@ def build_video_fact_payload(
     visual_inputs: list[dict[str, Any]],
     api_url: str = "",
     budget: ResourceBudget | None = None,
+    include_standalone_audio: bool = True,
 ) -> dict[str, Any]:
     """单视频事实抽取请求 payload。
 
-    主路径（omni + ffmpeg 可用）：把原生视频（重编码 fps=3 + 降分辨率，含完整音轨）
-    直接喂给模型，让它像人一样看连续画面 + 听声音，自定位变化点。
-    降级路径（无 ffmpeg 或视频转码失败）：回退到关键帧抽帧 + 完整音频，
-    沿用 visual_inputs（由 select_role_visual_inputs 提供）。
+    Stage1-A 的权威主输入固定为代码选出的 canonical frames、时间线、
+    ASR 和 OCR。原生视频只允许在 Stage1-C/Phase C 的定向窗口中出现，
+    不能作为首次事实抽取的隐式全片复扫。
     """
     info = analysis.get("videos", {}).get(role, {})
     code = "B" if role == "benchmark" else "C"
     role_dir = Path(str(info.get("work_dir") or ""))
     mode_prompt = speech_mode_prompt(info.get("speech_mode") if isinstance(info.get("speech_mode"), dict) else {})
-    native_audio = can_analyze_native_audio(api_url, model)
-
-    # 只有已验证可直接感知音轨的 provider 才走含音轨的原生视频；其余端点
-    # 使用在线 ASR 的转写/时间戳 + 画面帧，避免把未声明的音频模态送入请求。
-    video_path = Path(str(info.get("path") or ""))
-    video_data_url = (
-        video_to_data_url(video_path, budget=budget)
-        if native_audio and video_path.is_file()
+    direct_audio_supported = (
+        include_standalone_audio
+        and can_analyze_native_audio(api_url, model)
+        and can_send_standalone_audio(api_url, model)
+    )
+    audio_data_url = (
+        audio_to_mp3_data_url(role_dir / "audio.wav", budget=budget)
+        if direct_audio_supported
         else None
     )
-    native_video = video_data_url is not None
 
-    visual_source_hint = (
-        "随请求附带本视频的原生画面（已抽帧为连续序列）以及 Hook/CTA 时间线证据图。"
-        if native_video
-        else "随请求附带本视频的若干关键帧/时间线证据图。"
-    )
+    visual_source_hint = "随请求附带本视频的 canonical frames 和 Hook/CTA 时间线证据图；不附带整支原生视频。"
     audio_capability_rule = (
         "你可直接感知音轨；语气、BGM和音效只记录客观观察，不判断其商业贡献。"
-        if native_audio
+        if audio_data_url is not None
         else "你不能直接感知音轨。口播语义只以转录文本为准；audio_fact 必须写未直接感知音轨，不得判断语气、BGM或音效。"
     )
 
@@ -718,39 +713,20 @@ def build_video_fact_payload(
     )
 
     content: list[dict[str, Any]] = [{"type": "text", "text": text}]
-    if native_video:
+    for item in visual_inputs:
+        content.extend(
+            [
+                {"type": "text", "text": f"图片：{item['label']}，本地路径：{item['path']}"},
+                {"type": "image_url", "image_url": {"url": item["data_url"], "detail": "low"}},
+            ]
+        )
+    if audio_data_url is not None:
         content.append(
-            {"type": "video_url", "video_url": {"url": video_data_url}}
+            {"type": "text", "text": "以下是本视频的完整音频，用于判断 BGM、口播语气、特殊音效。"}
         )
-        for item in visual_inputs:
-            if "timeline" not in str(item.get("label") or "").lower():
-                continue
-            content.extend(
-                [
-                    {"type": "text", "text": f"时间线证据图：{item['label']}，本地路径：{item['path']}"},
-                    {"type": "image_url", "image_url": {"url": item["data_url"], "detail": "low"}},
-                ]
-            )
-    else:
-        for item in visual_inputs:
-            content.extend(
-                [
-                    {"type": "text", "text": f"图片：{item['label']}，本地路径：{item['path']}"},
-                    {"type": "image_url", "image_url": {"url": item["data_url"], "detail": "low"}},
-                ]
-            )
-        audio_data_url = (
-            audio_to_mp3_data_url(role_dir / "audio.wav", budget=budget)
-            if native_audio and can_send_standalone_audio(api_url, model)
-            else None
+        content.append(
+            {"type": "input_audio", "input_audio": {"data": audio_data_url, "format": "mp3"}}
         )
-        if audio_data_url is not None:
-            content.append(
-                {"type": "text", "text": "以下是本视频的完整音频，用于判断 BGM、口播语气、特殊音效。"}
-            )
-            content.append(
-                {"type": "input_audio", "input_audio": {"data": audio_data_url, "format": "mp3"}}
-            )
 
     system_prompt = (
         "你是单视频事实抽取器。只输出严格 JSON，不要 Markdown。"
@@ -935,6 +911,7 @@ def build_video_fact_recovery_payload(
         visual_inputs,
         api_url=api_url,
         budget=budget,
+        include_standalone_audio=False,
     )
     normalized_targets = [
         code
@@ -1221,6 +1198,30 @@ def _recovery_stage_windows(
             min(float(duration), end + STAGE1_RECOVERY_PADDING_SECONDS),
         )
         for label, start, end in windows
+    ]
+
+
+def stage1_recovery_media_windows(
+    analysis: dict[str, Any],
+    role: str,
+    target_stages: list[str],
+    *,
+    s6_tail_review: bool = False,
+) -> list[dict[str, Any]]:
+    """Return the code-owned Stage1-C windows used for audit metadata."""
+    return [
+        {
+            "role": role,
+            "window_label": label,
+            "start_seconds": round(start, 3),
+            "end_seconds": round(end, 3),
+        }
+        for label, start, end in _recovery_stage_windows(
+            analysis,
+            role,
+            target_stages,
+            s6_tail_review=s6_tail_review,
+        )
     ]
 
 
@@ -2865,26 +2866,16 @@ def build_stage_review_video_inputs(
     """为 Phase C 低置信阶段附上对应时间窗的原生视频切片。"""
     content: list[dict[str, Any]] = []
     videos = analysis.get("videos", {})
-    for stage in target_stages:
-        code = stage_code(stage.get("stage"))
-        for role in ("benchmark", "creator"):
-            info = videos.get(role) or {}
+    for window in stage_review_media_windows(analysis, target_stages):
+        code = str(window["stage"])
+        role = str(window["role"])
+        padded_start = float(window["start_seconds"])
+        padded_end = float(window["end_seconds"])
+        info = videos.get(role) or {}
+        if isinstance(info, dict):
             video_path = Path(str(info.get("path") or ""))
             if not video_path.is_file():
                 continue
-            time_range = str(stage.get(f"{role}_time_range") or "")
-            parsed = parse_time_range_seconds(time_range, info.get("duration_seconds"))
-            if parsed is None:
-                continue
-            start, end = parsed
-            # focused window：阶段 time_range 是模型估计，保留固定缓冲但不回传全片，避免把相邻阶段误当证据。
-            padded_start = max(0.0, start - PHASE_C_WINDOW_PADDING_SECONDS)
-            raw_duration = info.get("duration_seconds")
-            duration_value = parse_timestamp_seconds(raw_duration)
-            if raw_duration is not None and str(raw_duration).strip() and duration_value is None:
-                continue
-            duration_value = end if duration_value is None else duration_value
-            padded_end = min(duration_value, end + PHASE_C_WINDOW_PADDING_SECONDS)
             artifact_dir = Path(str(info.get("work_dir") or "")).expanduser()
             if not artifact_dir.is_dir():
                 continue
@@ -2947,6 +2938,48 @@ def build_stage_review_video_inputs(
             )
             content.append({"type": "video_url", "video_url": {"url": data_url}})
     return content
+
+
+def stage_review_media_windows(
+    analysis: dict[str, Any],
+    target_stages: list[dict[str, Any]],
+    facts: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return every focused Phase C window before media encoding."""
+    windows: list[dict[str, Any]] = []
+    videos = analysis.get("videos") if isinstance(analysis.get("videos"), dict) else {}
+    for stage in target_stages:
+        if not isinstance(stage, dict):
+            continue
+        code = stage_code(stage.get("stage"))
+        if not code:
+            continue
+        stage_context = stage_analysis_stage_context(stage, facts, code) if facts is not None else stage
+        for role in ("benchmark", "creator"):
+            info = videos.get(role) if isinstance(videos.get(role), dict) else {}
+            parsed = parse_time_range_seconds(
+                stage_context.get(f"{role}_time_range"),
+                info.get("duration_seconds"),
+            )
+            if parsed is None:
+                continue
+            start, end = parsed
+            raw_duration = info.get("duration_seconds")
+            duration_value = parse_timestamp_seconds(raw_duration)
+            if raw_duration is not None and str(raw_duration).strip() and duration_value is None:
+                continue
+            duration_value = end if duration_value is None else duration_value
+            windows.append(
+                {
+                    "stage": code,
+                    "role": role,
+                    "source_start_seconds": round(start, 3),
+                    "source_end_seconds": round(end, 3),
+                    "start_seconds": round(max(0.0, start - PHASE_C_WINDOW_PADDING_SECONDS), 3),
+                    "end_seconds": round(min(duration_value, end + PHASE_C_WINDOW_PADDING_SECONDS), 3),
+                }
+            )
+    return windows
 
 
 def normalize_stage_codes(values: list[str]) -> list[str]:

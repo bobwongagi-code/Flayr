@@ -384,6 +384,50 @@ class LlmApiContractTests(unittest.TestCase):
             self.assertNotIn("RAW_WORD_FACT_PAYLOAD", payload_text)
             video_encoder.assert_not_called()
 
+    def test_native_capable_provider_stage1_a_never_sends_full_video(self) -> None:
+        qwen_url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "video.mp4"
+            frame = root / "frame.jpg"
+            video.write_bytes(b"mp4")
+            frame.write_bytes(b"jpeg")
+            analysis = {
+                "product": {"name": "测试产品"},
+                "videos": {
+                    "creator": {
+                        "path": str(video),
+                        "work_dir": str(root),
+                        "duration_seconds": 2.0,
+                    }
+                },
+            }
+            with (
+                mock.patch(
+                    "flayr_core.llm.payload.video_to_data_url",
+                    return_value="data:video/mp4;base64,AA==",
+                ) as video_encoder,
+                mock.patch(
+                    "flayr_core.llm.payload.audio_to_mp3_data_url",
+                    return_value=None,
+                ),
+            ):
+                payload = build_video_fact_payload(
+                    "qwen3-omni-flash",
+                    "creator",
+                    analysis,
+                    [{"label": "creator frame", "path": str(frame), "data_url": "data:image/jpeg;base64,AA=="}],
+                    api_url=qwen_url,
+                )
+            types = [
+                item.get("type")
+                for item in payload["messages"][1]["content"]
+                if isinstance(item, dict)
+            ]
+            self.assertIn("image_url", types)
+            self.assertNotIn("video_url", types)
+            video_encoder.assert_not_called()
+
     def test_unknown_provider_is_conservative(self) -> None:
         capabilities = provider_capabilities("https://example.test/v1/chat/completions", "vision-test")
         self.assertEqual(capabilities.profile, "unknown_provider")

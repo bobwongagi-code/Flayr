@@ -7,9 +7,13 @@
     "max_deleted_lines": 700,
     "allowed_globs": [
       ".github/workflows/tests.yml",
+      "ARCHITECTURE.md",
       "references/bitter-lesson-frozen-spec.json",
       "references/bitter-lesson-implementation-audit.md",
       "references/bitter-lesson-runtime-fix-scope.json",
+      "references/ADR007.md",
+      "references/ADR008.md",
+      "references/stage-evidence-contract.md",
       "README.md",
       "SKILL.md",
       "scripts/batch_analyze.py",

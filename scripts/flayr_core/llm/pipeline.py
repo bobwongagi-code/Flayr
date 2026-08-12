@@ -73,7 +73,6 @@ from .api import (
     extract_chat_completion_text,
     read_llm_api_key,
     can_analyze_native_audio,
-    can_send_standalone_audio,
 )
 from .analysis_contract import AnalysisContractError, validate_normalized_analysis_contract
 from .artifact_identity import identity_value
@@ -104,6 +103,8 @@ from .payload import (
     build_video_identity_payload,
     build_video_fact_payload,
     load_brand_proposition,
+    stage1_recovery_media_windows,
+    stage_review_media_windows,
 )
 from .stage_review_contract import (
     PHASE_C_PATCH_SNAPSHOT_SCHEMA,
@@ -111,7 +112,6 @@ from .stage_review_contract import (
     PHASE_C_REVIEW_SCHEMA_VERSION,
     patch_fields_for_stage,
 )
-from .s4_visual_verifier import maybe_apply_s4_visual_verifier
 from .stage_group_artifacts import (
     StageGroupArtifactError,
     completed_stage_group_artifact,
@@ -208,7 +208,7 @@ def _localized_failure_kind(
 
 
 # 修改 build_video_fact_payload 的语义合同后必须递增，避免旧 facts 与新判断规则混用。
-VIDEO_FACT_CACHE_SCHEMA_VERSION = 28
+VIDEO_FACT_CACHE_SCHEMA_VERSION = 29
 PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION = 3
 CACHE_RECORD_SCHEMA_VERSION = 1
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -2570,7 +2570,7 @@ def _apply_live_postprocess_chain(
     analysis: dict[str, Any],
     locked_video_understanding: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Run the live-only Phase C/S4/improvement pass before finalization.
+    """Run the live-only Phase C/improvement pass before finalization.
 
     Stage2 owns bounded judgments and this function owns the single live
     post-judgment handoff.  The deterministic finalizer still runs afterwards
@@ -2592,22 +2592,10 @@ def _apply_live_postprocess_chain(
         analysis=analysis,
         locked_video_understanding=locked_video_understanding,
     )
-    visual_audit = PostprocessAudit() if _analysis_artifact_dir(analysis) is not None else None
-    visual_before = copy.deepcopy(refined) if visual_audit is not None else None
-    visually_checked = maybe_apply_s4_visual_verifier(
-        args=args,
-        api_key=api_key,
-        result=refined,
-        analysis=analysis,
-        run_dir=run_dir,
-    )
-    if visual_audit is not None:
-        visual_audit.record(visual_before, visually_checked, "postprocess.s4_visual_verifier")
-        _merge_postprocess_audit(analysis, visually_checked, audit=visual_audit)
     return maybe_reconcile_final_improvements(
         args=args,
         api_key=api_key,
-        result=visually_checked,
+        result=refined,
         analysis=analysis,
         analysis_input=analysis_input,
         locked_video_understanding=locked_video_understanding,
@@ -3108,21 +3096,36 @@ def maybe_refine_low_confidence_stages(
     """
     if not locked_video_understanding:
         return result
-    # 候选 = 模型自报 ∪ 素材不足确定性检测 ∪ resolver 冲突阶段。
-    # 按优先级取 2：P1 链路致命节点 S1/S6（判错代价最高）→ P2 高杠杆验证节点 S4 → P3 其他。
+    # Model uncertainty alone cannot spend the native-video budget. A stage
+    # must also have an independent coverage, qualification, or resolver signal.
     legacy_critical_candidates = finalization_facade.legacy_phase_c_candidate_set(
         critical_severity_stages(result),
     )
-    candidates: list[str] = []
-    for code in [
-        *extract_low_confidence_stages(raw_result),
-        *detect_low_confidence_stages(result),
+    model_candidates = extract_low_confidence_stages(raw_result)
+    coverage_candidates = detect_low_confidence_stages(result)
+    temporal_candidates = [
         *detect_visual_coverage_gap_stages(result, analysis),
         *detect_unreferenced_visual_event_stages(result, analysis),
-        *[candidate.stage_id for candidate in legacy_critical_candidates.candidates],
+    ]
+    conflict_candidates = [candidate.stage_id for candidate in legacy_critical_candidates.candidates]
+    reason_map: dict[str, list[str]] = {}
+    for code in coverage_candidates:
+        reason_map.setdefault(code, []).append("stage_coverage_incomplete")
+    for code in temporal_candidates:
+        reason_map.setdefault(code, []).append("temporal_continuity_uncertain")
+    for code in conflict_candidates:
+        reason_map.setdefault(code, []).append("evidence_qualification_conflict")
+    candidates: list[str] = []
+    for code in [
+        *coverage_candidates,
+        *temporal_candidates,
+        *conflict_candidates,
     ]:
         if code not in candidates:
             candidates.append(code)
+    for code in model_candidates:
+        if code in candidates:
+            reason_map.setdefault(code, []).append("model_uncertainty_correlated")
     _priority = {"S1": 0, "S6": 0, "S4": 1}
     stage_codes = sorted(candidates, key=lambda c: (_priority.get(c, 2), candidates.index(c)))[:2]
     if not stage_codes:
@@ -3135,6 +3138,22 @@ def maybe_refine_low_confidence_stages(
         stage_codes,
         budget=getattr(args, "_resource_budget", None),
     )
+    review_stages = [
+        stage
+        for stage in result.get("stage_analysis", [])
+        if isinstance(stage, dict) and stage_code(stage.get("stage")) in stage_codes
+    ]
+    review_windows = stage_review_media_windows(
+        analysis,
+        review_stages,
+        locked_video_understanding,
+    )
+    review_reasons = {
+        code: list(dict.fromkeys(reason_map.get(code, [])))
+        for code in stage_codes
+    }
+    request_bytes = _payload_size_bytes(review_payload)
+    review_started_at = time.monotonic()
     if not payload_has_video(review_payload):
         result["phase_c_review"] = {
             "schema_version": PHASE_C_REVIEW_SCHEMA_VERSION,
@@ -3144,6 +3163,11 @@ def maybe_refine_low_confidence_stages(
             "applied": False,
             "reason": "low_confidence_stages 已声明，但本地视频切片构造失败。",
             "patches": [],
+            "trigger_reasons": review_reasons,
+            "media_windows": review_windows,
+            "request_bytes": request_bytes,
+            "elapsed_seconds": round(max(0.0, time.monotonic() - review_started_at), 3),
+            "effective_patch": {"changed_stage_count": 0},
         }
         _refresh_final_derived_artifact(analysis, result, ("phase_c_review",))
         return result
@@ -3198,10 +3222,16 @@ def maybe_refine_low_confidence_stages(
             "patches": [],
             "provider_meta": response_meta,
             "provider_artifact": "provider_phase_c.json",
+            "trigger_reasons": review_reasons,
+            "media_windows": review_windows,
+            "request_bytes": request_bytes,
+            "elapsed_seconds": round(max(0.0, time.monotonic() - review_started_at), 3),
+            "effective_patch": {"changed_stage_count": 0},
         }
         _refresh_final_derived_artifact(analysis, result, ("phase_c_review",))
         return result
 
+    patches = _phase_c_patch_snapshots(result, refined, review_result)
     refined["phase_c_review"] = {
         "schema_version": PHASE_C_REVIEW_SCHEMA_VERSION,
         "mode": PHASE_C_REVIEW_MODE,
@@ -3213,7 +3243,12 @@ def maybe_refine_low_confidence_stages(
         "provider_artifact": "provider_phase_c.json",
         "execution_source": execution_source,
         "notes": review_result.get("review_notes", []),
-        "patches": _phase_c_patch_snapshots(result, refined, review_result),
+        "patches": patches,
+        "trigger_reasons": review_reasons,
+        "media_windows": review_windows,
+        "request_bytes": request_bytes,
+        "elapsed_seconds": round(max(0.0, time.monotonic() - review_started_at), 3),
+        "effective_patch": {"changed_stage_count": len(patches)},
     }
     _refresh_final_derived_artifact(analysis, refined, ("phase_c_review",))
     return refined
@@ -3429,6 +3464,34 @@ def payload_has_video(payload: dict[str, Any]) -> bool:
         if any(isinstance(item, dict) and item.get("type") == "video_url" for item in content):
             return True
     return False
+
+
+def payload_has_audio(payload: dict[str, Any]) -> bool:
+    """Return whether the exact request contains a standalone audio block."""
+    for message in payload.get("messages", []):
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        if any(isinstance(item, dict) and item.get("type") == "input_audio" for item in content):
+            return True
+    return False
+
+
+def _payload_size_bytes(payload: dict[str, Any]) -> int:
+    """Count the serialized request without materializing a second media copy."""
+    total = 0
+
+    class _CountingWriter:
+        def write(self, value: str) -> int:
+            nonlocal total
+            size = len(value.encode("utf-8"))
+            total += size
+            return len(value)
+
+    # Match api._write_request_json so request_bytes is the actual wire body,
+    # not an optimistic compact-JSON estimate.
+    json.dump(payload, _CountingWriter(), ensure_ascii=False)
+    return total
 
 
 def _visual_input_timestamps(visual_inputs: list[dict[str, Any]]) -> list[float]:
@@ -4567,25 +4630,21 @@ def run_video_fact_extraction(
             raise
         fact_result = normalize_video_fact_result(role, parsed_response, analysis)
         fact_result["evidence_budget_exceeded"] = response_meta.get("finish_reason") == "length"
+        stage1_a_direct_audio = payload_has_video(payload) or payload_has_audio(payload)
         sanitize_audio_observations(
             {"video_understanding": {role: fact_result}, "stage_analysis": []},
-            can_analyze_native_audio(args.llm_api_url, args.llm_model),
+            stage1_a_direct_audio,
         )
-        # 能力状态取自实际请求载荷，不让模型猜自己是否看到了连续视频。
-        fact_result["temporal_evidence_mode"] = "full_temporal" if payload_has_video(payload) else "static_only"
+        # Stage1-A is deliberately static even when the provider could accept
+        # a full video; focused temporal capability is earned only by Stage1-C.
+        fact_result["temporal_evidence_mode"] = "static_only"
         fact_result["stage1_acquisition"] = build_stage1_acquisition_manifest(
             analysis,
             role,
             native_video=payload_has_video(payload),
             visual_input_count=len(visual_inputs),
             visual_input_timestamps=_visual_input_timestamps(visual_inputs),
-            audio_input_available=(
-                payload_has_video(payload)
-                or (
-                    can_analyze_native_audio(args.llm_api_url, args.llm_model)
-                    and can_send_standalone_audio(args.llm_api_url, args.llm_model)
-                )
-            ),
+            audio_input_available=stage1_a_direct_audio,
         )
         fact_result["stage1_acquisition"]["provider_artifacts"] = [{
             "phase": "A",
@@ -4611,23 +4670,22 @@ def run_video_fact_extraction(
             role,
             fact_result,
         )
+        recovery_meta = fact_result.get("stage1_recovery") if isinstance(fact_result.get("stage1_recovery"), dict) else {}
+        recovery_media_mode = str(recovery_meta.get("media_mode") or "")
+        recovery_direct_audio = recovery_media_mode in {"focused_native_video", "focused_audio"}
         sanitize_audio_observations(
             {"video_understanding": {role: fact_result}, "stage_analysis": []},
-            can_analyze_native_audio(args.llm_api_url, args.llm_model),
+            stage1_a_direct_audio or recovery_direct_audio,
         )
+        if recovery_media_mode == "focused_native_video":
+            fact_result["temporal_evidence_mode"] = "focused_temporal"
         fact_result["stage1_acquisition"] = build_stage1_acquisition_manifest(
             analysis,
             role,
             native_video=payload_has_video(payload),
             visual_input_count=len(visual_inputs),
             visual_input_timestamps=_visual_input_timestamps(visual_inputs),
-            audio_input_available=(
-                payload_has_video(payload)
-                or (
-                    can_analyze_native_audio(args.llm_api_url, args.llm_model)
-                    and can_send_standalone_audio(args.llm_api_url, args.llm_model)
-                )
-            ),
+            audio_input_available=stage1_a_direct_audio,
         )
         existing_provider_artifacts = fact_result["stage1_acquisition"].get("provider_artifacts") or []
         for item in (
@@ -5187,13 +5245,20 @@ def _maybe_recover_video_facts(
     if budget_flag:
         trigger_reasons.append("evidence_budget_exceeded")
     if primary_targets:
-        trigger_reasons.append("stage_evidence_incomplete")
-    if s6_explicitly_absent:
-        trigger_reasons.append("s6_absent_tail_review")
-    elif s6_tail_review_required:
-        trigger_reasons.append("s6_unclosed_tail_review")
-    if contract_issues:
-        trigger_reasons.append("stage_evidence_contract_invalid")
+        trigger_reasons.append("stage_coverage_incomplete")
+    if any(
+        isinstance(stage_evidence_check_map(facts).get(code), dict)
+        and str(stage_evidence_check_map(facts)[code].get("status") or "").strip().lower() == "conflict"
+        for code in targets
+    ) or contract_issues:
+        trigger_reasons.append("evidence_qualification_conflict")
+    if any(code in {"S3", "S4"} for code in targets):
+        manifest = facts.get("stage1_acquisition") if isinstance(facts.get("stage1_acquisition"), dict) else {}
+        if manifest.get("input_mode") == "canonical_frames":
+            trigger_reasons.append("temporal_continuity_uncertain")
+    if s6_explicitly_absent or s6_tail_review_required:
+        trigger_reasons.append("s6_tail_unclosed")
+    trigger_reasons = list(dict.fromkeys(trigger_reasons))
     if not targets and not trigger_reasons:
         facts["stage1_recovery"] = {
             "source": "pipeline",
@@ -5221,6 +5286,10 @@ def _maybe_recover_video_facts(
     payload: dict[str, Any] = {}
     response_meta: dict[str, Any] = {}
     execution_source = "provider"
+    request_started_at = time.monotonic()
+    media_windows: list[dict[str, Any]] = []
+    media_mode = "canonical_frames"
+    request_bytes = 0
     try:
         video_info = analysis.get("videos", {}).get(role, {}) if isinstance(analysis.get("videos"), dict) else {}
         recovery_visual_inputs = select_stage_recovery_visual_inputs(
@@ -5239,6 +5308,20 @@ def _maybe_recover_video_facts(
             api_url=args.llm_api_url,
             budget=getattr(args, "_resource_budget", None),
         )
+        media_mode = (
+            "focused_native_video"
+            if payload_has_video(payload)
+            else "focused_audio"
+            if payload_has_audio(payload)
+            else "canonical_frames"
+        )
+        media_windows = stage1_recovery_media_windows(
+            analysis,
+            role,
+            targets,
+            s6_tail_review=s6_tail_review_required or s6_explicitly_absent,
+        )
+        request_bytes = _payload_size_bytes(payload)
         recovery: dict[str, Any] | None = None
         if replay_source is not None:
             try:
@@ -5329,7 +5412,7 @@ def _maybe_recover_video_facts(
                     response_meta=response_meta,
                 ),
             )
-        return _mark_video_fact_recovery_failed(
+        failed = _mark_video_fact_recovery_failed(
             facts,
             target_stages=targets,
             trigger_reasons=trigger_reasons,
@@ -5338,6 +5421,22 @@ def _maybe_recover_video_facts(
             error=exc,
             api_key=api_key,
         )
+        failure_meta = failed.get("stage1_recovery") if isinstance(failed.get("stage1_recovery"), dict) else {}
+        failure_meta.update(
+            {
+                "media_mode": media_mode,
+                "media_windows": media_windows,
+                "request_bytes": request_bytes,
+                "elapsed_seconds": round(max(0.0, time.monotonic() - request_started_at), 3),
+                "effective_patch": {
+                    "candidate_units_added": 0,
+                    "resolved_stages": [],
+                    "unresolved_stages": targets,
+                },
+            }
+        )
+        failed["stage1_recovery"] = failure_meta
+        return failed
 
     merged = _merge_video_fact_recovery(
         role,
@@ -5380,6 +5479,17 @@ def _maybe_recover_video_facts(
         "request_identity_sha256": artifact["request_identity"]["sha256"],
         "response_sha256": artifact["response_sha256"],
         "completion_attempts": response_meta.get("completion_attempts", 0),
+        "media_mode": media_mode,
+        "media_windows": media_windows,
+        "request_bytes": request_bytes,
+        "elapsed_seconds": round(max(0.0, time.monotonic() - request_started_at), 3),
+        "effective_patch": {
+            "candidate_units_added": len(recovery.get("candidate_evidence_units") or [])
+            if isinstance(recovery.get("candidate_evidence_units"), list)
+            else 0,
+            "resolved_stages": [stage for stage in targets if stage not in unresolved_stages],
+            "unresolved_stages": unresolved_stages,
+        },
     }
     final_issues = stage_evidence_contract_issues(merged, require_version=True)
     if final_issues:

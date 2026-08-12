@@ -290,7 +290,7 @@ class StageGroupPipelineReplayTests(unittest.TestCase):
                 self.assertEqual(value["status"], "completed")
                 self.assertEqual(value["response_meta"]["completion_attempts"], 1)
 
-    def test_default_entrypoint_runs_phase_c_and_s4_hooks(self) -> None:
+    def test_default_entrypoint_runs_phase_c_without_legacy_s4_hook(self) -> None:
         args = Namespace(
             llm_include_images=True,
             llm_dry_run=False,
@@ -316,7 +316,6 @@ class StageGroupPipelineReplayTests(unittest.TestCase):
                 patch.object(pipeline, "run_segmented_stage_pipeline", return_value={"stage2_pipeline_version": "segmented_stage_v1"}),
                 patch.object(pipeline, "_process_llm_result", return_value={"stage_analysis": []}) as process,
                 patch.object(pipeline, "maybe_refine_low_confidence_stages", return_value={"stage_analysis": []}) as phase_c,
-                patch.object(pipeline, "maybe_apply_s4_visual_verifier", return_value={"stage_analysis": []}) as s4,
                 patch.object(pipeline, "maybe_reconcile_final_improvements", return_value={"stage_analysis": []}),
                 patch.object(pipeline, "finalize_analysis_result", return_value={"stage2_pipeline_status": "completed"}),
             ):
@@ -330,7 +329,7 @@ class StageGroupPipelineReplayTests(unittest.TestCase):
             self.assertEqual(result["stage2_pipeline_status"], "completed")
             process.assert_called_once()
             phase_c.assert_called_once()
-            s4.assert_called_once()
+            self.assertFalse(hasattr(pipeline, "maybe_apply_s4_visual_verifier"))
 
     def test_stage3_cannot_override_code_owned_ranges_or_evidence_ids(self) -> None:
         stage_results = [{

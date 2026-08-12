@@ -5171,6 +5171,36 @@ class ArchitectureContractTests(unittest.TestCase):
             ["text"],
         )
 
+    def test_model_uncertainty_alone_cannot_trigger_phase_c(self) -> None:
+        args = SimpleNamespace(
+            llm_model="test-model",
+            llm_api_url="https://example.invalid/api",
+            provider_replay_from=None,
+            _resource_budget=None,
+        )
+        raw_result = {"low_confidence_stages": ["S4"]}
+        result = {"stage_analysis": [{"stage": "S4", "severity": "small"}]}
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(pipeline, "detect_low_confidence_stages", return_value=[]),
+            mock.patch.object(pipeline, "detect_visual_coverage_gap_stages", return_value=[]),
+            mock.patch.object(pipeline, "detect_unreferenced_visual_event_stages", return_value=[]),
+            mock.patch.object(pipeline, "critical_severity_stages", return_value=[]),
+            mock.patch.object(pipeline, "build_stage_review_payload") as payload_builder,
+        ):
+            refined = pipeline.maybe_refine_low_confidence_stages(
+                args,
+                "secret",
+                raw_result,
+                result,
+                "input",
+                Path(tmp),
+                {"videos": {}},
+                {"creator": {}, "benchmark": {}},
+            )
+        self.assertIs(refined, result)
+        payload_builder.assert_not_called()
+
     def test_stage_synthesis_uses_provider_compatible_budget_field(self) -> None:
         qwen_payload = build_stage_synthesis_payload("qwen3.6-plus", "input", {}, [], {})
         generic_payload = build_stage_synthesis_payload("qwen3.7-max", "input", {}, [], {})

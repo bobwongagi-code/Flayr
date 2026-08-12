@@ -1,6 +1,6 @@
 # Flayr 技术架构设计
 
-> 当前架构基准：2026-08-08（Stage1 证据账本 + 分段 Stage2/Stage3）。本文描述已落地的
+> 当前架构基准：2026-08-12（Stage1 证据账本 + 定向原生视频复核 + 分段 Stage2/Stage3）。本文描述已落地的
 > report-first 分析产品及其资源与证据契约。冻结设计的唯一来源是
 > [`references/ADR007.md`](references/ADR007.md)；Stage1 交接细节以
 > [`references/stage-evidence-contract.md`](references/stage-evidence-contract.md) 为准。
@@ -29,10 +29,10 @@
 
 - **Step-0（产品合同）**：只吃运营产品信息与品类知识，先生成卖点分流计划和 `proof_contract`；
   `observable_dimension` 是 S4 单一主证明的硬边界，`consumer_outcome` 只负责自然语言表达结果。
-- **阶段一（事实）**：先做 Stage1-A 原子观察清单，再做 Stage1-B 的 S1-S6 阶段证据资格投影；口播语义以在线 Fun-ASR 转写为准，产出
+- **阶段一（事实）**：Stage1-A 固定消费 canonical 帧/时间线、在线 Fun-ASR 和 OCR，不把整支原生视频作为首次事实源；再做 Stage1-B 的 S1-S6 阶段证据资格投影，产出
   `video_facts_{role}.json` 的 `evidence_units[]`、`stage_evidence_checks[]`。Stage1-A/B/C 每次 provider 响应都先写入带完整 request identity、response hash、retry/usage 元数据的 `stage1_provider_*.json`；严格回放缺失或身份变化时直接失败，不得回退到缓存或 provider。若必需信号缺失、未知或冲突，最多做一次按阶段定向的预锁定补观察；补观察只能追加候选事实、替换目标阶段资格投影，不能删除或改写已有事实。补观察完成后才锁定 facts。
-- **阶段二（判断）**：只消费锁定 facts 中已经资格化的阶段证据 + analysis_input.md（产品信息/三层指引/结构库/QA/schema + 字幕轨/镜头轨）。默认路径按 `S1+S2 / S3+S4 / S5 / S6` 四个小阶段组分别请求，随后由只读 Stage3 综合；Stage2/Stage3 provider 原文先写入 `stage2_provider_*.json`，单个阶段组失败不得让其他组重跑或丢失。Stage3 只输出建议 prose 和 target stage，时间范围、证据 ID、gap type、priority 由代码从已锁定 Stage2 结果投影，不能由模型重新编写。
-- **Phase C（回看）**：模型自报 ∪ 代码确定性检测（占位证据/visual_only、canonical 覆盖缺口、未被引用的高信号视觉事件 + medium/large），≤2 阶段、仅一次；切对应阶段原生片段（含音轨）后只接受受限 `stage_patches[]`，再重跑目标阶段的后处理链。Phase C 不能绕过 Stage1，也不能新增或改写已锁定 facts。规范见 0.7。
+- **阶段二（判断）**：只消费锁定 facts 中已经资格化的阶段证据 + analysis_input.md，不附视频或音频。默认路径按 `S1+S2 / S3+S4 / S5 / S6` 四个小阶段组分别请求，随后由只读 Stage3 综合；Stage2/Stage3 provider 原文先写入 `stage2_provider_*.json`，单个阶段组失败不得让其他组重跑或丢失。Stage3 只输出建议 prose 和 target stage，时间范围、证据 ID、gap type、priority 由代码从已锁定 Stage2 结果投影，不能由模型重新编写。
+- **Phase C（回看）**：代码确定性检测覆盖、资格、连续性或 resolver 冲突，≤2 阶段、仅一次；模型自报低置信只能与独立信号相关联，不能单独花费视频预算。切对应阶段原生片段（含音轨）后只接受受限 `stage_patches[]`，再重跑目标阶段的后处理链。Phase C 不能绕过 Stage1，也不能新增或改写已锁定 facts。规范见 0.7。
 - **后处理链**：确定性投影、validate、resolver、局部 patch repair 与 qa_warnings；默认路径不做整对象 Stage2 repair。
 - **最终建议收敛**：确定性 severity 与可选 S4 视觉复核全部完成后，若仍有 `large` 阶段未被
   `improvements` 覆盖，只做一次纯文本缺项补全；它不得重判阶段，失败时保留主分析并写明状态。
@@ -223,9 +223,9 @@ API 请求的 bearer 凭据只通过子进程标准输入传递，不进入命�
 爆款视频 + 达人视频
   → 视频解析、抽帧、抽音频、转写、中文翻译
   → Step-0：建立与视频独立的产品卖点分流计划和单一视觉证明合同
-  → 阶段一：按 provider 能力采集单视频原子事实；可用原生视频时使用原生视频，否则使用 canonical 帧/时间线与窗口安全转写，再按共享合同资格化 S1-S6 证据
+  → 阶段一：以 canonical 帧/时间线、窗口安全转写和 OCR 采集单视频原子事实；资格或连续性未闭合时，对目标窗口最多做一次原生视频补观察
   → 缺证据时：每侧最多一次定向 Stage1 补观察，之后锁定 facts
-  → 阶段二：按 S1+S2 / S3+S4 / S5 / S6 分组判断，喂已资格化 facts 文字 + 每条 evidence 的感官材料，再由只读 Stage3 综合
+  → 阶段二：按 S1+S2 / S3+S4 / S5 / S6 分组判断，只喂已资格化 facts 文字，再由只读 Stage3 综合
   → Phase C：仅在预算和确定性门控允许时，对目标阶段切原生视频片段回看一次并应用局部 stage patch
   → 最终建议收敛：仅补齐确定性推导后遗漏的 large 阶段提升点
   → report.html + analysis.json
@@ -269,7 +269,7 @@ scripts/
     │   ├── parse.py                  # 阶段 Flag、结果 schema normalize + 兼容导出
     │   ├── payload.py                # build_*_payload 系列请求构造
     │   ├── pipeline.py               # Stage1、分段 Stage2、Stage3、Phase C 与 finalizer
-    │   ├── s4_visual_verifier.py     # S4 视觉复核输入与结果校验
+    │   ├── s4_visual_verifier.py     # 旧 S4 复核产物与离线 fixture 兼容；不含 provider 调用
     │   └── stage_review_contract.py  # 阶段 patch 合同
     ├── postprocess/                  # 分析结果投影、校验、局部修复与专项规则
     │   ├── __init__.py               # 仅 re-export apply_postprocess_chain
@@ -443,22 +443,23 @@ json_codec / product_profile / parse → pipeline`。下游（translation）只 
 | `llm/json_codec.py` | LLM JSON fence、尾逗号和未转义引号的容错解析；不承载 schema 或业务规则。 |
 | `llm/product_profile.py` | Step-0 产品地基、短视频证明计划与 S4 证明合同的归一化；不反向依赖 `parse.py`。 |
 | `llm/parse.py` | 阶段 Flag 和最终结果 schema normalize；保留 `parse_json_text`、产品地基函数等兼容导出。含 `STAGES`、`is_effective_voiceover` 等被 `postprocess` 复用的基础接口。 |
-| `llm/payload.py` | `build_*_payload` 系列。阶段一 `build_video_fact_payload`（按 provider 能力选择原生视频或 canonical 帧/窗口转写）；阶段二 `build_stage_group_judgment_payload`（四个边界明确的小组请求）和只读 `build_stage_synthesis_payload`；Phase C `build_stage_review_payload`（低置信阶段原生视频切片）。 |
+| `llm/payload.py` | `build_*_payload` 系列。阶段一 `build_video_fact_payload`（固定 canonical 帧/窗口转写）和 `build_video_fact_recovery_payload`（一次定向原生片段）；阶段二 `build_stage_group_judgment_payload`（四个边界明确的纯文本小组请求）和只读 `build_stage_synthesis_payload`；Phase C `build_stage_review_payload`（结构信号触发的原生视频切片）。 |
 | `llm/pipeline.py` | 主入口：`run_video_fact_extraction`、`run_segmented_stage_pipeline`、`run_large_model_analysis`、`finalize_analysis_result`。分段 Stage2 依次收口四个阶段组，再执行只读 Stage3 综合；所有外部结果经过同一个 finalizer 和唯一投影写回 analysis。Phase C 只应用受限阶段 patch。运行目录保留 raw/validated/final/postprocess 产物，用于区分模型原文、规范化结果和确定性后处理。 |
+| `llm/s4_visual_verifier.py` | 只保留历史 S4 verifier 产物和离线 fixture 的合同/结果兼容；模块不再包含 provider 调用。S3/S4 原生视频连续性复核统一走 Phase C。 |
 
 **事实采集、分段判断与只读综合架构**：
 
 | 阶段 | 函数 | 输入 | 产出 | 意图 |
 |------|------|------|------|------|
-| 一：事实抽取 | `run_video_fact_extraction` → `build_video_fact_payload` → `build_video_fact_recovery_payload`（最多一次） | 已验证原生能力的 provider 使用原生视频；北京 MaaS Qwen 等 transcript-only provider 使用 canonical 帧/时间线图 + 窗口安全转写，benchmark/creator 各一次 | Stage1-A 原子 `evidence_units` + Stage1-B `stage_evidence_checks`，补观察后锁定 | 先建立事实，再按统一 S1-S6 合同资格化；缺失/未知不伪装成 absent；不把静态页面输入误称为原生视频理解 |
+| 一：事实抽取 | `run_video_fact_extraction` → `build_video_fact_payload` → `build_video_fact_recovery_payload`（最多一次） | Stage1-A 固定使用 canonical 帧/时间线图 + 窗口安全 ASR/OCR；Stage1-C 只向目标窗口发送原生片段 | Stage1-A 原子 `evidence_units` + Stage1-B `stage_evidence_checks`，补观察后锁定 | 先建立可审计主账本；原生视频只补连续性/资格缺口，不重新扫描并覆盖主账本 |
 | 二：分段对比判断 | `build_stage_group_judgment_payload` → `run_segmented_stage_pipeline` | 每个阶段组的锁定 facts + 必要感官材料 | 阶段事实状态 / relation / model gap | 每个阶段组独立失败与收口，避免完整大对象互相拖累 |
 | 三：只读综合 | `build_stage_synthesis_payload` | 已收口的阶段结果 | 全局结论 / 建议草稿 | 不能修改阶段事实、relation、model gap 或 resolver severity |
 | C：低置信回看 | `build_stage_review_payload` → `stage_patches[]` | 目标阶段锁定 facts + 对应阶段原生视频片段 | 仅局部 patch | 只修改目标阶段允许字段，硬限制预算和次数 |
 
-关键约束：Stage1 补观察完成后 facts 才锁定并成为"唯一事实源"，阶段二感官素材仅辅助评估声画质感，
-**不可新增或改写 facts，也不能用 `functions` 或自由文本补回未资格化阶段证据**（冲突以 facts 为准，可标注"感知歧义"）；阶段二 temperature=0 保证可复现；
-Phase C 由模型低置信声明与确定性证据检查共同触发，最多回看 2 个阶段、最多 1 次，不做无限 agent loop；
-ffmpeg 不可用时阶段一降级为关键帧。通过能力验证、可直接观察原生音轨的 provider 才接收原生视频；北京 MaaS Qwen 等 transcript-only 服务当前按“canonical 关键帧/时间线 + 在线 Fun-ASR 转录 + 本地音频质检”运行，不得把页面化证据误称为连续原生视频，也不得脑补语气、BGM 或音效。
+关键约束：Stage1 补观察完成后 facts 才锁定并成为"唯一事实源"。Stage2 不接收视频，
+**不可新增或改写 facts，也不能用 `functions` 或自由文本补回未资格化阶段证据**；阶段二 temperature=0 保证可复现；
+Phase C 由独立的确定性证据检查触发，模型低置信不能单独触发，最多回看 2 个阶段、最多 1 次，不做无限 agent loop；
+ffmpeg 不可用时定向原生视频复核失败并保持 `unknown`，不得回退成整片复扫或把页面化证据误称为连续原生视频理解。
 音频采用两层合同：本地确定性硬质检可进入报告；语气、BGM、音效的细微商业贡献只作观察，永不进入执行分或 severity。
 
 职责：
