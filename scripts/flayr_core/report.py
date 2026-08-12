@@ -180,7 +180,20 @@ def render_global_cause_note(value: Any) -> str:
 
 
 def stage_skipped(stage: dict[str, Any]) -> tuple[bool, str]:
-    """判断阶段是否双方都未设计（如 S5 都无信任背书），如是则折叠不展开分析。"""
+    """判断阶段是否被代码拥有的 gate/scope 明确关闭。
+
+    尤其是 S5，不能从报告文本、硬背书关键词或品类先验反推出“不涉及”。
+    S5 是否关闭只能来自双侧 Stage1 事实形成的 comparison_status。
+    """
+    stage_name = str(stage.get("stage", "") or "")
+    is_s5 = "S5" in stage_name.upper() or "信任" in stage_name or "trust" in stage_name.lower()
+    comparison_contract = stage.get("comparison_contract") if isinstance(stage, dict) else None
+    s5_scope_is_code_owned = (
+        is_s5
+        and isinstance(comparison_contract, dict)
+        and comparison_contract.get("status") == "not_applicable"
+        and comparison_contract.get("status_source") == "bilateral_stage1_facts"
+    )
     gate = stage.get("stage_evidence_gate") if isinstance(stage, dict) else None
     if isinstance(gate, dict) and gate.get("status") in {
         "blocked",
@@ -188,25 +201,42 @@ def stage_skipped(stage: dict[str, Any]) -> tuple[bool, str]:
         "not_comparable",
         "legacy",
     }:
-        if gate.get("status") == "legacy":
+        if is_s5 and gate.get("status") == "not_applicable" and not s5_scope_is_code_owned:
+            # A report artifact may contain a provider/model-shaped gate. It
+            # cannot hide S5 without the code-owned bilateral fact marker.
+            pass
+        else:
+            if gate.get("status") == "legacy":
+                reason = str(
+                    stage.get("comparison_reason")
+                    or stage.get("analysis_reason")
+                    or gate.get("reason")
+                    or "历史阶段结果不能作为当前 grounded 结论。"
+                )
+                return True, f"历史结果仅供审计，不输出差距判断。{reason}"
             reason = str(
-                stage.get("analysis_reason")
+                stage.get("comparison_reason")
+                or stage.get("analysis_reason")
                 or gate.get("reason")
-                or "历史阶段结果不能作为当前 grounded 结论。"
+                or "该阶段没有可发布的阶段比较结论。"
             )
-            return True, f"历史结果仅供审计，不输出差距判断。{reason}"
-        return True, str(
-            stage.get("analysis_reason")
-            or gate.get("reason")
-            or "该阶段没有可发布的阶段比较结论。"
-        )
+            if gate.get("status") == "not_comparable":
+                return True, f"该阶段没有共同的比较合同，不输出差距判断。{reason}"
+            return True, reason
     comparison_status = str(stage.get("comparison_status") or "")
     if comparison_status == "not_directly_comparable":
         reason = str(stage.get("comparison_reason") or "两条视频不能在该阶段做产品级直接比较。")
         return True, f"该阶段没有共同的比较合同，不输出差距判断。{reason}"
-    if comparison_status == "not_applicable":
+    if comparison_status == "not_applicable" and not (is_s5 and not s5_scope_is_code_owned):
         reason = str(stage.get("comparison_reason") or "双方在该阶段均未涉及可比较内容。")
         return True, reason
+
+    # S5 的可选性是阶段合同的一部分，但本轮是否涉及必须由双侧事实决定。
+    # 只要没有 code-owned not_applicable，这里就保留 S5 的报告行；不能因为
+    # 模型文字说“无硬背书”或某品类通常不依赖背书而把真实单侧差距折叠掉。
+    if is_s5:
+        return False, ""
+
     if normalize_severity(stage.get("severity")) != "small":
         return False, ""
     skip_phrases = (
@@ -234,17 +264,6 @@ def stage_skipped(stage: dict[str, Any]) -> tuple[bool, str]:
     creator_empty = is_effectively_empty(creator)
     benchmark_empty = is_effectively_empty(benchmark)
     gap_skip = any(p in gap for p in skip_phrases)
-
-    # S5 特殊处理：如果双方都没有实质信任背书内容，跳过
-    stage_name = str(stage.get("stage", "") or "")
-    is_s5 = "S5" in stage_name or "信任" in stage_name or "trust" in stage_name.lower()
-
-    if is_s5:
-        # 单一来源：跟随 derive 的 S5 硬背书判定，不再独立扫关键词（旧扫描含软背书 test/推荐，
-        # 与 derive 的 hard-only 口径分叉，会出现 derive 打分、报告却跳过的矛盾）。
-        derive_reason = str((stage.get("severity_derivation") or {}).get("reason") or "")
-        if "均无硬背书" in derive_reason:
-            return True, "双方均未提供硬背书（机构/检测/权威），S5 信任放大环节不单独分析。"
 
     if (creator_empty and benchmark_empty) or gap_skip:
         return True, "双方均未设计该环节，不单独分析。"
@@ -392,10 +411,38 @@ def executive_summary(analysis: dict[str, Any]) -> str:
     if state == "degraded" or (state == "not_run" and mode in {"compare", "improve"}):
         return "本报告未完成大模型分析，仅展示预处理和占位信息；阶段差距与提升点不可作为业务判断。"
     eligibility = result.get("comparison_contract") or result.get("comparison_eligibility")
+    code_owned_scope_note = ""
     if isinstance(eligibility, dict):
         from .llm.parse import normalize_comparison_contract
 
-        eligibility = normalize_comparison_contract(eligibility)
+        # The report is a consumer, not an authority. Preserve the marker only
+        # when the finalized code-owned gate proves the closure; model-shaped
+        # stage fields or imported artifacts cannot authorize it.
+        s5_scope_is_code_owned = any(
+            isinstance(stage, dict)
+            and str(stage.get("stage") or "").upper().startswith("S5")
+            and stage.get("comparison_status") == "not_applicable"
+            and isinstance(stage.get("comparison_contract"), dict)
+            and stage["comparison_contract"].get("status_source") == "bilateral_stage1_facts"
+            and isinstance(stage.get("stage_evidence_gate"), dict)
+            and stage["stage_evidence_gate"].get("status") == "not_applicable"
+            and stage["stage_evidence_gate"].get("source") == "code"
+            for stage in result.get("stage_analysis") or []
+        )
+        eligibility = normalize_comparison_contract(
+            eligibility,
+            allow_code_owned_s5_scope=s5_scope_is_code_owned,
+        )
+        if s5_scope_is_code_owned:
+            from .postprocess.repair_stages import comparison_scope_summary
+
+            # A fully comparable report can still have one optional stage out
+            # of scope. Keep that fact visible instead of letting the generic
+            # "Top 提升点" early returns erase the bilateral S5 decision.
+            code_owned_scope_note = comparison_scope_summary(
+                eligibility,
+                allow_code_owned_s5_scope=True,
+            )
     if isinstance(eligibility, dict) and str(eligibility.get("overall_status") or "") == "selective_structural":
         from .postprocess.repair_stages import comparison_scope_summary
 
@@ -405,22 +452,31 @@ def executive_summary(analysis: dict[str, Any]) -> str:
             or result.get("executive_summary")
             or ""
         ).strip()
-        scope_note = comparison_scope_summary(eligibility)
+        scope_note = comparison_scope_summary(
+            eligibility,
+            allow_code_owned_s5_scope=s5_scope_is_code_owned,
+        )
         return f"{scope_note} {summary}".strip()
     if isinstance(eligibility, dict) and str(eligibility.get("overall_status") or "") in {"not_comparable", "uncertain"}:
         # 兼容旧运行结果：即便 JSON 尚未走过最新后处理，报告也不能展示跨品产品结论。
         from .postprocess.repair_stages import comparison_scope_summary
 
-        return comparison_scope_summary(eligibility)
+        return comparison_scope_summary(
+            eligibility,
+            allow_code_owned_s5_scope=s5_scope_is_code_owned,
+        )
     commercial_summary = str(result.get("commercial_priority_summary") or "").strip()
     if commercial_summary:
-        return commercial_summary
+        return f"{code_owned_scope_note} {commercial_summary}".strip()
     summary = str(result.get("one_line_summary") or result.get("executive_summary") or "").strip()
     if summary:
-        return summary
+        return f"{code_owned_scope_note} {summary}".strip()
     improvements = sorted(result.improvements(), key=lambda item: item.get("priority", 999))
     if improvements:
-        return f"达人视频优先改：{improvements[0].get('title', '核心成交阻力')}。"
+        return (
+            f"{code_owned_scope_note} 达人视频优先改："
+            f"{improvements[0].get('title', '核心成交阻力')}。"
+        ).strip()
     large_stages = [
         item.get("stage", "")
         for item in result.stages()
@@ -428,8 +484,11 @@ def executive_summary(analysis: dict[str, Any]) -> str:
         and str(item.get("comparison_status") or "") not in {"not_directly_comparable", "not_applicable"}
     ]
     if large_stages:
-        return f"达人视频最大差距集中在：{'、'.join(large_stages[:2])}。"
-    return "当前报告已完成阶段拆解，建议优先查看 Top 提升点。"
+        return (
+            f"{code_owned_scope_note} 达人视频最大差距集中在："
+            f"{'、'.join(large_stages[:2])}。"
+        ).strip()
+    return f"{code_owned_scope_note} 当前报告已完成阶段拆解，建议优先查看 Top 提升点。".strip()
 
 
 def render_global_diagnosis(analysis: dict[str, Any]) -> str:

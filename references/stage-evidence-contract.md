@@ -140,6 +140,8 @@ stage_id + role + evidence_id + relation + linking_reason + confidence
 | S4 有动作但没有可验证效果，或把结果与过程混淆 | S3/S4 独立 required signals、阶段链接和 `unknown` 闸门；不能用邻段证据补齐 |
 | S1 窗口泄漏、ASR 粗段跨越多个阶段 | windowed transcript 与 raw transcript 分离；阶段时间仅消费窗口安全转写；越界和跨阶段链接硬失败 |
 | S5 将产品主张、软背书、硬来源混为一谈 | Stage1 只记录 source facts；S5 资格要求来源主体、依据、关联性，未知不等于 absence |
+
+**S5 的比较范围按双侧事实决定，不按品类先验关闭。** 只有达人和标杆两侧的 S5 覆盖都完整，且两侧都明确为 `absent`，代码才可以把 S5 标为 `not_applicable`；这表示本轮双方都没有合格的独立信任材料，不表示该品类“无需背书”。一侧存在可核验来源、另一侧 absent 时，S5 仍在比较范围内，标杆的实际信任材料不能被品类判断抵消；任一侧为 `unknown`、`conflict` 或覆盖未完成时，保留 S5 范围并由 evidence gate 阻断。只出现无来源的销量/功效/口碑主张时，记录为观察到的不合格主张，不能当作合格背书，也不能当作明确 absent。品类与购买门槛只影响信任材料的商业权重和解释，不拥有范围状态的写入权。
 | S6 口播/字幕缺失或结尾证据漏采 | 代码根据响应 `finish_reason=length` 记录 `evidence_budget_exceeded`，和缺阶段检查统一触发一次有预算的补观察；失败保留 unknown |
 | VL/模型输出两侧内容混合、证据引用错角色 | 每侧独立 evidence ID 空间、链接角色校验、跨视频/跨阶段引用拒绝 |
 | OCR、ASR、镜头或原生视频能力失败 | 采集能力状态写入运行产物；缺失能力只产生降级/unknown，不产生占位事实或确定性严重度 |

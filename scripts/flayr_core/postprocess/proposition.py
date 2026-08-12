@@ -652,6 +652,9 @@ def _absolute_status(stage_id: str, flag: dict[str, Any] | None) -> tuple[str, s
     if stage_id == "S5":
         if flag.get("exists") is False:
             return "not_applicable", "未设置独立信任环节"
+        # This is a side-local S5 quality/audit status. It must not decide
+        # whether the bilateral comparison scope is closed; that decision is
+        # owned by apply_comparison_eligibility and the bilateral fact matrix.
         if str(flag.get("trust_basis") or "unknown") in {"product_claim", "offer_or_spec", "none", "unknown"}:
             return "not_applicable", "产品主张或促销规格不构成独立信任材料"
         if flag.get("duplicates_other_stage") is True:

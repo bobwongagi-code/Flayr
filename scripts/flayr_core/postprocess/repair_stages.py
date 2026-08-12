@@ -17,9 +17,11 @@ from ..artifacts import format_seconds, parse_time_range_seconds, parse_timestam
 from ..evidence_states import S1_HOOK_FLOOR_FIELDS, hard_fact_fingerprint
 from ..stage_catalog import stage_tuples
 from ..stage_evidence_contracts import (
+    S5_NON_QUALIFYING_DISQUALIFIERS,
     STAGE_EVIDENCE_CONTRACT_VERSION,
     materialize_stage_evidence_gates,
     qualified_stage_evidence_ids,
+    stage_evidence_check_map,
     stage_evidence_readiness,
 )
 from ..transcript import read_timed_transcript_segments
@@ -610,6 +612,125 @@ def stabilize_stage_severity(result: dict[str, Any]) -> None:
     del result
 
 
+def _refresh_comparison_contract_views(contract: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild aggregate comparison fields after a stage-local scope change."""
+    stage_contracts = contract.get("stage_eligibility")
+    if not isinstance(stage_contracts, dict):
+        return contract
+    stage_order = ("S1", "S2", "S3", "S4", "S5", "S6")
+    comparable = [
+        code
+        for code in stage_order
+        if isinstance(stage_contracts.get(code), dict)
+        and stage_contracts[code].get("status") in {"direct", "structural"}
+    ]
+    contract["comparable_stages"] = comparable
+    contract["direct_product_stages"] = list(comparable)
+    identity = str(contract.get("identity_relation") or "uncertain").strip().lower()
+    substitution = str(contract.get("substitution_relation") or "uncertain").strip().lower()
+    if identity in {"exact_product", "same_product_family"}:
+        contract["overall_status"] = "full_direct"
+    elif identity == "uncertain" or substitution == "uncertain":
+        contract["overall_status"] = "uncertain"
+    elif comparable:
+        contract["overall_status"] = "selective_structural"
+    else:
+        contract["overall_status"] = "not_comparable"
+    return contract
+
+
+def _s5_has_non_qualifying_observation(side: dict[str, Any]) -> bool:
+    check = stage_evidence_check_map(side).get("S5") or {}
+    return bool(
+        S5_NON_QUALIFYING_DISQUALIFIERS.intersection(
+            str(item or "").strip()
+            for item in check.get("observed_disqualifiers") or []
+        )
+    )
+
+
+def _s5_bilateral_scope_state(
+    understanding: dict[str, Any],
+) -> tuple[dict[str, str], bool]:
+    """Return Stage1 readiness and whether facts close the optional S5 slot.
+
+    This is the single scope predicate used by both the normal comparison
+    contract path and the no-contract compatibility path. Qualification of a
+    source remains a separate Stage1/evidence-gate concern.
+    """
+    sides = {
+        role: understanding.get(role) if isinstance(understanding.get(role), dict) else {}
+        for role in ("creator", "benchmark")
+    }
+    readiness = {
+        role: stage_evidence_readiness(side, "S5")
+        for role, side in sides.items()
+    }
+    closes_scope = (
+        all(value == "absent" for value in readiness.values())
+        and not any(_s5_has_non_qualifying_observation(side) for side in sides.values())
+    )
+    return readiness, closes_scope
+
+
+def _apply_fact_scoped_s5(result: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
+    """Derive S5 comparison scope from bilateral Stage1 facts only.
+
+    ``structure_library_full.md`` defines S5 as an optional trust-amplification
+    slot.  Optional means a video may omit it; it does not authorize a product
+    category prior to erase a trust signal that the benchmark actually shows.
+    The only code-owned closure is bilateral factual absence after both sides
+    pass the Stage1 qualification contract.
+    """
+    stage_contracts = contract.get("stage_eligibility")
+    understanding = result.get("video_understanding")
+    if not isinstance(stage_contracts, dict) or not isinstance(understanding, dict):
+        return contract
+    current = stage_contracts.get("S5")
+    if not isinstance(current, dict):
+        return contract
+
+    readiness, both_closed_negative = _s5_bilateral_scope_state(understanding)
+    # Unsupported claims are not qualified S5 evidence, but they are still
+    # observed S5-related material. Keep the bilateral scope active so a
+    # product/category prior cannot erase a real creator/benchmark difference.
+    # Only an explicit bilateral Stage1 absence closes this optional slot.
+    # ``not_applicable`` is a different scope/status vocabulary and must not
+    # become an accidental product-category shortcut here.
+    current_status = str(current.get("status") or "not_comparable").strip().lower()
+
+    if both_closed_negative and current_status in {"direct", "structural", "not_applicable"}:
+        current["status"] = "not_applicable"
+        current["status_source"] = "bilateral_stage1_facts"
+        current["basis"] = (
+            "双方 Stage1 已完成 S5 覆盖且均未观察到独立信任/背书事实；"
+            "S5 本轮不涉及，不代表该品类永远不需要信任材料。"
+        )
+    elif current_status == "not_applicable":
+        # A provider cannot close S5 merely because it interpreted the product
+        # as low-decision or because one side had no signal. Reopen only when
+        # the product relationship itself permits comparison; unresolved facts
+        # will then be blocked by the normal evidence gate.
+        identity = str(contract.get("identity_relation") or "uncertain").strip().lower()
+        substitution = str(contract.get("substitution_relation") or "uncertain").strip().lower()
+        if identity in {"exact_product", "same_product_family"}:
+            active_status = "direct"
+        elif substitution in {"strong_substitute", "partial_substitute"}:
+            active_status = "structural"
+        else:
+            active_status = "not_comparable"
+        current["status"] = active_status
+        current.pop("status_source", None)
+        current["basis"] = (
+            "S5 的关闭不能由品类先验或单侧未使用推出；"
+            f"当前双侧 Stage1 readiness={readiness['creator']}/{readiness['benchmark']}，按实际事实保留比较范围。"
+        )
+
+    stage_contracts["S5"] = current
+    contract["stage_eligibility"] = stage_contracts
+    return _refresh_comparison_contract_views(contract)
+
+
 def apply_comparison_eligibility(result: dict[str, Any]) -> None:
     """按阶段比较合同限制差距结论，不用整体商品关系替阶段作答。"""
     contract = result.get("comparison_contract") or result.get("comparison_eligibility")
@@ -631,15 +752,42 @@ def apply_comparison_eligibility(result: dict[str, Any]) -> None:
                     readiness[role] = stage_evidence_readiness(facts, code)
                     if readiness[role] not in {"present", "absent"}:
                         unresolved.append(f"{role}:{readiness[role]}")
+            if code == "S5":
+                s5_readiness, s5_closes_scope = _s5_bilateral_scope_state(understanding)
+            else:
+                s5_readiness, s5_closes_scope = {}, False
+            if code == "S5" and s5_closes_scope:
+                stage["comparison_contract"] = {
+                    "status": "not_applicable",
+                    "status_source": "bilateral_stage1_facts",
+                    "basis": (
+                        "双方 Stage1 已完成 S5 覆盖且均未观察到独立信任/背书事实；"
+                        "S5 本轮不涉及，不代表该品类永远不需要信任材料。"
+                    ),
+                    "evidence_readiness": s5_readiness,
+                }
+                stage["comparison_status"] = "not_applicable"
+                stage["comparison_reason"] = stage["comparison_contract"]["basis"]
+                trace = stage.get("severity_derivation")
+                if isinstance(trace, dict):
+                    trace["direct_product_comparison_eligible"] = False
+                continue
+            if code == "S5":
+                # The compatibility path has no top-level comparison
+                # contract, so a provider/model stage field is the only stale
+                # scope value that could remain.  Bilateral Stage1 facts own
+                # this decision even here: one-sided evidence keeps S5 active
+                # and must not inherit a model-written not_applicable value.
+                stage.pop("comparison_status", None)
             if not unresolved:
                 continue
             stage["comparison_contract"] = {
-                "status": "not_comparable",
                 "evidence_readiness": readiness,
+                "reason_code": "evidence_collection_incomplete",
             }
-            stage["comparison_status"] = "not_directly_comparable"
+            stage.pop("comparison_status", None)
             stage["comparison_reason"] = (
-                f"Stage1证据资格未完成（{', '.join(unresolved)}），禁止输出阶段差距。"
+                f"Stage1证据资格未完成（{', '.join(unresolved)}），证据补齐前不输出阶段差距。"
             )
             trace = stage.get("severity_derivation")
             if isinstance(trace, dict):
@@ -650,6 +798,7 @@ def apply_comparison_eligibility(result: dict[str, Any]) -> None:
     from ..llm.parse import normalize_comparison_contract
 
     contract = normalize_comparison_contract(contract)
+    contract = _apply_fact_scoped_s5(result, contract)
     result["comparison_contract"] = contract
     result["comparison_eligibility"] = contract
     stage_contracts = contract.get("stage_eligibility")
@@ -681,10 +830,20 @@ def apply_comparison_eligibility(result: dict[str, Any]) -> None:
         stage["comparison_contract"]["evidence_readiness"] = readiness
         if unresolved:
             stage["model_comparison_status"] = status
-            stage["comparison_status"] = "not_directly_comparable"
-            stage["comparison_reason"] = (
-                f"Stage1 证据资格未完成（{', '.join(unresolved)}），原比较合同仅保留审计，不能输出阶段差距。"
-            )
+            if status in {"not_applicable", "not_comparable"}:
+                stage["comparison_status"] = (
+                    "not_applicable" if status == "not_applicable" else "not_directly_comparable"
+                )
+                stage["comparison_reason"] = reason
+            else:
+                # Evidence readiness and comparison scope are independent axes.
+                # An unresolved side blocks the judgment, but it does not make
+                # two otherwise comparable videos semantically incomparable.
+                stage.pop("comparison_status", None)
+                stage["comparison_reason"] = (
+                    f"Stage1 证据资格未完成（{', '.join(unresolved)}），"
+                    "比较合同仍然有效，证据补齐前不输出阶段差距。"
+                )
             trace = stage.get("severity_derivation")
             if isinstance(trace, dict):
                 trace["direct_product_comparison_eligible"] = False
@@ -706,7 +865,10 @@ def apply_comparison_eligibility(result: dict[str, Any]) -> None:
             trace["direct_product_comparison_eligible"] = False
 
     if contract.get("overall_status") != "full_direct":
-        result["comparison_scope_note"] = comparison_scope_summary(contract)
+        result["comparison_scope_note"] = comparison_scope_summary(
+            contract,
+            allow_code_owned_s5_scope=True,
+        )
     materialize_stage_evidence_gates(result)
     _suppress_blocked_stage_improvements(result)
 
@@ -759,11 +921,21 @@ def _suppress_blocked_stage_improvements(result: dict[str, Any]) -> None:
     ]
 
 
-def comparison_scope_summary(eligibility: dict[str, Any]) -> str:
+def comparison_scope_summary(
+    eligibility: dict[str, Any],
+    *,
+    allow_code_owned_s5_scope: bool = False,
+) -> str:
     """按阶段资格生成范围说明，不把结构可比误写成产品优劣可比。"""
     from ..llm.parse import normalize_comparison_contract
 
-    eligibility = normalize_comparison_contract(eligibility)
+    # Callers that already passed through apply_comparison_eligibility may
+    # preserve its code-owned bilateral S5 marker explicitly. Raw report or
+    # provider inputs must stay on the default untrusted path.
+    eligibility = normalize_comparison_contract(
+        eligibility,
+        allow_code_owned_s5_scope=allow_code_owned_s5_scope,
+    )
     identity = str(eligibility.get("identity_relation") or "uncertain").strip()
     substitution = str(eligibility.get("substitution_relation") or "uncertain").strip()
     overall = str(eligibility.get("overall_status") or "uncertain").strip()
@@ -787,6 +959,9 @@ def comparison_scope_summary(eligibility: dict[str, Any]) -> str:
         and stage_contracts[stage].get("status") in {"not_applicable", "not_comparable"}
     ]
     if overall == "full_direct":
+        if skipped:
+            skipped_text = "、".join(skipped)
+            return f"两条视频属于同品或同产品家族，其他阶段可直接比较；本轮不涉及：{skipped_text}。"
         return "两条视频属于同品或同产品家族，S1-S6 可直接比较。"
     if overall == "selective_structural":
         structural_text = "、".join(structural) or "无"
@@ -960,7 +1135,8 @@ def has_real_endorsement(text: str) -> bool:
 
 
 # 硬背书子集（机构/监管/检测临床/医生专家），排除软背书（测评/口碑/好评/销量）。
-# 用户判例：软背书 ≤ 硬背书，双方均无硬背书（哪怕一方有软背书）→ S5 small。
+# 这里只是兼容旧 derive 文本兜底的识别工具；它不能决定 S5 是否进入比较，
+# 也不能用“双方无硬背书”覆盖一侧已经观察到的软/数据型信任事实。
 _HARD_ENDORSEMENT_PATTERN = (
     r"认证|认可|检测报告|检验|临床|clinical|lab[\s-]?tested|certified|"
     r"KKM|kelulusan|sijil|BPOM|halal|FDA|SNI|GMP|"

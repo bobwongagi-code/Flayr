@@ -564,10 +564,17 @@ def _authoritative_segmented_comparison_contract(
     """
     for source in (
         analysis.get("comparison_eligibility") or analysis.get("comparison_contract"),
-        result.get("comparison_eligibility") or result.get("comparison_contract"),
     ):
         if isinstance(source, dict) and source:
             return copy.deepcopy(source)
+    # A segmented provider result is only a compatibility fallback. Normalize
+    # it as untrusted input so a model cannot smuggle a code-owned S5 closure
+    # into the authoritative handoff by copying ``status_source``.
+    for source in (
+        result.get("comparison_eligibility") or result.get("comparison_contract"),
+    ):
+        if isinstance(source, dict) and source:
+            return normalize_comparison_contract(source)
     return {}
 
 
@@ -5145,6 +5152,17 @@ def _maybe_recover_video_facts(
         include_budget=False,
         include_coverage_audit=False,
     )
+    # An explicit negative S6 result is closed enough to be actionable, but a
+    # missed tail CTA is costly and common in noisy/local-language speech.
+    # Open one bounded S6 tail review; the recovery prompt still requires
+    # semantic confirmation and may keep the result absent.
+    s6_check = stage_evidence_check_map(facts).get("S6")
+    s6_explicitly_absent = (
+        isinstance(s6_check, dict)
+        and str(s6_check.get("status") or "").strip().lower() == "absent"
+    )
+    if s6_explicitly_absent and "S6" not in primary_targets:
+        primary_targets.append("S6")
     issue_targets = [
         issue.split(":", 1)[0]
         for issue in contract_issues
@@ -5164,6 +5182,8 @@ def _maybe_recover_video_facts(
         trigger_reasons.append("evidence_budget_exceeded")
     if primary_targets:
         trigger_reasons.append("stage_evidence_incomplete")
+    if s6_explicitly_absent:
+        trigger_reasons.append("s6_absent_tail_review")
     if contract_issues:
         trigger_reasons.append("stage_evidence_contract_invalid")
     if not targets and not trigger_reasons:

@@ -33,7 +33,7 @@
       "S2": {"status": "direct | structural | not_applicable | not_comparable", "basis": "同上", "shared_contract": "同上", "restrictions": [], "evidence_ids": []},
       "S3": {"status": "direct | structural | not_applicable | not_comparable", "basis": "同上", "shared_contract": "同上", "restrictions": [], "evidence_ids": []},
       "S4": {"status": "direct | structural | not_applicable | not_comparable", "basis": "同上", "shared_contract": "同上", "restrictions": [], "evidence_ids": []},
-      "S5": {"status": "direct | structural | not_applicable | not_comparable", "basis": "同上", "shared_contract": "同上", "restrictions": [], "evidence_ids": []},
+      "S5": {"status": "direct | structural | not_applicable | not_comparable", "status_source": "仅代码可写；双方 Stage1 覆盖完整且均明确 absent 时为 bilateral_stage1_facts", "basis": "同上", "shared_contract": "同上", "restrictions": [], "evidence_ids": []},
       "S6": {"status": "direct | structural | not_applicable | not_comparable", "basis": "同上", "shared_contract": "同上", "restrictions": [], "evidence_ids": []}
     },
     "overall_status": "full_direct | selective_structural | not_comparable | uncertain。由代码根据关系与阶段资格派生。",
@@ -787,7 +787,7 @@
     ]
   },
   "product_profile": {
-    "visualizable": "yes | no。该产品核心价值能否视觉化呈现。yes 走 S4 视觉命题审计；no（香水/保健品/隐形矫正等效果拍不出）时判断权重从 S4 效果呈现转向 S5 信任与达人可信度。这个分叉判断本身品类无关。",
+    "visualizable": "yes | no。该产品核心价值能否视觉化呈现。yes 走 S4 视觉命题审计；no（香水/保健品/隐形矫正等效果拍不出）时仅表示商业权重可从 S4 效果呈现转向信任与达人可信度分析，不表示 S5 必须出现、达人必须提供背书，也不改变 S5 是否进入本轮比较；S5 范围只由双侧 Stage1 实际事实决定。这个分叉判断本身品类无关。",
     "physical_task": "该产品解决的最直观尴尬/任务。例：定妆粉饼消除粉底后油光、实现哑光定妆。",
     "hook_proposition": "S1 钩子命题：本品对目标人群最有拦截力的点，类型取决于本品、不限痛点——可痛点/承诺/反差/情绪/向往/视觉吸引/身份代入/场景还原等（见 structure_library S1 七型；功能品常=痛点/physical_task，情绪/潮玩品=视觉吸引/个性场景/反差）。S1 执行分以此为锚点。模型按品类+产品事实推，运营可覆盖。",
     "core_selling_points": [

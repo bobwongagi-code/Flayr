@@ -1629,6 +1629,7 @@ _IDENTITY_RELATIONS = {"exact_product", "same_product_family", "different_produc
 _SUBSTITUTION_RELATIONS = {"same_solution", "strong_substitute", "partial_substitute", "none", "uncertain"}
 _STAGE_COMPARISON_STATUSES = {"direct", "structural", "not_applicable", "not_comparable"}
 _ALL_STAGE_CODES = ("S1", "S2", "S3", "S4", "S5", "S6")
+_S5_FACT_SCOPE_SOURCE = "bilateral_stage1_facts"
 
 
 def normalize_video_product_identity(value: Any) -> dict[str, Any]:
@@ -1651,8 +1652,18 @@ def normalize_video_product_identity(value: Any) -> dict[str, Any]:
     }
 
 
-def normalize_comparison_contract(value: Any) -> dict[str, Any]:
-    """归一商品关系与阶段级可比合同，并由合同派生旧 scope 兼容视图。"""
+def normalize_comparison_contract(
+    value: Any,
+    *,
+    allow_code_owned_s5_scope: bool = False,
+) -> dict[str, Any]:
+    """归一商品关系与阶段级可比合同，并由合同派生旧 scope 兼容视图。
+
+    ``status_source=bilateral_stage1_facts`` is a code-owned assertion. Raw
+    provider or external results cannot carry it through normalization; only
+    postprocess/report replay paths that already trust the frozen bilateral
+    Stage1 fact matrix may opt in explicitly.
+    """
     value = value if isinstance(value, dict) else {}
     legacy_scope = normalize_choice(value.get("scope"), _COMPARISON_SCOPES, "uncertain")
     identity_relation = normalize_choice(value.get("identity_relation"), _IDENTITY_RELATIONS, "uncertain")
@@ -1717,15 +1728,40 @@ def normalize_comparison_contract(value: Any) -> dict[str, Any]:
     stage_eligibility: dict[str, dict[str, Any]] = {}
     for stage in _ALL_STAGE_CODES:
         raw = raw_stage_eligibility.get(stage) if isinstance(raw_stage_eligibility.get(stage), dict) else {}
-        status = normalize_choice(raw.get("status"), _STAGE_COMPARISON_STATUSES, "not_comparable")
+        raw_status = normalize_choice(raw.get("status"), _STAGE_COMPARISON_STATUSES, "not_comparable")
+        status = raw_status
+        raw_s5_scope_source = (
+            str(raw.get("status_source") or "").strip().lower()
+            if stage == "S5"
+            else ""
+        )
+        s5_scope_source = raw_s5_scope_source if allow_code_owned_s5_scope else ""
         if not raw and stage in legacy_stages:
             status = "direct" if identity_relation in {"exact_product", "same_product_family"} else "structural"
         if identity_relation in {"exact_product", "same_product_family"}:
-            status = "direct"
+            # Preserve the only sanctioned S5 closure through a later
+            # round-trip.  Other provider/category not_applicable values are
+            # reopened below rather than becoming a hidden prior.
+            status = (
+                "not_applicable"
+                if stage == "S5"
+                and raw_status == "not_applicable"
+                and s5_scope_source == _S5_FACT_SCOPE_SOURCE
+                else "direct"
+            )
         elif identity_relation == "uncertain" or substitution_relation in {"none", "uncertain"}:
             status = "not_comparable"
         elif status == "direct":
             status = "structural"
+        if stage == "S5" and status == "not_applicable" and s5_scope_source != _S5_FACT_SCOPE_SOURCE:
+            # A provider/category prior cannot close S5.  Only the postprocess
+            # may write this status after bilateral Stage1 absence is closed.
+            if identity_relation in {"exact_product", "same_product_family"}:
+                status = "direct"
+            elif substitution_relation in {"strong_substitute", "partial_substitute"}:
+                status = "structural"
+            else:
+                status = "not_comparable"
         stage_eligibility[stage] = {
             "status": status,
             "basis": str(raw.get("basis") or "").strip(),
@@ -1733,6 +1769,12 @@ def normalize_comparison_contract(value: Any) -> dict[str, Any]:
             "restrictions": normalize_evidence(raw.get("restrictions")),
             "evidence_ids": normalize_evidence(raw.get("evidence_ids")),
         }
+        if (
+            stage == "S5"
+            and status == "not_applicable"
+            and s5_scope_source == _S5_FACT_SCOPE_SOURCE
+        ):
+            stage_eligibility[stage]["status_source"] = s5_scope_source
 
     comparable_stages = [
         stage for stage in _ALL_STAGE_CODES

@@ -696,6 +696,28 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(mismatched["reason_code"], "comparison_scope_closed")
         self.assertFalse(mismatched["analysis_allowed"])
 
+    def test_s5_gate_rejects_model_not_applicable_without_bilateral_marker(self) -> None:
+        result = self._s5_comparison_result("unknown", "absent")
+        result["stage_analysis"][4]["comparison_status"] = "not_applicable"
+        untrusted = stage_evidence_gate(result, "S5", comparison_status="not_applicable")
+        self.assertEqual(untrusted["status"], "blocked")
+        self.assertEqual(untrusted["reason_code"], "evidence_collection_incomplete")
+
+        unmarked = self._s5_comparison_result("absent", "absent")
+        unmarked["stage_analysis"][4]["comparison_status"] = "not_applicable"
+        unmarked_gate = stage_evidence_gate(unmarked, "S5", comparison_status="not_applicable")
+        self.assertEqual(unmarked_gate["status"], "blocked")
+        self.assertEqual(unmarked_gate["reason_code"], "s5_scope_not_closed")
+
+        result = self._s5_comparison_result("absent", "absent")
+        result["stage_analysis"][4]["comparison_contract"] = {
+            "status": "not_applicable",
+            "status_source": "bilateral_stage1_facts",
+        }
+        trusted = stage_evidence_gate(result, "S5", comparison_status="not_applicable")
+        self.assertEqual(trusted["status"], "not_applicable")
+        self.assertEqual(trusted["reason_code"], "comparison_scope_closed")
+
     def test_closed_comparison_scope_precedes_unknown_evidence(self) -> None:
         result = {
             "video_understanding": {
@@ -2788,6 +2810,156 @@ class StageEvidenceContractTests(unittest.TestCase):
         }
         freeze_stage_evidence(side)
         return side
+
+    @staticmethod
+    def _set_s5_state(side: dict[str, object], status: str) -> dict[str, object]:
+        """Set one side's S5 fact state and re-freeze the fixture snapshot."""
+        first_unit = next(iter(side.get("evidence_units") or []), {})
+        role_code = str(first_unit.get("id") or "C")[:1]
+        check = next(item for item in side["stage_evidence_checks"] if item["stage"] == "S5")
+        if status == "present":
+            evidence_id = f"{role_code}5"
+            check.update(
+                {
+                    "status": "present",
+                    "coverage": "complete",
+                    "evidence_ids": [evidence_id],
+                    "observed_signals": list(stage_evidence_contract("S5").required_signals),
+                    "missing_signals": [],
+                    "signal_bindings": StageEvidenceContractTests._signal_bindings("S5", evidence_id),
+                }
+            )
+            unit = next(item for item in side["evidence_units"] if item["id"] == evidence_id)
+            unit.update(
+                {
+                    "evidence_strength": "direct",
+                    "visual_fact": "可核验的独立信任来源",
+                    "trust_source_signals": ["independent_user"],
+                    "trust_source_reference": "可核验的用户评价或来源记录。",
+                    "trust_source_status": "explicit_present",
+                }
+            )
+        elif status == "absent":
+            check.update(
+                {
+                    "status": "absent",
+                    "coverage": "complete",
+                    "evidence_ids": [],
+                    "observed_signals": [],
+                    "missing_signals": list(stage_evidence_contract("S5").required_signals),
+                    "signal_bindings": {},
+                }
+            )
+        elif status == "product_claim":
+            check.update(
+                {
+                    "status": "absent",
+                    "coverage": "complete",
+                    "evidence_ids": [],
+                    "observed_signals": [],
+                    "missing_signals": list(stage_evidence_contract("S5").required_signals),
+                    "observed_disqualifiers": ["product_claim_only"],
+                    "signal_bindings": {},
+                }
+            )
+        else:
+            check.update(
+                {
+                    "status": status,
+                    "coverage": "unknown",
+                    "evidence_ids": [],
+                    "observed_signals": [],
+                    "missing_signals": [],
+                    "signal_bindings": {},
+                }
+            )
+        side["stage1_coverage_audit"] = StageEvidenceContractTests._coverage_audit(
+            side["stage_evidence_checks"]
+        )
+        freeze_stage_evidence(side)
+        return side
+
+    @staticmethod
+    def _s5_comparison_result(creator_status: str, benchmark_status: str) -> dict[str, object]:
+        creator = StageEvidenceContractTests._set_s5_state(
+            StageEvidenceContractTests._active_side("C"), creator_status
+        )
+        benchmark = StageEvidenceContractTests._set_s5_state(
+            StageEvidenceContractTests._active_side("B"), benchmark_status
+        )
+        return {
+            "video_understanding": {"creator": creator, "benchmark": benchmark},
+            "comparison_contract": {
+                "identity_relation": "exact_product",
+                "substitution_relation": "same_solution",
+                "stage_eligibility": {
+                    stage: {"status": "direct", "basis": "同款产品"}
+                    for stage in stage_codes()
+                },
+            },
+            "stage_analysis": [{"stage": stage} for stage in stage_codes()],
+        }
+
+    def test_s5_scope_uses_bilateral_fact_matrix(self) -> None:
+        for creator_status, benchmark_status in (
+            ("present", "present"),
+            ("present", "absent"),
+            ("absent", "present"),
+        ):
+            with self.subTest(creator=creator_status, benchmark=benchmark_status):
+                result = self._s5_comparison_result(creator_status, benchmark_status)
+                apply_comparison_eligibility(result)
+                contract = result["comparison_contract"]["stage_eligibility"]["S5"]
+                stage = result["stage_analysis"][4]
+                self.assertEqual(contract["status"], "direct")
+                self.assertNotEqual(contract.get("status_source"), "bilateral_stage1_facts")
+                self.assertNotEqual(stage.get("comparison_status"), "not_applicable")
+                self.assertEqual(stage["stage_evidence_gate"]["status"], "grounded")
+
+        result = self._s5_comparison_result("absent", "absent")
+        apply_comparison_eligibility(result)
+        contract = result["comparison_contract"]["stage_eligibility"]["S5"]
+        stage = result["stage_analysis"][4]
+        self.assertEqual(contract["status"], "not_applicable")
+        self.assertEqual(contract["status_source"], "bilateral_stage1_facts")
+        self.assertEqual(stage["comparison_status"], "not_applicable")
+        self.assertEqual(stage["stage_evidence_gate"]["status"], "not_applicable")
+
+        result = self._s5_comparison_result("absent", "product_claim")
+        apply_comparison_eligibility(result)
+        contract = result["comparison_contract"]["stage_eligibility"]["S5"]
+        self.assertEqual(contract["status"], "direct")
+        self.assertNotIn("status_source", contract)
+        self.assertNotEqual(result["stage_analysis"][4].get("comparison_status"), "not_applicable")
+        self.assertEqual(
+            result["stage_analysis"][4]["stage_evidence_gate"]["status"],
+            "blocked",
+        )
+
+        # The compatibility path without a comparison contract must apply the
+        # same rule; it may not close S5 from bilateral "absent" after one
+        # side actually contained an unsupported trust-like claim.
+        result = self._s5_comparison_result("absent", "product_claim")
+        result.pop("comparison_contract")
+        apply_comparison_eligibility(result)
+        self.assertEqual(
+            result["stage_analysis"][4]["stage_evidence_gate"]["status"],
+            "blocked",
+        )
+
+    def test_s5_unknown_does_not_close_scope_even_if_provider_says_not_applicable(self) -> None:
+        result = self._s5_comparison_result("unknown", "absent")
+        result["comparison_contract"]["stage_eligibility"]["S5"] = {
+            "status": "not_applicable",
+            "basis": "品类通常不需要背书",
+        }
+        apply_comparison_eligibility(result)
+        contract = result["comparison_contract"]["stage_eligibility"]["S5"]
+        stage = result["stage_analysis"][4]
+        self.assertEqual(contract["status"], "direct")
+        self.assertNotIn("status_source", contract)
+        self.assertNotEqual(stage.get("comparison_status"), "not_applicable")
+        self.assertEqual(stage["stage_evidence_gate"]["status"], "blocked")
 
     def test_stage2_citations_follow_stage1_readiness_per_role(self) -> None:
         creator = self._active_side("C")

@@ -203,6 +203,17 @@ STAGE_DISQUALIFIER_DEFINITIONS: dict[str, str] = {
     "benefit_only_without_action": "只回顾产品利益，没有面向观众的可执行行动",
 }
 
+# These are observed S5-related claims, but they are not an explicit negative
+# observation. Keeping them separate prevents an unsupported benchmark claim
+# from being silently converted into "both sides did not use S5".
+S5_NON_QUALIFYING_DISQUALIFIERS = frozenset(
+    {
+        "product_claim_only",
+        "offer_only",
+        "unattributed_social_claim",
+    }
+)
+
 # Every stage is tested against the same four boundary questions: own positive,
 # non-own negative, previous-stage confusion, and next-stage confusion.  This
 # is deliberately declarative so a new stage cannot be added without stating
@@ -1321,6 +1332,42 @@ def stage_evidence_gate(
         and stage_evidence_snapshot_issues(sides[role], require_snapshot=True)
     }
     normalized_comparison = str(comparison_status or "").strip().lower()
+    if code == "S5" and normalized_comparison == "not_applicable":
+        # S5 is the only optional slot, so a side-local/model-shaped
+        # ``comparison_status`` must not close it.  The marker is written by
+        # apply_comparison_eligibility only after both Stage1 sides are
+        # complete and explicitly absent.  Accept the marker from either the
+        # stage projection or the finalized top-level contract for replay.
+        code_owned_scope = False
+        stage_records = result.get("stage_analysis") if isinstance(result, dict) else []
+        for candidate in stage_records if isinstance(stage_records, list) else []:
+            if not isinstance(candidate, dict) or normalize_stage_code(candidate.get("stage")) != "S5":
+                continue
+            candidate_contract = candidate.get("comparison_contract")
+            code_owned_scope = (
+                isinstance(candidate_contract, dict)
+                and candidate_contract.get("status") == "not_applicable"
+                and candidate_contract.get("status_source") == "bilateral_stage1_facts"
+            )
+            if code_owned_scope:
+                break
+        if not code_owned_scope and isinstance(result, dict):
+            comparison_contract = result.get("comparison_contract") or result.get("comparison_eligibility")
+            stage_contracts = (
+                comparison_contract.get("stage_eligibility")
+                if isinstance(comparison_contract, dict)
+                else None
+            )
+            s5_contract = stage_contracts.get("S5") if isinstance(stage_contracts, dict) else None
+            code_owned_scope = (
+                isinstance(s5_contract, dict)
+                and s5_contract.get("status") == "not_applicable"
+                and s5_contract.get("status_source") == "bilateral_stage1_facts"
+            )
+        if code_owned_scope and statuses != {"absent"}:
+            code_owned_scope = False
+        if not code_owned_scope:
+            normalized_comparison = ""
     if "conflict" in statuses:
         gate_status = "blocked"
         reason_code = "conflicting_stage_evidence"
@@ -1342,6 +1389,21 @@ def stage_evidence_gate(
             if normalized_comparison == "not_applicable"
             else "比较合同已明确该阶段不可比，不输出差距判断。"
         )
+    elif code == "S5" and "not_applicable" in statuses:
+        # S5 is optional, but a side-local/model-written ``not_applicable`` is
+        # not the bilateral scope decision. Only apply_comparison_eligibility
+        # may pass the explicit comparison_status above after both Stage1
+        # sides are complete and absent.
+        gate_status = "blocked"
+        reason_code = "s5_scope_not_closed"
+        reason = "S5 单侧或模型侧标记为未涉及，尚未形成双侧 Stage1 事实闭合，不能关闭本轮比较。"
+    elif code == "S5" and statuses == {"absent"}:
+        # Even bilateral absence needs the code-owned comparison decision. A
+        # raw stage gate call must not silently turn an unfinalized fact pair
+        # into a successful grounded result.
+        gate_status = "blocked"
+        reason_code = "s5_scope_not_closed"
+        reason = "S5 双侧事实均为 absent，但尚未由比较合同确认本轮不涉及，不能直接发布结果。"
     elif "unknown" in statuses:
         blocked_roles = [role for role, item in role_states.items() if item["status"] == "unknown"]
         budget_roles = [
@@ -1904,6 +1966,11 @@ def _stage_check_issues(
         )
         if coverage != "complete" or evidence_ids or supported_bindings or not required.issubset(missing):
             issues.append(f"{contract.code}:absence_without_complete_coverage")
+        if (
+            contract.code == "S5"
+            and S5_NON_QUALIFYING_DISQUALIFIERS.intersection(observed_disqualifiers)
+        ):
+            issues.append("S5:absence_with_non_qualifying_observation")
     elif status == "not_applicable":
         if coverage != "complete" or evidence_ids or signal_bindings or not str(check.get("reason") or "").strip():
             issues.append(f"{contract.code}:not_applicable_without_explicit_basis")

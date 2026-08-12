@@ -59,6 +59,8 @@ from flayr_core.llm.payload import (
     build_llm_comparison_payload,
     build_llm_payload,
     build_llm_repair_payload,
+    build_product_foundation_payload,
+    build_product_foundation_repair_payload,
     build_stage_group_judgment_payload,
     build_stage_synthesis_payload,
     build_stage_evidence_qualification_payload,
@@ -122,6 +124,7 @@ from flayr_core.postprocess.repair import (
 )
 from flayr_core.postprocess.repair_stages import infer_s1_boundary_candidate
 from flayr_core.postprocess.repair_stages import align_clear_commerce_evidence
+from flayr_core.postprocess.repair_stages import comparison_scope_summary
 from flayr_core.postprocess.health_rewrite import (
     is_child_toothpaste_context,
     sanitize_health_recommendations,
@@ -2359,6 +2362,39 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertTrue(normalized["valid"])
         self.assertEqual(normalized["observable_dimension"], "刷头状态")
 
+        process_evidence = {
+            **base,
+            "mode": "process_result",
+            "signal_type": "process_event",
+            "observable_dimension": "刷头卫生状态",
+            "observable_signal": "旧刷头无需手触被新刷头替换，使用后直接丢弃",
+        }
+        self.assertTrue(normalize_proof_contract(process_evidence)["valid"])
+
+        different_attributes = {**base, "observable_dimension": "刷头卫生状态与更换便捷性"}
+        normalized = normalize_proof_contract(different_attributes)
+        self.assertFalse(normalized["valid"])
+        self.assertIn("一个可观察维度", normalized["validation_reason"])
+
+    def test_step0_prompt_assigns_proof_contract_field_roles(self) -> None:
+        analysis = {"product": {"name": "一次性刷头", "category": "清洁用品"}}
+        prompt = build_product_foundation_payload("test-model", analysis)["messages"][1]["content"][0]["text"]
+        self.assertIn("observable_dimension 只写一个名词性、可复核的测量轴", prompt)
+        self.assertIn("刷头卫生状态", prompt)
+        self.assertIn("过程动作写 observable_signal", prompt)
+        self.assertIn("拍摄条件不能写进 observable_signal", prompt)
+        self.assertIn("不表示 S5 必须出现、达人必须提供背书", prompt)
+
+        repair_prompt = build_product_foundation_repair_payload(
+            "test-model",
+            analysis,
+            {"proof_contract": {"observable_dimension": "刷头替换与丢弃的卫生状态"}},
+            "observable_dimension 必须只保留一个可观察维度",
+        )["messages"][1]["content"][0]["text"]
+        self.assertIn("不要只把 dimension 中的‘替换’改成‘交接’", repair_prompt)
+        self.assertIn("只修 proof_contract 及其直接派生的 visual_proof_points", repair_prompt)
+        self.assertIn("旧刷头无需手触被新刷头替换，使用后直接丢弃", repair_prompt)
+
     def test_inferred_s4_contract_cannot_authoritatively_override_stage_analysis(self) -> None:
         profile = normalize_product_profile(
             {
@@ -2449,6 +2485,54 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(contract["overall_status"], "full_direct")
         self.assertEqual(contract["comparable_stages"], ["S1", "S2", "S3", "S4", "S5", "S6"])
         self.assertTrue(all(item["status"] == "direct" for item in contract["stage_eligibility"].values()))
+
+    def test_s5_not_applicable_requires_code_owned_bilateral_fact_marker(self) -> None:
+        provider_scope = normalize_comparison_contract(
+            {
+                "identity_relation": "exact_product",
+                "substitution_relation": "same_solution",
+                "stage_eligibility": {
+                    "S5": {"status": "not_applicable", "basis": "低决策品类通常不需要背书"}
+                },
+            }
+        )
+        self.assertEqual(provider_scope["stage_eligibility"]["S5"]["status"], "direct")
+        self.assertNotIn("status_source", provider_scope["stage_eligibility"]["S5"])
+
+        code_owned_scope = normalize_comparison_contract(
+            {
+                "identity_relation": "exact_product",
+                "substitution_relation": "same_solution",
+                "stage_eligibility": {
+                    "S5": {
+                        "status": "not_applicable",
+                        "status_source": "bilateral_stage1_facts",
+                        "basis": "双方 Stage1 完整且均 absent",
+                    }
+                },
+            },
+            allow_code_owned_s5_scope=True,
+        )
+        self.assertEqual(code_owned_scope["stage_eligibility"]["S5"]["status"], "not_applicable")
+        self.assertEqual(
+            code_owned_scope["stage_eligibility"]["S5"]["status_source"],
+            "bilateral_stage1_facts",
+        )
+
+        spoofed_scope = normalize_comparison_contract(
+            {
+                "identity_relation": "exact_product",
+                "substitution_relation": "same_solution",
+                "stage_eligibility": {
+                    "S5": {
+                        "status": "not_applicable",
+                        "status_source": "bilateral_stage1_facts",
+                    }
+                },
+            }
+        )
+        self.assertEqual(spoofed_scope["stage_eligibility"]["S5"]["status"], "direct")
+        self.assertNotIn("status_source", spoofed_scope["stage_eligibility"]["S5"])
 
     def test_strong_substitute_requires_all_shared_job_gates(self) -> None:
         contract = normalize_comparison_contract(
@@ -2572,7 +2656,10 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn("手持挂烫机", scope_text)
         self.assertIn("包装、颜色、色号", scope_text)
         self.assertIn("同一次购买决策可二选一", scope_text)
-        self.assertIn("S5 需共享信任问题", scope_text)
+        self.assertIn("S5 按 structure_library_full.md 定义为可选的‘信任放大’", scope_text)
+        self.assertIn("结构库的跳过条件只指导编排，不是事实先验", scope_text)
+        self.assertIn("双方 Stage1 覆盖完整且 S5 都是 absent", scope_text)
+        self.assertIn("一侧 present、另一侧 absent", scope_text)
         self.assertIn("展示熨烫过程", scope_text)
 
         stages = [{"stage": f"S{index}"} for index in range(1, 7)]
@@ -2580,6 +2667,17 @@ class ArchitectureContractTests(unittest.TestCase):
         analysis = {"comparison_eligibility": {"scope": "cross_product", "direct_product_stages": ["S1"], "reason": "形态不同"}}
         stamp_comparison_eligibility(result, analysis)
         self.assertEqual(result["comparison_eligibility"]["scope"], "cross_product")
+
+    def test_stage2_prompt_prioritizes_bilateral_s5_scope_over_category_prior(self) -> None:
+        payload = build_llm_comparison_payload("test", "input", {}, {"videos": {}})
+        prompt = payload["messages"][1]["content"]
+        self.assertIn("S5 范围优先级（代码合同，优先于商业框架中的品类判例）", prompt)
+        self.assertIn("只有双方覆盖完整且均为 absent 才由代码标记 not_applicable", prompt)
+        self.assertIn("品类和购买动机只能影响差距权重与解释", prompt)
+
+        structure_library = (ROOT / "structure_library_full.md").read_text(encoding="utf-8")
+        self.assertIn("编排模块与既有视频评估解耦", structure_library)
+        self.assertIn("既有视频只有在画面/口播中实际出现且来源可核验时", structure_library)
 
     def test_scope_identity_payload_excludes_video_and_audio(self) -> None:
         analysis = {
@@ -2647,7 +2745,7 @@ class ArchitectureContractTests(unittest.TestCase):
                 "facts_reason": "关键形态不同。",
             }
         )
-        self.assertEqual(eligibility["direct_product_stages"], ["S1", "S2", "S3", "S4", "S6"])
+        self.assertEqual(eligibility["direct_product_stages"], ["S1", "S2", "S3", "S4", "S5", "S6"])
         self.assertEqual(eligibility["scope_origin"], "operator_certified")
         self.assertEqual(eligibility["facts_scope"], "cross_product")
 
@@ -2663,9 +2761,96 @@ class ArchitectureContractTests(unittest.TestCase):
         apply_comparison_eligibility(result)
         stabilize_improvement_priorities(result)
         self.assertEqual(stages[2]["comparison_basis"], "structure_execution")
-        self.assertEqual(stages[4]["comparison_status"], "not_applicable")
-        self.assertEqual([item["target_stage"] for item in result["improvements"]], ["S3"])
+        self.assertEqual(stages[4]["comparison_status"], "structural_comparison")
+        self.assertEqual([item["target_stage"] for item in result["improvements"]], ["S3", "S5"])
         self.assertIn("仅在共同消费者任务下比较内容执行", result["comparison_scope_note"])
+
+    def test_s5_report_scope_is_not_inferred_from_hard_endorsement_text(self) -> None:
+        stage = {
+            "stage": "S5 信任放大",
+            "severity": "small",
+            "creator_summary": "双方均无硬背书。",
+            "benchmark_summary": "双方均无硬背书。",
+            "gap": "双方均无硬背书。",
+            "severity_derivation": {"reason": "双方均无硬背书。"},
+            "comparison_status": "structural_comparison",
+            "stage_evidence_gate": {"status": "grounded"},
+        }
+        skipped, _ = stage_skipped(stage)
+        self.assertFalse(skipped)
+
+        stage["comparison_status"] = "not_applicable"
+        stage["comparison_reason"] = "双方 Stage1 均已完整核验为 absent。"
+        stage["stage_evidence_gate"] = {"status": "not_applicable"}
+        skipped, reason = stage_skipped(stage)
+        # A provider/model-shaped not_applicable is not enough to close S5.
+        # The bilateral Stage1 fact marker must be present on the stage.
+        self.assertFalse(skipped)
+        self.assertEqual(reason, "")
+
+        stage["comparison_contract"] = {
+            "status": "not_applicable",
+            "status_source": "bilateral_stage1_facts",
+        }
+        skipped, reason = stage_skipped(stage)
+        self.assertTrue(skipped)
+        self.assertIn("absent", reason)
+
+    def test_s5_code_owned_closure_is_visible_in_scope_summary(self) -> None:
+        summary = comparison_scope_summary(
+            {
+                "identity_relation": "exact_product",
+                "substitution_relation": "same_solution",
+                "stage_eligibility": {
+                    **{
+                        stage: {"status": "direct"}
+                        for stage in ("S1", "S2", "S3", "S4", "S6")
+                    },
+                    "S5": {
+                        "status": "not_applicable",
+                        "status_source": "bilateral_stage1_facts",
+                    },
+                },
+            },
+            allow_code_owned_s5_scope=True,
+        )
+        self.assertIn("本轮不涉及：S5 信任放大", summary)
+
+    def test_report_summary_requires_code_owned_s5_gate(self) -> None:
+        base = {
+            "analysis_run_state": "completed",
+            "comparison_contract": {
+                "identity_relation": "exact_product",
+                "substitution_relation": "same_solution",
+                "stage_eligibility": {
+                    stage: {"status": "direct"}
+                    for stage in ("S1", "S2", "S3", "S4", "S6")
+                } | {
+                    "S5": {
+                        "status": "not_applicable",
+                        "status_source": "bilateral_stage1_facts",
+                    }
+                },
+            },
+            "stage_analysis": [
+                {
+                    "stage": "S5 信任放大",
+                    "comparison_status": "not_applicable",
+                    "comparison_contract": {
+                        "status": "not_applicable",
+                        "status_source": "bilateral_stage1_facts",
+                    },
+                    "stage_evidence_gate": {
+                        "status": "not_applicable",
+                        "source": "code",
+                    },
+                }
+            ],
+        }
+        self.assertIn("本轮不涉及：S5 信任放大", executive_summary(base))
+        untrusted = json.loads(json.dumps(base))
+        untrusted["stage_analysis"][0]["stage_evidence_gate"]["source"] = "model"
+        self.assertNotIn("本轮不涉及：S5 信任放大", executive_summary(untrusted))
 
     def test_same_task_structure_override_preserves_facts_audit(self) -> None:
         eligibility = pipeline._apply_operator_scope_override(
@@ -2702,7 +2887,7 @@ class ArchitectureContractTests(unittest.TestCase):
         )
         for stage in ("S1", "S2", "S3", "S4", "S6"):
             self.assertEqual(eligibility["stage_eligibility"][stage]["status"], "structural")
-        self.assertEqual(eligibility["stage_eligibility"]["S5"]["status"], "not_applicable")
+        self.assertEqual(eligibility["stage_eligibility"]["S5"]["status"], "structural")
         self.assertTrue(eligibility["shared_job"]["same_consumer_job"])
         self.assertIn("运营确认", eligibility["shared_job"]["reason"])
 

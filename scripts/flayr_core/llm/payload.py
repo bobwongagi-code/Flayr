@@ -129,6 +129,24 @@ def observation_method_view() -> str:
     return m.group(1).strip() if m else ""
 
 
+def _proof_contract_field_roles_prompt() -> str:
+    """把 Step-0 证明合同的字段职责固定成模型可直接执行的边界。"""
+    return "\n".join(
+        [
+            "## proof_contract 字段职责硬边界（必须逐字段遵守）",
+            "observable_dimension 只写一个名词性、可复核的测量轴；它回答‘测量哪一个最终结果’，不能写动作链、过程顺序、拍摄条件，也不能把同一对象的不同属性并列进去。",
+            "过程动作写 observable_signal：它记录这个维度在画面/记录中实际发生的状态变化或过程事件；多个过程动作可以共同证明同一个维度，但必须全部留在 signal。",
+            "proof_condition 只写让证据可信的拍摄/记录条件，例如同光线、固定机位、近景或完整记录；不要把这些条件写进 signal。",
+            "字段职责示例（只示范形状，不要求所有产品照抄文字）：",
+            "- 正确：observable_dimension=‘刷头卫生状态’；observable_signal=‘旧刷头无需手触被新刷头替换，使用后直接丢弃’。两个动作共同证明一个卫生状态，仍是一个维度。",
+            "- 错误：observable_dimension=‘刷头替换与丢弃的卫生状态’。这是把过程动作塞进维度；应保留单一维度‘刷头卫生状态’，把动作移到 observable_signal。",
+            "- 错误：observable_dimension=‘刷头卫生状态与更换便捷性’。同一个物理对象的不同属性仍是两个测量轴，不能靠同一对象或一句话把它们合并。",
+            "- 错误：observable_signal=‘同一光线近景拍摄’。这是 proof_condition，不是观察到的信号。",
+            "如果存在多个独立的最终结果，应拆为不同 candidate/证明点；不要在一个 observable_dimension 中用‘与/及/同时/+’拼接。",
+        ]
+    )
+
+
 def build_product_foundation_payload(model: str, analysis: dict[str, Any]) -> dict[str, Any]:
     """Step-0 品的商业地基：看视频前，据产品事实 + 品类世界知识确立 category_profile(特征) +
     product_profile(命题)，作为下游 S1-S6 判断的独立尺子。纯文本不附视频——地基独立于任一条
@@ -171,7 +189,7 @@ def build_product_foundation_payload(model: str, analysis: dict[str, Any]) -> di
             "category_profile（品类特征，只报事实+世界知识，不做权重判断）：category_name、price_tier(low|mid|high)、"
             "decision_threshold(impulse 冲动可买|considered 需被说服)、drive_type(emotional|functional|mixed)、"
             "painpoints（该品类目标消费者最在意的决策因素，每词中文+本地语放同一数组，6-16 个）。",
-            "product_profile（产品商业 DNA，S1-S6 打分的尺子）：visualizable(yes|no 核心价值能否视觉化)、"
+            "product_profile（产品商业 DNA，S1-S6 打分的尺子）：visualizable(yes|no 核心价值能否视觉化；no 只表示 S4 的视觉证明权重可转向信任与可信度分析，不表示 S5 必须出现、达人必须提供背书，S5 是否进入比较仍由双侧 Stage1 实际事实决定）、"
             "physical_task（解决的最直观尴尬）、hook_proposition（S1 钩子命题，类型取决于本品、不限痛点——"
             "可痛点/承诺/反差/情绪/向往/视觉吸引/身份代入/场景还原，见 structure_library S1 七型）、"
             "core_selling_points（S3 主轴：使用过程要演示传递的核心卖点，1-6 个）、"
@@ -196,7 +214,8 @@ def build_product_foundation_payload(model: str, analysis: dict[str, Any]) -> di
             "long_term_record=long_term_record，trust_substituted=trust_evidence，low_decision_light_proof=light_proof；"
             "observable_dimension=一个简短、可复核的维度名（如色彩覆盖度），这是单一主证明的硬边界，严禁并列多个卖点或维度；"
             "observable_signal=该维度在画面/记录中实际发生的状态变化；产品的其他卖点仍保留在 short_video_proof_plan 的其它 candidate，不是被删除；before_state/after_state=仅 direct visual（instant_visual/process_result）必填的两种不同状态；"
-            "proof_condition=使信号可信的拍摄/记录条件。拍摄条件不能写进 observable_signal 或 before/after。"
+            "proof_condition=使信号可信的拍摄/记录条件。拍摄条件不能写进 observable_signal 或 before/after。",
+            _proof_contract_field_roles_prompt(),
             "结构库约束：S4-A~F 的直接效果模块对保健品均排除；保健品不得把气色/体感变化伪装成直接视觉 state_change，"
             "应选 trust_substituted 或 long_term_record，并把认证/记录留给 S5 或对应记录证据。"
             "core_visual_proposition（旧兼容字段；S4 决定性视觉瞬间=选中 anchor 的到位效果标准，按本品现推、别套通用 before/after）、"
@@ -219,6 +238,7 @@ def build_product_foundation_payload(model: str, analysis: dict[str, Any]) -> di
     system_prompt = (
         "你是产品商业分析师。只输出严格 JSON（含 category_profile 与 product_profile 两个对象），不要 Markdown。"
         "基于产品事实 + 品类世界知识确立商业地基，运营未给的字段据品类世界知识补全，不臆造具体功效数据。"
+        "proof_contract 中 observable_dimension 只能是一个测量轴；过程动作写 observable_signal，拍摄条件写 proof_condition。"
     )
     return {
         "model": model,
@@ -250,7 +270,11 @@ def build_comparison_eligibility_payload(model: str, facts: dict[str, Any]) -> d
         "stage_eligibility 对 S1-S6 每个阶段输出 status=direct|structural|not_applicable|not_comparable：同品家族全部 direct；"
         "强/部分替代只能 structural 或不比较。S1 需共享目标用户/痛点/购买任务；S2 需共享问题-解决方案角色；"
         "S3 需共享使用任务，只比较过程表达完整度而非机制天然优劣；S4 需共享目标结果和可观察证明维度；"
-        "S5 需共享信任问题与可比证据，双方都无背书填 not_applicable；S6 需共享购买场景，只比较 CTA 完成度，"
+        "S5 按 structure_library_full.md 定义为可选的‘信任放大’：结构库的跳过条件只指导编排，不是事实先验；不根据品类先验判断达人是否必须做背书，只根据两侧 Stage1 的实际事实。"
+        "双方 Stage1 覆盖完整且 S5 都是 absent 时才填 not_applicable；这只表示两条视频都没有使用 S5，不表示品类不需要信任，也不构成达人错误。"
+        "一侧 present、另一侧 absent 时仍保持 direct/structural 并比较，标杆有真实背书而达人没有就是有效差距，不能用‘本品不需要背书’否定标杆事实。"
+        "任一侧 unknown、conflict 或覆盖未完成时不得关闭 S5，保留比较范围并让下游证据 gate 阻断。"
+        "S6 需共享购买场景，只比较 CTA 完成度，"
         "不直接比较不同规格的绝对价格。无替代或身份不确定时全部 not_comparable。\n"
         "输出严格 JSON：{\"identity_relation\":\"exact_product|same_product_family|different_product|uncertain\","
         "\"substitution_relation\":\"same_solution|strong_substitute|partial_substitute|none|uncertain\","
@@ -353,7 +377,11 @@ def build_product_foundation_repair_payload(
     content[0]["text"] += (
         "\n\n## 上次输出被拒绝，必须重答\n"
         f"proof_contract 校验失败：{validation_reason}。\n"
-        "不要修辞性改写；先重建 short_video_proof_plan，再在 product_profile 同级输出 proof_contract（不得嵌入 plan），让合同只引用选中的 S4 anchor，最后让 visual_proof_points 与合同一致。\n"
+        "这不是同义词替换问题，而是字段职责问题。必须把 observable_dimension、observable_signal、proof_condition 重新分工；不要只把 dimension 中的‘替换’改成‘交接’。\n"
+        "必须仍输出完整且合法的 category_profile/product_profile JSON，但保留被拒绝 profile 中与本次错误无关的有效字段；只修 proof_contract 及其直接派生的 visual_proof_points，不重做产品命题、不新增第二个 proof_contract。\n"
+        + _proof_contract_field_roles_prompt()
+        + "\n针对本次错误，若 dimension 把过程写成‘刷头替换与丢弃的卫生状态’，应改为单一维度‘刷头卫生状态’，并把‘旧刷头无需手触被新刷头替换，使用后直接丢弃’放入 observable_signal；这是字段转换示例，不是要求所有产品使用刷头文字。\n"
+        "先确认 mode/signal_type 与选中的 S4 anchor 一致，再输出 proof_contract；直接视觉模式仍必须提供不同的 before_state/after_state 和 proof_condition。\n"
         "被拒绝的 product_profile：\n"
         + json.dumps(rejected_profile, ensure_ascii=False, indent=2)
     )
@@ -916,6 +944,15 @@ def build_video_fact_recovery_payload(
     target_text = ", ".join(normalized_targets) or "S1-S6"
     evidence_prefix = "B" if role == "benchmark" else "C"
     target_set = set(normalized_targets)
+    current_checks = {
+        str(item.get("stage") or "").strip().upper()[:2]: item
+        for item in current_facts.get("stage_evidence_checks") or []
+        if isinstance(item, dict)
+    }
+    s6_explicitly_absent = (
+        "S6" in target_set
+        and str(current_checks.get("S6", {}).get("status") or "").strip().lower() == "absent"
+    )
     locked_fact_summary = {
         "evidence_units": [
             dict(item)
@@ -949,7 +986,15 @@ def build_video_fact_recovery_payload(
         api_url=api_url,
         model=model,
         budget=budget,
+        s6_tail_review=s6_explicitly_absent,
     )
+    s6_tail_review_block = (
+        "## S6 尾段 CTA 定向复核\n"
+        "当前 Stage1 明确把 S6 判为 absent。本轮只对原始视频最后 8-12 秒做一次漏检复核；"
+        "不要因为出现关键词就直接判定 CTA，必须确认完整语义、说话对象、画面路径和真实时间。\n"
+        "马来/东南亚电商口语可能用 beg kuning、bakul kuning、yellow bag/cart，或 tekan、klik、tap、beli、order、checkout、link 等表达；"
+        "这些只是检索线索，不是自动等价规则。确认后才可新增带原句/中文翻译和时间范围的 S6 evidence；未确认就保持 absent，不要脑补。"
+    ) if s6_explicitly_absent else ""
     payload["messages"][1]["content"] = [
         {
             "type": "text",
@@ -963,6 +1008,7 @@ def build_video_fact_recovery_payload(
                     "这是一次追加观察，不是重新抽取整条视频；不得改写、删除或合并已有 evidence_units。",
                     "已有事实只用于避免重复，不得把它们当成可修改的模型输出。没有确认事实就返回空 candidate_evidence_units 和 unknown。",
                     "每个新 candidate_evidence_unit 必须填写 fact_quality 的六个观察轴；无法判断时填 uncertain 或 not_applicable。",
+                    s6_tail_review_block,
                     "## 已锁定事实摘要（只读）",
                     json.dumps(locked_fact_summary, ensure_ascii=False, indent=2),
                     "## 输出合同",
@@ -1080,6 +1126,8 @@ def _recovery_stage_windows(
     analysis: dict[str, Any],
     role: str,
     target_stages: list[str],
+    *,
+    s6_tail_review: bool = False,
 ) -> list[tuple[str, float, float]]:
     """Return contiguous target-stage windows for bounded recovery media."""
     videos = analysis.get("videos") if isinstance(analysis.get("videos"), dict) else {}
@@ -1093,7 +1141,15 @@ def _recovery_stage_windows(
         if (match := re.search(r"\bS([1-6])\b", str(value).upper()))
     }
     all_ranges = stage_time_ranges(float(duration))
-    ranges = [item for item in all_ranges if _recovery_stage_code(item[0]) in target_set]
+    ranges = []
+    for item in all_ranges:
+        code = _recovery_stage_code(item[0])
+        if code not in target_set:
+            continue
+        if code == "S6" and s6_tail_review:
+            ranges.append((item[0], item[1], max(0.0, float(duration) - 10.0), float(duration)))
+        else:
+            ranges.append(item)
     if not ranges:
         return []
     index_by_stage = {
@@ -1107,7 +1163,8 @@ def _recovery_stage_windows(
     for stage, _label, start, end in ranges[1:]:
         stage_code = _recovery_stage_code(stage)
         index = index_by_stage.get(stage_code, -2)
-        if index == current_index + 1:
+        keep_s6_separate = s6_tail_review and (current_label == "S6" or stage_code == "S6")
+        if index == current_index + 1 and not keep_s6_separate:
             current_end = end
         else:
             windows.append((current_label, current_start, current_end))
@@ -1138,6 +1195,7 @@ def _replace_recovery_full_media(
     api_url: str,
     model: str,
     budget: ResourceBudget | None,
+    s6_tail_review: bool = False,
 ) -> list[dict[str, Any]]:
     """Remove full-video/audio blocks and replace them with target windows."""
     videos = analysis.get("videos") if isinstance(analysis.get("videos"), dict) else {}
@@ -1145,7 +1203,12 @@ def _replace_recovery_full_media(
     role_dir = Path(str(info.get("work_dir") or ""))
     video_path = Path(str(info.get("path") or ""))
     audio_path = role_dir / "audio.wav"
-    windows = _recovery_stage_windows(analysis, role, target_stages)
+    windows = _recovery_stage_windows(
+        analysis,
+        role,
+        target_stages,
+        s6_tail_review=s6_tail_review,
+    )
     retained = [
         item for item in media
         if item.get("type") not in {"video_url", "input_audio"}
@@ -2124,7 +2187,7 @@ def build_llm_comparison_payload(
     s5_flag_block = (
         "## S5 信任放大 flag（只判信任材料是否可见、可信、与本品相关）\n"
         "S5 阶段（且仅 S5）每侧【必须】输出 creator_s5 与 benchmark_s5 两个对象，形如：\n"
-        '{"exists": bool（是否有独立信任放大环节；S5 可跳过，低决策短视频没有独立信任环节可为 false）, '
+        '{"exists": bool（本侧视频实际是否出现独立信任放大材料；不得按品类先验填写。只有 Stage1 覆盖完整且明确没有合格信任材料时才为 false；覆盖不完整、冲突或无法确认时保持 unknown/交由代码阻断）, '
         '"module_type": "A"~"E" 或 "unknown"（按 structure_library S5 五型：A数据/B权威/C用户证言/D场景广度/E过程透明）, '
         '"trust_evidence_type": "hard|soft|mixed|none|unknown"（hard=权威或可溯源数据；soft=独立用户/社会共识/过程透明；mixed=两者都有）, '
         '"trust_basis": "authority|traceable_data|independent_user|social_consensus|process_transparency|product_claim|offer_or_spec|none|unknown"（只允许 authority=监管/认证/检测/专利等权威来源、traceable_data=带报告编号/平台截图/官方来源的可溯源数据、independent_user=真实用户评价/晒单、social_consensus=目标人群已有共识、process_transparency=探厂/原料/生产/质检进入 S5；产品自身功能/成分/参数主张填 product_claim，价格/数量/赠品/套装/使用时长填 offer_or_spec，这两类不构成 S5）, '
@@ -2232,6 +2295,12 @@ def build_llm_comparison_payload(
             structure_library_judgment_view(),
             "## 商业评判框架（判断差距权重的方法）",
             commercial_framework,
+            "## S5 范围优先级（代码合同，优先于商业框架中的品类判例）",
+            "structure_library_full.md 定义 S5 为可选的信任放大环节；可选不等于按品类跳过，也不等于达人必须完成。"
+            "S5 是否进入本轮比较只由双方 Stage1 实际事实决定：只有双方覆盖完整且均为 absent 才由代码标记 not_applicable；"
+            "一侧 present、另一侧 absent 仍须比较，标杆存在真实可核验背书而达人没有就是事实差距；"
+            "任一侧 unknown、conflict 或覆盖未完成时保留比较范围，但由 evidence gate 阻断确定性结论。"
+            "品类和购买动机只能影响差距权重与解释，不得改变上述范围规则。",
             "## 目标市场知识库（仅作判断依据，不在报告呈现）",
             market_knowledge,
             "## QA-RULES.md 自检契约（输出前必须自检）",
@@ -2281,7 +2350,7 @@ def build_llm_comparison_payload(
             "0.5 档同样适用于'内容存在但消费者无法有效接收'：看不清（虚焦/过曝/遮挡/一闪而过/画面晃动到观众抓不住重点）、听不清（吞字/被 BGM 压制）、读不完（字幕停留过短）——物理存在不等于有效传递，晃动按观众可看性判而非镜头美学。S5 背书孤证规则：仅口播提及背书而画面无任何佐证、或背书标志一闪而过无法辨认，执行分最高 0.5（高决策门槛品类口头孤证视为无效背书）。",
             "painpoint_relevance 只能取 benchmark_only、creator_only、both、none 四选一：该阶段双方内容是否命中 category_profile.painpoints 中的核心决策因素——只有标杆命中/只有达人命中/双方都命中/双方都未命中。按内容功能判断（讲没讲到、演没演到核心痛点），不要求字面用词一致。它只供 commercial_priorities 做同一 severity tier 内的商业相关性排序；缺失或未知不等同于 none，也不参与 severity。",
             "category_profile 必须含：category_name（品类名）, price_tier（low|mid|high 客单价档）, decision_threshold（impulse|considered）, drive_type（emotional|functional|mixed）, painpoints（该品类目标消费者最在意的决策因素关键词，每个痛点同时给中文和本地语两种表述放进同一数组，共 6-16 个词条）。只报品类事实与世界知识，不做权重判断。",
-            "打分前必须先输出 product_profile 产品商业 DNA（这是 S1-S6 打分的尺子，先立尺再量）：visualizable、physical_task、hook_proposition、core_selling_points、usage_context、short_video_proof_plan（先列全部候选卖点，再按可视展示空间→功能中心性→理解成本选出一个 S4 anchor，并把其他卖点分流到 S2/S3/S5；不是给产品删卖点）、proof_contract（只引用该 anchor）、core_visual_proposition（旧兼容字段）、visual_proof_points（S4 多视觉证明点；primary 是选中 anchor 的单一可测信号，secondary 是同一 S4 anchor 的补充画面，不能替代 primary）、proof_mode、effect_requires_process、visual_diff_dimensions、trust_multipliers、shooting_requirement、confidence。只报产品事实与品类世界知识。visualizable=no 时 S4 不强求视觉命题，把判断重心放到 S5 信任放大与达人可信度。",
+            "打分前必须先输出 product_profile 产品商业 DNA（这是 S1-S6 打分的尺子，先立尺再量）：visualizable、physical_task、hook_proposition、core_selling_points、usage_context、short_video_proof_plan（先列全部候选卖点，再按可视展示空间→功能中心性→理解成本选出一个 S4 anchor，并把其他卖点分流到 S2/S3/S5；不是给产品删卖点）、proof_contract（只引用该 anchor）、core_visual_proposition（旧兼容字段）、visual_proof_points（S4 多视觉证明点；primary 是选中 anchor 的单一可测信号，secondary 是同一 S4 anchor 的补充画面，不能替代 primary）、proof_mode、effect_requires_process、visual_diff_dimensions、trust_multipliers、shooting_requirement、confidence。只报产品事实与品类世界知识。visualizable=no 时只表示 S4 的视觉证明权重可转向信任与可信度分析；它不表示 S5 必须出现、达人必须提供背书，也不改变 S5 是否进入本轮比较，S5 范围仍只看双侧 Stage1 实际事实。",
             "每阶段输出 stage_standard_delivery（benchmark_only|creator_only|both|none|unknown）：Stage1 阶段证据资格未完成时必须填 unknown，不能把证据未知写成 none；否则按本品到位标准判断。做到/展示到才算，仅口头讲到不算。先作为事实输出，暂不参与推导。",
             "S1-S6 执行分统一三层判：阶段目标(core_question) → 用了什么做法(module_id/module_fit) → 该做法在【本品】上到位没(execution)。'到位'按阶段查本品锚点、核心目标为主轴次要元素不补偿弱核心；本轮已接入的阶段锚点——S4 效果呈现→锚 visual_proof_points.primary（旧结果回退 core_visual_proposition）；S5 信任放大→锚 trust_multipliers：硬信任（第三方认证/检测/临床/仪器实测/官方背书）有效呈现可达 2，软信任（真实好评/社会认同/向往式对比/使用记录/达人自用）算信任但封顶 1（软不如硬），自述功效/纯参数不算；位置优先——视频开头的此类背书内容算 S1 钩子（留人）、结尾算 S6 CTA，不要按语义把开头/结尾的背书塞进 S5；判'用没用且呈现有效'非'口头说没说'，口播孤证或标志一闪而过最高 0.5；S6 促单→到位=把 structure_library S6 五型各自【适配条件】套上本品特征 category_profile + 命题 product_profile；S1 钩子→到位=把 structure_library S1 七型各自【适配条件】套上本品特征 category_profile + hook_proposition；S2 产品引出→到位=引出自然 + 承接 S1 钩子 + 引出产品身份；S3 使用过程→主轴锚 core_selling_points + 场景层 usage_context：到位=真实使用过程中把核心卖点'演示出来'被看见，场景再丰富人员再多样、卖点没在过程落地仍判弱。打分后必须对 2 分（出色档）做 GMV 推动力核验——仅阶段功能完成且呈现到位还不够，必须确认该侧在该阶段的输出能实际推动观众向购买靠近一步——否则该侧执行分封顶 1。具体判据（两侧各自独立核验）：S1 钩子——不仅留人，还要让观众对被留后看到的内容产生明确的产品期待（留住了但没引出产品好奇心封顶 1）；S2 产品引出——不仅说清是什么，还要与 S1 的痛点/场景形成因果联结，因为问题所以需要这个产品（产品被指名但不构成解决问题封顶 1）；S3 使用过程——不仅演示真实动作，还要让观众在动作中自然感知到卖点成立、产生信心（完成动作但卖点被掩盖封顶 1）；S4 效果呈现——不仅拍出变化，还要让变化与产品之间的因果关系可信（before/after 存在但归因链路不成立封顶 1）；S5 信任——背书须能与本品的购买决策直接关联（弱关联背书信其存在但不封顶，最高 1）；S6 CTA——不仅要给出购买指令，还要与前面建立的产品价值和欲望形成闭环（孤立喊下单封顶 1）。信息量大≠有说服力，动作完成≠打动观众。注意：核验的是 2 分是否成立，0/0.5/1 不受此约束。",
             "improvements 每项必须含：title,target_stage,gmv_impact,gap_type,time_range,creator_time_range,benchmark_time_range,problem,benchmark_reference,benchmark_evidence_ids,suggestion,actions,gmv_reason,evidence,creator_script,creator_script_zh,base_frame_suitability,best_base_frame_time,base_frame_evidence_id,base_frame_reason,expected_effect,priority。",
@@ -2966,7 +3035,7 @@ def build_llm_payload(
                     "但知识库只用于判断有效性，不得替代视频证据，不得在报告中直接展开。\n"
                     "8. gap_type 判断：模块不同=structural，模块同但执行差=execution，资源条件限制=resource。\n"
                     "9. 同一信息只归入功能最匹配的一个阶段，后续阶段不重复。S1 提过的关键词 S2 不再重复分析。"
-                    "双方都没有独立设计的阶段（如 S5），key_message 写'均未设计该环节'。"
+                    "S5 是可选的信任放大环节：只有双方 Stage1 都已完整核验为 absent 时，key_message 才写'双方均未使用独立信任放大'；一侧有真实背书、另一侧没有时，必须保留 S5 比较并如实描述差距，不能用品类先验把标杆事实抹掉。"
                 ),
             },
             {

@@ -1150,6 +1150,19 @@ def reconcile_s5_trust_sources(result: dict[str, Any], source_signals_required: 
             continue
         source_status, source_ids = _s5_source_status(flag, units)
         basis = str(flag.get("trust_basis") or "unknown")
+        if readiness == "present" and (source_status != "explicit_present" or not source_ids):
+            # Stage1 has already qualified a real S5 source. A missing or
+            # contradictory Stage2 citation is a handoff/qualification gap,
+            # never an explicit absence and never a reason to close S5.
+            flag["_s5_source_status"] = "unknown"
+            valid_roles[role] = None
+            reconciled.append({
+                "role": role,
+                "basis": basis,
+                "status": "stage1_present_stage2_unbound",
+                "reason": "Stage1 已确认合格信任事实，但 Stage2 未提供一致的来源绑定；保留 unknown。",
+            })
+            continue
         has_valid_source = (
             flag.get("exists") is True
             and flag.get("independent_trust_purpose") is True

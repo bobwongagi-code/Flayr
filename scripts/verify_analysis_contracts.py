@@ -2074,6 +2074,7 @@ from flayr_core.llm.payload import (  # noqa: E402
     build_llm_comparison_payload,
     build_llm_repair_payload,
     build_product_foundation_payload,
+    build_product_foundation_repair_payload,
     build_stage_review_payload,
     hook_anchor_terms,
     load_brand_proposition,
@@ -2462,6 +2463,20 @@ check("Step-0 payload 禁止复合 primary",
 check("Step-0 payload 要求 proof_contract",
       "proof_contract" in _foundation_payload_text and "before_state" in _foundation_payload_text
       and "保健品不得把气色/体感变化伪装成直接视觉" in _foundation_payload_text)
+_foundation_repair_payload_text = build_product_foundation_repair_payload(
+    "test-model",
+    _brand_analysis,
+    {"proof_contract": {"observable_dimension": "刷头替换与丢弃的卫生状态"}},
+    "observable_dimension 必须只保留一个可观察维度",
+)["messages"][1]["content"][0]["text"]
+check("Step-0 payload 明确 dimension/signal/condition 职责",
+      "observable_dimension 只写一个名词性、可复核的测量轴" in _foundation_payload_text
+      and "刷头卫生状态" in _foundation_payload_text
+      and "过程动作写 observable_signal" in _foundation_payload_text
+      and "拍摄条件不能写进 observable_signal" in _foundation_payload_text)
+check("Step-0 repair 针对字段职责定向修复",
+      "不要只把 dimension 中的‘替换’改成‘交接’" in _foundation_repair_payload_text
+      and "只修 proof_contract 及其直接派生的 visual_proof_points" in _foundation_repair_payload_text)
 check("Step-0 地基门禁同时要求计划和合同",
       product_foundation_validation_reason(_proof_plan_profile) == ""
       and "short_video_proof_plan" in product_foundation_validation_reason(_contract_profile))
