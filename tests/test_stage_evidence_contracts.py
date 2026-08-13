@@ -3593,6 +3593,47 @@ class StageEvidenceContractTests(unittest.TestCase):
             stage_evidence_snapshot_issues(side, expected_sha256=expected),
         )
 
+    def test_stage1_ledger_hash_ignores_only_technical_replay_source(self) -> None:
+        side = self._active_side("C", "present")
+        side["stage1_acquisition"] = {
+            "provider_artifacts": [
+                {
+                    "phase": "A",
+                    "artifact": "stage1_provider_creator_A.json",
+                    "execution_source": "provider",
+                    "request_identity_sha256": "request-a",
+                    "response_sha256": "response-a",
+                    "completion_attempts": 1,
+                }
+            ]
+        }
+        side["stage1_qualification"] = {
+            "status": "completed",
+            "group_records": [
+                {
+                    "group": ["S1", "S2"],
+                    "execution_source": "provider",
+                    "request_identity_sha256": "request-b",
+                    "response_sha256": "response-b",
+                }
+            ],
+        }
+        provider_hash = stage_evidence_sha256(side)
+
+        replayed = copy.deepcopy(side)
+        replayed["stage1_acquisition"]["provider_artifacts"][0]["execution_source"] = "replay"
+        replayed["stage1_qualification"]["group_records"][0]["execution_source"] = "replay"
+        self.assertEqual(stage_evidence_sha256(replayed), provider_hash)
+        freeze_stage_evidence(side)
+        freeze_stage_evidence(replayed)
+        self.assertEqual(
+            _compact_stage_group_facts({"creator": side}, ["S1", "S2"]),
+            _compact_stage_group_facts({"creator": replayed}, ["S1", "S2"]),
+        )
+
+        replayed["stage1_qualification"]["group_records"][0]["response_sha256"] = "changed"
+        self.assertNotEqual(stage_evidence_sha256(replayed), provider_hash)
+
     def test_product_identity_is_preserved_and_frozen_with_stage1_observations(self) -> None:
         normalized = normalize_video_understanding(
             {

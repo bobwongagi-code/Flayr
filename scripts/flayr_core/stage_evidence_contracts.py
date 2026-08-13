@@ -920,12 +920,27 @@ def stage_evidence_snapshot(side: Any) -> dict[str, Any]:
             "contract_version": None,
             "fields": {field: None for field in STAGE1_IMMUTABLE_FIELDS},
         }
+    fields = {
+        field: copy.deepcopy(side.get(field))
+        for field in STAGE1_IMMUTABLE_FIELDS
+    }
+    # A technical replay must preserve semantic ledger identity. Keep the
+    # provider artifact names, request/response hashes, attempts, and all
+    # qualification content frozen, but do not let the transport source alone
+    # create a different Stage1 ledger.
+    acquisition = fields.get("stage1_acquisition")
+    if isinstance(acquisition, dict):
+        for item in acquisition.get("provider_artifacts") or []:
+            if isinstance(item, dict) and item.get("execution_source") == "replay":
+                item["execution_source"] = "provider"
+    qualification = fields.get("stage1_qualification")
+    if isinstance(qualification, dict):
+        for item in qualification.get("group_records") or []:
+            if isinstance(item, dict) and item.get("execution_source") == "replay":
+                item["execution_source"] = "provider"
     return {
         "snapshot_version": STAGE_EVIDENCE_SNAPSHOT_VERSION,
-        "fields": {
-            field: copy.deepcopy(side.get(field))
-            for field in STAGE1_IMMUTABLE_FIELDS
-        },
+        "fields": fields,
     }
 
 
