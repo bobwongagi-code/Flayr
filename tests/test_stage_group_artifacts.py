@@ -140,6 +140,11 @@ class StageGroupPipelineReplayTests(unittest.TestCase):
                 "one_line_verdict": "replayed",
                 "one_line_summary": "replayed",
                 "executive_summary": "replayed",
+                "holistic_assessment": {},
+                "key_conclusions": ["fixture conclusion"],
+                "loop_closure": {},
+                "s3_s4_relationship": {},
+                "promise_chain": {},
                 "improvements": [],
             }
         return {
@@ -149,6 +154,9 @@ class StageGroupPipelineReplayTests(unittest.TestCase):
                     "stage_state": "completed",
                     "relation": "benchmark_better",
                     "model_gap_magnitude": "medium",
+                    "benchmark_evidence_ids": [],
+                    "creator_evidence_ids": [],
+                    "judgment_reason": "fixture judgment",
                 }
                 for code in group
             ]
@@ -260,6 +268,151 @@ class StageGroupPipelineReplayTests(unittest.TestCase):
             }
             self.assertEqual(sources[missing], "provider")
             self.assertTrue(all(source_name == "replay" for group, source_name in sources.items() if group != missing))
+
+    def test_resume_retries_identity_valid_but_semantically_invalid_group(self) -> None:
+        invalid = STAGE_JUDGMENT_GROUPS[0]
+        with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as run_tmp:
+            source = Path(source_tmp)
+            for group in (*STAGE_JUDGMENT_GROUPS, ("SYNTHESIS",)):
+                self._write_completed(source, group)
+            invalid_path = stage_group_artifact_path(source, invalid)
+            invalid_artifact = json.loads(invalid_path.read_text(encoding="utf-8"))
+            invalid_response = {
+                "stages": [
+                    {"stage": item["stage"]}
+                    for item in invalid_artifact["provider_response"]["stages"]
+                ]
+            }
+            invalid_artifact["provider_response"] = invalid_response
+            invalid_artifact["response_sha256"] = pipeline._stable_digest(invalid_response)
+            invalid_path.write_text(json.dumps(invalid_artifact), encoding="utf-8")
+
+            def fetch_response(_args, _api_key, request_path, _response_path, **kwargs):
+                payload = json.loads(Path(request_path).read_text(encoding="utf-8"))
+                kwargs["response_meta"].update(_provider_meta("semantic-resume"))
+                return json.dumps(self._response(payload["group"]))
+
+            fetch_mock = unittest.mock.Mock(side_effect=fetch_response)
+            result = self._run(self._args(resume=source), Path(run_tmp), fetch_mock)
+
+            self.assertEqual(fetch_mock.call_count, 1)
+            first = result["segmented_pipeline"]["stage_groups"][0]
+            self.assertEqual(first["status"], "completed")
+            self.assertEqual(first["execution_source"], "provider")
+
+    def test_resume_retries_duplicate_or_contradictory_stage_group(self) -> None:
+        invalid = STAGE_JUDGMENT_GROUPS[0]
+        with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as run_tmp:
+            source = Path(source_tmp)
+            for group in (*STAGE_JUDGMENT_GROUPS, ("SYNTHESIS",)):
+                self._write_completed(source, group)
+            invalid_path = stage_group_artifact_path(source, invalid)
+            invalid_artifact = json.loads(invalid_path.read_text(encoding="utf-8"))
+            invalid_response = invalid_artifact["provider_response"]
+            invalid_response["stages"][0]["relation"] = "equivalent"
+            invalid_response["stages"][0]["model_gap_magnitude"] = "large"
+            invalid_response["stages"].append(dict(invalid_response["stages"][0]))
+            invalid_artifact["response_sha256"] = pipeline._stable_digest(invalid_response)
+            invalid_path.write_text(json.dumps(invalid_artifact), encoding="utf-8")
+
+            def fetch_response(_args, _api_key, request_path, _response_path, **kwargs):
+                payload = json.loads(Path(request_path).read_text(encoding="utf-8"))
+                kwargs["response_meta"].update(_provider_meta("contract-resume"))
+                return json.dumps(self._response(payload["group"]))
+
+            fetch_mock = unittest.mock.Mock(side_effect=fetch_response)
+            result = self._run(self._args(resume=source), Path(run_tmp), fetch_mock)
+
+            self.assertEqual(fetch_mock.call_count, 1)
+            first = result["segmented_pipeline"]["stage_groups"][0]
+            self.assertEqual(first["status"], "completed")
+            self.assertEqual(first["execution_source"], "provider")
+
+    def test_in_place_resume_failure_preserves_invalid_source_response(self) -> None:
+        invalid = STAGE_JUDGMENT_GROUPS[0]
+        with tempfile.TemporaryDirectory() as source_tmp:
+            source = Path(source_tmp)
+            for group in (*STAGE_JUDGMENT_GROUPS, ("SYNTHESIS",)):
+                self._write_completed(source, group)
+            invalid_path = stage_group_artifact_path(source, invalid)
+            invalid_artifact = json.loads(invalid_path.read_text(encoding="utf-8"))
+            invalid_response = {
+                "stages": [
+                    {"stage": item["stage"]}
+                    for item in invalid_artifact["provider_response"]["stages"]
+                ]
+            }
+            invalid_artifact["provider_response"] = invalid_response
+            invalid_artifact["response_sha256"] = pipeline._stable_digest(invalid_response)
+            invalid_path.write_text(json.dumps(invalid_artifact), encoding="utf-8")
+            original = invalid_path.read_bytes()
+            fetch_mock = unittest.mock.Mock(side_effect=RuntimeError("provider unavailable"))
+
+            result = self._run(self._args(resume=source), source, fetch_mock)
+
+            self.assertEqual(fetch_mock.call_count, 1)
+            self.assertEqual(invalid_path.read_bytes(), original)
+            failure_path = invalid_path.with_name(
+                f"{invalid_path.stem}.resume-failed{invalid_path.suffix}"
+            )
+            self.assertEqual(json.loads(failure_path.read_text(encoding="utf-8"))["status"], "failed")
+            self.assertEqual(result["stage2_candidate_status"], "degraded")
+
+    def test_resume_retries_semantically_empty_synthesis(self) -> None:
+        with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as run_tmp:
+            source = Path(source_tmp)
+            for group in (*STAGE_JUDGMENT_GROUPS, ("SYNTHESIS",)):
+                self._write_completed(source, group)
+            synthesis_path = stage_group_artifact_path(source, ("SYNTHESIS",))
+            synthesis_artifact = json.loads(synthesis_path.read_text(encoding="utf-8"))
+            synthesis_artifact["provider_response"] = {}
+            synthesis_artifact["response_sha256"] = pipeline._stable_digest({})
+            synthesis_path.write_text(json.dumps(synthesis_artifact), encoding="utf-8")
+
+            def fetch_response(_args, _api_key, request_path, _response_path, **kwargs):
+                payload = json.loads(Path(request_path).read_text(encoding="utf-8"))
+                kwargs["response_meta"].update(_provider_meta("synthesis-resume"))
+                return json.dumps(self._response(payload["group"]))
+
+            fetch_mock = unittest.mock.Mock(side_effect=fetch_response)
+            result = self._run(self._args(resume=source), Path(run_tmp), fetch_mock)
+
+            self.assertEqual(fetch_mock.call_count, 1)
+            self.assertEqual(result["segmented_pipeline"]["synthesis_status"], "completed")
+            recovered = json.loads(
+                stage_group_artifact_path(Path(run_tmp), ("SYNTHESIS",)).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                recovered["response_meta"]["logical_request_id"],
+                "synthesis-resume",
+            )
+
+    def test_resume_retries_invalid_nested_synthesis(self) -> None:
+        with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as run_tmp:
+            source = Path(source_tmp)
+            for group in (*STAGE_JUDGMENT_GROUPS, ("SYNTHESIS",)):
+                self._write_completed(source, group)
+            synthesis_path = stage_group_artifact_path(source, ("SYNTHESIS",))
+            synthesis_artifact = json.loads(synthesis_path.read_text(encoding="utf-8"))
+            invalid = dict(synthesis_artifact["provider_response"])
+            invalid["key_conclusions"] = [{"not": "text"}]
+            invalid["improvements"] = ["not-an-object"]
+            synthesis_artifact["provider_response"] = invalid
+            synthesis_artifact["response_sha256"] = pipeline._stable_digest(invalid)
+            synthesis_path.write_text(json.dumps(synthesis_artifact), encoding="utf-8")
+
+            def fetch_response(_args, _api_key, request_path, _response_path, **kwargs):
+                payload = json.loads(Path(request_path).read_text(encoding="utf-8"))
+                kwargs["response_meta"].update(_provider_meta("nested-synthesis-resume"))
+                return json.dumps(self._response(payload["group"]))
+
+            fetch_mock = unittest.mock.Mock(side_effect=fetch_response)
+            result = self._run(self._args(resume=source), Path(run_tmp), fetch_mock)
+
+            self.assertEqual(fetch_mock.call_count, 1)
+            self.assertEqual(result["segmented_pipeline"]["synthesis_status"], "completed")
 
     def test_provider_path_runs_all_groups_and_persists_retry_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -94,8 +94,9 @@ def failed_stage_group_artifact(
     api_url: str,
     error: str,
     response_meta: Mapping[str, Any],
+    response: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    artifact = {
         "schema_version": STAGE_GROUP_ARTIFACT_SCHEMA_VERSION,
         "status": "failed",
         "request_identity": request_identity(
@@ -109,6 +110,11 @@ def failed_stage_group_artifact(
             dict(response_meta), execution_source=str(response_meta.get("execution_source") or "live")
         ),
     }
+    if isinstance(response, Mapping):
+        response_copy = copy.deepcopy(dict(response))
+        artifact["provider_response"] = response_copy
+        artifact["response_sha256"] = _stable_sha256(response_copy)
+    return artifact
 
 
 def reusable_stage_group_response(

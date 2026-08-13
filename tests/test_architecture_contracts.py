@@ -2177,6 +2177,88 @@ class ArchitectureContractTests(unittest.TestCase):
         qualify.assert_not_called()
         self.assertIs(result["creator"], cached)
 
+    def test_stage1_a_resume_retries_identity_valid_but_empty_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            role_dir = run_dir / "creator"
+            role_dir.mkdir()
+            source_artifact = run_dir / "stage1_provider_creator_A.json"
+            source_artifact.write_text("{}", encoding="utf-8")
+            analysis = {
+                "videos": {
+                    "creator": {
+                        "work_dir": str(role_dir),
+                        "duration_seconds": 10.0,
+                        "preprocess_fingerprint": {"source_video": {"sha256": "source"}},
+                        "preprocess_artifacts": {"schema_version": 2, "files": {}},
+                    }
+                }
+            }
+            args = SimpleNamespace(
+                llm_dry_run=False,
+                llm_model="test-model",
+                llm_api_url="https://example.invalid",
+                llm_image_limit=8,
+                stage1_replay_from=None,
+                stage1_resume_from=run_dir,
+                stage2_replay_from=None,
+                provider_replay_from=None,
+                _resource_budget=None,
+            )
+            valid = {
+                "content_summary": "product shown",
+                "evidence_units": [
+                    {
+                        "id": "C1",
+                        "time_range": "0s - 1s",
+                        "visual_fact": "product is visible",
+                        "evidence_strength": "direct",
+                        "functions": ["S1_hook"],
+                    }
+                ],
+            }
+
+            def fetch_response(*_args, **kwargs):
+                kwargs["response_meta"].update(
+                    {
+                        "logical_request_id": "stage1-a-resume",
+                        "completion_attempts": 1,
+                        "retry_reasons": [],
+                        "usage": {},
+                    }
+                )
+                return json.dumps(valid)
+
+            with (
+                mock.patch.object(pipeline, "select_role_visual_inputs", return_value=[]),
+                mock.patch.object(pipeline, "build_video_fact_payload", return_value={"kind": "stage1-a"}),
+                mock.patch.object(
+                    pipeline,
+                    "_read_replayable_stage_fact",
+                    return_value=({"evidence_units": []}, {}, source_artifact),
+                ),
+                mock.patch.object(pipeline, "fetch_json_completion", side_effect=fetch_response) as fetch,
+                mock.patch.object(
+                    pipeline,
+                    "_run_stage1_qualification",
+                    side_effect=lambda *values, **_kwargs: values[-1],
+                ),
+                mock.patch.object(
+                    pipeline,
+                    "_maybe_recover_video_facts",
+                    side_effect=lambda *values, **_kwargs: values[-1],
+                ),
+                mock.patch.object(pipeline, "freeze_stage_evidence"),
+                mock.patch.object(pipeline, "_write_cache_result"),
+            ):
+                result = pipeline.run_video_fact_extraction(args, analysis, run_dir, "secret")
+
+            fetch.assert_called_once()
+            self.assertEqual(result["creator"]["evidence_units"][0]["id"], "C1")
+            saved = json.loads(source_artifact.read_text(encoding="utf-8"))
+            self.assertEqual(saved["status"], "completed")
+            self.assertEqual(saved["provider_response"], valid)
+
     def test_video_fact_cache_key_binds_preprocess_file_content(self) -> None:
         args = SimpleNamespace(
             llm_model="test",
@@ -5055,6 +5137,8 @@ class ArchitectureContractTests(unittest.TestCase):
             args = self._cache_args()
             deps = self._cache_deps()
             fingerprint = flayr.build_preprocess_fingerprint(video, deps, args)
+            self.assertNotIn("code_commit", fingerprint)
+            self.assertRegex(fingerprint["implementation_sha256"], r"^[0-9a-f]{64}$")
             self.assertNotIn("path", fingerprint["source_video"])
             moved_copy = root / "moved-copy.mp4"
             moved_copy.write_bytes(video.read_bytes())
@@ -5083,6 +5167,44 @@ class ArchitectureContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertIsNotNone(flayr.load_existing_video_result(role_dir, fingerprint))
+
+            legacy_fingerprint = dict(fingerprint)
+            legacy_fingerprint.pop("implementation_sha256")
+            legacy_fingerprint["code_commit"] = "0d9ec9d"
+            cached_info = json.loads((role_dir / "_preprocess.json").read_text(encoding="utf-8"))
+            cached_info["preprocess_fingerprint"] = legacy_fingerprint
+            (role_dir / "_preprocess.json").write_text(json.dumps(cached_info), encoding="utf-8")
+            migrated = flayr.load_existing_video_result(role_dir, fingerprint)
+            self.assertIsNotNone(migrated)
+            self.assertEqual(migrated["preprocess_fingerprint"], legacy_fingerprint)
+            self.assertEqual(migrated["preprocess_source_commit"], "0d9ec9d")
+            self.assertIsNone(migrated["preprocess_source_dirty"])
+            self.assertEqual(
+                migrated["preprocess_legacy_compatibility"],
+                {
+                    "status": "audited_legacy_read",
+                    "producer_commit": "0d9ec9d",
+                    "current_implementation_sha256": fingerprint["implementation_sha256"],
+                    "identity_promoted": False,
+                },
+            )
+
+            cached_info = json.loads((role_dir / "_preprocess.json").read_text(encoding="utf-8"))
+            unaudited_fingerprint = dict(legacy_fingerprint)
+            unaudited_fingerprint["code_commit"] = "unknown-producer"
+            cached_info["preprocess_fingerprint"] = unaudited_fingerprint
+            (role_dir / "_preprocess.json").write_text(json.dumps(cached_info), encoding="utf-8")
+            self.assertIsNone(flayr.load_existing_video_result(role_dir, fingerprint))
+
+            cached_info = json.loads((role_dir / "_preprocess.json").read_text(encoding="utf-8"))
+            incomplete_fingerprint = dict(fingerprint)
+            incomplete_fingerprint.pop("implementation_sha256")
+            cached_info["preprocess_fingerprint"] = incomplete_fingerprint
+            (role_dir / "_preprocess.json").write_text(json.dumps(cached_info), encoding="utf-8")
+            self.assertIsNone(flayr.load_existing_video_result(role_dir, fingerprint))
+
+            cached_info["preprocess_fingerprint"] = fingerprint
+            (role_dir / "_preprocess.json").write_text(json.dumps(cached_info), encoding="utf-8")
 
             cached_info = json.loads((role_dir / "_preprocess.json").read_text(encoding="utf-8"))
             cached_info["transcription_status"] = "failed"
@@ -5115,6 +5237,60 @@ class ArchitectureContractTests(unittest.TestCase):
                 flayr.build_preprocess_fingerprint(video, deps, args),
             )
 
+    def test_preprocess_fingerprint_tracks_semantic_implementation_not_git_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "source.mp4"
+            video.write_bytes(b"video")
+            args = self._cache_args()
+            deps = self._cache_deps()
+            with (
+                mock.patch.object(flayr, "_preprocess_implementation_sha256", return_value="a" * 64),
+                mock.patch.object(flayr, "_git_commit_sha", return_value="first"),
+            ):
+                first = flayr.build_preprocess_fingerprint(video, deps, args)
+            with (
+                mock.patch.object(flayr, "_preprocess_implementation_sha256", return_value="b" * 64),
+                mock.patch.object(flayr, "_git_commit_sha", return_value="second"),
+            ):
+                second = flayr.build_preprocess_fingerprint(video, deps, args)
+            self.assertNotEqual(first, second)
+            self.assertEqual(first["implementation_sha256"], "a" * 64)
+            self.assertEqual(second["implementation_sha256"], "b" * 64)
+
+    def test_preprocess_implementation_digest_covers_asr_and_local_policy(self) -> None:
+        flayr._preprocess_implementation_sha256.cache_clear()
+        baseline = flayr._preprocess_implementation_sha256()
+        original_getsource = inspect.getsource
+
+        def changed_digest(target) -> str:
+            def changed_source(value):
+                source = original_getsource(value)
+                return source + "\nSEMANTIC_CHANGE = True\n" if value is target else source
+
+            with mock.patch.object(flayr.inspect, "getsource", side_effect=changed_source):
+                flayr._preprocess_implementation_sha256.cache_clear()
+                return flayr._preprocess_implementation_sha256()
+
+        try:
+            self.assertNotEqual(baseline, changed_digest(flayr.asr_core))
+            self.assertNotEqual(baseline, changed_digest(flayr.llm_api_core))
+        finally:
+            flayr._preprocess_implementation_sha256.cache_clear()
+        implementation_source = inspect.getsource(flayr._preprocess_implementation_sha256)
+        self.assertIn("resolve_ocr_policy", implementation_source)
+        self.assertIn("looks_like_vision_config", implementation_source)
+        self.assertIn("llm_api_core", implementation_source)
+
+    def test_preprocess_source_identity_reports_dirty_worktree(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=" M scripts/flayr.py\n",
+            stderr="",
+        )
+        with mock.patch.object(flayr.subprocess, "run", return_value=completed):
+            self.assertTrue(flayr._git_worktree_dirty())
+
     def test_secondary_evidence_rebuild_refreshes_preprocess_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             role_dir = Path(tmp)
@@ -5139,10 +5315,22 @@ class ArchitectureContractTests(unittest.TestCase):
                     "audit_path": str(root / "video_evidence_audit.json"),
                 }
 
-            with mock.patch.object(flayr, "build_video_evidence_artifacts", side_effect=build_secondary):
+            with (
+                mock.patch.object(flayr, "build_video_evidence_artifacts", side_effect=build_secondary),
+                mock.patch.object(flayr, "_git_commit_sha", return_value="augmentation-commit"),
+                mock.patch.object(flayr, "_git_worktree_dirty", return_value=True),
+            ):
                 flayr.ensure_video_evidence_artifacts(role_dir, info)
             self.assertTrue(flayr._preprocess_artifacts_match(role_dir, info["preprocess_artifacts"]))
             self.assertIn("timeline_views/timeline.json", info["preprocess_artifacts"]["files"])
+            self.assertEqual(
+                info["preprocess_augmentation_provenance"],
+                {
+                    "source_commit": "augmentation-commit",
+                    "source_dirty": True,
+                    "fields": ["video_evidence"],
+                },
+            )
 
     def test_transcript_consumers_never_fallback_to_role_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

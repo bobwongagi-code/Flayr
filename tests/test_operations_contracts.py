@@ -82,6 +82,84 @@ class OperationsContractTests(unittest.TestCase):
                 self.assertFalse((output_dir / name).exists())
             self.assertTrue((output_dir / "benchmark").is_dir())
 
+    def test_in_place_stage_resume_preserves_only_matching_provider_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "run"
+            output_dir.mkdir()
+            stage1 = output_dir / "stage1_provider_creator_A.json"
+            stage2 = output_dir / "stage2_provider_S1_S2.json"
+            analysis = output_dir / "analysis.json"
+            for path in (stage1, stage2, analysis):
+                path.write_text("stale", encoding="utf-8")
+            args = SimpleNamespace(
+                output_dir=output_dir,
+                reuse_preprocessing=True,
+                mode="improve",
+                stage1_replay_from=None,
+                stage1_resume_from=output_dir,
+                stage2_replay_from=None,
+                stage2_resume_from=None,
+            )
+
+            self.assertEqual(flayr.create_run_dir(args), output_dir.resolve())
+            self.assertTrue(stage1.exists())
+            self.assertFalse(stage2.exists())
+            self.assertFalse(analysis.exists())
+
+    def test_in_place_stage_resume_does_not_preserve_provider_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "run"
+            output_dir.mkdir()
+            outside = root / "outside.json"
+            outside.write_text("external", encoding="utf-8")
+            linked = output_dir / "stage1_provider_creator_A.json"
+            linked.symlink_to(outside)
+            args = SimpleNamespace(
+                output_dir=output_dir,
+                reuse_preprocessing=True,
+                mode="improve",
+                stage1_replay_from=None,
+                stage1_resume_from=output_dir,
+                stage2_replay_from=None,
+                stage2_resume_from=None,
+            )
+
+            self.assertEqual(flayr.create_run_dir(args), output_dir.resolve())
+            self.assertFalse(linked.exists())
+            self.assertEqual(outside.read_text(encoding="utf-8"), "external")
+
+    def test_same_location_uses_filesystem_identity_before_path_spelling(self) -> None:
+        with mock.patch.object(flayr.os.path, "samefile", return_value=True) as samefile:
+            self.assertTrue(
+                flayr._paths_refer_to_same_location(Path("/tmp/Run"), Path("/tmp/run"))
+            )
+        samefile.assert_called_once()
+
+    def test_strict_stage_replay_rejects_the_output_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "run"
+            output_dir.mkdir()
+            parser = flayr.build_parser()
+            for option in ("--stage1-replay-from", "--stage2-replay-from"):
+                args = parser.parse_args(
+                    [
+                        "compare",
+                        "--benchmark-video",
+                        __file__,
+                        "--creator-video",
+                        __file__,
+                        "--output-dir",
+                        str(output_dir),
+                        option,
+                        str(output_dir),
+                        "--verification-stage",
+                        "production",
+                    ]
+                )
+                with self.assertRaisesRegex(SystemExit, "in-place strict replay"):
+                    flayr.validate_inputs(args)
+
     def test_reuse_preserves_keyed_product_foundation_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp) / "run"

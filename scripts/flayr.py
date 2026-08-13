@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import functools
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -27,6 +29,22 @@ from flayr_core.asr import (
     read_asr_api_key,
     run_online_asr,
 )
+from flayr_core import asr as asr_core
+from flayr_core import audio_quality as audio_quality_core
+from flayr_core import artifacts as artifacts_core
+from flayr_core import frame_selection as frame_selection_core
+from flayr_core import motion as motion_core
+from flayr_core import network as network_core
+from flayr_core import resources as resources_core
+from flayr_core import shot_track as shot_track_core
+from flayr_core import speech_mode as speech_mode_core
+from flayr_core import subtitle_track as subtitle_track_core
+from flayr_core import transcript as transcript_core
+from flayr_core import translation as translation_core
+from flayr_core import video as video_core
+from flayr_core import video_evidence as video_evidence_core
+from flayr_core import utils as utils_core
+from flayr_core.llm import api as llm_api_core
 from flayr_core.llm.api import (
     can_analyze_native_audio,
     provider_capabilities,
@@ -87,6 +105,10 @@ DEFAULT_RUNS_DIR = ROOT / "runs"
 PREPROCESS_CACHE_SCHEMA_VERSION = 5
 PREPROCESS_PIPELINE_VERSION = "2026-08-03.1-online-asr"
 PREPROCESS_ARTIFACT_SCHEMA_VERSION = 2
+# The only pre-fingerprint generation whose semantic compatibility was
+# audited for the current ordinary-sample resume. Keep its legacy identity;
+# never promote it to a current implementation fingerprint.
+LEGACY_PREPROCESS_COMPATIBLE_COMMITS = frozenset({"0d9ec9d"})
 ASR_AUDIO_PLACEHOLDER = "Online ASR unavailable because audio extraction failed."
 _RUN_ROLE_DIRS = frozenset({"benchmark", "creator"})
 _RUN_OUTPUT_FILES = frozenset(
@@ -678,7 +700,19 @@ def build_parser() -> argparse.ArgumentParser:
 def create_run_dir(args: argparse.Namespace) -> Path:
     if args.output_dir:
         run_dir = args.output_dir.expanduser().resolve()
-        _prepare_explicit_run_dir(run_dir, reuse=bool(args.reuse_preprocessing))
+        preserved_prefixes: set[str] = set()
+        for option, prefix in (
+            ("stage1_resume_from", "stage1_provider_"),
+            ("stage2_resume_from", "stage2_provider_"),
+        ):
+            source = getattr(args, option, None)
+            if source and _paths_refer_to_same_location(Path(source), run_dir):
+                preserved_prefixes.add(prefix)
+        _prepare_explicit_run_dir(
+            run_dir,
+            reuse=bool(args.reuse_preprocessing),
+            preserved_prefixes=preserved_prefixes,
+        )
     else:
         stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         run_dir = DEFAULT_RUNS_DIR / f"{stamp}-{args.mode}-{uuid.uuid4().hex[:8]}"
@@ -686,8 +720,24 @@ def create_run_dir(args: argparse.Namespace) -> Path:
     return run_dir
 
 
-def _prepare_explicit_run_dir(run_dir: Path, *, reuse: bool) -> None:
+def _paths_refer_to_same_location(left: Path, right: Path) -> bool:
+    """Compare existing paths by filesystem identity, with a lexical fallback."""
+    left_path = left.expanduser()
+    right_path = right.expanduser()
+    try:
+        return os.path.samefile(left_path, right_path)
+    except OSError:
+        return left_path.resolve() == right_path.resolve()
+
+
+def _prepare_explicit_run_dir(
+    run_dir: Path,
+    *,
+    reuse: bool,
+    preserved_prefixes: set[str] | None = None,
+) -> None:
     """Reject mixed output directories and remove only known stale run files."""
+    preserved_prefixes = preserved_prefixes or set()
     if run_dir.exists() and not run_dir.is_dir():
         raise SystemExit(f"--output-dir 不是目录：{run_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -721,6 +771,10 @@ def _prepare_explicit_run_dir(run_dir: Path, *, reuse: bool) -> None:
             entry.name in _RUN_OUTPUT_FILES
             or entry.name.startswith(_RUN_OUTPUT_PREFIXES)
         ):
+            if not entry.is_symlink() and any(
+                entry.name.startswith(prefix) for prefix in preserved_prefixes
+            ):
+                continue
             entry.unlink()
             continue
         raise SystemExit(
@@ -781,7 +835,10 @@ def validate_inputs(args: argparse.Namespace) -> dict[str, Path]:
         args.provider_replay_from = args.provider_replay_from.expanduser().resolve()
         if not args.provider_replay_from.is_dir():
             raise SystemExit(f"--provider-replay-from must be an existing run directory: {args.provider_replay_from}")
-        if args.output_dir and args.output_dir.expanduser().resolve() == args.provider_replay_from:
+        if args.output_dir and _paths_refer_to_same_location(
+            args.output_dir,
+            args.provider_replay_from,
+        ):
             raise SystemExit(
                 "--output-dir must differ from --provider-replay-from; "
                 "in-place replay could overwrite replay artifacts"
@@ -803,6 +860,15 @@ def validate_inputs(args: argparse.Namespace) -> dict[str, Path]:
         resolved = value.expanduser().resolve()
         if not resolved.is_dir():
             raise SystemExit(f"--{option.replace('_', '-')} must be an existing run directory: {resolved}")
+        if (
+            option in {"stage1_replay_from", "stage2_replay_from"}
+            and args.output_dir
+            and _paths_refer_to_same_location(args.output_dir, resolved)
+        ):
+            raise SystemExit(
+                f"--output-dir must differ from --{option.replace('_', '-')}; "
+                "in-place strict replay could overwrite replay artifacts"
+            )
         setattr(args, option, resolved)
 
     if args.comparison_scope_override and args.mode not in {"compare", "improve", "scope"}:
@@ -916,6 +982,85 @@ def _git_commit_sha() -> str:
         return "unknown"
 
 
+def _git_worktree_dirty() -> bool | None:
+    """Return whether tracked or untracked source differs from HEAD."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--porcelain=v1", "--untracked-files=all"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        return bool(result.stdout.strip())
+    except Exception:
+        return None
+
+
+@functools.lru_cache(maxsize=1)
+def _preprocess_implementation_sha256() -> str:
+    """Hash code that can change deterministic preprocessing artifacts."""
+    semantic_callables = (
+        _process_video_generation,
+        ensure_video_evidence_artifacts,
+        resolve_ocr_policy,
+        looks_like_vision_config,
+        asr_core.normalize_asr_response,
+        asr_core.extract_word_timestamps,
+        asr_core._normalize_words,
+        asr_core._time_seconds,
+        asr_core._join_word_text,
+        asr_core.render_srt,
+        asr_core._format_srt_timestamp,
+        video_core.probe_duration_seconds,
+        video_core._showinfo_timestamps,
+        video_core.extract_frames,
+        video_core.extract_focus_frames,
+        video_core.extract_anchor_frames,
+        video_core._collect_anchor_times,
+        video_core.extract_audio,
+        subtitle_track_core.build_subtitle_track,
+        subtitle_track_core._merge_ocr_frame_entries,
+        subtitle_track_core.sample_frames_by_interval,
+        subtitle_track_core._sample_with_anchors,
+        subtitle_track_core.build_ocr_payload,
+        subtitle_track_core.parse_ocr_lines,
+        subtitle_track_core.merge_adjacent_subtitles,
+        subtitle_track_core._find_recent_segment,
+        subtitle_track_core.normalize_line,
+        subtitle_track_core.render_subtitle_track_markdown,
+    )
+    digest = hashlib.sha256()
+    for function in semantic_callables:
+        digest.update(f"{function.__module__}.{function.__qualname__}\n".encode("utf-8"))
+        digest.update(inspect.getsource(function).encode("utf-8"))
+    # These modules are deterministic artifact transforms. Hash their complete
+    # implementations so a new builder or helper cannot silently reuse output
+    # produced by older semantics.
+    for module in (
+        artifacts_core,
+        asr_core,
+        audio_quality_core,
+        frame_selection_core,
+        motion_core,
+        network_core,
+        resources_core,
+        shot_track_core,
+        speech_mode_core,
+        subtitle_track_core,
+        transcript_core,
+        translation_core,
+        video_core,
+        video_evidence_core,
+        utils_core,
+        llm_api_core,
+    ):
+        digest.update(f"{module.__name__}\n".encode("utf-8"))
+        digest.update(inspect.getsource(module).encode("utf-8"))
+    return digest.hexdigest()
+
+
 def _binary_version(bin_deps: dict[str, Any], key: str) -> str:
     """返回工具路径 + 版本第一行，不可用返回 'missing'。"""
     path = bin_deps.get(key) if isinstance(bin_deps, dict) else None
@@ -944,7 +1089,7 @@ def build_preprocess_fingerprint(
     return {
         "cache_schema_version": PREPROCESS_CACHE_SCHEMA_VERSION,
         "pipeline_version": PREPROCESS_PIPELINE_VERSION,
-        "code_commit": _git_commit_sha(),
+        "implementation_sha256": _preprocess_implementation_sha256(),
         # Content identity is deliberately independent of the input path and mtime.
         "source_video": _file_metadata(
             video_path,
@@ -1000,7 +1145,19 @@ def load_existing_video_result(
             return None
     if not isinstance(info, dict):
         return None
-    if info.get("preprocess_fingerprint") != expected_fingerprint:
+    cached_fingerprint = info.get("preprocess_fingerprint")
+    if not isinstance(cached_fingerprint, dict):
+        return None
+    comparable_cached_fingerprint = dict(cached_fingerprint)
+    producer_commit = str(comparable_cached_fingerprint.pop("code_commit", "") or "")
+    legacy_fingerprint = dict(expected_fingerprint)
+    legacy_fingerprint.pop("implementation_sha256", None)
+    is_legacy_commit_fingerprint = producer_commit in LEGACY_PREPROCESS_COMPATIBLE_COMMITS and (
+        comparable_cached_fingerprint == legacy_fingerprint
+        and cached_fingerprint.get("cache_schema_version") == PREPROCESS_CACHE_SCHEMA_VERSION
+        and cached_fingerprint.get("pipeline_version") == PREPROCESS_PIPELINE_VERSION
+    )
+    if comparable_cached_fingerprint != expected_fingerprint and not is_legacy_commit_fingerprint:
         return None
     if info.get("preprocess_completed") is not True:
         return None
@@ -1040,6 +1197,19 @@ def load_existing_video_result(
         require_root=True,
     ) is None:
         return None
+    if is_legacy_commit_fingerprint:
+        migrated = dict(info)
+        if producer_commit and not str(migrated.get("preprocess_source_commit") or "").strip():
+            migrated["preprocess_source_commit"] = producer_commit
+        migrated.setdefault("preprocess_source_dirty", None)
+        migrated["preprocess_legacy_compatibility"] = {
+            "status": "audited_legacy_read",
+            "producer_commit": producer_commit,
+            "current_implementation_sha256": expected_fingerprint.get("implementation_sha256"),
+            "identity_promoted": False,
+        }
+        write_json(cache, migrated)
+        info = migrated
     return info
 
 
@@ -1442,6 +1612,8 @@ def _process_video_generation(
     # 这些产物改变模型可见输入，但不直接改写业务评分。
     result["video_evidence"] = build_video_evidence_artifacts(role_dir, result)
     result["preprocess_fingerprint"] = build_preprocess_fingerprint(video_path, deps, args)
+    result["preprocess_source_commit"] = _git_commit_sha()
+    result["preprocess_source_dirty"] = _git_worktree_dirty()
     result["preprocess_source_probe"] = _file_probe_from_stat(video_path.stat()) if video_path.is_file() else None
 
     # 落盘预处理结果，供 --reuse-preprocessing 下次复用（即使本次 LLM 阶段后续失败也已写）。
@@ -1454,6 +1626,7 @@ def _process_video_generation(
 def ensure_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> None:
     """Ensure reused preprocessing also has secondary evidence artifacts."""
     role_root = {"work_dir": str(role_dir)}
+    augmented_fields: list[str] = []
     if not isinstance(info.get("audio_quality"), dict) or not info.get("audio_quality"):
         audio_path = resolve_artifact_path(
             role_root,
@@ -1465,8 +1638,10 @@ def ensure_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> Non
             audio_path,
             info.get("duration_seconds"),
         )
+        augmented_fields.append("audio_quality")
     if not isinstance(info.get("speech_mode"), dict) or not info.get("speech_mode", {}).get("mode"):
         info["speech_mode"] = classify_speech_mode(role_dir, info)
+        augmented_fields.append("speech_mode")
     existing = info.get("video_evidence") if isinstance(info.get("video_evidence"), dict) else {}
     timeline_dir = resolve_artifact_path(
         role_root,
@@ -1520,8 +1695,22 @@ def ensure_video_evidence_artifacts(role_dir: Path, info: dict[str, Any]) -> Non
         and transcript_ready
         and transcript_window_contract_ready
     ):
+        if augmented_fields:
+            info["preprocess_augmentation_provenance"] = {
+                "source_commit": _git_commit_sha(),
+                "source_dirty": _git_worktree_dirty(),
+                "fields": augmented_fields,
+            }
+            info["preprocess_artifacts"] = _build_preprocess_artifact_manifest(role_dir)
+            write_json(role_dir / "_preprocess.json", info)
         return
     info["video_evidence"] = build_video_evidence_artifacts(role_dir, info)
+    augmented_fields.append("video_evidence")
+    info["preprocess_augmentation_provenance"] = {
+        "source_commit": _git_commit_sha(),
+        "source_dirty": _git_worktree_dirty(),
+        "fields": augmented_fields,
+    }
     info["preprocess_artifacts"] = _build_preprocess_artifact_manifest(role_dir)
     write_json(role_dir / "_preprocess.json", info)
 

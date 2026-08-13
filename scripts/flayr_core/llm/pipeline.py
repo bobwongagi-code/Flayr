@@ -17,6 +17,7 @@ import datetime as dt
 import hashlib
 import json
 import math
+import os
 import re
 import subprocess
 import tempfile
@@ -2340,6 +2341,167 @@ def _stage1_replay_source(args: argparse.Namespace) -> tuple[Path | None, bool]:
     return None, True
 
 
+def _same_existing_artifact(left: Path | None, right: Path) -> bool:
+    if left is None:
+        return False
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return left.expanduser().resolve() == right.expanduser().resolve()
+
+
+def _resume_failure_artifact_path(path: Path) -> Path:
+    return path.with_name(f"{path.stem}.resume-failed{path.suffix}")
+
+
+def _validated_stage_group_response(
+    parsed: Any,
+    target: list[str],
+    *,
+    label: str,
+    facts: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(parsed, dict):
+        raise ValueError(f"阶段组 {label} 必须返回 JSON 对象")
+    raw_stages = parsed.get("stages") if isinstance(parsed.get("stages"), list) else []
+    raw_codes: list[str] = []
+    for item in raw_stages:
+        if not isinstance(item, dict):
+            raise ValueError(f"阶段组 {label} 的 stage item 必须是 JSON 对象")
+        code = _segmented_stage_code(item.get("stage"))
+        if code is None:
+            raise ValueError(f"阶段组 {label} 返回了无效阶段")
+        raw_codes.append(code)
+    by_code = {
+        _segmented_stage_code(item.get("stage")): item
+        for item in raw_stages
+        if isinstance(item, dict) and _segmented_stage_code(item.get("stage")) in target
+    }
+    if len(raw_codes) != len(target) or set(raw_codes) != set(target):
+        raise ValueError(
+            f"阶段组 {label} 必须恰好覆盖目标阶段一次："
+            f"期待 {target}，实际 {raw_codes}"
+        )
+    required_keys = {
+        "stage_state",
+        "relation",
+        "model_gap_magnitude",
+        "benchmark_evidence_ids",
+        "creator_evidence_ids",
+        "judgment_reason",
+    }
+    valid_states = {"completed", "unknown", "conflict", "blocked"}
+    valid_relations = {"creator_better", "benchmark_better", "equivalent", "uncertain"}
+    valid_magnitudes = {"none", "small", "medium", "large", "uncertain"}
+    for code in target:
+        item = by_code[code]
+        missing = sorted(required_keys - set(item))
+        if missing:
+            raise ValueError(
+                f"阶段组 {label} 的 {code} 缺少必填语义字段：{', '.join(missing)}"
+            )
+        stage_state = str(item.get("stage_state") or "").strip().lower()
+        relation = str(item.get("relation") or "").strip().lower()
+        magnitude = str(item.get("model_gap_magnitude") or "").strip().lower()
+        if stage_state not in valid_states:
+            raise ValueError(f"阶段组 {label} 的 {code} stage_state 非法")
+        if relation not in valid_relations:
+            raise ValueError(f"阶段组 {label} 的 {code} relation 非法")
+        if magnitude not in valid_magnitudes:
+            raise ValueError(f"阶段组 {label} 的 {code} model_gap_magnitude 非法")
+        if stage_state != "completed" and (relation != "uncertain" or magnitude != "uncertain"):
+            raise ValueError(
+                f"阶段组 {label} 的 {code} 未完成状态必须保持 uncertain relation/magnitude"
+            )
+        if stage_state == "completed":
+            consistent = (
+                (relation == "equivalent" and magnitude == "none")
+                or (
+                    relation in {"creator_better", "benchmark_better"}
+                    and magnitude in {"small", "medium", "large"}
+                )
+            )
+            if not consistent:
+                raise ValueError(
+                    f"阶段组 {label} 的 {code} relation 与 model_gap_magnitude 自相矛盾"
+                )
+        for key in ("benchmark_evidence_ids", "creator_evidence_ids"):
+            if not isinstance(item.get(key), list):
+                raise ValueError(f"阶段组 {label} 的 {code} {key} 必须是数组")
+            raw_ids = item[key]
+            if any(not isinstance(value, str) or not value.strip() for value in raw_ids):
+                raise ValueError(f"阶段组 {label} 的 {code} {key} 只能包含非空字符串")
+            if facts is not None:
+                role = key.removesuffix("_evidence_ids")
+                side = facts.get(role) if isinstance(facts.get(role), dict) else {}
+                valid_ids = qualified_stage_evidence_ids(side, code)
+                invalid_ids = sorted(set(raw_ids) - valid_ids)
+                if invalid_ids:
+                    raise ValueError(
+                        f"阶段组 {label} 的 {code} {key} 含非本阶段合格证据："
+                        + ", ".join(invalid_ids)
+                    )
+        if not isinstance(item.get("judgment_reason"), str) or not item["judgment_reason"].strip():
+            raise ValueError(f"阶段组 {label} 的 {code} judgment_reason 不能为空")
+    return by_code
+
+
+def _validated_stage_synthesis_response(parsed: Any) -> dict[str, Any]:
+    if not isinstance(parsed, dict):
+        raise ValueError("Stage3 synthesis must be a JSON object")
+    required_types: dict[str, type] = {
+        "one_line_verdict": str,
+        "one_line_summary": str,
+        "executive_summary": str,
+        "holistic_assessment": dict,
+        "key_conclusions": list,
+        "loop_closure": dict,
+        "s3_s4_relationship": dict,
+        "promise_chain": dict,
+        "improvements": list,
+    }
+    missing = sorted(set(required_types) - set(parsed))
+    if missing:
+        raise ValueError("Stage3 synthesis 缺少必填字段：" + ", ".join(missing))
+    for key, expected_type in required_types.items():
+        if not isinstance(parsed.get(key), expected_type):
+            raise ValueError(f"Stage3 synthesis 的 {key} 类型非法")
+    for key in ("one_line_verdict", "one_line_summary", "executive_summary"):
+        if not str(parsed.get(key) or "").strip():
+            raise ValueError(f"Stage3 synthesis 的 {key} 不能为空")
+    conclusions = parsed["key_conclusions"]
+    if any(not isinstance(item, str) or not item.strip() for item in conclusions):
+        raise ValueError("Stage3 synthesis 的 key_conclusions 只能包含非空字符串")
+    improvement_keys = {
+        "title",
+        "target_stage",
+        "problem",
+        "suggestion",
+        "actions",
+        "gmv_reason",
+        "gmv_impact",
+    }
+    for index, item in enumerate(parsed["improvements"]):
+        if not isinstance(item, dict):
+            raise ValueError(f"Stage3 synthesis 的 improvements[{index}] 必须是对象")
+        missing = sorted(improvement_keys - set(item))
+        if missing:
+            raise ValueError(
+                f"Stage3 synthesis 的 improvements[{index}] 缺少字段：" + ", ".join(missing)
+            )
+        if _segmented_stage_code(item.get("target_stage")) is None:
+            raise ValueError(f"Stage3 synthesis 的 improvements[{index}] target_stage 非法")
+        for key in improvement_keys - {"target_stage", "actions"}:
+            if not isinstance(item.get(key), str) or not item[key].strip():
+                raise ValueError(f"Stage3 synthesis 的 improvements[{index}].{key} 不能为空")
+        actions = item.get("actions")
+        if not isinstance(actions, list) or any(
+            not isinstance(action, str) or not action.strip() for action in actions
+        ):
+            raise ValueError(f"Stage3 synthesis 的 improvements[{index}].actions 类型非法")
+    return parsed
+
+
 def _read_replayable_stage_fact(
     source_dir: Path,
     *,
@@ -2429,6 +2591,17 @@ def run_segmented_stage_pipeline(
         response_path = run_dir / f"llm_stage_group_{label}_response.json"
         payload: dict[str, Any] = {}
         response_meta: dict[str, Any] = {}
+        execution_source = "provider"
+        replay_artifact_path = (
+            stage_group_artifact_path(replay_source, target)
+            if replay_source is not None
+            else None
+        )
+        preserve_resume_source = (
+            provider_fallback_allowed
+            and _same_existing_artifact(replay_artifact_path, provider_artifact_path)
+        )
+        resume_failure_path = _resume_failure_artifact_path(provider_artifact_path)
         try:
             payload = build_stage_group_judgment_payload(
                 judgment_model(args),
@@ -2439,7 +2612,6 @@ def run_segmented_stage_pipeline(
                 api_url=args.llm_api_url,
                 budget=getattr(args, "_resource_budget", None),
             )
-            execution_source = "provider"
             parsed: dict[str, Any] | None = None
             if replay_source is not None:
                 execution_source = "replay"
@@ -2450,10 +2622,13 @@ def run_segmented_stage_pipeline(
                         payload=payload,
                         args=args,
                     )
-                except StageGroupArtifactError as exc:
+                    _validated_stage_group_response(parsed, target, label=label, facts=facts)
+                except (StageGroupArtifactError, ValueError) as exc:
                     if not provider_fallback_allowed:
                         raise SystemExit(f"阶段组 {label} 无法离线重放：{exc}") from exc
                     execution_source = "provider"
+                    parsed = None
+                    response_meta = {}
             if parsed is None:
                 write_json(request_path, payload)
                 response_text = fetch_json_completion(
@@ -2464,8 +2639,7 @@ def run_segmented_stage_pipeline(
                     response_meta=response_meta,
                 )
                 parsed = parse_json_text(response_text)
-            if not isinstance(parsed, dict):
-                raise SystemExit(f"阶段组 {label} 必须返回 JSON 对象")
+            by_code = _validated_stage_group_response(parsed, target, label=label, facts=facts)
             write_json(
                 provider_artifact_path,
                 completed_stage_group_artifact(
@@ -2477,14 +2651,7 @@ def run_segmented_stage_pipeline(
                     response_meta=response_meta,
                 ),
             )
-            raw_stages = parsed.get("stages") if isinstance(parsed, dict) and isinstance(parsed.get("stages"), list) else []
-            by_code = {
-                _segmented_stage_code(item.get("stage")): item
-                for item in raw_stages
-                if isinstance(item, dict) and _segmented_stage_code(item.get("stage")) in target
-            }
-            if set(by_code) != set(target):
-                raise SystemExit(f"阶段组 {label} 返回阶段不完整：期待 {target}，实际 {sorted(by_code)}")
+            resume_failure_path.unlink(missing_ok=True)
             comparison_eligibility = _authoritative_segmented_comparison_contract(analysis, {})
             projected = [
                 _normalize_segmented_stage(by_code[code], code, facts, comparison_eligibility)
@@ -2516,17 +2683,21 @@ def run_segmented_stage_pipeline(
                     "error": str(exc),
                 }
             )
-            write_json(
-                provider_artifact_path,
-                failed_stage_group_artifact(
-                    group=target,
-                    payload=payload,
-                    model=judgment_model(args),
-                    api_url=args.llm_api_url,
-                    error=str(exc),
-                    response_meta=response_meta,
-                ),
+            failure_artifact = failed_stage_group_artifact(
+                group=target,
+                payload=payload,
+                model=judgment_model(args),
+                api_url=args.llm_api_url,
+                error=str(exc),
+                response_meta=response_meta,
+                response=parsed,
             )
+            failure_path = resume_failure_path if preserve_resume_source else provider_artifact_path
+            write_json(
+                failure_path,
+                failure_artifact,
+            )
+            record["provider_artifact"] = failure_path.name
             projected = [
                 _normalize_segmented_stage(
                     {"stage": _SEGMENTED_STAGE_NAMES[code], "relation": "uncertain", "model_gap_magnitude": "uncertain", "judgment_reason": f"阶段组调用失败：{exc}"},
@@ -2548,25 +2719,39 @@ def run_segmented_stage_pipeline(
     synthesis_payload: dict[str, Any] = {}
     synthesis_response_meta: dict[str, Any] = {}
     synthesis_execution_source = "provider"
+    parsed_synthesis: dict[str, Any] | None = None
+    synthesis_artifact_record = synthesis_provider_artifact.name
+    synthesis_replay_artifact = (
+        stage_group_artifact_path(replay_source, ("SYNTHESIS",))
+        if replay_source is not None
+        else None
+    )
+    preserve_synthesis_resume_source = (
+        provider_fallback_allowed
+        and _same_existing_artifact(synthesis_replay_artifact, synthesis_provider_artifact)
+    )
+    synthesis_resume_failure = _resume_failure_artifact_path(synthesis_provider_artifact)
     try:
         synthesis_payload = build_stage_synthesis_payload(
             judgment_model(args), analysis_input, facts, stage_results, analysis
         )
-        parsed: dict[str, Any] | None = None
         if replay_source is not None:
             synthesis_execution_source = "replay"
             try:
-                parsed, synthesis_response_meta = _read_replayable_stage_group(
+                parsed_synthesis, synthesis_response_meta = _read_replayable_stage_group(
                     replay_source,
                     group=("SYNTHESIS",),
                     payload=synthesis_payload,
                     args=args,
                 )
-            except StageGroupArtifactError as exc:
+                _validated_stage_synthesis_response(parsed_synthesis)
+            except (StageGroupArtifactError, ValueError) as exc:
                 if not provider_fallback_allowed:
                     raise SystemExit(f"Stage3 synthesis 无法离线重放：{exc}") from exc
                 synthesis_execution_source = "provider"
-        if parsed is None:
+                parsed_synthesis = None
+                synthesis_response_meta = {}
+        if parsed_synthesis is None:
             write_json(synthesis_request, synthesis_payload)
             response_text = fetch_json_completion(
                 args,
@@ -2575,21 +2760,21 @@ def run_segmented_stage_pipeline(
                 synthesis_response,
                 response_meta=synthesis_response_meta,
             )
-            parsed = parse_json_text(response_text)
-        if not isinstance(parsed, dict):
-            raise SystemExit("Stage3 synthesis must be a JSON object")
+            parsed_synthesis = parse_json_text(response_text)
+        parsed_synthesis = _validated_stage_synthesis_response(parsed_synthesis)
         write_json(
             synthesis_provider_artifact,
             completed_stage_group_artifact(
                 group=("SYNTHESIS",),
                 payload=synthesis_payload,
-                response=parsed,
+                response=parsed_synthesis,
                 model=judgment_model(args),
                 api_url=args.llm_api_url,
                 response_meta=synthesis_response_meta,
             ),
         )
-        synthesis = parsed
+        synthesis_resume_failure.unlink(missing_ok=True)
+        synthesis = parsed_synthesis
     except (OSError, ValueError, RuntimeError, SystemExit, json.JSONDecodeError) as exc:
         synthesis_status = "failed"
         synthesis = {
@@ -2602,17 +2787,25 @@ def run_segmented_stage_pipeline(
             "cause_type": exc.__class__.__name__,
         }
         any_group_failed = True
-        write_json(
-            synthesis_provider_artifact,
-            failed_stage_group_artifact(
-                group=("SYNTHESIS",),
-                payload=synthesis_payload,
-                model=judgment_model(args),
-                api_url=args.llm_api_url,
-                error=str(exc),
-                response_meta=synthesis_response_meta,
-            ),
+        failure_artifact = failed_stage_group_artifact(
+            group=("SYNTHESIS",),
+            payload=synthesis_payload,
+            model=judgment_model(args),
+            api_url=args.llm_api_url,
+            error=str(exc),
+            response_meta=synthesis_response_meta,
+            response=parsed_synthesis,
         )
+        failure_path = (
+            synthesis_resume_failure
+            if preserve_synthesis_resume_source
+            else synthesis_provider_artifact
+        )
+        write_json(
+            failure_path,
+            failure_artifact,
+        )
+        synthesis_artifact_record = failure_path.name
 
     synthesis = _prepare_segmented_synthesis(synthesis, stage_results)
     unresolved_stages = _segmented_stage_unresolved(stage_results)
@@ -2621,7 +2814,7 @@ def run_segmented_stage_pipeline(
         "pipeline": "segmented_stage_v1",
         "stage_groups": group_records,
         "synthesis_status": synthesis_status,
-        "synthesis_provider_artifact": synthesis_provider_artifact.name,
+        "synthesis_provider_artifact": synthesis_artifact_record,
         "synthesis_execution_source": (
             synthesis_execution_source if synthesis_status == "completed" else "failed"
         ),
@@ -4401,6 +4594,146 @@ def _unknown_stage_qualification_check(stage: str, reason: str) -> dict[str, Any
     }
 
 
+def _validated_stage1_qualification_response(
+    response: Any,
+    *,
+    targets: list[str],
+    valid_ids: set[str],
+    phase_label: str,
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(response, dict):
+        raise ValueError(f"{phase_label} qualification 必须返回 JSON object。")
+    forbidden = stage1_forbidden_field_issues(response)
+    pipeline_owned = stage1_pipeline_owned_field_issues(response)
+    if forbidden:
+        raise ValueError(
+            f"{phase_label} qualification returned downstream fields: "
+            + ", ".join(forbidden)
+        )
+    if pipeline_owned:
+        raise ValueError(
+            f"{phase_label} qualification returned pipeline-owned fields: "
+            + ", ".join(pipeline_owned)
+        )
+    allowed_keys = {"stage_evidence_contract_version", "stage_evidence_checks"}
+    extra_keys = sorted(set(response) - allowed_keys)
+    if extra_keys:
+        raise ValueError(
+            f"{phase_label} qualification returned out-of-contract fields: "
+            + ", ".join(extra_keys)
+        )
+    if response.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+        raise ValueError(f"{phase_label} qualification 缺少匹配的 evidence contract version。")
+    raw_checks = response.get("stage_evidence_checks")
+    if not isinstance(raw_checks, list):
+        raise ValueError(f"{phase_label} qualification 的 stage_evidence_checks 必须是数组。")
+    raw_codes: list[str] = []
+    required_check_keys = {
+        "status",
+        "coverage",
+        "evidence_ids",
+        "observed_signals",
+        "missing_signals",
+        "signal_bindings",
+        "reason",
+    }
+    valid_statuses = {"present", "absent", "unknown", "conflict", "not_applicable"}
+    valid_coverages = {"complete", "partial", "unknown"}
+    for item in raw_checks:
+        if not isinstance(item, dict):
+            raise ValueError(f"{phase_label} qualification 的 stage check 必须是对象。")
+        code = normalize_stage_code(item.get("stage"))
+        if code is None:
+            raise ValueError(f"{phase_label} qualification 返回了无效阶段。")
+        missing_keys = sorted(required_check_keys - set(item))
+        if missing_keys:
+            raise ValueError(
+                f"{phase_label} qualification 的 {code} 缺少必填语义字段："
+                + ", ".join(missing_keys)
+            )
+        if str(item.get("status") or "").strip().lower() not in valid_statuses:
+            raise ValueError(f"{phase_label} qualification 的 {code} status 非法。")
+        if str(item.get("coverage") or "").strip().lower() not in valid_coverages:
+            raise ValueError(f"{phase_label} qualification 的 {code} coverage 非法。")
+        for key in ("evidence_ids", "observed_signals", "missing_signals"):
+            if not isinstance(item.get(key), list):
+                raise ValueError(f"{phase_label} qualification 的 {code} {key} 必须是数组。")
+        if not isinstance(item.get("signal_bindings"), dict):
+            raise ValueError(f"{phase_label} qualification 的 {code} signal_bindings 必须是对象。")
+        contract = stage_evidence_contract(code)
+        if contract is None:  # pragma: no cover - normalize_stage_code already guards this
+            raise ValueError(f"{phase_label} qualification 的 {code} 缺少阶段合同。")
+        for key in ("observed_signals", "missing_signals"):
+            raw_signals = item[key]
+            if any(not isinstance(value, str) or not value.strip() for value in raw_signals):
+                raise ValueError(f"{phase_label} qualification 的 {code} {key} 含无效值。")
+            invalid_signals = sorted(set(raw_signals) - set(contract.allowed_signals))
+            if invalid_signals:
+                raise ValueError(
+                    f"{phase_label} qualification 的 {code} {key} 含非合同信号："
+                    + ", ".join(invalid_signals)
+                )
+        if any(not isinstance(value, str) or not value.strip() for value in item["evidence_ids"]):
+            raise ValueError(
+                f"{phase_label} qualification 的 {code} evidence_ids 只能包含非空字符串。"
+            )
+        invalid_ids = sorted(set(item["evidence_ids"]) - valid_ids)
+        if invalid_ids:
+            raise ValueError(
+                f"{phase_label} qualification 的 {code} evidence_ids 含无效引用："
+                + ", ".join(invalid_ids)
+            )
+        for signal, binding in item["signal_bindings"].items():
+            if signal not in contract.allowed_signals or not isinstance(binding, dict):
+                raise ValueError(f"{phase_label} qualification 的 {code} signal binding 非法：{signal}")
+            binding_keys = {"status", "evidence_ids", "reason"}
+            if not binding_keys.issubset(binding):
+                raise ValueError(f"{phase_label} qualification 的 {code} binding 缺字段：{signal}")
+            if str(binding.get("status") or "").strip().lower() not in {
+                "supported", "missing", "unknown", "conflict"
+            }:
+                raise ValueError(f"{phase_label} qualification 的 {code} binding status 非法：{signal}")
+            binding_ids = binding.get("evidence_ids")
+            if not isinstance(binding_ids, list) or any(
+                not isinstance(value, str) or not value.strip() for value in binding_ids
+            ):
+                raise ValueError(f"{phase_label} qualification 的 {code} binding IDs 非法：{signal}")
+            invalid_binding_ids = sorted(set(binding_ids) - valid_ids)
+            if invalid_binding_ids:
+                raise ValueError(
+                    f"{phase_label} qualification 的 {code} binding 含无效引用："
+                    + ", ".join(invalid_binding_ids)
+                )
+            if not isinstance(binding.get("reason"), str) or not binding["reason"].strip():
+                raise ValueError(f"{phase_label} qualification 的 {code} binding reason 不能为空：{signal}")
+        if not isinstance(item.get("reason"), str) or not item["reason"].strip():
+            raise ValueError(f"{phase_label} qualification 的 {code} reason 不能为空。")
+        raw_codes.append(code)
+    target_set = set(targets)
+    returned = set(raw_codes)
+    if len(raw_codes) != len(targets) or returned != target_set:
+        missing = sorted(target_set - returned)
+        extra = sorted(returned - target_set)
+        duplicate = sorted(code for code in returned if raw_codes.count(code) > 1)
+        detail = []
+        if missing:
+            detail.append(f"missing={','.join(missing)}")
+        if extra:
+            detail.append(f"extra={','.join(extra)}")
+        if duplicate:
+            detail.append(f"duplicate={','.join(duplicate)}")
+        raise ValueError(
+            f"{phase_label} qualification 必须恰好覆盖 {','.join(targets)}。"
+            + (" " + " ".join(detail) if detail else "")
+        )
+    checks = normalize_stage_evidence_checks(raw_checks, valid_ids)
+    return {
+        str(item.get("stage")): item
+        for item in checks
+        if isinstance(item, dict) and str(item.get("stage") or "").strip()
+    }
+
+
 def _run_stage1_qualification(
     args: argparse.Namespace,
     analysis: dict[str, Any],
@@ -4500,6 +4833,16 @@ def _run_stage1_qualification(
         response_meta: dict[str, Any] = {}
         execution_source = "provider"
         response: dict[str, Any] | None = None
+        replay_artifact_path = (
+            stage_fact_artifact_path(replay_source, role, provider_phase, targets)
+            if replay_source is not None
+            else None
+        )
+        preserve_resume_source = (
+            provider_fallback_allowed
+            and _same_existing_artifact(replay_artifact_path, artifact_path)
+        )
+        resume_failure_path = _resume_failure_artifact_path(artifact_path)
         try:
             payload = build_stage_evidence_qualification_payload(
                 judgment_model(args),
@@ -4519,10 +4862,22 @@ def _run_stage1_qualification(
                         payload=payload,
                         args=args,
                     )
-                except StageFactArtifactError:
+                    _validated_stage1_qualification_response(
+                        response,
+                        targets=targets,
+                        valid_ids=valid_ids,
+                        phase_label=phase_label,
+                    )
+                except (StageFactArtifactError, ValueError) as exc:
                     if not provider_fallback_allowed:
-                        raise
+                        if isinstance(exc, StageFactArtifactError):
+                            raise
+                        raise StageFactArtifactError(
+                            f"{phase_label} replay content contract invalid: {exc}"
+                        ) from exc
                     execution_source = "provider"
+                    response = None
+                    response_meta = {}
             if response is None:
                 write_json(request_path, payload)
                 response_text = fetch_json_completion(
@@ -4533,65 +4888,12 @@ def _run_stage1_qualification(
                     response_meta=response_meta,
                 )
                 response = parse_json_text(response_text)
-            if not isinstance(response, dict):
-                raise ValueError(f"{phase_label} qualification 必须返回 JSON object。")
-            forbidden = stage1_forbidden_field_issues(response)
-            pipeline_owned = stage1_pipeline_owned_field_issues(response)
-            if forbidden:
-                raise ValueError(
-                    f"{phase_label} qualification returned downstream fields: "
-                    + ", ".join(forbidden)
-                )
-            if pipeline_owned:
-                raise ValueError(
-                    f"{phase_label} qualification returned pipeline-owned fields: "
-                    + ", ".join(pipeline_owned)
-                )
-            allowed_keys = {"stage_evidence_contract_version", "stage_evidence_checks"}
-            extra_keys = sorted(set(response) - allowed_keys)
-            if extra_keys:
-                raise ValueError(
-                    f"{phase_label} qualification returned out-of-contract fields: "
-                    + ", ".join(extra_keys)
-                )
-            if response.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
-                raise ValueError(f"{phase_label} qualification 缺少匹配的 evidence contract version。")
-            raw_checks = response.get("stage_evidence_checks")
-            if not isinstance(raw_checks, list):
-                raise ValueError(f"{phase_label} qualification 的 stage_evidence_checks 必须是数组。")
-            raw_codes: list[str] = []
-            for item in raw_checks:
-                if not isinstance(item, dict):
-                    raise ValueError(f"{phase_label} qualification 的 stage check 必须是对象。")
-                code = normalize_stage_code(item.get("stage"))
-                if code is None:
-                    raise ValueError(f"{phase_label} qualification 返回了无效阶段。")
-                raw_codes.append(code)
-            target_set = set(targets)
-            returned = set(raw_codes)
-            if len(raw_codes) != len(targets) or returned != target_set:
-                missing = sorted(target_set - returned)
-                extra = sorted(returned - target_set)
-                duplicate = sorted(
-                    code for code in returned if raw_codes.count(code) > 1
-                )
-                detail = []
-                if missing:
-                    detail.append(f"missing={','.join(missing)}")
-                if extra:
-                    detail.append(f"extra={','.join(extra)}")
-                if duplicate:
-                    detail.append(f"duplicate={','.join(duplicate)}")
-                raise ValueError(
-                    f"{phase_label} qualification 必须恰好覆盖 {','.join(targets)}。"
-                    + (" " + " ".join(detail) if detail else "")
-                )
-            checks = normalize_stage_evidence_checks(raw_checks, valid_ids)
-            normalized_by_stage = {
-                str(item.get("stage")): item
-                for item in checks
-                if isinstance(item, dict) and str(item.get("stage") or "").strip()
-            }
+            normalized_by_stage = _validated_stage1_qualification_response(
+                response,
+                targets=targets,
+                valid_ids=valid_ids,
+                phase_label=phase_label,
+            )
             for stage in targets:
                 checks_by_stage[stage] = normalized_by_stage.get(
                     stage,
@@ -4612,6 +4914,7 @@ def _run_stage1_qualification(
                 artifact_name=artifact_path.name,
             )
             write_json(artifact_path, artifact)
+            resume_failure_path.unlink(missing_ok=True)
             current_successful_group_count += 1
             group_records.append(
                 {
@@ -4664,13 +4967,11 @@ def _run_stage1_qualification(
                     response_meta=response_meta,
                     response=response,
                 )
-                write_json(
-                    artifact_path,
-                    failure_artifact,
-                )
+                failure_path = resume_failure_path if preserve_resume_source else artifact_path
+                write_json(failure_path, failure_artifact)
                 failure_record.update(
                     {
-                        "provider_artifact": artifact_path.name,
+                        "provider_artifact": failure_path.name,
                         "request_identity_sha256": failure_artifact["request_identity"]["sha256"],
                         "response_sha256": failure_artifact.get("response_sha256", ""),
                     }
@@ -4800,6 +5101,17 @@ def run_video_fact_extraction(
         artifact_path = stage_fact_artifact_path(run_dir, role, "A")
         execution_source = "provider"
         parsed_response: dict[str, Any] | None = None
+        fact_result: dict[str, Any] | None = None
+        replay_artifact_path = (
+            stage_fact_artifact_path(stage1_replay_source, role, "A")
+            if stage1_replay_source is not None
+            else None
+        )
+        preserve_resume_source = (
+            _provider_fallback_allowed
+            and _same_existing_artifact(replay_artifact_path, artifact_path)
+        )
+        resume_failure_path = _resume_failure_artifact_path(artifact_path)
         try:
             if stage1_replay_source is not None:
                 try:
@@ -4812,14 +5124,27 @@ def run_video_fact_extraction(
                         args=args,
                     )
                     execution_source = "replay"
-                except StageFactArtifactError:
+                    fact_result = normalize_video_fact_result(
+                        role,
+                        parsed_response,
+                        analysis,
+                    )
+                except (StageFactArtifactError, ValueError, SystemExit) as exc:
                     # Strict replay is a reproducibility operation and must
                     # fail closed. Resume is local recovery: a missing or
                     # stale Stage1-A artifact may be regenerated by the
                     # provider, while still preserving the failure in the new
                     # run's artifact ledger if that call also fails.
                     if not _provider_fallback_allowed:
-                        raise
+                        if isinstance(exc, StageFactArtifactError):
+                            raise
+                        raise StageFactArtifactError(
+                            f"Stage1-A replay content contract invalid: {exc}"
+                        ) from exc
+                    parsed_response = None
+                    fact_result = None
+                    response_meta = {}
+                    execution_source = "provider"
             if parsed_response is None:
                 write_json(request_path, payload)
                 result_text = fetch_json_completion(
@@ -4834,6 +5159,8 @@ def run_video_fact_extraction(
                 parsed_response = parse_json_text(result_text)
             if not isinstance(parsed_response, dict):
                 raise ValueError("Stage1-A provider response must be a JSON object")
+            if fact_result is None:
+                fact_result = normalize_video_fact_result(role, parsed_response, analysis)
             artifact = completed_stage_fact_artifact(
                 role=role,
                 phase="A",
@@ -4845,11 +5172,10 @@ def run_video_fact_extraction(
                 artifact_name=artifact_path.name,
             )
             write_json(artifact_path, artifact)
+            resume_failure_path.unlink(missing_ok=True)
         except (OSError, ValueError, RuntimeError, SystemExit) as exc:
             safe_error = str(exc).replace(api_key, "[REDACTED]")[:1000]
-            write_json(
-                artifact_path,
-                failed_stage_fact_artifact(
+            failure_artifact = failed_stage_fact_artifact(
                     role=role,
                     phase="A",
                     payload=payload,
@@ -4859,10 +5185,12 @@ def run_video_fact_extraction(
                     artifact_name=artifact_path.name,
                     response_meta=response_meta,
                     response=parsed_response,
-                ),
-            )
+                )
+            failure_path = resume_failure_path if preserve_resume_source else artifact_path
+            write_json(failure_path, failure_artifact)
             raise
-        fact_result = normalize_video_fact_result(role, parsed_response, analysis)
+        if fact_result is None:  # pragma: no cover - guarded by validation above
+            raise RuntimeError("Stage1-A normalized result is unavailable")
         fact_result["evidence_budget_exceeded"] = response_meta.get("finish_reason") == "length"
         stage1_a_direct_audio = payload_has_direct_audio(
             payload,
@@ -5606,6 +5934,59 @@ def _maybe_recover_video_facts(
     request_bytes = 0
     recovery: dict[str, Any] | None = None
     recovery_visual_inputs: list[dict[str, Any]] = []
+    recorded_artifact_path = artifact_path
+
+    def validate_recovery_response(value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise ValueError("Stage1 focused recovery 必须返回 JSON object。")
+        forbidden = stage1_forbidden_field_issues(value)
+        pipeline_owned = stage1_pipeline_owned_field_issues(value)
+        if forbidden:
+            raise ValueError(
+                "Stage1 focused recovery returned downstream fields: " + ", ".join(forbidden)
+            )
+        if pipeline_owned:
+            raise ValueError(
+                "Stage1 focused recovery returned pipeline-owned fields: "
+                + ", ".join(pipeline_owned)
+            )
+        if value.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+            raise ValueError("Stage1 focused recovery 缺少匹配的 evidence contract version。")
+        if not isinstance(value.get("candidate_evidence_units"), list):
+            raise ValueError("Stage1 focused recovery 的 candidate_evidence_units 必须是数组。")
+        target_set = set(targets)
+        for candidate in value["candidate_evidence_units"]:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_stages = {
+                code
+                for raw in candidate.get("functions") or []
+                if (code := normalize_stage_code(str(raw).split("_", 1)[0])) is not None
+            }
+            out_of_scope = sorted(candidate_stages - target_set, key=list(stage_codes()).index)
+            if out_of_scope:
+                raise ValueError(
+                    "Stage1-C candidate escaped target stages: " + ",".join(out_of_scope)
+                )
+        allowed_keys = {"candidate_evidence_units", "stage_evidence_contract_version"}
+        out_of_contract = sorted(set(value) - allowed_keys)
+        if out_of_contract:
+            raise ValueError(
+                "Stage1-C observation returned fields owned by another phase: "
+                + ", ".join(out_of_contract)
+            )
+        return value
+
+    replay_artifact_path = (
+        stage_fact_artifact_path(replay_source, role, "C", targets)
+        if replay_source is not None
+        else None
+    )
+    preserve_resume_source = (
+        provider_fallback_allowed
+        and _same_existing_artifact(replay_artifact_path, artifact_path)
+    )
+    resume_failure_path = _resume_failure_artifact_path(artifact_path)
     try:
         video_info = analysis.get("videos", {}).get(role, {}) if isinstance(analysis.get("videos"), dict) else {}
         recovery_visual_inputs = select_stage_recovery_visual_inputs(
@@ -5649,52 +6030,24 @@ def _maybe_recover_video_facts(
                     args=args,
                 )
                 execution_source = "replay"
-            except StageFactArtifactError:
+                validate_recovery_response(recovery)
+            except (StageFactArtifactError, ValueError) as exc:
                 if not provider_fallback_allowed:
-                    raise
+                    if isinstance(exc, StageFactArtifactError):
+                        raise
+                    raise StageFactArtifactError(
+                        f"Stage1-C replay content contract invalid: {exc}"
+                    ) from exc
+                recovery = None
+                response_meta = {}
+                execution_source = "provider"
         if recovery is None:
             write_json(request_path, payload)
             recovery_text = fetch_json_completion(
                 args, api_key, request_path, response_path, response_meta=response_meta
             )
             recovery = parse_json_text(recovery_text)
-        if not isinstance(recovery, dict):
-            raise ValueError("Stage1 focused recovery 必须返回 JSON object。")
-        forbidden = stage1_forbidden_field_issues(recovery)
-        pipeline_owned = stage1_pipeline_owned_field_issues(recovery)
-        if forbidden:
-            raise ValueError(
-                "Stage1 focused recovery returned downstream fields: " + ", ".join(forbidden)
-            )
-        if pipeline_owned:
-            raise ValueError(
-                "Stage1 focused recovery returned pipeline-owned fields: " + ", ".join(pipeline_owned)
-            )
-        if recovery.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
-            raise ValueError("Stage1 focused recovery 缺少匹配的 evidence contract version。")
-        if not isinstance(recovery.get("candidate_evidence_units"), list):
-            raise ValueError("Stage1 focused recovery 的 candidate_evidence_units 必须是数组。")
-        target_set = set(targets)
-        for candidate in recovery["candidate_evidence_units"]:
-            if not isinstance(candidate, dict):
-                continue
-            candidate_stages = {
-                code
-                for value in candidate.get("functions") or []
-                if (code := normalize_stage_code(str(value).split("_", 1)[0])) is not None
-            }
-            out_of_scope = sorted(candidate_stages - target_set, key=list(stage_codes()).index)
-            if out_of_scope:
-                raise ValueError(
-                    "Stage1-C candidate escaped target stages: " + ",".join(out_of_scope)
-                )
-        allowed_keys = {"candidate_evidence_units", "stage_evidence_contract_version"}
-        out_of_contract = sorted(set(recovery) - allowed_keys)
-        if out_of_contract:
-            raise ValueError(
-                "Stage1-C observation returned fields owned by another phase: "
-                + ", ".join(out_of_contract)
-            )
+        recovery = validate_recovery_response(recovery)
         artifact = completed_stage_fact_artifact(
             role=role,
             phase="C",
@@ -5707,6 +6060,7 @@ def _maybe_recover_video_facts(
             artifact_name=artifact_path.name,
         )
         write_json(artifact_path, artifact)
+        resume_failure_path.unlink(missing_ok=True)
     except (OSError, ValueError, RuntimeError, SystemExit) as exc:
         if _is_strict_replay_failure(args, exc):
             raise
@@ -5724,10 +6078,9 @@ def _maybe_recover_video_facts(
                 response_meta=response_meta,
                 response=recovery,
             )
-            write_json(
-                artifact_path,
-                failure_artifact,
-            )
+            failure_path = resume_failure_path if preserve_resume_source else artifact_path
+            write_json(failure_path, failure_artifact)
+            recorded_artifact_path = failure_path
         failed = _mark_video_fact_recovery_failed(
             facts,
             target_stages=targets,
@@ -5756,7 +6109,7 @@ def _maybe_recover_video_facts(
                 {
                     "provider_status": "failed",
                     "execution_source": execution_source,
-                    "provider_artifact": artifact_path.name,
+                    "provider_artifact": recorded_artifact_path.name,
                     "request_identity_sha256": failure_artifact["request_identity"]["sha256"],
                     "response_sha256": failure_artifact.get("response_sha256", ""),
                     "completion_attempts": response_meta.get("completion_attempts", 0),

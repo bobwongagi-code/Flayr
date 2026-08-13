@@ -36,7 +36,11 @@ from flayr_core.llm.pipeline import (
     _run_stage1_qualification,
     detect_low_confidence_stages,
 )
-from flayr_core.llm.stage_fact_artifacts import StageFactArtifactError
+from flayr_core.llm.stage_fact_artifacts import (
+    StageFactArtifactError,
+    completed_stage_fact_artifact,
+    stage_fact_artifact_path,
+)
 from flayr_core.llm.payload import (
     _compact_comparison_facts,
     _compact_stage_group_facts,
@@ -545,6 +549,210 @@ class StageEvidenceContractTests(unittest.TestCase):
                 )
 
         fetch.assert_not_called()
+
+    def test_stage1_resume_retries_semantically_invalid_qualification_group(self) -> None:
+        facts = self._active_side("C")
+        analysis = self._analysis()
+        args = type(
+            "Args",
+            (),
+            {
+                "llm_dry_run": False,
+                "llm_model": "test-model",
+                "llm_api_url": "https://example.invalid",
+                "stage1_replay_from": None,
+                "stage1_resume_from": None,
+                "provider_replay_from": None,
+                "stage2_replay_from": None,
+                "_resource_budget": None,
+            },
+        )()
+
+        def payload_for(_model, _role, _analysis, _facts, targets):
+            return {"group": list(targets)}
+
+        def response_for(targets: list[str]) -> dict:
+            return {
+                "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                "stage_evidence_checks": [
+                    {
+                        "stage": stage,
+                        "status": "unknown",
+                        "coverage": "unknown",
+                        "evidence_ids": [],
+                        "observed_signals": [],
+                        "missing_signals": [],
+                        "signal_bindings": {},
+                        "reason": "resumed",
+                    }
+                    for stage in targets
+                ],
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            args.stage1_resume_from = run_dir
+            for index, group in enumerate(STAGE1_QUALIFICATION_GROUPS):
+                targets = list(group)
+                response = response_for(targets)
+                if index == 0:
+                    response["stage_evidence_checks"] = [
+                        {"stage": item["stage"]}
+                        for item in response["stage_evidence_checks"]
+                    ]
+                artifact = completed_stage_fact_artifact(
+                    role="creator",
+                    phase="B",
+                    group=targets,
+                    payload=payload_for(None, None, None, None, targets),
+                    response=response,
+                    model="test-model",
+                    api_url="https://example.invalid",
+                    response_meta={
+                        "logical_request_id": f"saved-{index}",
+                        "completion_attempts": 1,
+                        "retry_reasons": [],
+                        "usage": {},
+                    },
+                )
+                stage_fact_artifact_path(run_dir, "creator", "B", targets).write_text(
+                    json.dumps(artifact),
+                    encoding="utf-8",
+                )
+
+            def provider_call(*_args, **kwargs):
+                payload = json.loads(Path(_args[2]).read_text(encoding="utf-8"))
+                kwargs["response_meta"].update(
+                    {
+                        "logical_request_id": "semantic-resume",
+                        "completion_attempts": 1,
+                        "retry_reasons": [],
+                        "usage": {},
+                    }
+                )
+                return json.dumps(response_for(payload["group"]))
+
+            with (
+                patch(
+                    "flayr_core.llm.pipeline.build_stage_evidence_qualification_payload",
+                    side_effect=payload_for,
+                ),
+                patch(
+                    "flayr_core.llm.pipeline.fetch_json_completion",
+                    side_effect=provider_call,
+                ) as fetch,
+            ):
+                result = _run_stage1_qualification(
+                    args,
+                    analysis,
+                    run_dir,
+                    "",
+                    "creator",
+                    facts,
+                )
+
+            self.assertEqual(fetch.call_count, 1)
+            self.assertEqual(result["stage1_qualification"]["status"], "completed")
+            self.assertEqual(
+                result["stage1_qualification"]["group_records"][0]["execution_source"],
+                "provider",
+            )
+
+    def test_stage1_resume_retries_invalid_references_and_binding_types(self) -> None:
+        facts = self._active_side("C")
+        analysis = self._analysis()
+        targets = list(STAGE1_QUALIFICATION_GROUPS[0])
+        invalid_response = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage_evidence_checks": [
+                {
+                    "stage": stage,
+                    "status": "present",
+                    "coverage": "complete",
+                    "evidence_ids": ["DOES_NOT_EXIST"],
+                    "observed_signals": list(stage_evidence_contract(stage).required_signals),
+                    "missing_signals": [],
+                    "signal_bindings": {
+                        signal: "not-an-object"
+                        for signal in stage_evidence_contract(stage).required_signals
+                    },
+                    "reason": {"not": "text"},
+                }
+                for stage in targets
+            ],
+        }
+        valid_response = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage_evidence_checks": [
+                {
+                    "stage": stage,
+                    "status": "unknown",
+                    "coverage": "unknown",
+                    "evidence_ids": [],
+                    "observed_signals": [],
+                    "missing_signals": [],
+                    "signal_bindings": {},
+                    "reason": "provider recovered invalid replay",
+                }
+                for stage in targets
+            ],
+        }
+        args = type("Args", (), {
+            "llm_dry_run": False,
+            "llm_model": "test-model",
+            "llm_api_url": "https://example.invalid",
+            "stage1_replay_from": None,
+            "stage1_resume_from": None,
+            "provider_replay_from": None,
+            "stage2_replay_from": None,
+            "_resource_budget": None,
+        })()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            args.stage1_resume_from = run_dir
+            payload = {"group": targets}
+            artifact = completed_stage_fact_artifact(
+                role="creator", phase="D", group=targets, payload=payload,
+                response=invalid_response, model="test-model",
+                api_url="https://example.invalid", response_meta={
+                    "logical_request_id": "saved-invalid-reference",
+                    "completion_attempts": 1,
+                    "retry_reasons": [],
+                    "usage": {},
+                },
+            )
+            stage_fact_artifact_path(run_dir, "creator", "D", targets).write_text(
+                json.dumps(artifact), encoding="utf-8"
+            )
+
+            def provider_call(*_args, **kwargs):
+                kwargs["response_meta"].update({
+                    "logical_request_id": "invalid-ref-resume",
+                    "completion_attempts": 1,
+                    "retry_reasons": [],
+                    "usage": {},
+                })
+                return json.dumps(valid_response)
+
+            with patch(
+                "flayr_core.llm.pipeline.build_stage_evidence_qualification_payload",
+                return_value=payload,
+            ), patch(
+                "flayr_core.llm.pipeline.fetch_json_completion",
+                side_effect=provider_call,
+            ) as fetch:
+                result = _run_stage1_qualification(
+                    args, analysis, run_dir, "", "creator", facts,
+                    target_stages=targets,
+                )
+
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(result["stage1_qualification"]["status"], "completed")
+        self.assertEqual(
+            result["stage1_qualification"]["group_records"][0]["execution_source"],
+            "provider",
+        )
 
     def test_present_qualification_uses_unit_strength_and_required_signals(self) -> None:
         checks = self._checks("present", "inferred")
@@ -1338,6 +1546,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                     "observed_signals": list(stage_evidence_contract("S1").required_signals),
                     "missing_signals": [],
                     "signal_bindings": self._signal_bindings("S1", "C7"),
+                    "reason": "focused recovery supports S1",
                 }
             ],
         }
@@ -1516,6 +1725,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                             stage,
                             "C7" if stage == "S4" else f"C{list(stage_codes()).index(stage) + 1}",
                         ),
+                        "reason": "focused recovery qualification completed",
                     }
                     for stage in group
                 ],

@@ -67,6 +67,7 @@
       "tests/test_audio_layers.py",
       "tests/test_llm_api.py",
       "tests/test_network.py",
+      "tests/test_operations_contracts.py",
       "tests/test_resource_budget.py",
       "tests/test_freeze_contract.py",
       "tests/test_evaluate_analysis.py",
