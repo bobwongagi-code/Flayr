@@ -671,7 +671,9 @@ def validate_s1_hook_flags(result: dict[str, Any], analysis: dict[str, Any]) -> 
             errors.append(f"S1 {key}.landing_met 必须是 bool")
         if not str(hook.get("landing_reason") or "").strip():
             errors.append(f"S1 {key}.landing_reason 不能为空")
-        if not str(hook.get("window_evidence") or "").strip():
+        evidence_ids = hook.get("evidence_ids")
+        closed_absence = hook.get("exists") is False and evidence_ids == []
+        if not str(hook.get("window_evidence") or "").strip() and not closed_absence:
             errors.append(f"S1 {key}.window_evidence 不能为空")
         boundary = hook.get("hook_boundary_seconds")
         if not isinstance(boundary, (int, float)) or boundary < 0:

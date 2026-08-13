@@ -4444,48 +4444,45 @@ def establish_comparison_eligibility(
     run_dir: Path,
     api_key: str,
 ) -> dict[str, Any]:
-    """独立判定双视频能否做产品级比较；失败时保守退回 uncertain。"""
+    """独立判定双视频能否做产品级比较。
+
+    模型返回有效的 ``uncertain`` 是一个语义结论；provider、预算或解析失败则是
+    管线失败，必须传递给外层的分类器，不得伪装成可发布的比较结论。
+    """
     payload = build_comparison_eligibility_payload(judgment_model(args), facts)
     request_path = run_dir / "llm_comparison_eligibility_request.json"
     response_path = run_dir / "llm_comparison_eligibility_response.json"
     response_meta: dict[str, Any] = {}
     execution_source = "live"
     write_json(request_path, payload)
-    try:
-        response, response_meta, execution_source = provider_call_with_artifact(
-            artifact_path=run_dir / "provider_comparison_eligibility.json",
-            replay_root=(
-                getattr(args, "provider_replay_from", None)
-                or getattr(args, "stage2_replay_from", None)
+    response, response_meta, execution_source = provider_call_with_artifact(
+        artifact_path=run_dir / "provider_comparison_eligibility.json",
+        replay_root=(
+            getattr(args, "provider_replay_from", None)
+            or getattr(args, "stage2_replay_from", None)
+        ),
+        resume_root=getattr(args, "stage2_resume_from", None),
+        call_kind="comparison_eligibility",
+        payload=payload,
+        model=judgment_model(args),
+        api_url=args.llm_api_url,
+        response_meta=response_meta,
+        call=lambda: (
+            parse_json_text(
+                fetch_json_completion(
+                    args,
+                    api_key,
+                    request_path,
+                    response_path,
+                    response_meta=response_meta,
+                )
             ),
-            resume_root=getattr(args, "stage2_resume_from", None),
-            call_kind="comparison_eligibility",
-            payload=payload,
-            model=judgment_model(args),
-            api_url=args.llm_api_url,
-            response_meta=response_meta,
-            call=lambda: (
-                parse_json_text(
-                    fetch_json_completion(
-                        args,
-                        api_key,
-                        request_path,
-                        response_path,
-                        response_meta=response_meta,
-                    )
-                ),
-                response_meta,
-            ),
+            response_meta,
         )
-        eligibility = normalize_comparison_contract(response)
-        if eligibility["overall_status"] == "uncertain" and not eligibility["reason"]:
-            eligibility["reason"] = "双侧产品身份不足以确认产品级比较资格。"
-    except (Exception, SystemExit) as exc:  # 资格层不允许阻断主分析；uncertain 会阻止后续误用为直接产品比较。
-        if _is_strict_replay_failure(args, exc):
-            raise
-        eligibility = normalize_comparison_contract(
-            {"reason": f"产品级比较资格判定失败，保守按 uncertain 处理：{exc}"}
-        )
+    )
+    eligibility = normalize_comparison_contract(response)
+    if eligibility["overall_status"] == "uncertain" and not eligibility["reason"]:
+        eligibility["reason"] = "双侧产品身份不足以确认产品级比较资格。"
     eligibility = _stamp_facts_eligibility(eligibility)
     eligibility = _apply_operator_scope_override(
         eligibility,

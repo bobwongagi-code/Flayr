@@ -42,7 +42,7 @@ from flayr_core.llm import api as llm_api
 from flayr_core.llm import media as llm_media
 from flayr_core.llm import payload as payload_module
 from flayr_core.llm import pipeline
-from flayr_core.llm.provider_artifacts import ProviderReplayError, read_provider_artifact
+from flayr_core.llm.provider_artifacts import ProviderCallError, ProviderReplayError, read_provider_artifact
 from flayr_core.llm.analysis_contract import (
     AnalysisContractError,
     validate_normalized_analysis_contract,
@@ -3477,6 +3477,53 @@ class ArchitectureContractTests(unittest.TestCase):
             {"creator_exec": None, "bench_exec": 0.0},
         )
 
+    def test_s1_closed_absence_allows_empty_window_without_weakening_active_hook_gate(self) -> None:
+        absent_hook = {
+            "exists": False,
+            "type": "unknown",
+            "dims": {"camera": False, "copy": False, "sound": False, "rhythm": False},
+            "hook_boundary_seconds": 0,
+            "hook_boundary_reason": "Stage1 已闭合为 absent。",
+            "s2_start_signal": "0s 起进入产品展示。",
+            "landing_met": False,
+            "landing_reason": "Stage1 无可引用的 Hook 事实。",
+            "window_evidence": "",
+            "landing_window_leak": False,
+            "anchors_proposition": False,
+            "evidence_ids": [],
+        }
+        validate_s1_hook_flags(
+            {
+                "stage_analysis": [
+                    {
+                        "stage": "S1 Hook",
+                        "creator_hook": copy.deepcopy(absent_hook),
+                        "benchmark_hook": copy.deepcopy(absent_hook),
+                    }
+                ]
+            },
+            {"s1_hook_flags_required": True},
+        )
+
+        for invalid_update in (
+            {"exists": True},
+            {"evidence_ids": ["B1"]},
+        ):
+            invalid_hook = {**copy.deepcopy(absent_hook), **invalid_update}
+            with self.assertRaisesRegex(SystemExit, "window_evidence 不能为空"):
+                validate_s1_hook_flags(
+                    {
+                        "stage_analysis": [
+                            {
+                                "stage": "S1 Hook",
+                                "creator_hook": copy.deepcopy(absent_hook),
+                                "benchmark_hook": invalid_hook,
+                            }
+                        ]
+                    },
+                    {"s1_hook_flags_required": True},
+                )
+
     def test_s6_soft_invitation_with_offer_is_not_absent_cta(self) -> None:
         complete = {
             "exists": True,
@@ -6222,6 +6269,60 @@ class ArchitectureContractTests(unittest.TestCase):
                     Path(tmp),
                     "",
                 )
+
+    def test_comparison_eligibility_does_not_publish_provider_failure_as_uncertain(self) -> None:
+        args = SimpleNamespace(
+            llm_model="test-model",
+            llm_api_url="https://example.invalid/v1",
+            provider_replay_from=None,
+            stage2_replay_from=None,
+            stage2_resume_from=None,
+            comparison_scope_override=None,
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            pipeline,
+            "provider_call_with_artifact",
+            side_effect=ProviderCallError("provider unavailable"),
+        ):
+            with self.assertRaisesRegex(ProviderCallError, "provider unavailable"):
+                pipeline.establish_comparison_eligibility(
+                    args,
+                    {"benchmark": {}, "creator": {}},
+                    Path(tmp),
+                    "",
+                )
+            self.assertFalse((Path(tmp) / "comparison_eligibility.json").exists())
+
+    def test_comparison_eligibility_preserves_valid_semantic_uncertain(self) -> None:
+        args = SimpleNamespace(
+            llm_model="test-model",
+            llm_api_url="https://example.invalid/v1",
+            provider_replay_from=None,
+            stage2_replay_from=None,
+            stage2_resume_from=None,
+            comparison_scope_override=None,
+        )
+        provider_contract = {
+            "identity_relation": "uncertain",
+            "substitution_relation": "uncertain",
+            "reason": "双侧产品身份事实不足。",
+        }
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            pipeline,
+            "provider_call_with_artifact",
+            return_value=(provider_contract, {"request_id": "semantic-uncertain"}, "replay"),
+        ):
+            contract = pipeline.establish_comparison_eligibility(
+                args,
+                {"benchmark": {}, "creator": {}},
+                Path(tmp),
+                "",
+            )
+            persisted = json.loads((Path(tmp) / "comparison_eligibility.json").read_text())
+
+        self.assertEqual(contract["overall_status"], "uncertain")
+        self.assertEqual(contract["reason"], "双侧产品身份事实不足。")
+        self.assertEqual(persisted, contract)
 
     def test_comparison_eligibility_closes_bilateral_absent_s5_before_stage2(self) -> None:
         args = SimpleNamespace(
