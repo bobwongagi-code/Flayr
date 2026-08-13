@@ -284,7 +284,7 @@ def build_comparison_eligibility_payload(model: str, facts: dict[str, Any]) -> d
         "\"restrictions\":[],\"evidence_ids\":[]},\"S2\":{},\"S3\":{},\"S4\":{},\"S5\":{},\"S6\":{}},"
         "\"reason\":\"一句话\",\"evidence_ids\":[],\"confidence\":\"high|medium|low\"}。\n\n"
         "已锁定的产品身份与阶段事实：\n"
-        + json.dumps(comparison_facts, ensure_ascii=False, indent=2)
+        + json.dumps(comparison_facts, ensure_ascii=False, indent=2, sort_keys=True)
     )
     return {
         "model": model,
@@ -837,10 +837,29 @@ def build_stage_evidence_qualification_payload(
         }
     ]
     target_text = ", ".join(normalized_targets) or "S1-S6"
+    acquisition = dict(
+        facts.get("stage1_acquisition")
+        if isinstance(facts.get("stage1_acquisition"), dict)
+        else {}
+    )
+    # Technical replay changes only the transport provenance. Preserve the
+    # frozen live request identity instead of feeding "replay" back into the
+    # next semantic request. Removing this legacy audit block entirely would
+    # require a versioned contract migration and invalidate existing artifacts.
+    provider_artifacts = []
+    for item in acquisition.get("provider_artifacts") or []:
+        if not isinstance(item, dict):
+            continue
+        normalized_item = dict(item)
+        if normalized_item.get("execution_source") == "replay":
+            normalized_item["execution_source"] = "provider"
+        provider_artifacts.append(normalized_item)
+    if "provider_artifacts" in acquisition:
+        acquisition["provider_artifacts"] = provider_artifacts
     context = {
         "role": role,
         "duration_seconds": info.get("duration_seconds"),
-        "stage1_acquisition": facts.get("stage1_acquisition") or {},
+        "stage1_acquisition": acquisition,
         "evidence_units": units,
     }
     output_stages = _stage_evidence_qualification_examples(normalized_targets)

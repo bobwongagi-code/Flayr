@@ -35,6 +35,7 @@ from flayr_core.llm.pipeline import (
     _run_stage1_qualification,
     detect_low_confidence_stages,
 )
+from flayr_core.llm.stage_fact_artifacts import StageFactArtifactError
 from flayr_core.llm.payload import (
     _compact_comparison_facts,
     _compact_stage_group_facts,
@@ -471,6 +472,42 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(checks["S1"]["reason"], "fixture group completed")
         self.assertIn("Stage1-B 该阶段组失败", checks["S3"]["reason"])
         self.assertIn("Stage1-B 该阶段组失败", checks["S4"]["reason"])
+
+    def test_stage1_qualification_strict_replay_identity_failure_is_not_degraded(self) -> None:
+        facts = self._active_side("C")
+        analysis = self._analysis()
+        args = type(
+            "Args",
+            (),
+            {
+                "llm_dry_run": False,
+                "llm_model": "test-model",
+                "llm_api_url": "https://example.invalid",
+                "stage1_replay_from": Path("/strict-replay"),
+                "stage1_resume_from": None,
+                "provider_replay_from": None,
+                "stage2_replay_from": None,
+            },
+        )()
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "flayr_core.llm.pipeline._read_replayable_stage_fact",
+            side_effect=StageFactArtifactError("Stage1 request identity mismatch"),
+        ), patch("flayr_core.llm.pipeline.fetch_json_completion") as fetch:
+            with self.assertRaisesRegex(
+                StageFactArtifactError,
+                "Stage1 request identity mismatch",
+            ):
+                _run_stage1_qualification(
+                    args,
+                    analysis,
+                    Path(tmp),
+                    "",
+                    "creator",
+                    facts,
+                )
+
+        fetch.assert_not_called()
 
     def test_present_qualification_uses_unit_strength_and_required_signals(self) -> None:
         checks = self._checks("present", "inferred")
@@ -2495,6 +2532,24 @@ class StageEvidenceContractTests(unittest.TestCase):
         s1 = next(item for item in view["stage_evidence_checks"] if item["stage"] == "S1")
         self.assertEqual(s1["status"], "unknown")
         self.assertEqual(view["stage_evidence_readiness"]["S1"], "unknown")
+
+    def test_analysis_view_uses_registry_order_for_stage_maps(self) -> None:
+        side = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage_evidence_checks": self._checks("unknown"),
+            "evidence_units": [],
+        }
+
+        view = stage_analysis_evidence_view(
+            side,
+            {"S6", "S4", "S2", "S5", "S3", "S1"},
+        )
+
+        expected = list(stage_codes())
+        self.assertEqual(list(view["stage_evidence_units"]), expected)
+        self.assertEqual(list(view["qualified_stage_evidence_ids"]), expected)
+        self.assertEqual(list(view["stage_evidence_readiness"]), expected)
+        self.assertEqual(view["analysis_evidence_stages"], expected)
 
     def test_analysis_view_hides_unqualified_signal_claims(self) -> None:
         checks = self._checks("unknown")

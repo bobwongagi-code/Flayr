@@ -2622,7 +2622,10 @@ def _stage_analysis_side_view(side: Any, target_stages: set[str] | None) -> dict
         view["analysis_evidence_scope"] = "legacy_raw"
         return view
 
-    selected_stages = target_stages or set(stage_codes())
+    requested_stages = target_stages or set(stage_codes())
+    selected_stages = tuple(
+        stage for stage in stage_codes() if stage in requested_stages
+    )
     qualified_by_stage = {
         stage: qualified_stage_evidence_ids(side, stage)
         for stage in selected_stages
@@ -2644,7 +2647,7 @@ def _stage_analysis_side_view(side: Any, target_stages: set[str] | None) -> dict
         if isinstance(coverage_audit.get("stages"), dict)
         else {}
     )
-    for stage in sorted(selected_stages):
+    for stage in selected_stages:
         check = raw_checks.get(stage) if isinstance(raw_checks.get(stage), dict) else {}
         candidate_ids = [
             str(value).strip()
@@ -2754,7 +2757,7 @@ def _stage_analysis_side_view(side: Any, target_stages: set[str] | None) -> dict
     view["candidate_observations_by_stage"] = candidate_observations_by_stage
     view["stage_evidence_readiness"] = readiness_by_stage
     view["analysis_evidence_scope"] = "qualified_stage_evidence_only"
-    view["analysis_evidence_stages"] = sorted(selected_stages)
+    view["analysis_evidence_stages"] = list(selected_stages)
     return view
 
 

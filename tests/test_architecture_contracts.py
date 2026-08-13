@@ -38,6 +38,7 @@ from flayr_core.artifacts import (
 )
 from flayr_core.llm import api as llm_api
 from flayr_core.llm import media as llm_media
+from flayr_core.llm import payload as payload_module
 from flayr_core.llm import pipeline
 from flayr_core.llm.provider_artifacts import ProviderReplayError, read_provider_artifact
 from flayr_core.llm.analysis_contract import (
@@ -5386,6 +5387,91 @@ class ArchitectureContractTests(unittest.TestCase):
             [item.get("type") for item in qualification["messages"][1]["content"] if isinstance(item, dict)],
             ["text"],
         )
+
+    def test_stage1_b_identity_ignores_provider_audit_provenance(self) -> None:
+        analysis = {
+            "product": {"name": "测试品"},
+            "videos": {"creator": {"duration_seconds": 12.0}},
+        }
+        facts = {
+            "stage1_acquisition": {
+                "version": 4,
+                "status": "partial",
+                "channels": {"visual": {"status": "ready", "coverage": "sampled"}},
+                "provider_artifacts": [
+                    {
+                        "phase": "A",
+                        "artifact": "stage1_provider_creator_A.json",
+                        "execution_source": "provider",
+                        "request_identity_sha256": "request-a",
+                        "response_sha256": "response-a",
+                        "completion_attempts": 1,
+                    }
+                ],
+            },
+            "evidence_units": [
+                {"id": "C1", "time_range": "0s - 2s", "visual_fact": "手拿产品"}
+            ],
+        }
+        live_payload = build_stage_evidence_qualification_payload(
+            "test-model", "creator", analysis, facts, ["S1", "S2"]
+        )
+        facts["stage1_acquisition"]["provider_artifacts"][0]["execution_source"] = "replay"
+        replay_payload = build_stage_evidence_qualification_payload(
+            "test-model", "creator", analysis, facts, ["S1", "S2"]
+        )
+
+        self.assertEqual(live_payload, replay_payload)
+
+    def test_comparison_eligibility_does_not_hide_strict_provider_replay_failure(self) -> None:
+        args = SimpleNamespace(
+            llm_model="test-model",
+            llm_api_url="https://example.invalid/v1",
+            provider_replay_from=Path("/strict-replay"),
+            comparison_scope_override=None,
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            pipeline,
+            "provider_call_with_artifact",
+            side_effect=ProviderReplayError("provider replay request identity mismatch"),
+        ):
+            with self.assertRaisesRegex(
+                ProviderReplayError,
+                "request identity mismatch",
+            ):
+                pipeline.establish_comparison_eligibility(
+                    args,
+                    {"benchmark": {}, "creator": {}},
+                    Path(tmp),
+                    "",
+                )
+
+    def test_comparison_eligibility_payload_is_stable_across_stage_set_order(self) -> None:
+        side = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "evidence_units": [],
+            "stage_evidence_checks": [],
+        }
+        with mock.patch.object(
+            payload_module,
+            "stage_analysis_evidence_view",
+            side_effect=(
+                {
+                    **side,
+                    "stage_evidence_units": {stage: [] for stage in {"S1", "S2", "S3", "S4", "S5", "S6"}},
+                },
+                {},
+                {
+                    **side,
+                    "stage_evidence_units": {stage: [] for stage in ("S6", "S5", "S4", "S3", "S2", "S1")},
+                },
+                {},
+            ),
+        ):
+            first = build_comparison_eligibility_payload("test-model", {"benchmark": side})
+            second = build_comparison_eligibility_payload("test-model", {"benchmark": side})
+
+        self.assertEqual(first, second)
 
     def test_stage1_qualification_prompt_has_one_exact_template_per_stage(self) -> None:
         analysis = {

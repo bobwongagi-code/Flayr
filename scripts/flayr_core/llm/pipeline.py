@@ -207,6 +207,17 @@ def _localized_failure_kind(
     return default
 
 
+def _is_strict_replay_failure(args: argparse.Namespace, exc: BaseException) -> bool:
+    """Return whether a replay-integrity failure must escape a degradable lane."""
+    if isinstance(exc, ProviderReplayError):
+        return getattr(args, "provider_replay_from", None) is not None
+    if isinstance(exc, StageFactArtifactError):
+        return getattr(args, "stage1_replay_from", None) is not None
+    if isinstance(exc, StageGroupArtifactError):
+        return getattr(args, "stage2_replay_from", None) is not None
+    return False
+
+
 # 修改 build_video_fact_payload 的语义合同后必须递增，避免旧 facts 与新判断规则混用。
 VIDEO_FACT_CACHE_SCHEMA_VERSION = 29
 PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION = 3
@@ -2786,6 +2797,8 @@ def maybe_run_absolute_execution_shadow(
             }
             write_json(run_dir / f"absolute_execution_{role}.json", parsed)
         except (OSError, ValueError, RuntimeError, SystemExit, json.JSONDecodeError) as exc:
+            if _is_strict_replay_failure(args, exc):
+                raise
             audit["errors"].append(f"{role}: {exc}")
     audit["status"] = "completed" if len(audit["roles"]) == 2 else "partial" if audit["roles"] else "failed"
     analysis["absolute_execution_shadow"] = audit
@@ -3050,6 +3063,8 @@ def maybe_reconcile_final_improvements(
         if any(code in remaining for code in missing):
             raise ValueError("补全结果未覆盖全部缺失的大差距阶段")
     except (Exception, SystemExit) as exc:  # 可选补全失败时保留主分析结果
+        if _is_strict_replay_failure(args, exc):
+            raise
         result["improvement_reconciliation"] = {
             "applied": False,
             "requested_stages": missing,
@@ -3212,6 +3227,8 @@ def maybe_refine_low_confidence_stages(
             fallback_improvements=raw_result.get("improvements"),
         )
     except (OSError, ValueError, RuntimeError, SystemExit, json.JSONDecodeError) as exc:
+        if _is_strict_replay_failure(args, exc):
+            raise
         result["phase_c_review"] = {
             "schema_version": PHASE_C_REVIEW_SCHEMA_VERSION,
             "mode": PHASE_C_REVIEW_MODE,
@@ -3992,6 +4009,8 @@ def establish_product_foundation(
         if not foundation["category_profile"] and not foundation["product_profile"]:
             raise ValueError("category_profile 与 product_profile 均为空")
     except (Exception, SystemExit) as exc:  # noqa: BLE001
+        if _is_strict_replay_failure(args, exc):
+            raise
         analysis["product_foundation_status"] = "failed"
         analysis["product_foundation_error"] = str(exc)[:500]
         print(f"Step-0 品地基确立失败，状态记为 failed：{exc}", flush=True)
@@ -4042,6 +4061,8 @@ def establish_comparison_eligibility(
         if eligibility["overall_status"] == "uncertain" and not eligibility["reason"]:
             eligibility["reason"] = "双侧产品身份不足以确认产品级比较资格。"
     except (Exception, SystemExit) as exc:  # 资格层不允许阻断主分析；uncertain 会阻止后续误用为直接产品比较。
+        if _is_strict_replay_failure(args, exc):
+            raise
         eligibility = normalize_comparison_contract(
             {"reason": f"产品级比较资格判定失败，保守按 uncertain 处理：{exc}"}
         )
@@ -4422,6 +4443,8 @@ def _run_stage1_qualification(
                 }
             )
         except (OSError, ValueError, RuntimeError, SystemExit) as exc:
+            if _is_strict_replay_failure(args, exc):
+                raise
             safe_error = str(exc).strip()
             if api_key and safe_error:
                 safe_error = safe_error.replace(api_key, "[REDACTED]")
@@ -5397,6 +5420,8 @@ def _maybe_recover_video_facts(
         )
         write_json(artifact_path, artifact)
     except (OSError, ValueError, RuntimeError, SystemExit) as exc:
+        if _is_strict_replay_failure(args, exc):
+            raise
         if payload:
             write_json(
                 artifact_path,
