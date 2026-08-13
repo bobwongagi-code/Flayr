@@ -30,7 +30,7 @@ from .artifacts import (
     sample_evenly,
 )
 from .llm.api import call_llm_api, extract_chat_completion_text, image_to_data_url
-from .llm.provider_artifacts import provider_call_with_artifact
+from .llm.provider_artifacts import provider_call_with_artifact, provider_role_replay_root
 from .resources import ResourceBudget, ResourceBudgetExceeded, current_budget, finite_nonnegative
 from .utils import write_json
 
@@ -61,6 +61,7 @@ def build_subtitle_track(
     interval_sec: float = SAMPLE_INTERVAL_SEC,
     budget: ResourceBudget | None = None,
     provider_replay_from: Path | None = None,
+    replay_role_name: str | None = None,
 ) -> dict[str, Any]:
     """对单个视频的抽帧做字幕 OCR，产出 subtitle_track.json 并返回结果。
 
@@ -86,7 +87,7 @@ def build_subtitle_track(
     raw_dir = role_dir / "ocr_raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     replay_raw_dir = (
-        provider_replay_from / role_dir.name / "ocr_raw"
+        provider_role_replay_root(provider_replay_from, str(replay_role_name or role_dir.name)) / "ocr_raw"
         if provider_replay_from is not None
         else None
     )

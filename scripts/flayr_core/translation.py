@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .llm.api import call_llm_api, extract_chat_completion_text, read_llm_api_key
-from .llm.provider_artifacts import provider_call_with_artifact
+from .llm.provider_artifacts import provider_call_with_artifact, provider_role_replay_root
 from .utils import read_optional_text, write_json, write_text
 
 
@@ -112,7 +112,7 @@ def translate_transcript_with_llm(
         provider_response, response_meta, execution_source = provider_call_with_artifact(
             artifact_path=role_dir / "provider_translation.json",
             replay_root=(
-                Path(args.provider_replay_from) / role_dir.name
+                provider_role_replay_root(Path(args.provider_replay_from), role)
                 if getattr(args, "provider_replay_from", None)
                 else None
             ),

@@ -25,6 +25,7 @@ REQUIRED_PROVIDER_META_FIELDS = (
     "retry_reasons",
     "usage",
 )
+PROVIDER_VIDEO_ROLES = frozenset({"benchmark", "creator"})
 
 
 class ProviderArtifactError(ValueError):
@@ -33,6 +34,14 @@ class ProviderArtifactError(ValueError):
 
 class ProviderCallError(RuntimeError):
     """Raised after a failed live provider call has been persisted."""
+
+
+def provider_role_replay_root(replay_from: Path, role: str) -> Path:
+    """Resolve a published role directory without leaking random staging names into replay identity."""
+    normalized = str(role or "").strip()
+    if normalized not in PROVIDER_VIDEO_ROLES:
+        raise ValueError(f"invalid provider replay role: {role}")
+    return (Path(replay_from).expanduser().resolve() / normalized).resolve()
 
 
 class ProviderReplayError(ProviderArtifactError):

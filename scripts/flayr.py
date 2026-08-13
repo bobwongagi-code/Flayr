@@ -1383,6 +1383,7 @@ def _process_video_generation(
             model=args.llm_model,
             budget=budget,
             provider_replay_from=getattr(args, "provider_replay_from", None),
+            replay_role_name=role,
         )
         result["subtitle_track_status"] = subtitle_track.get("status")
         if subtitle_track.get("segments"):

@@ -15,7 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .llm.api import audio_to_mp3_data_url, read_llm_api_key
-from .llm.provider_artifacts import provider_call_with_artifact
+from .llm.provider_artifacts import provider_call_with_artifact, provider_role_replay_root
 from .network import DEFAULT_QWEN_API_HOSTS, OutboundURLPolicyError, validate_outbound_url
 from .resources import ResourceBudgetExceeded, current_budget
 from .utils import run_command, write_json, write_text
@@ -67,10 +67,8 @@ def run_online_asr(
 ) -> None:
     """Transcribe one local audio artifact through the approved Fun-ASR endpoint."""
     replay_role = str(replay_role_name or role_dir.name).strip()
-    if replay_role_name is not None and replay_role not in {"benchmark", "creator"}:
-        raise ValueError(f"invalid ASR replay role: {replay_role_name}")
     if provider_replay_from is not None:
-        replay_role_dir = (provider_replay_from / replay_role).expanduser().resolve()
+        replay_role_dir = provider_role_replay_root(provider_replay_from, replay_role)
         if replay_role_dir == role_dir.expanduser().resolve():
             result["transcription_status"] = "failed"
             result.setdefault("errors", []).append(
@@ -120,7 +118,11 @@ def run_online_asr(
     payload = _build_asr_payload(model, data_url, requested_language)
     provider_artifact_path = role_dir / "provider_asr.json"
     result["transcription_provider_artifact"] = provider_artifact_path.name
-    replay_root = provider_replay_from / replay_role if provider_replay_from is not None else None
+    replay_root = (
+        provider_role_replay_root(provider_replay_from, replay_role)
+        if provider_replay_from is not None
+        else None
+    )
     live_meta: dict[str, Any] = {}
 
     try:

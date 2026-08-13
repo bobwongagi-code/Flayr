@@ -5093,7 +5093,7 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertEqual(result["transcription_execution_source"], "technical_replay")
             replay_call.assert_not_called()
 
-            with self.assertRaisesRegex(ValueError, "invalid ASR replay role"):
+            with self.assertRaisesRegex(ValueError, "invalid provider replay role"):
                 asr.run_online_asr(
                     asr.DEFAULT_FUN_ASR_API_URL,
                     asr.DEFAULT_FUN_ASR_MODEL,
@@ -5106,6 +5106,62 @@ class ArchitectureContractTests(unittest.TestCase):
                     provider_replay_from=root / "source",
                     replay_role_name="../benchmark",
                 )
+
+    def test_ocr_and_translation_replay_use_published_role_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            replay_root = root / "source"
+            staging_role = root / "target" / ".creator.generation-random"
+            frame = staging_role / "frame.jpg"
+            staging_role.mkdir(parents=True)
+            frame.write_bytes(b"jpeg")
+            info = {
+                "duration_seconds": 1.0,
+                "frames": [{"path": str(frame), "timestamp_seconds": 0.0}],
+                "focus_frames": [],
+            }
+            with mock.patch.object(
+                subtitle_track,
+                "ocr_frame_with_retry",
+                return_value=(["subtitle"], "ok"),
+            ) as ocr_call:
+                subtitle_track.build_subtitle_track(
+                    staging_role,
+                    info,
+                    "",
+                    api_url="https://example.test/v1/chat/completions",
+                    model="qwen3-vl-plus",
+                    provider_replay_from=replay_root,
+                    replay_role_name="creator",
+                )
+            self.assertEqual(
+                ocr_call.call_args.kwargs["provider_replay_from"],
+                (replay_root / "creator" / "ocr_raw").resolve(),
+            )
+
+            (staging_role / "transcript.txt").write_text("source", encoding="utf-8")
+            args = SimpleNamespace(
+                translation_model="qwen3.7-plus",
+                llm_model="qwen3.7-plus",
+                product_name="",
+                product_notes="",
+                llm_dry_run=False,
+                llm_api_url="https://example.test/v1/chat/completions",
+                provider_replay_from=replay_root,
+            )
+            provider_response = {
+                "choices": [{"message": {"content": "translation"}, "finish_reason": "stop"}]
+            }
+            with mock.patch.object(
+                translation,
+                "provider_call_with_artifact",
+                return_value=(provider_response, {}, "technical_replay"),
+            ) as translation_call:
+                translation.translate_transcript_with_llm(args, "creator", staging_role, {"errors": []})
+            self.assertEqual(
+                translation_call.call_args.kwargs["replay_root"],
+                (replay_root / "creator").resolve(),
+            )
 
     def test_online_asr_replay_does_not_clear_in_place_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
