@@ -2604,6 +2604,47 @@ class StageEvidenceContractTests(unittest.TestCase):
             stage_evidence_contract_issues(side),
         )
 
+    def test_s5_present_requires_bound_independent_origin(self) -> None:
+        contract = stage_evidence_contract("S5")
+        self.assertIn("independent_origin", contract.required_signals)
+
+        side = self._active_side("C", "unknown")
+        check = {
+            "stage": "S5",
+            "status": "present",
+            "coverage": "complete",
+            "evidence_ids": ["C5"],
+            "observed_signals": [
+                "source_identity",
+                "source_basis",
+                "product_relevance",
+                "independent_origin",
+            ],
+            "missing_signals": [],
+            "signal_bindings": {
+                signal: {
+                    "status": "supported",
+                    "evidence_ids": ["C5"],
+                    "reason": "fixture binding",
+                }
+                for signal in ("source_identity", "source_basis", "product_relevance")
+            },
+        }
+        side["stage_evidence_checks"][4] = check
+        unit = side["evidence_units"][4]
+        unit.update(
+            {
+                "evidence_strength": "direct",
+                "trust_source_signals": ["independent_user"],
+                "trust_source_reference": "达人讲述自己以前使用的工具。",
+                "trust_source_status": "explicit_present",
+            }
+        )
+
+        issues = stage_evidence_contract_issues(side)
+        self.assertIn("S5:observed_signal_without_supported_binding:independent_origin", issues)
+        self.assertIn("S5:present_missing_required_signal_bindings:independent_origin", issues)
+
     def test_stage1_normalization_does_not_silently_drop_units(self) -> None:
         units = [
             {

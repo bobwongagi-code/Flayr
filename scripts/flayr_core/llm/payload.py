@@ -891,6 +891,16 @@ def build_stage_evidence_qualification_payload(
         if "S6" in normalized_targets
         else ""
     )
+    s5_independence_review = (
+        "## S5 独立来源边界\n"
+        "S5 衡量独立信任来源，不把产品、品牌或当前达人的自述重新命名为用户证言。"
+        "达人本人以用户身份出镜、讲自己的使用经历、演示产品，或比较自己以前使用的工具，仍是当前达人自述，不能构成 independent_user。"
+        "independent_user 必须能归因到与当前达人不同的第三方用户，例如可识别的评论、晒单、访谈或第三方用户原话；"
+        "authority、traceable_data、social_consensus 和 process_transparency 也必须分别有其真实独立来源。"
+        "若只有达人自述，应标记 product_claim_only，并把 independent_origin 绑定为 missing；不得因为内容具体、画中画对比或达人自称真实用户就判 present。"
+        if "S5" in normalized_targets
+        else ""
+    )
     text = "\n\n".join(
         [
             f"# Stage1 阶段资格投影：{role}（{target_text}）",
@@ -905,6 +915,7 @@ def build_stage_evidence_qualification_payload(
             stage_evidence_contract_prompt(normalized_targets),
             "## 输出时必须遵守的阶段信号白名单",
             _stage_evidence_signal_codebook(normalized_targets),
+            *([s5_independence_review] if s5_independence_review else []),
             s6_language_review,
             "## 已锁定 Canonical Stage1-A/C 事实（只读）",
             json.dumps(context, ensure_ascii=False, indent=2),

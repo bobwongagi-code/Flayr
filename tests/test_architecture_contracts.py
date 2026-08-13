@@ -6129,6 +6129,8 @@ class ArchitectureContractTests(unittest.TestCase):
             f'"stage_evidence_contract_version": {STAGE_EVIDENCE_CONTRACT_VERSION}',
             qualification_text,
         )
+        self.assertIn("达人本人以用户身份出镜、讲自己的使用经历", qualification_text)
+        self.assertIn("不能构成 independent_user", qualification_text)
         self.assertEqual(
             [item.get("type") for item in qualification["messages"][1]["content"] if isinstance(item, dict)],
             ["text"],
