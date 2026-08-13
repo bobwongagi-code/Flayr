@@ -1617,17 +1617,20 @@ def normalize_stage_evidence_checks(value: Any, valid_ids: set[str]) -> list[dic
         raw_coverage = str(raw.get("coverage") or "").strip().lower()
         coverage = raw_coverage if raw_coverage in STAGE_EVIDENCE_COVERAGE_STATES else "unknown"
         status = normalize_stage_evidence_state(raw.get("status") or raw.get("state"))
-        if (
-            contract.code == "S5"
-            and status == "absent"
+        closes_negative = (
+            status in {"absent", "unknown"}
             and coverage == "complete"
-            and observed_disqualifiers
+            and bool(observed_disqualifiers)
             and not required_stage_signals_satisfied(contract, observed)
-        ):
-            # A closed negative may retain disqualifier observations in the
-            # atomic ledger, but none of those facts qualifies as stage-owned
-            # positive evidence. Keep the audit vocabulary and project an empty
-            # stage index deterministically.
+        )
+        if closes_negative:
+            # A complete negative pass may cite the observations that proved a
+            # disqualifier or missing requirement. Those facts remain in the
+            # immutable ledger/candidate lane, but they are not positive
+            # stage-owned evidence. Project the same closed negative shape for
+            # S1-S6 so a focused Stage1-D result cannot invalidate itself merely
+            # by explaining what it inspected.
+            status = "absent"
             evidence_ids = []
             observed = []
             signal_bindings = {}

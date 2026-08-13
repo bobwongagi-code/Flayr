@@ -91,6 +91,8 @@ Stage1-C 只返回候选原子观察，代码追加 Evidence Ledger；Stage1-D �
 
 `present` 必须有完整覆盖、全部 required signals、每个 required signal 的有效 `signal_bindings`、真实证据 ID、`direct/explicit` 原子强度和所需渠道。`absent` 必须有完整覆盖，并明确缺少 required signals，且不能存在支持性 signal binding。`not_applicable` 必须有完整覆盖和明确的适用性依据，并且不能携带证据或支持性绑定。`partial`、`unknown`、冲突、预算超限或渠道缺失只能进入 `unknown/conflict`，不能降格成 `absent` 或 `not_applicable`。
 
+完整覆盖中用于确认排除项或缺失信号的原子观察仍保留在 Evidence Ledger 和 candidate lane，不能作为该阶段的正向 `evidence_ids`。当资格响应已经给出完整覆盖、明确的注册表排除项且 required signals 未满足时，代码统一将 S1-S6 投影为同一份空索引 `absent` 结构；没有排除项、覆盖不完整或存在硬冲突时仍保持 `unknown/conflict`，不得由代码猜测负向结论。
+
 `signal_bindings` 是 S1-S6 共用的泛化约束。例如 S4 不能因为一条证据同时出现在阶段列表中，就默认它同时证明“结果可见”和“结果由本品操作造成”；这两个信号必须分别绑定。一个原子事实可以支持多个信号，但每次绑定都必须留下可追溯关系。
 
 Stage1 完成后由代码对全部规范化观察字段、`stage1_acquisition`、`stage1_coverage_audit`、`evidence_units` 和 `stage_evidence_checks` 生成 `evidence_set_sha256`，并标记 `evidence_set_status=frozen`。从这一刻起，Stage2、Repair、Phase C 和 Resolver 都只能读取它；任意事实内容、时间、归属、采集能力、覆盖审计、门控观察或阶段资格变化都会使运行失败。阶段链接是可变的判断投影，不进入事实哈希。

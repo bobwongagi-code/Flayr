@@ -3929,6 +3929,147 @@ class StageEvidenceContractTests(unittest.TestCase):
             list(stage_evidence_contract("S5").required_signals),
         )
 
+    def test_closed_negative_projection_is_shared_by_all_stages(self) -> None:
+        for index, stage in enumerate(stage_codes(), start=1):
+            with self.subTest(stage=stage):
+                contract = stage_evidence_contract(stage)
+                evidence_id = f"C{index}"
+                disqualifier = contract.disqualifiers[0]
+                raw = {
+                    "stage": stage,
+                    "status": "absent",
+                    "coverage": "complete",
+                    "evidence_ids": [evidence_id],
+                    "observed_signals": [],
+                    "missing_signals": list(contract.required_signals),
+                    "signal_bindings": {
+                        signal: {
+                            "status": "missing",
+                            "evidence_ids": [],
+                            "reason": "完整观察后未发现该信号",
+                        }
+                        for signal in contract.required_signals
+                    },
+                    "observed_disqualifiers": [disqualifier],
+                    "evidence_strength": "explicit",
+                }
+                check = next(
+                    item
+                    for item in normalize_stage_evidence_checks([raw], {evidence_id})
+                    if item["stage"] == stage
+                )
+                self.assertEqual(check["status"], "absent")
+                self.assertEqual(check["evidence_ids"], [])
+                self.assertEqual(check["observed_signals"], [])
+                self.assertEqual(check["signal_bindings"], {})
+                self.assertEqual(check["evidence_strength"], "absent")
+                self.assertEqual(check["observed_disqualifiers"], [disqualifier])
+                self.assertEqual(check["missing_signals"], list(contract.required_signals))
+
+    def test_complete_unknown_with_disqualifier_closes_as_absent(self) -> None:
+        contract = stage_evidence_contract("S2")
+        raw = {
+            "stage": "S2",
+            "status": "unknown",
+            "coverage": "complete",
+            "evidence_ids": ["B2"],
+            "observed_signals": ["product_identity"],
+            "missing_signals": ["problem_to_product_bridge"],
+            "signal_bindings": {
+                "product_identity": {
+                    "status": "supported",
+                    "evidence_ids": ["B2"],
+                    "reason": "产品身份可见",
+                },
+                "problem_to_product_bridge": {
+                    "status": "missing",
+                    "evidence_ids": [],
+                    "reason": "完整观察后仍未出现承接关系",
+                },
+            },
+            "observed_disqualifiers": ["product_only_without_bridge"],
+            "evidence_strength": "explicit",
+        }
+        check = next(
+            item
+            for item in normalize_stage_evidence_checks([raw], {"B2"})
+            if item["stage"] == "S2"
+        )
+        self.assertEqual(check["status"], "absent")
+        self.assertEqual(check["evidence_ids"], [])
+        self.assertEqual(check["observed_signals"], [])
+        self.assertEqual(check["signal_bindings"], {})
+        self.assertEqual(check["missing_signals"], list(contract.required_signals))
+
+    def test_complete_unknown_without_disqualifier_stays_unknown(self) -> None:
+        raw = {
+            "stage": "S2",
+            "status": "unknown",
+            "coverage": "complete",
+            "evidence_ids": [],
+            "observed_signals": [],
+            "missing_signals": ["problem_to_product_bridge"],
+            "signal_bindings": {},
+            "observed_disqualifiers": [],
+        }
+        check = next(
+            item
+            for item in normalize_stage_evidence_checks([raw], set())
+            if item["stage"] == "S2"
+        )
+        self.assertEqual(check["status"], "unknown")
+
+    def test_negative_projection_does_not_hide_unexplained_or_unclosed_evidence(self) -> None:
+        contract = stage_evidence_contract("S4")
+        base = {
+            "stage": "S4",
+            "status": "absent",
+            "coverage": "complete",
+            "evidence_ids": ["C4"],
+            "observed_signals": [],
+            "missing_signals": list(contract.required_signals),
+            "signal_bindings": {},
+            "observed_disqualifiers": [],
+        }
+        unexplained = next(
+            item
+            for item in normalize_stage_evidence_checks([base], {"C4"})
+            if item["stage"] == "S4"
+        )
+        self.assertEqual(unexplained["status"], "absent")
+        self.assertEqual(unexplained["evidence_ids"], ["C4"])
+
+        partial = next(
+            item
+            for item in normalize_stage_evidence_checks(
+                [{
+                    **base,
+                    "status": "unknown",
+                    "coverage": "partial",
+                    "observed_disqualifiers": ["claim_only_without_result"],
+                }],
+                {"C4"},
+            )
+            if item["stage"] == "S4"
+        )
+        self.assertEqual(partial["status"], "unknown")
+        self.assertEqual(partial["evidence_ids"], ["C4"])
+
+        conflict = next(
+            item
+            for item in normalize_stage_evidence_checks(
+                [{
+                    **base,
+                    "status": "conflict",
+                    "observed_disqualifiers": ["claim_only_without_result"],
+                }],
+                {"C4"},
+            )
+            if item["stage"] == "S4"
+        )
+        self.assertEqual(conflict["status"], "conflict")
+        self.assertEqual(conflict["evidence_ids"], ["C4"])
+
     def test_s5_absent_projection_does_not_hide_fully_qualified_trust_source(self) -> None:
         contract = stage_evidence_contract("S5")
         raw = {
