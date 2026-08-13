@@ -1341,6 +1341,7 @@ def _process_video_generation(
             provider_replay_from=(
                 Path(args.provider_replay_from) if getattr(args, "provider_replay_from", None) else None
             ),
+            replay_role_name=role,
         )
     else:
         write_text(transcript_path, ASR_AUDIO_PLACEHOLDER + "\n")

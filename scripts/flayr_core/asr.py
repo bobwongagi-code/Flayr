@@ -63,10 +63,14 @@ def run_online_asr(
     *,
     budget: Any = None,
     provider_replay_from: Path | None = None,
+    replay_role_name: str | None = None,
 ) -> None:
     """Transcribe one local audio artifact through the approved Fun-ASR endpoint."""
+    replay_role = str(replay_role_name or role_dir.name).strip()
+    if replay_role_name is not None and replay_role not in {"benchmark", "creator"}:
+        raise ValueError(f"invalid ASR replay role: {replay_role_name}")
     if provider_replay_from is not None:
-        replay_role_dir = (provider_replay_from / role_dir.name).expanduser().resolve()
+        replay_role_dir = (provider_replay_from / replay_role).expanduser().resolve()
         if replay_role_dir == role_dir.expanduser().resolve():
             result["transcription_status"] = "failed"
             result.setdefault("errors", []).append(
@@ -116,7 +120,7 @@ def run_online_asr(
     payload = _build_asr_payload(model, data_url, requested_language)
     provider_artifact_path = role_dir / "provider_asr.json"
     result["transcription_provider_artifact"] = provider_artifact_path.name
-    replay_root = provider_replay_from / role_dir.name if provider_replay_from is not None else None
+    replay_root = provider_replay_from / replay_role if provider_replay_from is not None else None
     live_meta: dict[str, Any] = {}
 
     try:

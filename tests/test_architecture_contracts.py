@@ -5038,6 +5038,75 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertEqual(mismatch_artifact["status"], "failed")
             self.assertIn("identity mismatch", mismatch_artifact["error"])
 
+    def test_online_asr_replay_uses_stable_role_name_for_staging_directory(self) -> None:
+        response = {
+            "output": {
+                "sentence": {
+                    "begin_time": 0,
+                    "end_time": 500,
+                    "text": "stable replay",
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_role = root / "source" / "benchmark"
+            staging_role = root / "target" / ".benchmark.generation-random"
+            source_role.mkdir(parents=True)
+            staging_role.mkdir(parents=True)
+            for role in (source_role, staging_role):
+                (role / "audio.wav").write_bytes(b"same-audio")
+
+            with mock.patch.object(asr, "audio_to_mp3_data_url", return_value="data:audio/mpeg;base64,AA=="), mock.patch.object(
+                asr, "_call_asr_endpoint", return_value=response
+            ):
+                asr.run_online_asr(
+                    asr.DEFAULT_FUN_ASR_API_URL,
+                    asr.DEFAULT_FUN_ASR_MODEL,
+                    "test-key",
+                    "en",
+                    source_role / "audio.wav",
+                    source_role,
+                    source_role / "transcript.txt",
+                    {"errors": []},
+                )
+
+            with mock.patch.object(asr, "audio_to_mp3_data_url", return_value="data:audio/mpeg;base64,AA=="), mock.patch.object(
+                asr,
+                "_call_asr_endpoint",
+                side_effect=AssertionError("strict replay must not call ASR provider"),
+            ) as replay_call:
+                result = {"errors": []}
+                asr.run_online_asr(
+                    asr.DEFAULT_FUN_ASR_API_URL,
+                    asr.DEFAULT_FUN_ASR_MODEL,
+                    "",
+                    "en",
+                    staging_role / "audio.wav",
+                    staging_role,
+                    staging_role / "transcript.txt",
+                    result,
+                    provider_replay_from=root / "source",
+                    replay_role_name="benchmark",
+                )
+
+            self.assertEqual(result["transcription_execution_source"], "technical_replay")
+            replay_call.assert_not_called()
+
+            with self.assertRaisesRegex(ValueError, "invalid ASR replay role"):
+                asr.run_online_asr(
+                    asr.DEFAULT_FUN_ASR_API_URL,
+                    asr.DEFAULT_FUN_ASR_MODEL,
+                    "",
+                    "en",
+                    staging_role / "audio.wav",
+                    staging_role,
+                    staging_role / "transcript.txt",
+                    {"errors": []},
+                    provider_replay_from=root / "source",
+                    replay_role_name="../benchmark",
+                )
+
     def test_online_asr_replay_does_not_clear_in_place_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
