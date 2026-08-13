@@ -6354,6 +6354,9 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn("buang、letak、masuk dalam", text)
         self.assertIn("原始口播和整句句法优先", text)
         self.assertIn("多个合理解释，保持 unknown", text)
+        self.assertIn("coverage 表示相关素材范围是否已完整检查", text)
+        self.assertIn("required_signal_mode=any", text)
+        self.assertIn("不得因另一个备选 required signal 缺失改成 partial", text)
 
     def test_stage1_qualification_groups_cover_each_stage_once(self) -> None:
         flattened = [stage for group in STAGE1_QUALIFICATION_GROUPS for stage in group]
