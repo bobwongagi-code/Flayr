@@ -1955,7 +1955,7 @@ def _normalize_segmented_stage(
             or "Stage2 未返回可核验的阶段证据 ID，未将候选事实升级为正式引用。"
         )
         output["stage_handoff_status"] = "handoff_loss"
-    elif any(value != "present" for value in readiness.values()):
+    elif any(value not in {"present", "absent"} for value in readiness.values()):
         output["relation"] = "uncertain"
         output["model_gap_magnitude"] = "uncertain"
         output["stage_state"] = "unknown" if "conflict" not in readiness.values() else "conflict"

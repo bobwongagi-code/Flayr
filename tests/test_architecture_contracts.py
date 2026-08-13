@@ -5966,6 +5966,10 @@ class ArchitectureContractTests(unittest.TestCase):
         text = payload["messages"][1]["content"][0]["text"]
         self.assertIn("stage_state", text)
         self.assertIn("stage_state 是必填语义字段", text)
+        self.assertIn("absent 是已闭合的负向事实", text)
+        self.assertIn("只有 unknown/conflict", text)
+        self.assertIn("qualified evidence IDs 和代码已闭合的 readiness=absent", text)
+        self.assertIn("readiness=absent 的一侧必须保持 evidence_ids 为空", text)
         strict_output = text.split("## 输出严格 JSON", 1)[1]
         self.assertIn('"benchmark_evidence_ids"', strict_output)
         self.assertIn('"creator_evidence_ids"', strict_output)

@@ -1142,6 +1142,122 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(projected["benchmark_evidence_ids"], ["B6"])
         self.assertEqual(projected["creator_evidence_ids"], ["C6"])
 
+    @classmethod
+    def _closed_negative_side(cls, role_code: str, stage: str) -> dict[str, object]:
+        side = cls._active_side(role_code, "present")
+        contract = stage_evidence_contract(stage)
+        check = next(item for item in side["stage_evidence_checks"] if item["stage"] == stage)
+        check.update(
+            {
+                "status": "absent",
+                "coverage": "complete",
+                "evidence_ids": [],
+                "observed_signals": [],
+                "missing_signals": list(contract.required_signals),
+                "signal_bindings": {},
+                "observed_disqualifiers": [contract.disqualifiers[0]],
+                "evidence_strength": "absent",
+            }
+        )
+        side["stage1_coverage_audit"]["stages"][stage].update(
+            {
+                "status": "clear",
+                "coverage": "complete",
+                "evidence_ids": [],
+                "observed_signals": [],
+                "missing_signals": list(contract.required_signals),
+                "signal_bindings": {},
+            }
+        )
+        freeze_stage_evidence(side)
+        return side
+
+    def test_segmented_projection_treats_closed_negative_as_judgment_fact(self) -> None:
+        benchmark = self._closed_negative_side("B", "S6")
+        self.assertEqual(stage_evidence_readiness(benchmark, "S6"), "absent")
+
+        projected = _normalize_segmented_stage(
+            {
+                "stage": "S6 CTA",
+                "stage_state": "completed",
+                "relation": "creator_better",
+                "model_gap_magnitude": "medium",
+                "benchmark_evidence_ids": [],
+                "creator_evidence_ids": ["C6"],
+                "judgment_reason": "benchmark 为闭合负向事实，creator 由 C6 支持",
+            },
+            "S6",
+            {
+                "benchmark": benchmark,
+                "creator": self._active_side("C", "present"),
+            },
+        )
+
+        self.assertEqual(projected["stage_handoff_status"], "grounded")
+        self.assertEqual(projected["stage_state"], "completed")
+        self.assertEqual(projected["relation"], "creator_better")
+        self.assertEqual(projected["model_gap_magnitude"], "medium")
+        self.assertEqual(projected["benchmark_evidence_ids"], [])
+        self.assertEqual(projected["creator_evidence_ids"], ["C6"])
+
+    def test_segmented_projection_allows_bilateral_closed_negative_equivalence(self) -> None:
+        facts = {
+            "benchmark": self._closed_negative_side("B", "S6"),
+            "creator": self._closed_negative_side("C", "S6"),
+        }
+        self.assertEqual(stage_evidence_readiness(facts["benchmark"], "S6"), "absent")
+        self.assertEqual(stage_evidence_readiness(facts["creator"], "S6"), "absent")
+
+        projected = _normalize_segmented_stage(
+            {
+                "stage": "S6 CTA",
+                "stage_state": "completed",
+                "relation": "equivalent",
+                "model_gap_magnitude": "none",
+                "benchmark_evidence_ids": [],
+                "creator_evidence_ids": [],
+                "judgment_reason": "双方均为闭合负向事实",
+            },
+            "S6",
+            facts,
+        )
+
+        self.assertEqual(projected["stage_handoff_status"], "grounded")
+        self.assertEqual(projected["stage_state"], "completed")
+        self.assertEqual(projected["relation"], "equivalent")
+        self.assertEqual(projected["model_gap_magnitude"], "none")
+
+    def test_segmented_projection_still_blocks_unknown_or_conflict(self) -> None:
+        for status in ("unknown", "conflict"):
+            with self.subTest(status=status):
+                benchmark = self._active_side("B", "unknown")
+                if status == "conflict":
+                    check = next(
+                        item for item in benchmark["stage_evidence_checks"]
+                        if item["stage"] == "S6"
+                    )
+                    check.update({"status": "conflict", "coverage": "unknown"})
+                    freeze_stage_evidence(benchmark)
+                projected = _normalize_segmented_stage(
+                    {
+                        "stage": "S6 CTA",
+                        "stage_state": "completed",
+                        "relation": "creator_better",
+                        "model_gap_magnitude": "medium",
+                        "creator_evidence_ids": ["C6"],
+                        "judgment_reason": "不应发布",
+                    },
+                    "S6",
+                    {
+                        "benchmark": benchmark,
+                        "creator": self._active_side("C", "present"),
+                    },
+                )
+                self.assertEqual(projected["stage_handoff_status"], "evidence_blocked")
+                self.assertEqual(projected["stage_state"], status)
+                self.assertEqual(projected["relation"], "uncertain")
+                self.assertEqual(projected["model_gap_magnitude"], "uncertain")
+
     def test_segmented_projection_does_not_parse_evidence_ids_from_reason_text(self) -> None:
         facts = {
             "benchmark": self._active_side("B", "present"),
