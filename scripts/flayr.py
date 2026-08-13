@@ -414,12 +414,13 @@ def _generate_reports_and_publish(
                 reasons.append("Stage2 未闭合阶段：" + ",".join(str(item) for item in unresolved))
             if not reasons:
                 reasons.append("分析链路已降级，不能发布 completed 成功标记。")
+            reasons = list(dict.fromkeys(reasons))
             _mark_analysis_degraded(run_dir, analysis, reasons)
             write_json(run_dir / "analysis.json", analysis)
             transition_run_state(
                 run_dir,
                 DEGRADED,
-                reason="辅助产物已降级，不影响报告结论。",
+                reason="；".join(reasons),
                 artifacts=("degraded_manifest.json", "analysis.json", "bd_report.html", "creator_report.html"),
             )
         return report_path
@@ -1086,6 +1087,7 @@ def build_preprocess_fingerprint(
     cached_source = cached_fingerprint.get("source_video") if isinstance(cached_fingerprint, dict) else None
     cached_probe = cached_info.get("preprocess_source_probe") if isinstance(cached_info, dict) else None
     cached_sha256 = cached_source.get("sha256") if isinstance(cached_source, dict) else ""
+    ocr_enabled, _ocr_key, ocr_disabled_reason = resolve_ocr_policy(args)
     return {
         "cache_schema_version": PREPROCESS_CACHE_SCHEMA_VERSION,
         "pipeline_version": PREPROCESS_PIPELINE_VERSION,
@@ -1121,6 +1123,11 @@ def build_preprocess_fingerprint(
             "with_ocr": bool(getattr(args, "with_ocr", False)),
             "no_ocr": bool(getattr(args, "no_ocr", False)),
             "dry_run": bool(getattr(args, "llm_dry_run", False)),
+            # The secret itself must never enter an artifact.  Its availability
+            # still changes preprocessing semantics: an auto-mode run with no
+            # key produces no subtitle track and cannot satisfy a later run
+            # whose configured provider can perform OCR.
+            "runtime_status": "enabled" if ocr_enabled else (ocr_disabled_reason or "disabled"),
             "model": vision_model(args),
             "api_url": str(getattr(args, "llm_api_url", "") or ""),
         },
@@ -1150,6 +1157,23 @@ def load_existing_video_result(
         return None
     comparable_cached_fingerprint = dict(cached_fingerprint)
     producer_commit = str(comparable_cached_fingerprint.pop("code_commit", "") or "")
+    ocr_runtime_fallback_compatible = False
+    cached_ocr = comparable_cached_fingerprint.get("ocr")
+    expected_ocr = expected_fingerprint.get("ocr")
+    if isinstance(cached_ocr, dict) and isinstance(expected_ocr, dict):
+        # Credential availability is directional. A run that temporarily has
+        # no key may consume an already completed OCR result produced by the
+        # same model/configuration, but an OCR-capable run must never consume a
+        # poorer no-OCR cache. Explicit policy disablement is not compatible.
+        comparable_with_runtime_fallback = json.loads(json.dumps(comparable_cached_fingerprint))
+        comparable_ocr = comparable_with_runtime_fallback.get("ocr")
+        if (
+            isinstance(comparable_ocr, dict)
+            and comparable_ocr.get("runtime_status") == "enabled"
+            and expected_ocr.get("runtime_status") == "disabled_no_ocr_key"
+        ):
+            comparable_ocr["runtime_status"] = "disabled_no_ocr_key"
+            ocr_runtime_fallback_compatible = comparable_with_runtime_fallback == expected_fingerprint
     legacy_fingerprint = dict(expected_fingerprint)
     legacy_fingerprint.pop("implementation_sha256", None)
     is_legacy_commit_fingerprint = producer_commit in LEGACY_PREPROCESS_COMPATIBLE_COMMITS and (
@@ -1157,9 +1181,27 @@ def load_existing_video_result(
         and cached_fingerprint.get("cache_schema_version") == PREPROCESS_CACHE_SCHEMA_VERSION
         and cached_fingerprint.get("pipeline_version") == PREPROCESS_PIPELINE_VERSION
     )
-    if comparable_cached_fingerprint != expected_fingerprint and not is_legacy_commit_fingerprint:
+    if (
+        comparable_cached_fingerprint != expected_fingerprint
+        and not is_legacy_commit_fingerprint
+        and not ocr_runtime_fallback_compatible
+    ):
         return None
     if info.get("preprocess_completed") is not True:
+        return None
+    if (
+        (
+            isinstance(expected_ocr, dict)
+            and expected_ocr.get("runtime_status") == "enabled"
+        )
+        or ocr_runtime_fallback_compatible
+    ) and str(info.get("subtitle_track_status") or "").strip().lower() not in {
+        "ready",
+        "empty",
+    }:
+        # A transient OCR failure is not a reusable completed generation.  In
+        # particular, it must not suppress OCR forever on later runs whose
+        # provider credentials are available.
         return None
     if not _preprocess_artifacts_match(role_dir, info.get("preprocess_artifacts")):
         return None

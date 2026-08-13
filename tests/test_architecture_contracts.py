@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -5169,6 +5170,28 @@ class ArchitectureContractTests(unittest.TestCase):
             )
             self.assertIsNotNone(flayr.load_existing_video_result(role_dir, fingerprint))
 
+            enabled_ocr_fingerprint = json.loads(json.dumps(fingerprint))
+            enabled_ocr_fingerprint["ocr"]["runtime_status"] = "enabled"
+            cached_info = json.loads((role_dir / "_preprocess.json").read_text(encoding="utf-8"))
+            cached_info["preprocess_fingerprint"] = enabled_ocr_fingerprint
+            cached_info["subtitle_track_status"] = "failed"
+            (role_dir / "_preprocess.json").write_text(json.dumps(cached_info), encoding="utf-8")
+            self.assertIsNone(flayr.load_existing_video_result(role_dir, enabled_ocr_fingerprint))
+            cached_info["subtitle_track_status"] = "empty"
+            (role_dir / "_preprocess.json").write_text(json.dumps(cached_info), encoding="utf-8")
+            self.assertIsNotNone(flayr.load_existing_video_result(role_dir, enabled_ocr_fingerprint))
+
+            no_key_fingerprint = json.loads(json.dumps(enabled_ocr_fingerprint))
+            no_key_fingerprint["ocr"]["runtime_status"] = "disabled_no_ocr_key"
+            self.assertIsNotNone(flayr.load_existing_video_result(role_dir, no_key_fingerprint))
+            explicit_off_fingerprint = json.loads(json.dumps(enabled_ocr_fingerprint))
+            explicit_off_fingerprint["ocr"]["runtime_status"] = "disabled_by_policy"
+            self.assertIsNone(flayr.load_existing_video_result(role_dir, explicit_off_fingerprint))
+
+            cached_info["preprocess_fingerprint"] = fingerprint
+            cached_info.pop("subtitle_track_status", None)
+            (role_dir / "_preprocess.json").write_text(json.dumps(cached_info), encoding="utf-8")
+
             legacy_fingerprint = dict(fingerprint)
             legacy_fingerprint.pop("implementation_sha256")
             legacy_fingerprint["code_commit"] = "0d9ec9d"
@@ -5257,6 +5280,32 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertNotEqual(first, second)
             self.assertEqual(first["implementation_sha256"], "a" * 64)
             self.assertEqual(second["implementation_sha256"], "b" * 64)
+
+    def test_preprocess_fingerprint_tracks_ocr_runtime_availability_without_leaking_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "source.mp4"
+            video.write_bytes(b"video")
+            args = self._cache_args()
+            args.ocr_mode = "auto"
+            args.llm_dry_run = False
+            args.llm_api_url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+            args.judgment_model = "qwen3.7-plus"
+            args.vision_model = "qwen3-vl-plus"
+            args.llm_api_key_env = "FLAYR_TEST_OCR_KEY"
+            args.llm_api_key_keychain_service = ""
+            args.llm_api_key_keychain_account = ""
+            deps = self._cache_deps()
+
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("FLAYR_TEST_OCR_KEY", None)
+                disabled = flayr.build_preprocess_fingerprint(video, deps, args)
+            with mock.patch.dict(os.environ, {"FLAYR_TEST_OCR_KEY": "secret-value"}, clear=False):
+                enabled = flayr.build_preprocess_fingerprint(video, deps, args)
+
+            self.assertEqual(disabled["ocr"]["runtime_status"], "disabled_no_ocr_key")
+            self.assertEqual(enabled["ocr"]["runtime_status"], "enabled")
+            self.assertNotEqual(disabled, enabled)
+            self.assertNotIn("secret-value", json.dumps(enabled, sort_keys=True))
 
     def test_preprocess_implementation_digest_covers_asr_and_local_policy(self) -> None:
         flayr._preprocess_implementation_sha256.cache_clear()

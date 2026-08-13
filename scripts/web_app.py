@@ -1445,7 +1445,7 @@ class JobStore:
                 return
             returncode = 1
         if returncode == 0 and state == "degraded" and (run_dir / "degraded_manifest.json").is_file() and report_variants_ready(run_dir):
-            reason = "辅助产物已降级，不影响报告结论。"
+            reason = "分析链路已降级，部分结论不可发布。"
             try:
                 payload = json.loads((run_dir / "degraded_manifest.json").read_text(encoding="utf-8"))
                 reason = str(payload.get("reason") or reason)
