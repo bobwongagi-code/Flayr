@@ -1076,15 +1076,15 @@ def fetch_json_completion(
     api_key: str,
     payload_path: Path,
     raw_path: Path,
-    max_attempts: int = 3,
+    max_attempts: int = 1,
     request_max_time_seconds: int | None = None,
     response_meta: dict[str, Any] | None = None,
 ) -> str:
-    """调用 LLM 并确保返回内容是可解析 JSON；静默截断时整体重取。
+    """调用 LLM 并校验 JSON；默认不重复已完成但格式错误的语义请求。
 
-    DashScope 大响应偶发在传输途中被截断（无错误、finish_reason=None、body 不完整），
-    导致 JSON 残缺。这类截断 repair 无效（重发也会截断），唯一可靠解是重取整次调用。
-    重试 max_attempts 次仍不完整，则返回最后一次内容，交由下游 repair 兜底。
+    连接中断、缺少 ``[DONE]`` 等传输故障由 ``call_llm_api`` 在同一逻辑请求内
+    有界重试。调用方只有在明确需要独立的新 completion 时才提高 ``max_attempts``；
+    默认一次，避免对 temperature=0 的同一合同盲目重复付费。
     """
     last_text = ""
     logical_request_id = uuid.uuid4().hex
@@ -1211,7 +1211,7 @@ def fetch_json_completion(
         try:
             parse_json_text(last_text)
             return last_text
-        except SystemExit:
+        except SystemExit as exc:
             reason = "invalid JSON in completed model response"
             retry_reasons.append(reason)
             if response_meta is not None:
@@ -1220,6 +1220,11 @@ def fetch_json_completion(
                         "status": "invalid_json",
                         "json_valid": False,
                         "retry_reasons": list(retry_reasons),
+                        "invalid_content_sha256": hashlib.sha256(
+                            last_text.encode("utf-8", errors="replace")
+                        ).hexdigest(),
+                        "invalid_content_chars": len(last_text),
+                        "invalid_json_error": str(exc)[:500],
                     }
                 )
             # 输出预算截断（finish_reason=length）重发也会在同处截断，直接交给 repair，不徒劳重取。

@@ -788,7 +788,7 @@ def build_video_fact_payload(
         "不得臆造牙齿前后对比、用户评论、证书、检测报告、认证、价格、优惠或功效。"
     )
 
-    return {
+    payload = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -796,6 +796,13 @@ def build_video_fact_payload(
         ],
         "temperature": 0.0,
     }
+    if str(model or "").strip().lower().startswith("qwen3-vl"):
+        # Stage1-A/C are extraction tasks. JSON mode prevents a completed VL
+        # response from being discarded solely because it wrapped or damaged
+        # the requested object; thinking adds cost here without adding facts.
+        payload["response_format"] = {"type": "json_object"}
+        payload["enable_thinking"] = False
+    return payload
 
 
 def build_stage_evidence_qualification_payload(

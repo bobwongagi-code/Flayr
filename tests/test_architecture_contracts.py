@@ -1749,6 +1749,35 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertEqual(response_meta["status"], "completed")
             self.assertTrue(any("missing text output" in str(reason) for reason in response_meta["retry_reasons"]))
 
+    def test_fetch_json_completion_does_not_blindly_retry_completed_invalid_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            response_path = root / "response.json"
+            payload_path.write_text(json.dumps({"model": "test", "messages": []}), encoding="utf-8")
+            invalid = "{not-json"
+            raw = json.dumps(
+                {"choices": [{"message": {"content": invalid}, "finish_reason": "stop"}]}
+            )
+            response_meta: dict[str, object] = {}
+            args = SimpleNamespace(llm_api_url="https://example.test/v1/chat/completions")
+            with mock.patch.object(pipeline, "call_llm_api", return_value=raw) as call:
+                output = pipeline.fetch_json_completion(
+                    args,
+                    "secret",
+                    payload_path,
+                    response_path,
+                    response_meta=response_meta,
+                )
+
+            self.assertEqual(output, invalid)
+            self.assertEqual(call.call_count, 1)
+            self.assertEqual(response_meta["completion_attempts"], 1)
+            self.assertEqual(response_meta["status"], "invalid_json")
+            self.assertEqual(response_meta["invalid_content_chars"], len(invalid))
+            self.assertRegex(str(response_meta["invalid_content_sha256"]), r"^[0-9a-f]{64}$")
+            self.assertIn("JSON", str(response_meta["invalid_json_error"]))
+
     def test_small_json_request_can_set_a_shorter_transport_deadline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -5512,6 +5541,21 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertNotIn('"stage_evidence_checks": [', primary_text)
         self.assertNotIn('"structure_event_checks": [', primary_text)
 
+        vl_primary = build_video_fact_payload(
+            "qwen3-vl-plus",
+            "creator",
+            analysis,
+            [],
+            api_url=(
+                "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/"
+                "compatible-mode/v1/chat/completions"
+            ),
+        )
+        self.assertEqual(vl_primary["response_format"], {"type": "json_object"})
+        self.assertIs(vl_primary["enable_thinking"], False)
+        self.assertNotIn("max_tokens", vl_primary)
+        self.assertNotIn("max_completion_tokens", vl_primary)
+
         qualification = build_stage_evidence_qualification_payload(
             "test-model",
             "creator",
@@ -5696,6 +5740,17 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn("完整使用动作本身不等于 direct_comparison", text)
         self.assertNotIn('"stop_trigger"', text)
         self.assertNotIn('"product_identity"', text)
+
+        vl_payload = build_video_fact_recovery_payload(
+            "qwen3-vl-plus",
+            "creator",
+            analysis,
+            [],
+            {"evidence_units": []},
+            ["S4"],
+        )
+        self.assertEqual(vl_payload["response_format"], {"type": "json_object"})
+        self.assertIs(vl_payload["enable_thinking"], False)
 
     def test_stage1_recovery_exposes_candidates_and_reviews_unclosed_s6_tail(self) -> None:
         analysis = {
