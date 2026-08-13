@@ -714,6 +714,7 @@ def create_run_dir(args: argparse.Namespace) -> Path:
     if args.output_dir:
         run_dir = args.output_dir.expanduser().resolve()
         preserved_prefixes: set[str] = set()
+        preserved_files: set[str] = set()
         for option, prefix in (
             ("stage1_resume_from", "stage1_provider_"),
             ("stage2_resume_from", "stage2_provider_"),
@@ -721,10 +722,13 @@ def create_run_dir(args: argparse.Namespace) -> Path:
             source = getattr(args, option, None)
             if source and _paths_refer_to_same_location(Path(source), run_dir):
                 preserved_prefixes.add(prefix)
+                if option == "stage2_resume_from":
+                    preserved_files.add("provider_comparison_eligibility.json")
         _prepare_explicit_run_dir(
             run_dir,
             reuse=bool(args.reuse_preprocessing),
             preserved_prefixes=preserved_prefixes,
+            preserved_files=preserved_files,
         )
     else:
         stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -748,9 +752,11 @@ def _prepare_explicit_run_dir(
     *,
     reuse: bool,
     preserved_prefixes: set[str] | None = None,
+    preserved_files: set[str] | None = None,
 ) -> None:
     """Reject mixed output directories and remove only known stale run files."""
     preserved_prefixes = preserved_prefixes or set()
+    preserved_files = preserved_files or set()
     if run_dir.exists() and not run_dir.is_dir():
         raise SystemExit(f"--output-dir 不是目录：{run_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -784,8 +790,9 @@ def _prepare_explicit_run_dir(
             entry.name in _RUN_OUTPUT_FILES
             or entry.name.startswith(_RUN_OUTPUT_PREFIXES)
         ):
-            if not entry.is_symlink() and any(
-                entry.name.startswith(prefix) for prefix in preserved_prefixes
+            if not entry.is_symlink() and (
+                entry.name in preserved_files
+                or any(entry.name.startswith(prefix) for prefix in preserved_prefixes)
             ):
                 continue
             entry.unlink()

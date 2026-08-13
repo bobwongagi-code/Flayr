@@ -88,8 +88,9 @@ class OperationsContractTests(unittest.TestCase):
             output_dir.mkdir()
             stage1 = output_dir / "stage1_provider_creator_A.json"
             stage2 = output_dir / "stage2_provider_S1_S2.json"
+            eligibility = output_dir / "provider_comparison_eligibility.json"
             analysis = output_dir / "analysis.json"
-            for path in (stage1, stage2, analysis):
+            for path in (stage1, stage2, eligibility, analysis):
                 path.write_text("stale", encoding="utf-8")
             args = SimpleNamespace(
                 output_dir=output_dir,
@@ -104,7 +105,32 @@ class OperationsContractTests(unittest.TestCase):
             self.assertEqual(flayr.create_run_dir(args), output_dir.resolve())
             self.assertTrue(stage1.exists())
             self.assertFalse(stage2.exists())
+            self.assertFalse(eligibility.exists())
             self.assertFalse(analysis.exists())
+
+    def test_in_place_stage2_resume_preserves_comparison_eligibility_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "run"
+            output_dir.mkdir()
+            stage2 = output_dir / "stage2_provider_S1_S2.json"
+            eligibility = output_dir / "provider_comparison_eligibility.json"
+            unrelated = output_dir / "provider_product_foundation.json"
+            for path in (stage2, eligibility, unrelated):
+                path.write_text("completed", encoding="utf-8")
+            args = SimpleNamespace(
+                output_dir=output_dir,
+                reuse_preprocessing=True,
+                mode="improve",
+                stage1_replay_from=None,
+                stage1_resume_from=None,
+                stage2_replay_from=None,
+                stage2_resume_from=output_dir,
+            )
+
+            self.assertEqual(flayr.create_run_dir(args), output_dir.resolve())
+            self.assertTrue(stage2.exists())
+            self.assertTrue(eligibility.exists())
+            self.assertFalse(unrelated.exists())
 
     def test_in_place_stage_resume_does_not_preserve_provider_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
