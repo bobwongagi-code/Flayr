@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from flayr_core.llm.api import (  # noqa: E402
     IncrementalSSEParser,
     can_analyze_native_audio,
+    can_analyze_native_video,
     can_send_standalone_audio,
     call_llm_api,
     increase_output_budget,
@@ -283,6 +284,10 @@ class LlmApiContractTests(unittest.TestCase):
         self.assertEqual(qwen.confidence, "verified_matrix")
         self.assertTrue(can_send_standalone_audio(qwen_url, "qwen3-omni-flash"))
         self.assertTrue(can_analyze_native_audio(qwen_url, "qwen3-omni-flash"))
+        self.assertTrue(can_analyze_native_video(qwen_url, "qwen3-omni-flash"))
+        self.assertTrue(can_analyze_native_video(qwen_url, "qwen3-vl-plus"))
+        self.assertFalse(can_send_standalone_audio(qwen_url, "qwen3-vl-plus"))
+        self.assertFalse(can_analyze_native_audio(qwen_url, "qwen3-vl-plus"))
 
     def test_beijing_maas_qwen_capabilities_are_explicit(self) -> None:
         qwen_url = "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions"
@@ -291,6 +296,13 @@ class LlmApiContractTests(unittest.TestCase):
         self.assertEqual(qwen.confidence, "runtime_verified")
         self.assertFalse(can_send_standalone_audio(qwen_url, "qwen3.6-plus"))
         self.assertFalse(can_analyze_native_audio(qwen_url, "qwen3.6-plus"))
+        self.assertFalse(can_analyze_native_video(qwen_url, "qwen3.6-plus"))
+
+        vision = provider_capabilities(qwen_url, "qwen3-vl-plus")
+        self.assertTrue(vision.native_video_input)
+        self.assertFalse(vision.standalone_audio_input)
+        self.assertFalse(vision.native_audio_analysis)
+        self.assertTrue(can_analyze_native_video(qwen_url, "qwen3-vl-plus"))
 
     def test_maas_comparison_omits_unsupported_input_audio(self) -> None:
         qwen_url = "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions"
@@ -441,6 +453,7 @@ class LlmApiContractTests(unittest.TestCase):
         self.assertEqual(capabilities.profile, "unknown_provider")
         self.assertEqual(capabilities.confidence, "unverified")
         self.assertFalse(can_send_standalone_audio("https://example.test/v1/chat/completions", "vision-test"))
+        self.assertFalse(can_analyze_native_video("https://example.test/v1/chat/completions", "vision-test"))
         self.assertFalse(can_analyze_native_audio("https://example.test/v1/chat/completions", "vision-test"))
 
     def test_length_at_output_cap_is_returned_once_for_outer_repair(self) -> None:

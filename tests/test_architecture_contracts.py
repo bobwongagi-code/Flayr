@@ -1159,6 +1159,82 @@ class ArchitectureContractTests(unittest.TestCase):
         )
         self.assertFalse(legacy.llm_include_images)
 
+    def test_dual_model_route_is_explicit_and_legacy_route_stays_single_model(self) -> None:
+        dual = flayr.build_parser().parse_args(
+            [
+                "compare",
+                "--verification-stage",
+                "production",
+                "--judgment-model",
+                "qwen3.7-plus",
+                "--vision-model",
+                "qwen3-vl-plus",
+            ]
+        )
+        self.assertEqual(pipeline.judgment_model(dual), "qwen3.7-plus")
+        self.assertEqual(pipeline.vision_model(dual), "qwen3-vl-plus")
+        self.assertEqual(pipeline._stage1_model(dual, "A"), "qwen3-vl-plus")
+        self.assertEqual(pipeline._stage1_model(dual, "B"), "qwen3.7-plus")
+        self.assertEqual(pipeline._stage1_model(dual, "C"), "qwen3-vl-plus")
+
+        legacy = flayr.build_parser().parse_args(
+            [
+                "compare",
+                "--verification-stage",
+                "production",
+                "--llm-model",
+                "qwen3.6-plus",
+            ]
+        )
+        self.assertEqual(pipeline.judgment_model(legacy), "qwen3.6-plus")
+        self.assertEqual(pipeline.vision_model(legacy), "qwen3.6-plus")
+
+    def test_dual_model_cli_rejects_partial_or_mixed_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            benchmark = root / "benchmark.mp4"
+            creator = root / "creator.mp4"
+            benchmark.write_bytes(b"benchmark")
+            creator.write_bytes(b"creator")
+            common = [
+                "compare",
+                "--benchmark-video",
+                str(benchmark),
+                "--creator-video",
+                str(creator),
+                "--verification-stage",
+                "production",
+            ]
+            partial = flayr.build_parser().parse_args(
+                [*common, "--judgment-model", "qwen3.7-plus"]
+            )
+            with self.assertRaisesRegex(SystemExit, "requires both"):
+                flayr.validate_inputs(partial)
+            mixed = flayr.build_parser().parse_args(
+                [
+                    *common,
+                    "--llm-model",
+                    "qwen3.6-plus",
+                    "--judgment-model",
+                    "qwen3.7-plus",
+                    "--vision-model",
+                    "qwen3-vl-plus",
+                ]
+            )
+            with self.assertRaisesRegex(SystemExit, "cannot be combined"):
+                flayr.validate_inputs(mixed)
+            retired = flayr.build_parser().parse_args(
+                [
+                    *common,
+                    "--judgment-model",
+                    "qwen3.7-plus",
+                    "--vision-model",
+                    "qwen3-vl-flash",
+                ]
+            )
+            with self.assertRaisesRegex(SystemExit, "retired"):
+                flayr.validate_inputs(retired)
+
     def test_cli_requires_explicit_execution_intent(self) -> None:
         with self.assertRaises(SystemExit):
             flayr.build_parser().parse_args(["compare"])
@@ -4578,6 +4654,74 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn("不得输出或改写 severity", review_text)
         self.assertNotIn("creator_multimodal", review_text)
 
+    def test_phase_c_uses_windowed_asr_and_never_claims_native_audio_understanding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            videos = {}
+            for role in ("benchmark", "creator"):
+                role_dir = root / role
+                role_dir.mkdir()
+                video = role_dir / "video.mp4"
+                video.write_bytes(b"video")
+                words = role_dir / "transcript.words.json"
+                words.write_text(
+                    json.dumps(
+                        {
+                            "words": [
+                                {"start_seconds": 1.0, "end_seconds": 1.4, "text": f"{role}-inside"},
+                                {"start_seconds": 8.0, "end_seconds": 8.4, "text": f"{role}-outside"},
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                videos[role] = {
+                    "path": str(video),
+                    "work_dir": str(role_dir),
+                    "duration_seconds": 10.0,
+                    "transcript_words_path": str(words),
+                }
+            current = {
+                "stage_analysis": [
+                    {
+                        "stage": "S1 Hook",
+                        "benchmark_time_range": "0s - 2s",
+                        "creator_time_range": "0s - 2s",
+                    }
+                ]
+            }
+            facts = {
+                "benchmark": {"evidence_units": []},
+                "creator": {"evidence_units": []},
+            }
+            with (
+                mock.patch.object(payload_module, "build_timeline_view_for_range", return_value={}),
+                mock.patch.object(
+                    payload_module,
+                    "video_to_data_url",
+                    return_value="data:video/mp4;base64,clip",
+                ),
+            ):
+                review = build_stage_review_payload(
+                    "qwen3-vl-plus",
+                    {"videos": videos},
+                    facts,
+                    current,
+                    ["S1"],
+                    api_url=(
+                        "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/"
+                        "compatible-mode/v1/chat/completions"
+                    ),
+                )
+
+        text = json.dumps(review, ensure_ascii=False)
+        self.assertIn("benchmark-inside", text)
+        self.assertIn("creator-inside", text)
+        self.assertNotIn("benchmark-outside", text)
+        self.assertNotIn("creator-outside", text)
+        self.assertIn("不能直接理解视频音轨", text)
+        self.assertNotIn("真实听到", text)
+
     def test_phase_c_does_not_reuse_stale_multimodal_assessment(self) -> None:
         current = {
             "stage_analysis": [
@@ -4736,6 +4880,17 @@ class ArchitectureContractTests(unittest.TestCase):
 
             args.asr_language = "th"
             self.assertIsNone(flayr.load_existing_video_result(role_dir, flayr.build_preprocess_fingerprint(video, deps, args)))
+
+            args.asr_language = "auto"
+            args.judgment_model = "qwen3.7-plus"
+            args.vision_model = "qwen3-vl-plus"
+            vision_fingerprint = flayr.build_preprocess_fingerprint(video, deps, args)
+            self.assertEqual(vision_fingerprint["ocr"]["model"], "qwen3-vl-plus")
+            args.vision_model = "other-vision-model"
+            self.assertNotEqual(
+                vision_fingerprint,
+                flayr.build_preprocess_fingerprint(video, deps, args),
+            )
 
     def test_secondary_evidence_rebuild_refreshes_preprocess_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

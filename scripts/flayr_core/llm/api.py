@@ -67,6 +67,7 @@ class ProviderCapabilities:
 
     profile: str
     confidence: str
+    native_video_input: bool
     standalone_audio_input: bool
     native_audio_analysis: bool
 
@@ -82,19 +83,26 @@ def provider_capabilities(api_url: str, model: str = "") -> ProviderCapabilities
         return ProviderCapabilities(
             profile="beijing_maas_qwen_transcript_visual",
             confidence="runtime_verified",
+            native_video_input=normalized_model.startswith("qwen3-vl"),
             standalone_audio_input=False,
             native_audio_analysis=False,
         )
     if hostname in DEFAULT_QWEN_API_HOSTS and normalized_model.startswith("qwen"):
+        native_audio = normalized_model.startswith("qwen3-omni")
         return ProviderCapabilities(
             profile="dashscope_qwen_compatible",
             confidence="verified_matrix",
-            standalone_audio_input=True,
-            native_audio_analysis=True,
+            native_video_input=(
+                normalized_model.startswith("qwen3-vl")
+                or normalized_model.startswith("qwen3-omni")
+            ),
+            standalone_audio_input=native_audio,
+            native_audio_analysis=native_audio,
         )
     return ProviderCapabilities(
         profile="unknown_provider",
         confidence="unverified",
+        native_video_input=False,
         standalone_audio_input=False,
         native_audio_analysis=False,
     )
@@ -103,6 +111,11 @@ def provider_capabilities(api_url: str, model: str = "") -> ProviderCapabilities
 def can_send_standalone_audio(api_url: str, model: str = "") -> bool:
     """Return the matrix decision for OpenAI-style ``input_audio`` blocks."""
     return provider_capabilities(api_url, model).standalone_audio_input
+
+
+def can_analyze_native_video(api_url: str, model: str = "") -> bool:
+    """Return whether the profile accepts native video as visual input."""
+    return provider_capabilities(api_url, model).native_video_input
 
 
 def can_analyze_native_audio(api_url: str, model: str = "") -> bool:

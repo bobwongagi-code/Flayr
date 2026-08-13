@@ -4,10 +4,18 @@ import os
 import json
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
-from scripts.batch_analyze import _run_jobs, _success_manifest_valid, acquire_lock, build_command, validate_spec
+from scripts.batch_analyze import (
+    _run_jobs,
+    _success_manifest_valid,
+    _trusted_runner_args,
+    acquire_lock,
+    build_command,
+    validate_spec,
+)
 from scripts.flayr_core.run_manifest import write_success_manifest, validate_success_manifest
 from scripts.flayr_core.run_manifest import command_digest
 from scripts.flayr_core.run_state import (
@@ -87,6 +95,24 @@ class BatchAnalyzeValidationTests(unittest.TestCase):
     def test_rejects_non_positive_concurrency(self) -> None:
         with self.assertRaisesRegex(ValueError, "concurrency"):
             validate_spec({"jobs": [self._job()]}, Path("/tmp/runs"), 0)
+
+    def test_trusted_runner_serializes_dual_model_route(self) -> None:
+        values = _trusted_runner_args(
+            Namespace(
+                llm_model=None,
+                judgment_model="qwen3.7-plus",
+                vision_model="qwen3-vl-plus",
+                llm_api_url="https://example.test/v1/chat/completions",
+                llm_api_key_env=None,
+                llm_api_key_keychain_service=None,
+                llm_api_key_keychain_account=None,
+                translation_model=None,
+            )
+        )
+        self.assertIn("--judgment-model", values)
+        self.assertIn("qwen3.7-plus", values)
+        self.assertIn("--vision-model", values)
+        self.assertIn("qwen3-vl-plus", values)
 
     def test_lock_creation_is_atomic_and_rejects_live_owner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

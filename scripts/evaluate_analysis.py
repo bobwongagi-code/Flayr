@@ -1199,7 +1199,8 @@ def promotion_readiness(
                 reasons.append("blind cohort 已被消费，不能用于晋级")
             if set(cohort_lock.get("sample_ids") or []) != blind_ids:
                 reasons.append("cohort lock sample_ids 与本次 blind 评测不一致")
-            expected_model = str((cohort_lock.get("model_config") or {}).get("model") or "")
+            locked_model_config = cohort_lock.get("model_execution_config") or cohort_lock.get("model_config") or {}
+            expected_model = str(locked_model_config.get("model") or "")
             expected_temperature = (cohort_lock.get("model_config") or {}).get("temperature")
             run_models = {
                 str((row.get("run_metadata") or {}).get("llm_model") or "")
@@ -1211,6 +1212,25 @@ def promotion_readiness(
             }
             if run_models != {expected_model}:
                 reasons.append("analysis_result 模型版本与 cohort lock 不一致或缺失")
+            if locked_model_config.get("schema_version") == 2:
+                expected_judgment = str(locked_model_config.get("judgment_model") or "")
+                expected_vision = str(locked_model_config.get("vision_model") or "")
+                run_judgment_models = {
+                    str(
+                        (row.get("run_metadata") or {}).get("judgment_model")
+                        or (row.get("run_metadata") or {}).get("llm_model")
+                        or ""
+                    )
+                    for row in blind_rows
+                }
+                run_vision_models = {
+                    str((row.get("run_metadata") or {}).get("vision_model") or "")
+                    for row in blind_rows
+                }
+                if run_judgment_models != {expected_judgment}:
+                    reasons.append("analysis_result judgment model 与 cohort lock 不一致或缺失")
+                if run_vision_models != {expected_vision}:
+                    reasons.append("analysis_result vision model 与 cohort lock 不一致或缺失")
             if run_temperatures != {expected_temperature}:
                 reasons.append("analysis_result comparison temperature 与 cohort lock 不一致或缺失")
 

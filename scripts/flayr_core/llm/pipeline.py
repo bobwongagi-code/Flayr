@@ -160,6 +160,28 @@ from ..postprocess.validate import (
 )
 
 
+def judgment_model(args: argparse.Namespace) -> str:
+    """Return the single semantic-judgment model selected for this run."""
+    return str(
+        getattr(args, "judgment_model", "")
+        or getattr(args, "llm_model", "")
+        or ""
+    ).strip()
+
+
+def vision_model(args: argparse.Namespace) -> str:
+    """Return the visual-evidence model, preserving the legacy single-model route."""
+    return str(
+        getattr(args, "vision_model", "")
+        or getattr(args, "llm_model", "")
+        or ""
+    ).strip()
+
+
+def _stage1_model(args: argparse.Namespace, phase: str) -> str:
+    return judgment_model(args) if str(phase).upper() == "B" else vision_model(args)
+
+
 class AnalysisPipelineError(RuntimeError):
     """One typed failure at a named analysis-pipeline boundary."""
 
@@ -219,7 +241,7 @@ def _is_strict_replay_failure(args: argparse.Namespace, exc: BaseException) -> b
 
 
 # 修改 build_video_fact_payload 的语义合同后必须递增，避免旧 facts 与新判断规则混用。
-VIDEO_FACT_CACHE_SCHEMA_VERSION = 29
+VIDEO_FACT_CACHE_SCHEMA_VERSION = 30
 PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION = 3
 CACHE_RECORD_SCHEMA_VERSION = 1
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -1436,10 +1458,11 @@ def _product_context_digest(analysis: dict[str, Any]) -> str:
 
 
 def _product_foundation_cache_key(args: argparse.Namespace, analysis: dict[str, Any]) -> dict[str, Any]:
-    payload = build_product_foundation_payload(str(args.llm_model or ""), analysis)
+    model = judgment_model(args)
+    payload = build_product_foundation_payload(model, analysis)
     return {
         "cache_schema_version": PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION,
-        "llm_model": str(args.llm_model or ""),
+        "llm_model": model,
         "llm_api_url": str(args.llm_api_url or ""),
         "temperature": 0.0,
         "product_context_digest": _product_context_digest(analysis),
@@ -1458,7 +1481,8 @@ def _video_fact_cache_key(args: argparse.Namespace, analysis: dict[str, Any], ro
         "preprocess_fingerprint_sha256": _stable_digest(preprocess_fingerprint),
         "preprocess_artifacts_sha256": _preprocess_artifact_content_digest(preprocess_artifacts),
         "role": role,
-        "llm_model": str(args.llm_model or ""),
+        "judgment_model": judgment_model(args),
+        "vision_model": vision_model(args),
         "llm_api_url": str(args.llm_api_url or ""),
         "foundation_digest": _stable_digest(foundation),
         "product_context_digest": _product_context_digest(analysis),
@@ -2251,7 +2275,7 @@ def _read_replayable_stage_fact(
         phase=phase,
         group=group,
         payload=payload,
-        model=args.llm_model,
+        model=_stage1_model(args, phase),
         api_url=args.llm_api_url,
     )
     return response, response_meta, path
@@ -2270,7 +2294,7 @@ def _read_replayable_stage_group(
         artifact,
         group=group,
         payload=payload,
-        model=args.llm_model,
+        model=judgment_model(args),
         api_url=args.llm_api_url,
     )
     response_meta = artifact.get("response_meta")
@@ -2325,7 +2349,7 @@ def run_segmented_stage_pipeline(
         response_meta: dict[str, Any] = {}
         try:
             payload = build_stage_group_judgment_payload(
-                args.llm_model,
+                judgment_model(args),
                 analysis_input,
                 facts,
                 analysis,
@@ -2366,7 +2390,7 @@ def run_segmented_stage_pipeline(
                     group=target,
                     payload=payload,
                     response=parsed,
-                    model=args.llm_model,
+                    model=judgment_model(args),
                     api_url=args.llm_api_url,
                     response_meta=response_meta,
                 ),
@@ -2415,7 +2439,7 @@ def run_segmented_stage_pipeline(
                 failed_stage_group_artifact(
                     group=target,
                     payload=payload,
-                    model=args.llm_model,
+                    model=judgment_model(args),
                     api_url=args.llm_api_url,
                     error=str(exc),
                     response_meta=response_meta,
@@ -2443,7 +2467,9 @@ def run_segmented_stage_pipeline(
     synthesis_response_meta: dict[str, Any] = {}
     synthesis_execution_source = "provider"
     try:
-        synthesis_payload = build_stage_synthesis_payload(args.llm_model, analysis_input, facts, stage_results, analysis)
+        synthesis_payload = build_stage_synthesis_payload(
+            judgment_model(args), analysis_input, facts, stage_results, analysis
+        )
         parsed: dict[str, Any] | None = None
         if replay_source is not None:
             synthesis_execution_source = "replay"
@@ -2476,7 +2502,7 @@ def run_segmented_stage_pipeline(
                 group=("SYNTHESIS",),
                 payload=synthesis_payload,
                 response=parsed,
-                model=args.llm_model,
+                model=judgment_model(args),
                 api_url=args.llm_api_url,
                 response_meta=synthesis_response_meta,
             ),
@@ -2499,7 +2525,7 @@ def run_segmented_stage_pipeline(
             failed_stage_group_artifact(
                 group=("SYNTHESIS",),
                 payload=synthesis_payload,
-                model=args.llm_model,
+                model=judgment_model(args),
                 api_url=args.llm_api_url,
                 error=str(exc),
                 response_meta=synthesis_response_meta,
@@ -2701,7 +2727,9 @@ def run_large_model_analysis(
         ),
     )
     segmented_result["analysis_run_metadata"] = {
-        "llm_model": str(args.llm_model or ""),
+        "llm_model": judgment_model(args),
+        "judgment_model": judgment_model(args),
+        "vision_model": vision_model(args),
         "llm_api_url": str(args.llm_api_url or ""),
         "multimodal_input": True,
         "pipeline": "segmented_stage_v1",
@@ -2762,7 +2790,9 @@ def maybe_run_absolute_execution_shadow(
         try:
             request_path = run_dir / f"llm_absolute_execution_{role}_request.json"
             response_path = run_dir / f"llm_absolute_execution_{role}_response.json"
-            payload = build_absolute_execution_shadow_payload(args.llm_model, role, facts, analysis)
+            payload = build_absolute_execution_shadow_payload(
+                judgment_model(args), role, facts, analysis
+            )
             write_json(request_path, payload)
             live_meta: dict[str, Any] = {}
             response, response_meta, execution_source = provider_call_with_artifact(
@@ -2770,7 +2800,7 @@ def maybe_run_absolute_execution_shadow(
                 replay_root=getattr(args, "provider_replay_from", None),
                 call_kind=f"absolute_execution_shadow:{role}",
                 payload=payload,
-                model=args.llm_model,
+                model=judgment_model(args),
                 api_url=args.llm_api_url,
                 response_meta=live_meta,
                 call=lambda: (
@@ -3016,7 +3046,9 @@ def maybe_reconcile_final_improvements(
     missing = uncovered_large_stage_codes(result)
     if not missing or args.llm_dry_run:
         return result
-    payload = build_improvement_reconciliation_payload(args.llm_model, result, missing, analysis)
+    payload = build_improvement_reconciliation_payload(
+        judgment_model(args), result, missing, analysis
+    )
     request_path = run_dir / "llm_improvement_reconciliation_request.json"
     response_path = run_dir / "llm_improvement_reconciliation_response.json"
     write_json(request_path, payload)
@@ -3033,7 +3065,7 @@ def maybe_reconcile_final_improvements(
             replay_root=getattr(args, "provider_replay_from", None),
             call_kind="improvement_reconciliation",
             payload=payload,
-            model=args.llm_model,
+            model=judgment_model(args),
             api_url=args.llm_api_url,
             response_meta=live_meta,
             call=lambda: (
@@ -3146,12 +3178,13 @@ def maybe_refine_low_confidence_stages(
     if not stage_codes:
         return result
     review_payload = build_stage_review_payload(
-        args.llm_model,
+        vision_model(args),
         analysis,
         locked_video_understanding,
         result,
         stage_codes,
         budget=getattr(args, "_resource_budget", None),
+        api_url=args.llm_api_url,
     )
     review_stages = [
         stage
@@ -3198,7 +3231,7 @@ def maybe_refine_low_confidence_stages(
             replay_root=getattr(args, "provider_replay_from", None),
             call_kind="phase_c_review",
             payload=review_payload,
-            model=args.llm_model,
+            model=vision_model(args),
             api_url=args.llm_api_url,
             response_meta=live_meta,
             call=lambda: (
@@ -3896,7 +3929,7 @@ def establish_product_foundation(
             if cached_reason:
                 analysis["product_foundation_error"] = f"缓存的 Step-0 产品证明合同未闭合：{cached_reason}"
             return foundation
-    payload = build_product_foundation_payload(args.llm_model, analysis)
+    payload = build_product_foundation_payload(judgment_model(args), analysis)
     request_path = run_dir / "llm_product_foundation_request.json"
     response_path = run_dir / "llm_product_foundation_response.json"
     provider_meta: dict[str, Any] = {"initial": {}, "repair": {}}
@@ -3911,7 +3944,7 @@ def establish_product_foundation(
             replay_root=getattr(args, "provider_replay_from", None),
             call_kind="product_foundation",
             payload=payload,
-            model=args.llm_model,
+            model=judgment_model(args),
             api_url=args.llm_api_url,
             response_meta=provider_meta["initial"],
             call=lambda: (
@@ -3939,7 +3972,7 @@ def establish_product_foundation(
         repaired_reason = ""
         if validation_reason:
             repair_payload = build_product_foundation_repair_payload(
-                args.llm_model,
+                judgment_model(args),
                 analysis,
                 raw.get("product_profile") if isinstance(raw.get("product_profile"), dict) else {},
                 validation_reason,
@@ -3952,7 +3985,7 @@ def establish_product_foundation(
                 replay_root=getattr(args, "provider_replay_from", None),
                 call_kind="product_foundation_repair",
                 payload=repair_payload,
-                model=args.llm_model,
+                model=judgment_model(args),
                 api_url=args.llm_api_url,
                 response_meta=provider_meta["repair"],
                 call=lambda: (
@@ -4029,7 +4062,7 @@ def establish_comparison_eligibility(
     api_key: str,
 ) -> dict[str, Any]:
     """独立判定双视频能否做产品级比较；失败时保守退回 uncertain。"""
-    payload = build_comparison_eligibility_payload(args.llm_model, facts)
+    payload = build_comparison_eligibility_payload(judgment_model(args), facts)
     request_path = run_dir / "llm_comparison_eligibility_request.json"
     response_path = run_dir / "llm_comparison_eligibility_response.json"
     response_meta: dict[str, Any] = {}
@@ -4041,7 +4074,7 @@ def establish_comparison_eligibility(
             replay_root=getattr(args, "provider_replay_from", None),
             call_kind="comparison_eligibility",
             payload=payload,
-            model=args.llm_model,
+            model=judgment_model(args),
             api_url=args.llm_api_url,
             response_meta=response_meta,
             call=lambda: (
@@ -4331,7 +4364,7 @@ def _run_stage1_qualification(
         execution_source = "provider"
         try:
             payload = build_stage_evidence_qualification_payload(
-                args.llm_model,
+                judgment_model(args),
                 role,
                 analysis,
                 facts,
@@ -4424,7 +4457,7 @@ def _run_stage1_qualification(
                 group=targets,
                 payload=payload,
                 response=response,
-                model=args.llm_model,
+                model=judgment_model(args),
                 api_url=args.llm_api_url,
                 response_meta=response_meta,
                 artifact_name=artifact_path.name,
@@ -4476,7 +4509,7 @@ def _run_stage1_qualification(
                         phase="B",
                         group=targets,
                         payload=payload,
-                        model=args.llm_model,
+                        model=judgment_model(args),
                         api_url=args.llm_api_url,
                         error=safe_error or type(exc).__name__,
                         artifact_name=artifact_path.name,
@@ -4551,7 +4584,7 @@ def run_video_fact_extraction(
             if cached.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
                 sanitize_audio_observations(
                     {"video_understanding": {role: cached}, "stage_analysis": []},
-                    can_analyze_native_audio(args.llm_api_url, args.llm_model),
+                    can_analyze_native_audio(args.llm_api_url, vision_model(args)),
                 )
             # A valid current-contract cache already contains the frozen
             # Stage1-B result. Re-running qualification here would spend four
@@ -4581,7 +4614,7 @@ def run_video_fact_extraction(
             continue
         visual_inputs = select_role_visual_inputs(videos[role], role, per_role_limit)
         payload = build_video_fact_payload(
-            args.llm_model,
+            vision_model(args),
             role,
             analysis,
             visual_inputs,
@@ -4629,7 +4662,7 @@ def run_video_fact_extraction(
                 phase="A",
                 payload=payload,
                 response=parsed_response,
-                model=args.llm_model,
+                model=vision_model(args),
                 api_url=args.llm_api_url,
                 response_meta=response_meta,
                 artifact_name=artifact_path.name,
@@ -4643,7 +4676,7 @@ def run_video_fact_extraction(
                     role=role,
                     phase="A",
                     payload=payload,
-                    model=args.llm_model,
+                    model=vision_model(args),
                     api_url=args.llm_api_url,
                     error=safe_error or type(exc).__name__,
                     artifact_name=artifact_path.name,
@@ -5322,7 +5355,7 @@ def _maybe_recover_video_facts(
             image_limit=max(4, int(getattr(args, "llm_image_limit", 0) or 0)),
         )
         payload = build_video_fact_recovery_payload(
-            args.llm_model,
+            vision_model(args),
             role,
             analysis,
             recovery_visual_inputs,
@@ -5413,7 +5446,7 @@ def _maybe_recover_video_facts(
             group=targets,
             payload=payload,
             response=recovery,
-            model=args.llm_model,
+            model=vision_model(args),
             api_url=args.llm_api_url,
             response_meta=response_meta,
             artifact_name=artifact_path.name,
@@ -5430,7 +5463,7 @@ def _maybe_recover_video_facts(
                     phase="C",
                     group=targets,
                     payload=payload,
-                    model=args.llm_model,
+                    model=vision_model(args),
                     api_url=args.llm_api_url,
                     error=str(exc) or type(exc).__name__,
                     artifact_name=artifact_path.name,
@@ -5830,7 +5863,7 @@ def run_video_identity_extraction(
         if role not in videos:
             continue
         payload = build_video_identity_payload(
-            args.llm_model,
+            vision_model(args),
             role,
             analysis,
             select_role_visual_inputs(videos[role], role, image_limit=2),
@@ -5848,7 +5881,7 @@ def run_video_identity_extraction(
             replay_root=getattr(args, "provider_replay_from", None),
             call_kind=f"video_identity:{role}",
             payload=payload,
-            model=args.llm_model,
+            model=vision_model(args),
             api_url=args.llm_api_url,
             response_meta=live_meta,
             call=lambda: (

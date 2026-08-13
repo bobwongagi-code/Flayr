@@ -41,13 +41,14 @@ def main() -> int:
     freeze.add_argument("--manifest", type=Path, default=Path("references/validation-inputs.json"))
     freeze.add_argument("--sample", action="append", required=True, help="blind sample id，可重复")
     freeze.add_argument("--provider", required=True)
-    freeze.add_argument("--model", required=True)
+    freeze.add_argument("--model", help="旧单模型冻结入口；不能与双模型参数混用")
+    freeze.add_argument("--judgment-model")
+    freeze.add_argument("--vision-model")
     freeze.add_argument("--api-url", required=True)
     freeze.add_argument("--fallback-model", default=None)
     freeze.add_argument("--temperature", type=float, default=0.0)
-    # Qwen3.6 Plus uses max_completion_tokens=65536 for the full contract;
-    # this field records the equivalent output ceiling in the freeze manifest.
-    freeze.add_argument("--max-tokens", type=int, default=65536)
+    # Current bounded Stage1/Stage2/Phase C contracts start at an 8192-token ceiling.
+    freeze.add_argument("--max-tokens", type=int, default=8192)
     freeze.add_argument("--top-p", type=float, default=None)
     freeze.add_argument("--seed", type=int, default=None)
     freeze.add_argument("--response-format", type=json.loads, default=None, help="JSON object，例如 '{\"type\":\"json_object\"}'")
@@ -69,32 +70,50 @@ def main() -> int:
 
     args = parser.parse_args()
     if args.command == "freeze":
+        if args.model and (args.judgment_model or args.vision_model):
+            parser.error("--model cannot be combined with --judgment-model/--vision-model")
+        if bool(args.judgment_model) != bool(args.vision_model):
+            parser.error("--judgment-model and --vision-model must be provided together")
+        if not args.model and not args.judgment_model:
+            parser.error("provide --model or both --judgment-model and --vision-model")
+        dual_route = bool(args.judgment_model)
+        if dual_route and args.fallback_model:
+            parser.error("dual-model freezes do not allow --fallback-model")
+        model_identity = {
+            "schema_version": 2 if dual_route else 1,
+            "provider": args.provider,
+            "api_url": args.api_url,
+            "model": args.judgment_model if dual_route else args.model,
+            **(
+                {
+                    "judgment_model": args.judgment_model,
+                    "vision_model": args.vision_model,
+                }
+                if dual_route
+                else {}
+            ),
+            "fallback_model": args.fallback_model,
+            "temperature": args.temperature,
+            "max_tokens": args.max_tokens,
+            "top_p": args.top_p,
+            "seed": args.seed,
+            "response_format": args.response_format,
+            "stop": args.stop,
+            "transport_retry": args.transport_retry,
+            "completion_attempts": args.completion_attempts,
+            "timeout": {
+                "connect": args.connect_timeout,
+                "read": args.read_timeout,
+                "low_speed": args.low_speed_timeout,
+                "overall": args.overall_timeout,
+            },
+        }
         lock = build_cohort_lock(
             ROOT,
             args.labels,
             args.manifest,
             args.sample,
-            {
-                "schema_version": 1,
-                "provider": args.provider,
-                "api_url": args.api_url,
-                "model": args.model,
-                "fallback_model": args.fallback_model,
-                "temperature": args.temperature,
-                "max_tokens": args.max_tokens,
-                "top_p": args.top_p,
-                "seed": args.seed,
-                "response_format": args.response_format,
-                "stop": args.stop,
-                "transport_retry": args.transport_retry,
-                "completion_attempts": args.completion_attempts,
-                "timeout": {
-                    "connect": args.connect_timeout,
-                    "read": args.read_timeout,
-                    "low_speed": args.low_speed_timeout,
-                    "overall": args.overall_timeout,
-                },
-            },
+            model_identity,
         )
         write_json_atomic(args.output, lock)
         print(f"frozen={len(lock['sample_ids'])} output={args.output}")

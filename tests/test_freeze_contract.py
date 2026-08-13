@@ -55,6 +55,22 @@ class FreezeContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "provider"):
             ModelExecutionConfig.from_mapping(incomplete)
 
+    def test_dual_model_execution_config_binds_both_roles_without_fallback(self) -> None:
+        dual = self._config(
+            schema_version=2,
+            model="qwen3.7-plus",
+            judgment_model="qwen3.7-plus",
+            vision_model="qwen3-vl-plus",
+        )
+        config = ModelExecutionConfig.from_mapping(dual)
+        self.assertEqual(config.as_dict()["judgment_model"], "qwen3.7-plus")
+        self.assertEqual(config.as_dict()["vision_model"], "qwen3-vl-plus")
+
+        changed = ModelExecutionConfig.from_mapping({**dual, "vision_model": "other-vision"})
+        self.assertNotEqual(config.sha256, changed.sha256)
+        with self.assertRaisesRegex(ValueError, "禁止自动 fallback"):
+            ModelExecutionConfig.from_mapping({**dual, "fallback_model": "qwen3.6-plus"})
+
     def test_evaluation_role_is_orthogonal_to_historical_metadata(self) -> None:
         label = {"partition": "seen_validation"}
         sample = {"group": "seen_validation", "purpose": "seen_validation"}

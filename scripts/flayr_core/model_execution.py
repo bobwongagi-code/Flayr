@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 
-MODEL_EXECUTION_CONFIG_SCHEMA_VERSION = 1
+MODEL_EXECUTION_CONFIG_SCHEMA_VERSION = 2
+LEGACY_MODEL_EXECUTION_CONFIG_SCHEMA_VERSION = 1
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -118,9 +119,12 @@ class ModelExecutionTimeout:
 class ModelExecutionConfig:
     """Complete, JSON-canonical identity of a model execution."""
 
+    schema_version: int
     provider: str
     api_url: str
     model: str
+    judgment_model: str
+    vision_model: str
     fallback_model: str | None
     temperature: float
     max_tokens: int
@@ -136,13 +140,31 @@ class ModelExecutionConfig:
     def from_mapping(cls, value: Mapping[str, Any]) -> "ModelExecutionConfig":
         if not isinstance(value, Mapping):
             raise ValueError("model_execution_config 必须是 object")
-        schema_version = value.get("schema_version", MODEL_EXECUTION_CONFIG_SCHEMA_VERSION)
-        if schema_version != MODEL_EXECUTION_CONFIG_SCHEMA_VERSION:
+        schema_version = value.get("schema_version", LEGACY_MODEL_EXECUTION_CONFIG_SCHEMA_VERSION)
+        if schema_version not in {
+            LEGACY_MODEL_EXECUTION_CONFIG_SCHEMA_VERSION,
+            MODEL_EXECUTION_CONFIG_SCHEMA_VERSION,
+        }:
             raise ValueError("model_execution_config.schema_version 不兼容")
+        if schema_version == LEGACY_MODEL_EXECUTION_CONFIG_SCHEMA_VERSION:
+            model = _required_text(value.get("model"), "model")
+            judgment_model = model
+            vision_model = model
+        else:
+            judgment_model = _required_text(value.get("judgment_model"), "judgment_model")
+            vision_model = _required_text(value.get("vision_model"), "vision_model")
+            model = _required_text(value.get("model") or judgment_model, "model")
+            if model != judgment_model:
+                raise ValueError("model_execution_config.model 必须等于 judgment_model 兼容别名")
+            if value.get("fallback_model") is not None:
+                raise ValueError("双模型执行合同禁止自动 fallback_model")
         return cls(
+            schema_version=int(schema_version),
             provider=_required_text(value.get("provider"), "provider"),
             api_url=_required_text(value.get("api_url"), "api_url"),
-            model=_required_text(value.get("model"), "model"),
+            model=model,
+            judgment_model=judgment_model,
+            vision_model=vision_model,
             fallback_model=_optional_text(value.get("fallback_model"), "fallback_model"),
             temperature=_number(value.get("temperature"), "temperature", minimum=0.0, maximum=2.0),
             max_tokens=_positive_int(value.get("max_tokens"), "max_tokens"),
@@ -160,8 +182,8 @@ class ModelExecutionConfig:
         )
 
     def as_dict(self) -> dict[str, Any]:
-        return {
-            "schema_version": MODEL_EXECUTION_CONFIG_SCHEMA_VERSION,
+        result = {
+            "schema_version": self.schema_version,
             "provider": self.provider,
             "api_url": self.api_url,
             "model": self.model,
@@ -176,6 +198,10 @@ class ModelExecutionConfig:
             "completion_attempts": self.completion_attempts,
             "timeout": self.timeout.as_dict(),
         }
+        if self.schema_version == MODEL_EXECUTION_CONFIG_SCHEMA_VERSION:
+            result["judgment_model"] = self.judgment_model
+            result["vision_model"] = self.vision_model
+        return result
 
     @property
     def sha256(self) -> str:

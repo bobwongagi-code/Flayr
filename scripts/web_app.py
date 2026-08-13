@@ -1379,12 +1379,31 @@ class JobStore:
             "--verification-stage",
             "production",
         ]
-        model = os.environ.get("FLAYR_LLM_MODEL", "").strip()
-        if model:
+        judgment_model = os.environ.get("FLAYR_JUDGMENT_MODEL", "").strip()
+        vision_model = os.environ.get("FLAYR_VISION_MODEL", "").strip()
+        legacy_model = os.environ.get("FLAYR_LLM_MODEL", "").strip()
+        if judgment_model or vision_model:
+            if not judgment_model or not vision_model:
+                raise RuntimeError(
+                    "FLAYR_JUDGMENT_MODEL and FLAYR_VISION_MODEL must be configured together"
+                )
+            command.extend(
+                [
+                    "--judgment-model",
+                    judgment_model,
+                    "--vision-model",
+                    vision_model,
+                    "--llm-api-url",
+                    os.environ.get("FLAYR_LLM_API_URL", "https://api.openai.com/v1/chat/completions"),
+                    "--llm-api-key-env",
+                    os.environ.get("FLAYR_LLM_API_KEY_ENV", "OPENAI_API_KEY"),
+                ]
+            )
+        elif legacy_model:
             command.extend(
                 [
                     "--llm-model",
-                    model,
+                    legacy_model,
                     "--llm-api-url",
                     os.environ.get("FLAYR_LLM_API_URL", "https://api.openai.com/v1/chat/completions"),
                     "--llm-api-key-env",

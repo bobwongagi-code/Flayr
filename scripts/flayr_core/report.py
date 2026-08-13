@@ -899,7 +899,7 @@ def render_improvement_cards(
             return (
                 '<div class="card warning">'
                 "LLM 分析未运行或失败，本次报告无可展示的提升点。"
-                "请检查 --llm-model / API key 配置后重跑。"
+                "请检查 judgment/vision model 与 API key 配置后重跑。"
                 "</div>"
             )
         if status == "llm_completed":

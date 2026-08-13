@@ -21,6 +21,8 @@ Flayr 接收一条**爆款参考视频**和一条**达人视频**，结合连续
 
 ## 二、两阶段分析架构
 
+生产推荐路由固定为 `qwen3-vl-plus` 负责视觉观察，`qwen3.7-plus` 负责资格、比较、综合与世界知识判断。两者共用同一份 Evidence Ledger、resolver 和 Phase C 补丁合同，不存在 VL 专属的第二套事实或判断系统。`qwen3.6-plus` 只保留为人工指定的 judgment 备份，使用时仍与 `qwen3-vl-plus` 配对，不会在 3.7 失败时自动接管；`qwen3-vl-flash` 已退役并由 provider 边界拒绝。
+
 Flayr 用**两阶段 pipeline + 一次性回看**，而非一次性看完整视频：
 
 ```
@@ -38,7 +40,7 @@ Flayr 用**两阶段 pipeline + 一次性回看**，而非一次性看完整视�
 
 Phase C：低置信阶段回看（只触发一次）
   只有代码发现覆盖、资格、连续性或 resolver 冲突时触发（最多 2 个 S1-S6 阶段）；模型自报低置信不能单独触发
-  → 代码按该阶段真实时间窗切标杆/达人原生视频片段（含音轨）
+  → 代码按该阶段真实时间窗切标杆/达人原生视频画面，并附同窗 Fun-ASR 文本
   → 第二次只重判这些阶段，并重新走现有 postprocess/validate
   不做无限多轮，也不允许模型继续索要素材
 ```
@@ -118,8 +120,9 @@ python3 scripts/flayr.py \
   --benchmark-video 爆款.mp4 \
   --creator-video 达人.mp4 \
   --product-name "儿童牙膏" \
-  --llm-model qwen3.6-plus \
-  --llm-api-url https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions \
+  --judgment-model qwen3.7-plus \
+  --vision-model qwen3-vl-plus \
+  --llm-api-url https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions \
   --max-total-wall-time 3600 \
   --llm-api-key-env DASHSCOPE_API_KEY \
   --verification-stage production \
@@ -133,7 +136,9 @@ python3 scripts/flayr.py \
 | `--benchmark-video` | 爆款参考视频路径 |
 | `--creator-video` | 达人视频路径 |
 | `--product-name` | 产品名称 |
-| `--llm-model` | 多模态视觉模型名称（推荐 `qwen3.6-plus`） |
+| `--judgment-model` | Step-0、Stage1-B、Stage2/Stage3、综合与文本判断模型；当前推荐 `qwen3.7-plus` |
+| `--vision-model` | OCR、Stage1-A、Stage1-C、Phase C 与视频身份观察模型；当前推荐 `qwen3-vl-plus`，必须与 `--judgment-model` 同时提供 |
+| `--llm-model` | 旧单模型兼容入口；同一模型承担全部职责，不能与双模型参数混用。仅用于历史严格回放，不是生产备份或推荐路径 |
 | `--llm-api-url` | 已批准供应商的 Chat Completions 端点；当前网络策略允许 OpenAI、DashScope 官方域名和登记的北京 MaaS Qwen 端点 |
 | `--max-total-wall-time` | 单次运行总墙钟上限；默认 1800 秒，慢模型验证可显式提高，例如 3600 秒 |
 | `--llm-api-key-keychain-service` | macOS Keychain 服务名（或用 `--llm-api-key-env` 走环境变量） |
@@ -143,6 +148,13 @@ python3 scripts/flayr.py \
 | `--asr-language` | ASR 语言提示；默认 `auto` |
 | `--asr-api-key-env` | 在线 ASR 使用的 key 环境变量；默认 `DASHSCOPE_API_KEY` |
 | `--ocr-mode auto/on/off` | 字幕 OCR 轨。默认 `auto`：复用分析模型的视觉能力和 key；`off` 可关闭 |
+
+Web worker 使用同一条路由：同时设置 `FLAYR_JUDGMENT_MODEL=qwen3.7-plus` 与
+`FLAYR_VISION_MODEL=qwen3-vl-plus`；只设置其中一个会在任务启动前失败。仅在两者都未设置时，
+才读取旧的 `FLAYR_LLM_MODEL` 单模型兼容变量，不会自动回退到 `qwen3.6-plus`。
+
+需要人工观察 3.6 时，显式使用 `--judgment-model qwen3.6-plus --vision-model qwen3-vl-plus`；
+这只是一次新的、可审计的模型选择，不是运行失败后的自动 fallback。
 
 > 注：在线 Fun-ASR 是 compare/improve 的语音证据依赖；调用失败时默认返回非零，不会发布为完成状态。只有显式使用 `--allow-degraded` 才会继续生成降级报告，并写入 `degraded` 状态；不会伪造缺失的转写或证据。
 
@@ -206,7 +218,8 @@ python3 scripts/flayr.py \
 python3 scripts/manage_validation_cohort.py freeze \
   --sample <sample-id> \
   --provider <provider-id> \
-  --model <model-id> \
+  --judgment-model qwen3.7-plus \
+  --vision-model qwen3-vl-plus \
   --api-url <compatible-api-url> \
   --temperature 0 \
   --output runs/validation/<cohort-id>.lock.json
@@ -237,7 +250,7 @@ python3 scripts/replay_finalization.py <source-run> <new-output-dir>
 
 ## 七、设计原则
 
-1. **全模态主导**：判断环节必须能看画面、听声音，不退化成读文字摘要
+1. **模态分工明确**：视觉模型负责可见事实和定向视频复核；在线 Fun-ASR 是口播语义权威源；判断模型只读冻结事实，不假装直接看过或听过原视频
 2. **关注变化点**：预算内自适应基础帧叠加镜头、字幕、局部变化和词级口播边界，模型消费统一的 canonical manifest
 3. **事实与判断分离**：阶段一锁定事实防串供，阶段二在事实基线上做感官判断
 4. **按证据形态切换主骨架**：有口播用口播时间线，无口播则切到字幕/OCR、画面变化、镜头轨和音频节奏

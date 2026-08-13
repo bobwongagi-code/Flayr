@@ -20,7 +20,8 @@ jobs.json 格式：
 }
 
 模型、端点、密钥从 runner 命令行传入，不放进低信任 jobs.json：
-  python3 scripts/batch_analyze.py jobs.json --llm-model <model> \
+  python3 scripts/batch_analyze.py jobs.json \
+      --judgment-model qwen3.7-plus --vision-model qwen3-vl-plus \
       --llm-api-url <trusted-endpoint> --llm-api-key-keychain-service <service>
 
 约定：
@@ -65,6 +66,8 @@ RUNNER_OWNED_FLAGS = frozenset({
     "--reuse-preprocessing",
     # 凭据与网络参数：禁止作业覆盖，防止低信任作业配置窃取高信任凭据
     "--llm-model",
+    "--judgment-model",
+    "--vision-model",
     "--llm-api-url",
     "--llm-api-key-env",
     "--llm-api-key-keychain-service",
@@ -371,12 +374,18 @@ def main() -> int:
     parser.add_argument("--runs-dir", default=str(ROOT / "runs"))
     # 这些选项属于启动 runner 的可信配置，不允许出现在 jobs.json。
     parser.add_argument("--llm-model")
+    parser.add_argument("--judgment-model")
+    parser.add_argument("--vision-model")
     parser.add_argument("--llm-api-url")
     parser.add_argument("--llm-api-key-env")
     parser.add_argument("--llm-api-key-keychain-service")
     parser.add_argument("--llm-api-key-keychain-account")
     parser.add_argument("--translation-model")
     args = parser.parse_args()
+    if args.llm_model and (args.judgment_model or args.vision_model):
+        parser.error("--llm-model cannot be combined with --judgment-model/--vision-model")
+    if bool(args.judgment_model) != bool(args.vision_model):
+        parser.error("--judgment-model and --vision-model must be provided together")
 
     runs_dir = Path(args.runs_dir).expanduser().resolve()
     try:
@@ -411,6 +420,8 @@ def _trusted_runner_args(args: argparse.Namespace) -> list[str]:
     """Serialize only explicitly supplied trusted provider settings."""
     names = (
         "llm_model",
+        "judgment_model",
+        "vision_model",
         "llm_api_url",
         "llm_api_key_env",
         "llm_api_key_keychain_service",

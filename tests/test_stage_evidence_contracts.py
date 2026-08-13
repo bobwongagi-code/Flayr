@@ -1262,7 +1262,13 @@ class StageEvidenceContractTests(unittest.TestCase):
                 {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,full"}},
                 {"type": "input_audio", "input_audio": {"data": "full-audio", "format": "wav"}},
             ]
-            with patch("flayr_core.llm.payload.can_analyze_native_audio", return_value=True), patch(
+            with patch("flayr_core.llm.payload.can_analyze_native_video", return_value=True), patch(
+                "flayr_core.llm.payload.load_transcript_words",
+                return_value=[
+                    {"start_seconds": 8.0, "end_seconds": 8.4, "text": "SAFE_WINDOW"},
+                    {"start_seconds": 40.0, "end_seconds": 40.4, "text": "OUTSIDE_WINDOW"},
+                ],
+            ), patch(
                 "flayr_core.llm.payload.video_to_data_url",
                 return_value="data:video/mp4;base64,clip",
             ) as clip:
@@ -1278,9 +1284,64 @@ class StageEvidenceContractTests(unittest.TestCase):
 
             self.assertEqual(sum(item.get("type") == "video_url" for item in result), 1)
             self.assertNotIn("full", json.dumps(result))
+            rendered = json.dumps(result, ensure_ascii=False)
+            self.assertIn("SAFE_WINDOW", rendered)
+            self.assertNotIn("OUTSIDE_WINDOW", rendered)
             clip.assert_called_once()
             self.assertGreater(clip.call_args.kwargs["duration"], 0)
             self.assertLess(clip.call_args.kwargs["start"], 15.0)
+
+    def test_beijing_vl_recovery_sends_video_without_claiming_audio_perception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "creator.mp4"
+            video_path.write_bytes(b"fixture")
+            analysis = {
+                "videos": {
+                    "creator": {
+                        "duration_seconds": 60,
+                        "path": str(video_path),
+                        "work_dir": str(root),
+                    }
+                }
+            }
+            api_url = (
+                "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/"
+                "compatible-mode/v1/chat/completions"
+            )
+            with patch(
+                "flayr_core.llm.payload.video_to_data_url",
+                return_value="data:video/mp4;base64,clip",
+            ), patch(
+                "flayr_core.llm.payload.load_transcript_words",
+                return_value=[],
+            ):
+                payload = build_video_fact_recovery_payload(
+                    "qwen3-vl-plus",
+                    "creator",
+                    analysis,
+                    [],
+                    {"evidence_units": [], "stage_evidence_checks": []},
+                    ["S6"],
+                    api_url=api_url,
+                )
+
+                result = _replace_recovery_full_media(
+                    [], analysis,
+                    "creator",
+                    ["S6"],
+                    api_url=api_url,
+                    model="qwen3-vl-plus",
+                    budget=None,
+                )
+
+            types = [item.get("type") for item in result]
+            self.assertIn("video_url", types)
+            self.assertNotIn("input_audio", types)
+            self.assertIn("不得使用粗粒度 SRT", json.dumps(result, ensure_ascii=False))
+            payload_text = json.dumps(payload, ensure_ascii=False)
+            self.assertIn("不能直接理解视频音轨", payload_text)
+            self.assertNotIn("直接听到的音频事实", payload_text)
 
     def test_recovery_payload_does_not_encode_full_standalone_audio_first(self) -> None:
         with patch(

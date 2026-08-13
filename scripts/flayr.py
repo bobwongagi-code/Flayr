@@ -27,14 +27,21 @@ from flayr_core.asr import (
     read_asr_api_key,
     run_online_asr,
 )
-from flayr_core.llm.api import can_analyze_native_audio, provider_capabilities, read_llm_api_key
+from flayr_core.llm.api import (
+    can_analyze_native_audio,
+    provider_capabilities,
+    read_llm_api_key,
+    reject_retired_model,
+)
 from flayr_core.llm.provider_artifacts import ProviderCallError, ProviderReplayError
 from flayr_core.llm.pipeline import (
     AnalysisPipelineError,
     apply_finalized_analysis_result,
+    judgment_model,
     merge_analysis_result,
     run_comparison_scope_preflight,
     run_large_model_analysis,
+    vision_model,
 )
 from flayr_core.prompt import write_analysis_input
 from flayr_core.creator_report import write_creator_report
@@ -77,7 +84,7 @@ from flayr_core.video_evidence import (
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNS_DIR = ROOT / "runs"
-PREPROCESS_CACHE_SCHEMA_VERSION = 4
+PREPROCESS_CACHE_SCHEMA_VERSION = 5
 PREPROCESS_PIPELINE_VERSION = "2026-08-03.1-online-asr"
 PREPROCESS_ARTIFACT_SCHEMA_VERSION = 2
 ASR_AUDIO_PLACEHOLDER = "Online ASR unavailable because audio extraction failed."
@@ -259,7 +266,7 @@ def main() -> int:
         write_analysis_input(run_dir, analysis)
         print_scope_summary(run_dir, deps, videos, eligibility)
         return 0
-    if args.llm_model and not args.analysis_result_json:
+    if judgment_model(args) and not args.analysis_result_json:
         try:
             completed = run_large_model_analysis(args, analysis, analysis_input_path, run_dir)
         except AnalysisPipelineError as exc:
@@ -296,7 +303,8 @@ def main() -> int:
             _record_run_failure(run_dir, "compare/improve 未运行完成的 LLM 分析。")
             raise SystemExit(
                 "compare/improve 需要完成的 LLM 分析，但当前 analysis_run_state=not_run。"
-                " 提供 --llm-model 跑分析，或加 --allow-degraded 在无分析时继续（severity 留空）。"
+                " 提供 --judgment-model 与 --vision-model 跑分析，或加 --allow-degraded "
+                "在无分析时继续（severity 留空）。"
             )
         _mark_analysis_degraded(
             run_dir,
@@ -355,7 +363,9 @@ def _generate_reports_and_publish(
                     "mode": args.mode,
                     "code_commit": _git_commit_sha(),
                     "argv_sha256": command_digest(sys.argv[1:]),
-                    "llm_model": str(args.llm_model or ""),
+                    "llm_model": judgment_model(args),
+                    "judgment_model": judgment_model(args),
+                    "vision_model": vision_model(args),
                     "llm_api_url": str(args.llm_api_url or ""),
                 },
             )
@@ -542,7 +552,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--llm-model",
-        help="Optional approved-provider chat model used to generate analysis_result.json.",
+        help=(
+            "Legacy single-model route. The same model performs visual evidence extraction and "
+            "judgment. Cannot be combined with --judgment-model/--vision-model."
+        ),
+    )
+    parser.add_argument(
+        "--judgment-model",
+        help="Model for Step-0, Stage1-B, Stage2/Stage3 and other text/world-knowledge judgments.",
+    )
+    parser.add_argument(
+        "--vision-model",
+        help="Model for OCR, Stage1-A, Stage1-C and Phase C visual/native-video work.",
     )
     parser.add_argument(
         "--llm-api-url",
@@ -581,7 +602,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--provider-replay-from",
         type=Path,
         help=(
-            "Strictly replay provider artifacts (including ASR, Step-0, Phase C, S4 verifier and postprocess). "
+            "Strictly replay provider artifacts (including ASR, Step-0, Stage1, "
+            "Stage2/Stage3, Phase C and postprocess). "
             "A missing or mismatched artifact never falls back to a live provider call."
         ),
     )
@@ -629,7 +651,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--translation-model",
-        help="Optional model for transcript translation. Defaults to --llm-model.",
+        help="Optional model for transcript translation. Defaults to the judgment model.",
     )
     parser.add_argument(
         "--ocr-mode",
@@ -723,6 +745,22 @@ def check_dependencies(args: argparse.Namespace) -> dict[str, Any]:
 
 def validate_inputs(args: argparse.Namespace) -> dict[str, Path]:
     inputs: dict[str, Path] = {}
+
+    explicit_judgment = str(getattr(args, "judgment_model", "") or "").strip()
+    explicit_vision = str(getattr(args, "vision_model", "") or "").strip()
+    legacy_model = str(getattr(args, "llm_model", "") or "").strip()
+    if legacy_model and (explicit_judgment or explicit_vision):
+        raise SystemExit(
+            "--llm-model is the legacy single-model route and cannot be combined with "
+            "--judgment-model or --vision-model."
+        )
+    if bool(explicit_judgment) != bool(explicit_vision):
+        raise SystemExit(
+            "Dual-model routing requires both --judgment-model and --vision-model."
+        )
+    for configured_model in (legacy_model, explicit_judgment, explicit_vision):
+        if configured_model:
+            reject_retired_model(configured_model)
 
     if args.mode in {"breakdown", "compare", "improve", "scope"}:
         if not args.benchmark_video:
@@ -928,7 +966,7 @@ def build_preprocess_fingerprint(
         },
         "translation": {
             "enabled": bool(getattr(args, "translate_with_llm", False)),
-            "model": str(getattr(args, "translation_model", "") or getattr(args, "llm_model", "") or ""),
+            "model": str(getattr(args, "translation_model", "") or judgment_model(args)),
             "api_url": str(getattr(args, "llm_api_url", "") or ""),
             "product_name": str(getattr(args, "product_name", "") or ""),
             "product_notes": str(getattr(args, "product_notes", "") or ""),
@@ -938,6 +976,8 @@ def build_preprocess_fingerprint(
             "with_ocr": bool(getattr(args, "with_ocr", False)),
             "no_ocr": bool(getattr(args, "no_ocr", False)),
             "dry_run": bool(getattr(args, "llm_dry_run", False)),
+            "model": vision_model(args),
+            "api_url": str(getattr(args, "llm_api_url", "") or ""),
         },
         "frame_strategy": "base-adaptive-2fps-focus-2fps-canonical-analysis-manifest-v4-anchor-frames",
     }
@@ -1380,7 +1420,7 @@ def _process_video_generation(
             result,
             ocr_key,
             api_url=args.llm_api_url,
-            model=args.llm_model,
+            model=vision_model(args),
             budget=budget,
             provider_replay_from=getattr(args, "provider_replay_from", None),
             replay_role_name=role,
@@ -1514,7 +1554,7 @@ def looks_like_vision_config(args: argparse.Namespace) -> bool:
     values = [
         str(getattr(args, "llm_api_url", "") or "").lower(),
         str(getattr(args, "llm_api_key_keychain_service", "") or "").lower(),
-        str(getattr(args, "llm_model", "") or "").lower(),
+        vision_model(args).lower(),
     ]
     return any(
         marker in value
@@ -1543,8 +1583,8 @@ def build_analysis(
     #   llm_completed   —— LLM 分析已成功合并（由 merge_analysis_result 改写）
     improvements_status = "not_applicable" if args.mode == "breakdown" else "llm_unavailable"
 
-    capabilities = provider_capabilities(args.llm_api_url, args.llm_model)
-    native_audio = can_analyze_native_audio(args.llm_api_url, args.llm_model)
+    capabilities = provider_capabilities(args.llm_api_url, vision_model(args))
+    native_audio = can_analyze_native_audio(args.llm_api_url, vision_model(args))
     return {
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "mode": args.mode,

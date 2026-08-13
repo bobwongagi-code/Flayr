@@ -434,6 +434,36 @@ class WebAppHelpersTests(unittest.TestCase):
             (run_dir / "_SUCCESS.json").write_text("{}", encoding="utf-8")
             self.assertEqual(progress_for_run(run_dir), (100, "报告生成"))
 
+    def test_web_worker_prefers_explicit_dual_model_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            job = {
+                "benchmark_path": "/tmp/benchmark.mp4",
+                "creator_path": "/tmp/creator.mp4",
+                "product_name": "product",
+                "category": "category",
+                "price": "1",
+                "market_code": "my",
+                "selling_point": "point",
+                "run_dir": str(Path(tmp) / "run"),
+            }
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "FLAYR_JUDGMENT_MODEL": "qwen3.7-plus",
+                    "FLAYR_VISION_MODEL": "qwen3-vl-plus",
+                    "FLAYR_LLM_MODEL": "qwen3.6-plus",
+                },
+                clear=False,
+            ):
+                command = store._command(job)
+            store.shutdown()
+            self.assertIn("--judgment-model", command)
+            self.assertIn("qwen3.7-plus", command)
+            self.assertIn("--vision-model", command)
+            self.assertIn("qwen3-vl-plus", command)
+            self.assertNotIn("--llm-model", command)
+
     def test_estimated_remaining_time_uses_coarse_phase_buckets(self) -> None:
         self.assertEqual(estimated_remaining_seconds(0), 30 * 60)
         self.assertEqual(estimated_remaining_seconds(10), 30 * 60)

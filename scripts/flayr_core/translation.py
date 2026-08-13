@@ -77,9 +77,16 @@ def translate_transcript_with_llm(
         result["translation_status"] = "skipped_no_transcript"
         return
 
-    model = args.translation_model or args.llm_model
+    model = (
+        getattr(args, "translation_model", None)
+        or getattr(args, "judgment_model", None)
+        or getattr(args, "llm_model", None)
+    )
     if not model:
-        result["errors"].append("translation skipped: --translate-with-llm requires --translation-model or --llm-model")
+        result["errors"].append(
+            "translation skipped: --translate-with-llm requires --translation-model, "
+            "--judgment-model, or --llm-model"
+        )
         return
 
     payload = build_translation_payload(

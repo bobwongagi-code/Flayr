@@ -42,7 +42,9 @@ from ..stage_ownership import (
 )
 from ..subtitle_track import render_subtitle_track_markdown
 from ..transcript import (
+    load_transcript_words,
     read_timed_transcript_segments,
+    transcript_text_for_range,
     transcript_timing_contract,
 )
 from ..video_evidence import build_timeline_view_for_range
@@ -50,6 +52,7 @@ from ..resources import ResourceBudget
 from .api import (
     audio_to_mp3_data_url,
     can_analyze_native_audio,
+    can_analyze_native_video,
     can_send_standalone_audio,
     image_to_data_url,
     video_to_data_url,
@@ -984,6 +987,11 @@ def build_video_fact_recovery_payload(
         "candidate_evidence_ids_by_stage": candidate_ids_by_stage,
         "candidate_observations_by_stage": candidate_observations,
     }
+    recovery_audio_rule = (
+        "你可以直接感知本轮窗口音轨，但仍不得补全听不清的话术。"
+        if can_analyze_native_audio(api_url, model)
+        else "你不能直接理解视频音轨；口播语义只能来自本轮提供的窗口安全 Fun-ASR，缺失时保持 unknown，不得脑补。"
+    )
     recovery_system = (
         "你是 Flayr Stage1 的定向证据复核器。只输出严格 JSON。"
         "这是一次且仅一次的事实恢复，不得改写、删除或合并已有 evidence_units，"
@@ -991,6 +999,7 @@ def build_video_fact_recovery_payload(
         "候选观察是未资格化的恢复线索，不是事实；必须结合其内容、时间和本轮媒体独立核实，"
         "不得仅凭 functions、关键词或旧资格表把候选直接升级为证据。"
         "没有确认事实就写空数组和 unknown，不得为了让阶段成立而推断。"
+        + recovery_audio_rule
     )
     payload["messages"][0]["content"] = recovery_system
     original_content = payload["messages"][1].get("content")
@@ -1045,6 +1054,7 @@ def build_video_fact_recovery_payload(
                     "若候选观察的 functions 含 S6_cta，必须检查其完整口播、字幕、画面和时间范围；"
                     "不能把它静默丢掉后仍返回 S6 absent/unknown，除非在 reason 中说明独立核查为何不成立。",
                     "每个新 candidate_evidence_unit 必须填写 fact_quality 的六个观察轴；无法判断时填 uncertain 或 not_applicable。",
+                    recovery_audio_rule,
                     s6_tail_review_block,
                     "## 已锁定事实摘要（只读）",
                     json.dumps(locked_fact_summary, ensure_ascii=False, indent=2),
@@ -1063,7 +1073,11 @@ def build_video_fact_recovery_payload(
                             "voiceover_zh": "中文翻译，没有则留空",
                             "visual_fact": "直接看到的画面事实",
                             "subtitle_fact": "直接读到的字幕，没有则留空",
-                            "audio_fact": "直接听到的音频事实，没有则写无",
+                            "audio_fact": (
+                                "直接听到的音频事实，没有则写无"
+                                if can_analyze_native_audio(api_url, model)
+                                else "未直接感知音轨；口播只引用窗口安全 Fun-ASR"
+                            ),
                             "evidence_strength": "direct|explicit|inferred|absent",
                             "fact_quality": {
                                 "subject": "correct|incorrect|uncertain|not_applicable",
@@ -1260,7 +1274,7 @@ def _replace_recovery_full_media(
     budget: ResourceBudget | None,
     s6_tail_review: bool = False,
 ) -> list[dict[str, Any]]:
-    """Remove full-video/audio blocks and replace them with target windows."""
+    """Replace full media with target video windows and window-safe ASR."""
     videos = analysis.get("videos") if isinstance(analysis.get("videos"), dict) else {}
     info = videos.get(role) if isinstance(videos.get(role), dict) else {}
     role_dir = Path(str(info.get("work_dir") or ""))
@@ -1276,9 +1290,25 @@ def _replace_recovery_full_media(
         item for item in media
         if item.get("type") not in {"video_url", "input_audio"}
     ]
+    words = load_transcript_words(info)
     for label, start, end in windows:
         window_duration = max(0.1, end - start)
-        if can_analyze_native_audio(api_url, model) and video_path.is_file():
+        transcript_text = transcript_text_for_range(words, start, end) if words else ""
+        retained.append(
+            {
+                "type": "text",
+                "text": (
+                    f"Stage1-C 窗口安全 Fun-ASR｜{role}｜{label}｜"
+                    f"{format_seconds(start)} - {format_seconds(end)}\n"
+                    + (
+                        transcript_text
+                        if transcript_text
+                        else "（无词级窗口安全口播；不得使用粗粒度 SRT 推断本窗口口播）"
+                    )
+                ),
+            }
+        )
+        if can_analyze_native_video(api_url, model) and video_path.is_file():
             clip = video_to_data_url(
                 video_path,
                 start=start,
@@ -2511,6 +2541,7 @@ def build_stage_review_payload(
     current_result: dict[str, Any],
     stage_codes: list[str],
     budget: ResourceBudget | None = None,
+    api_url: str = "",
 ) -> dict[str, Any]:
     """Phase C：对低置信阶段切原生视频片段，只返回受限事实补丁。
 
@@ -2518,7 +2549,6 @@ def build_stage_review_payload(
     """
     target_codes = normalize_stage_codes(stage_codes)[:2]
     analysis_facts = stage_analysis_evidence_view(facts, target_codes)
-    native_audio = bool((analysis.get("audio_assessment") or {}).get("native_audio_analysis", True))
     target_stages = [
         stage_analysis_stage_context(stage, facts, stage_code(stage.get("stage")))
         for stage in current_result.get("stage_analysis", [])
@@ -2815,7 +2845,8 @@ def build_stage_review_payload(
             "text": "\n\n".join(
                 [
                     "# Phase C 低置信阶段回看",
-                    "你将看到低置信阶段对应的 focused window 原生视频切片（含画面和声音）。",
+                    "你将看到低置信阶段对应的 focused window 原生视频画面，以及代码按同一时间窗裁剪的 Fun-ASR 文本。",
+                    "当前视觉模型不能直接理解视频音轨；口播语义只能来自标为 window-safe 的 ASR，不得声称听到了音轨。",
                     f"detail_mode=focused_window：每个目标阶段只附阶段时间窗±{PHASE_C_WINDOW_PADDING_SECONDS:g}s 的片段，采样约 {PHASE_C_REVIEW_FPS:g}fps、宽度≤{PHASE_C_REVIEW_MAX_WIDTH}px。",
                     "切片边界可能有缓冲误差，可能混入相邻阶段内容；判断按功能归属，不要把相邻阶段内容算进本阶段。",
                     "若切片内证据不足、画面过稀或关键动作跨出窗口，必须在 review_notes 写明 sparse_window，而不是用主分析旧结论或邻近阶段补证。",
@@ -2853,7 +2884,15 @@ def build_stage_review_payload(
             ),
         }
     ]
-    content.extend(build_stage_review_video_inputs(analysis, target_stages, budget=budget))
+    content.extend(
+        build_stage_review_video_inputs(
+            analysis,
+            target_stages,
+            model=model,
+            api_url=api_url,
+            budget=budget,
+        )
+    )
     return {
         "model": model,
         "messages": [
@@ -2864,9 +2903,9 @@ def build_stage_review_payload(
                     "本轮只能基于用户给出的 facts 和原生视频切片，为指定 S1-S6 阶段输出允许的事实与证据引用补丁。"
                     "不得新增、删除或改写 evidence_units；不得输出或改写 severity、gap、summary、quote、support_status、执行分、痛点相关性、improvements 或 multimodal 结论。"
                     "如果目标阶段包含 S1，补丁必须同时包含 creator_hook 与 benchmark_hook，不得复用旧 hook 判断。"
-                    # 接地约束：禁止从含糊音频脑补话术（kakwan S6 幻觉教训）；不预设判断方向。
-                    "判断只能基于切片中真实听到/看到的内容：引用口播必须能对上切片音频，"
-                    "听不清就写听不清并标 voice_only，禁止推断或补全未听清的话术。"
+                    # 接地约束：禁止从不可感知音轨脑补话术（kakwan S6 幻觉教训）；不预设判断方向。
+                    "视觉判断只能基于切片中真实看到的内容；口播引用只能来自随窗口提供的 Fun-ASR 文本。"
+                    "ASR 缺失或时间粒度不足时必须保持 unknown/voice_only，禁止推断或补全话术。"
                     "不要继续要求更多素材。"
                 ),
             },
@@ -2880,9 +2919,14 @@ def build_stage_review_payload(
 def build_stage_review_video_inputs(
     analysis: dict[str, Any],
     target_stages: list[dict[str, Any]],
+    *,
+    model: str = "",
+    api_url: str = "",
     budget: ResourceBudget | None = None,
 ) -> list[dict[str, Any]]:
     """为 Phase C 低置信阶段附上对应时间窗的原生视频切片。"""
+    if not can_analyze_native_video(api_url, model):
+        return []
     content: list[dict[str, Any]] = []
     videos = analysis.get("videos", {})
     for window in stage_review_media_windows(analysis, target_stages):
@@ -2898,6 +2942,22 @@ def build_stage_review_video_inputs(
             artifact_dir = Path(str(info.get("work_dir") or "")).expanduser()
             if not artifact_dir.is_dir():
                 continue
+            words = load_transcript_words(info)
+            transcript_text = transcript_text_for_range(words, padded_start, padded_end) if words else ""
+            content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"【Phase C 窗口安全 Fun-ASR｜{role}｜{code}｜"
+                        f"{format_seconds(padded_start)} - {format_seconds(padded_end)}】\n"
+                        + (
+                            transcript_text
+                            if transcript_text
+                            else "（无词级窗口安全口播；不得使用粗粒度 SRT 推断本窗口口播）"
+                        )
+                    ),
+                }
+            )
             timeline_view = build_timeline_view_for_range(
                 artifact_dir,
                 info,

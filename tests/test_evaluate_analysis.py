@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.evaluate_analysis import (
     _decision_gt_audit,
@@ -15,11 +16,64 @@ from scripts.evaluate_analysis import (
     blind_contract_violations,
     ground_truth_label_inventory,
     normalize_human_gap,
+    promotion_readiness,
     severity_diagnostics,
 )
 
 
 class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
+    def test_promotion_lock_rejects_visual_model_drift(self) -> None:
+        rows = [
+            {
+                "sample_id": "sample",
+                "partition": "blind",
+                "stage": "S1",
+                "expected": "small",
+                "matched": True,
+                "ordinal_distance": 0,
+                "run_metadata": {
+                    "llm_model": "qwen3.7-plus",
+                    "judgment_model": "qwen3.7-plus",
+                    "vision_model": "other-vision",
+                    "comparison_temperature": 0.0,
+                },
+            }
+        ]
+        lock = {
+            "status": "frozen",
+            "sample_ids": ["sample"],
+            "model_config": {
+                "schema_version": 2,
+                "model": "qwen3.7-plus",
+                "judgment_model": "qwen3.7-plus",
+                "vision_model": "qwen3-vl-plus",
+                "temperature": 0.0,
+            },
+        }
+        with patch("scripts.evaluate_analysis.verify_cohort_lock", return_value=[]):
+            readiness = promotion_readiness(
+                rows,
+                {"samples": {}},
+                {
+                    "samples": [
+                        {
+                            "id": "sample",
+                            "group": "blind",
+                            "product_category": "test",
+                            "target_market": "my",
+                        }
+                    ]
+                },
+                lock,
+                {},
+                {},
+                {},
+            )
+        self.assertIn(
+            "analysis_result vision model 与 cohort lock 不一致或缺失",
+            readiness["reasons"],
+        )
+
     def test_canonical_human_gap_keeps_none_and_uncertain_out_of_severity_normalization(self) -> None:
         self.assertEqual(normalize_human_gap("none"), "none")
         self.assertEqual(normalize_human_gap("uncertain"), "uncertain")
