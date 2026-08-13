@@ -244,6 +244,8 @@ def _is_strict_replay_failure(args: argparse.Namespace, exc: BaseException) -> b
 VIDEO_FACT_CACHE_SCHEMA_VERSION = 31
 PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION = 3
 CACHE_RECORD_SCHEMA_VERSION = 1
+STAGE1_A_REQUEST_TIMEOUT_SECONDS = 300
+STAGE1_A_REQUEST_RETRIES = 1
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -1078,6 +1080,7 @@ def fetch_json_completion(
     raw_path: Path,
     max_attempts: int = 1,
     request_max_time_seconds: int | None = None,
+    request_retries: int | None = None,
     response_meta: dict[str, Any] | None = None,
 ) -> str:
     """调用 LLM 并校验 JSON；默认不重复已完成但格式错误的语义请求。
@@ -1101,6 +1104,8 @@ def fetch_json_completion(
         request_options = {}
         if request_max_time_seconds is not None:
             request_options["max_time_seconds"] = request_max_time_seconds
+        if request_retries is not None:
+            request_options["retries"] = request_retries
         with tempfile.TemporaryDirectory(prefix=".llm-request.", dir=payload_path.parent) as request_dir:
             ephemeral_payload = Path(request_dir) / "request.json"
             write_text(ephemeral_payload, payload_text)
@@ -1132,6 +1137,7 @@ def fetch_json_completion(
                         "total upload budget exceeded",
                         "download budget exceeded",
                         "cost estimate budget exceeded",
+                        "insufficient wall time for another LLM transport attempt",
                     )
                 ):
                     # Shared run-budget exhaustion is a hard stop. Re-entering
@@ -4817,7 +4823,13 @@ def run_video_fact_extraction(
             if parsed_response is None:
                 write_json(request_path, payload)
                 result_text = fetch_json_completion(
-                    args, api_key, request_path, response_path, response_meta=response_meta
+                    args,
+                    api_key,
+                    request_path,
+                    response_path,
+                    request_max_time_seconds=STAGE1_A_REQUEST_TIMEOUT_SECONDS,
+                    request_retries=STAGE1_A_REQUEST_RETRIES,
+                    response_meta=response_meta,
                 )
                 parsed_response = parse_json_text(result_text)
             if not isinstance(parsed_response, dict):

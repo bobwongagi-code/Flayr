@@ -30,6 +30,10 @@ class NetworkPolicyTests(unittest.TestCase):
         with self.assertRaises(OutboundURLPolicyError):
             validate_outbound_url("https://127.0.0.1/v1/chat/completions")
 
+    def test_rejects_trailing_dot_hostname_that_cannot_use_pinned_resolution(self) -> None:
+        with self.assertRaisesRegex(OutboundURLPolicyError, "尾点"):
+            validate_outbound_url("https://api.openai.com./v1/chat/completions")
+
     def test_rejects_private_dns_resolution(self) -> None:
         answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 443))]
         with mock.patch("flayr_core.network.socket.getaddrinfo", return_value=answer):

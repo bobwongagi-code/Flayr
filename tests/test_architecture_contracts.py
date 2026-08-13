@@ -1664,11 +1664,13 @@ class ArchitectureContractTests(unittest.TestCase):
             raw_path = root / "response.json"
             payload_path.write_text(json.dumps({"model": "test", "messages": []}), encoding="utf-8")
             calls: list[list[str]] = []
+            call_options: list[dict[str, object]] = []
             stdin_values: list[str | bytes | None] = []
             response_meta: dict[str, object] = {}
 
             def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
                 calls.append(command)
+                call_options.append(kwargs)
                 stdin_values.append(kwargs.get("stdin_text"))
                 callback = kwargs["stdout_callback"]
                 assert callable(callback)
@@ -1706,14 +1708,24 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertEqual(len(calls), 2)
             self.assertIn("--speed-limit", calls[0])
             self.assertIn("--speed-time", calls[0])
+            self.assertEqual(calls[0][calls[0].index("--noproxy") + 1], "*")
             self.assertEqual(calls[0][calls[0].index("--max-redirs") + 1], "0")
             self.assertIn("--resolve", calls[0])
-            self.assertIn("example.test:443:203.0.113.10", calls[0])
-            self.assertIn("example.test:443:[2001:db8::10]", calls[0])
+            resolve_values = [
+                calls[0][index + 1]
+                for index, value in enumerate(calls[0])
+                if value == "--resolve"
+            ]
+            self.assertEqual(
+                resolve_values,
+                ["example.test:443:203.0.113.10,[2001:db8::10]"],
+            )
             self.assertNotIn("-L", calls[0])
             self.assertEqual(calls[0][calls[0].index("--max-time") + 1], "1800")
+            self.assertEqual(call_options[0]["timeout_seconds"], 1805)
             self.assertIn('"finish_reason": "stop"', raw)
             self.assertEqual(response_meta["transport_attempts"], 2)
+            self.assertEqual(response_meta["transport_attempt_timeouts_seconds"], [1800, 1800])
             self.assertEqual(response_meta["transport_status"], "completed")
             self.assertTrue(response_meta["transport_retry_reasons"])
             self.assertFalse(raw_path.exists())
@@ -1748,6 +1760,32 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertEqual(response_meta["completion_attempts"], 2)
             self.assertEqual(response_meta["status"], "completed")
             self.assertTrue(any("missing text output" in str(reason) for reason in response_meta["retry_reasons"]))
+
+    def test_fetch_json_completion_does_not_retry_finalization_reserve_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            response_path = root / "response.json"
+            payload_path.write_text(json.dumps({"model": "test", "messages": []}), encoding="utf-8")
+            args = SimpleNamespace(llm_api_url="https://example.test/v1/chat/completions")
+            with mock.patch.object(
+                pipeline,
+                "call_llm_api",
+                side_effect=SystemExit(
+                    "LLM streaming request failed: insufficient wall time for another LLM "
+                    "transport attempt while preserving 30s for deterministic finalization"
+                ),
+            ) as call, mock.patch.object(pipeline.time, "sleep") as sleep:
+                with self.assertRaisesRegex(SystemExit, "insufficient wall time"):
+                    pipeline.fetch_json_completion(
+                        args,
+                        "secret",
+                        payload_path,
+                        response_path,
+                        max_attempts=2,
+                    )
+            self.assertEqual(call.call_count, 1)
+            sleep.assert_not_called()
 
     def test_fetch_json_completion_does_not_blindly_retry_completed_invalid_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5280,6 +5318,61 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertTrue(result["transcript_words_available"])
             self.assertEqual(transcript.read_text(encoding="utf-8").strip(), "new transcript")
             self.assertIn("new transcript", (role_dir / "transcript.srt").read_text(encoding="utf-8"))
+
+    def test_online_asr_transport_is_direct_and_preserves_all_pinned_addresses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            role_dir = Path(tmp)
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+                calls.append(command)
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps({"output": {}}),
+                    stderr="__FLAYR_HTTP_STATUS__200\n",
+                )
+
+            with (
+                mock.patch.object(
+                    asr,
+                    "validate_outbound_url",
+                    return_value=SimpleNamespace(
+                        hostname="example.test",
+                        port=443,
+                        resolved_addresses=("203.0.113.10", "2001:db8::10"),
+                    ),
+                ),
+                mock.patch.object(asr.shutil, "which", return_value="/usr/bin/curl"),
+                mock.patch.object(asr, "run_command", side_effect=fake_run),
+            ):
+                asr._call_asr_endpoint(
+                    "https://example.test/asr",
+                    "secret",
+                    {"model": "fun-asr-flash-2026-06-15"},
+                    role_dir,
+                )
+
+            self.assertEqual(len(calls), 1)
+            command = calls[0]
+            self.assertEqual(command[command.index("--noproxy") + 1], "*")
+            resolve_values = [
+                command[index + 1]
+                for index, value in enumerate(command)
+                if value == "--resolve"
+            ]
+            self.assertEqual(
+                resolve_values,
+                ["example.test:443:203.0.113.10,[2001:db8::10]"],
+            )
+
+    def test_online_asr_retries_common_curl_connect_failures(self) -> None:
+        for diagnostic in (
+            "curl: (7) Failed to connect to host port 443",
+            "curl: (7) Couldn't connect to server",
+            "curl: (7) Could not connect to server",
+        ):
+            with self.subTest(diagnostic=diagnostic):
+                self.assertTrue(asr._retryable_asr_error(None, diagnostic))
 
     def test_online_asr_persists_and_strictly_replays_provider_artifact(self) -> None:
         response = {

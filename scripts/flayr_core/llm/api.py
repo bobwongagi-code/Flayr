@@ -41,6 +41,15 @@ LLM_CURL_MAX_TIME_SECONDS = 1800
 LLM_CURL_LOW_SPEED_LIMIT_BYTES_PER_SECOND = 1
 LLM_CURL_LOW_SPEED_TIME_SECONDS = 180
 LLM_CURL_RETRIES = 2
+LLM_OUTPUT_EXPANSIONS = 2
+LLM_FINALIZATION_RESERVE_SECONDS = 30
+LLM_COMMAND_WRAPPER_GRACE_SECONDS = 5
+LLM_COMMAND_CLEANUP_GRACE_SECONDS = 4
+LLM_RUN_OVERHEAD_RESERVE_SECONDS = (
+    LLM_FINALIZATION_RESERVE_SECONDS
+    + LLM_COMMAND_WRAPPER_GRACE_SECONDS
+    + LLM_COMMAND_CLEANUP_GRACE_SECONDS
+)
 LLM_MAX_OUTPUT_TOKENS = 65536
 LLM_GENERIC_MAX_OUTPUT_TOKENS = 32768
 VIDEO_DATA_URL_MAX_DURATION_SECONDS = 180.0
@@ -133,11 +142,15 @@ def reject_retired_model(model: str) -> None:
 
 def _curl_resolve_entries(validated: ValidatedOutboundURL) -> tuple[str, ...]:
     """Pin curl to the public addresses validated for the original hostname."""
-    entries = []
+    addresses = []
     for address in validated.resolved_addresses:
         curl_address = f"[{address}]" if ":" in address else address
-        entries.append(f"{validated.hostname}:{validated.port}:{curl_address}")
-    return tuple(entries)
+        addresses.append(curl_address)
+    if not addresses:
+        return ()
+    # Repeating --resolve for one host replaces the previous address in curl.
+    # A comma-separated address set preserves every validated failover target.
+    return (f"{validated.hostname}:{validated.port}:{','.join(addresses)}",)
 
 
 def _write_request_json(path: Path, payload: dict[str, Any]) -> None:
@@ -330,6 +343,7 @@ def call_llm_api(
     max_time_seconds: int = LLM_CURL_MAX_TIME_SECONDS,
     low_speed_time_seconds: int = LLM_CURL_LOW_SPEED_TIME_SECONDS,
     retries: int = LLM_CURL_RETRIES,
+    output_expansions: int = LLM_OUTPUT_EXPANSIONS,
     budget: Any = None,
     call_kind: str = "llm",
     request_id: str | None = None,
@@ -399,6 +413,10 @@ def call_llm_api(
             int(finite_nonnegative(low_speed_time_seconds, "LLM low-speed timeout", maximum=LLM_CURL_MAX_TIME_SECONDS)),
         )
         retries = max(0, int(finite_nonnegative(retries, "LLM retries", maximum=10)))
+        output_expansions = max(
+            0,
+            int(finite_nonnegative(output_expansions, "LLM output expansions", maximum=10)),
+        )
     except ValueError as exc:
         raise SystemExit(f"invalid LLM resource limit: {exc}") from exc
     cleanup_stale_temp_entries(
@@ -425,6 +443,8 @@ def call_llm_api(
                 "logical_request_id": logical_request_id,
                 "transport_attempts": 0,
                 "transport_retry_reasons": list(transport_retry_reasons),
+                "transport_attempt_timeouts_seconds": [],
+                "request_retry_kinds": [],
             }
         )
     # The request body is sensitive media, so keep it in a short-lived, known
@@ -439,6 +459,11 @@ def call_llm_api(
             "-sS",
             "--http1.1",
             "--no-buffer",
+            # A proxy would resolve/connect to the target independently and
+            # bypass the public IP set validated above. Provider transport is
+            # intentionally direct and pinned with --resolve.
+            "--noproxy",
+            "*",
             "--proto",
             "=https",
             "--proto-redir",
@@ -474,9 +499,28 @@ def call_llm_api(
 
         last_error = ""
         retry_reason = str(initial_retry_reason or "")[:200]
-        for attempt in range(retries + 1):
-            if response_meta is not None:
-                response_meta["transport_attempts"] = attempt + 1
+        attempt = 0
+        transport_retries_used = 0
+        output_expansions_used = 0
+        while True:
+            attempt += 1
+            attempt_max_time_seconds = max_time_seconds
+            if active_budget is not None:
+                remaining = active_budget.remaining_wall_seconds()
+                available = int(
+                    remaining
+                    - LLM_RUN_OVERHEAD_RESERVE_SECONDS
+                )
+                if available <= 0:
+                    last_error = (
+                        "insufficient wall time for another LLM transport attempt "
+                        f"while preserving {LLM_FINALIZATION_RESERVE_SECONDS}s for deterministic finalization"
+                    )
+                    transport_retry_reasons.append(last_error)
+                    break
+                attempt_max_time_seconds = min(attempt_max_time_seconds, available)
+            attempt_command = list(curl_command)
+            attempt_command[attempt_command.index("--max-time") + 1] = str(attempt_max_time_seconds)
             current_request_size = req_path.stat().st_size
             if current_request_size > request_limit:
                 raise SystemExit(
@@ -488,20 +532,29 @@ def call_llm_api(
                         current_request_size,
                         kind=call_kind,
                         request_id=logical_request_id,
-                        attempt=attempt + 1,
+                        attempt=attempt,
                         retry_reason=retry_reason,
                     )
                 except ResourceBudgetExceeded as exc:
                     raise SystemExit(str(exc)) from exc
-            attempt_sse_path = temp_root / f"attempt-{attempt + 1}.sse"
+            if response_meta is not None:
+                response_meta["transport_attempts"] = attempt
+                response_meta["transport_timeout_seconds"] = attempt_max_time_seconds
+                response_meta["transport_attempt_timeouts_seconds"].append(attempt_max_time_seconds)
+            attempt_sse_path = temp_root / f"attempt-{attempt}.sse"
             parser = IncrementalSSEParser(max_total_bytes=request_limit)
+            retry_kind = "transport"
             with attempt_sse_path.open("wb") as response_file:
                 def consume_response(chunk: bytes) -> None:
                     response_file.write(chunk)
                     parser.feed(chunk)
 
                 completed = run_command(
-                    curl_command,
+                    attempt_command,
+                    # Let curl own its deadline and emit the HTTP-status marker.
+                    # The command wrapper previously killed a configured 1800s
+                    # request at its unrelated 900s default.
+                    timeout_seconds=attempt_max_time_seconds + LLM_COMMAND_WRAPPER_GRACE_SECONDS,
                     budget=active_budget,
                     # stdout 是响应流，stderr 还包含 curl 诊断和 HTTP 状态标记；给诊断保留独立余量。
                     max_output_bytes=request_limit + LLM_TRANSPORT_DIAGNOSTIC_BYTES,
@@ -544,18 +597,12 @@ def call_llm_api(
             else:
                 if response_size > request_limit:
                     last_error = "LLM response exceeded the single-request byte limit"
-                    transport_retry_reasons.append(last_error)
-                    retry_reason = last_error
-                    continue
-                content, usage, complete, finish_reason, parse_error = parser.result()
+                    content, usage, complete, finish_reason, parse_error = "", None, False, None, None
+                else:
+                    content, usage, complete, finish_reason, parse_error = parser.result()
                 if parse_error:
                     last_error = f"SSE parse failed: {parse_error}"
-                    transport_retry_reasons.append(last_error[:200])
-                    retry_reason = last_error
-                    if attempt >= retries:
-                        break
-                    continue
-                if complete and content and finish_reason != "length":
+                elif complete and content and finish_reason != "length":
                     if response_meta is not None:
                         response_meta.update(
                             {
@@ -572,13 +619,38 @@ def call_llm_api(
                         finish_reason or "stop",
                         cleanup_raw=cleanup_raw,
                     )
-                if finish_reason == "length":
+                elif finish_reason == "length":
                     # length 是服务端主动截断，不是可修复的残缺 JSON。先提高同一请求的输出预算再重发。
                     old_budget, new_budget = increase_output_budget(payload)
                     budget_field = output_budget_field(payload)
                     if new_budget > old_budget:
-                        _write_request_json(req_path, payload)
-                        last_error = f"输出被 {budget_field}={old_budget} 截断，已提高至 {new_budget} 后重试"
+                        if output_expansions_used < output_expansions:
+                            output_expansions_used += 1
+                            retry_kind = "output_expansion"
+                            _write_request_json(req_path, payload)
+                            last_error = (
+                                f"输出被 {budget_field}={old_budget} 截断，"
+                                f"已提高至 {new_budget} 后重试"
+                            )
+                        elif content:
+                            if response_meta is not None:
+                                response_meta.update(
+                                    {
+                                        "transport_status": "completed",
+                                        "transport_retry_reasons": list(transport_retry_reasons),
+                                        "finish_reason": "length",
+                                        "usage": usage or {},
+                                    }
+                                )
+                            return _write_completion_response(
+                                raw_path,
+                                content,
+                                usage,
+                                "length",
+                                cleanup_raw=cleanup_raw,
+                            )
+                        else:
+                            break
                     else:
                         last_error = f"输出在 {budget_field}={old_budget} 仍被截断"
                         # The cap is already reached. Returning the partial
@@ -608,14 +680,29 @@ def call_llm_api(
                     last_error = "流式响应不完整（连接在 [DONE] 前中断）" if content else "流式响应无内容"
             retry_reason = last_error
             transport_retry_reasons.append(last_error[:200])
-            if attempt >= retries:
-                break
-            sleep_seconds = float(5 * (attempt + 1))
+            if retry_kind == "transport":
+                if transport_retries_used >= retries:
+                    break
+                transport_retries_used += 1
+            sleep_seconds = 0.0
+            if retry_kind == "transport":
+                sleep_seconds = float(5 * transport_retries_used)
             if active_budget is not None:
-                sleep_seconds = min(sleep_seconds, active_budget.remaining_wall_seconds())
-            if sleep_seconds <= 0:
-                break
-            time.sleep(sleep_seconds)
+                retry_window = max(
+                    0.0,
+                    active_budget.remaining_wall_seconds()
+                    - LLM_RUN_OVERHEAD_RESERVE_SECONDS,
+                )
+                if retry_window <= 0:
+                    break
+                if retry_kind == "transport":
+                    sleep_seconds = min(sleep_seconds, retry_window)
+            if response_meta is not None:
+                response_meta["request_retry_kinds"].append(retry_kind)
+            if retry_kind == "transport":
+                if sleep_seconds <= 0:
+                    break
+                time.sleep(sleep_seconds)
         if response_meta is not None:
             response_meta.update(
                 {
@@ -677,6 +764,7 @@ def is_retryable_error(error_text: str, *, http_status: int | None = None) -> bo
         marker in lowered
         for marker in (
             "timed out", "timeout", "connection reset", "recv failure", "empty reply",
+            "failed to connect", "couldn't connect to server", "could not connect to server",
             "transfer closed with outstanding read data", "curl: (18)",
             "framing layer", "http/2", "429", "too many requests",
             "500", "502", "503", "504", "internal_server_error", "backend",

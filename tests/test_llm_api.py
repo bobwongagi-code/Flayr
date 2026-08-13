@@ -33,6 +33,7 @@ from flayr_core.llm.pipeline import (  # noqa: E402
     _deterministic_product_visibility,
     run_video_fact_extraction,
 )
+from flayr_core.resources import ResourceBudget, ResourceLimits  # noqa: E402
 from flayr_core.llm.parse import (  # noqa: E402
     adapt_misnested_analysis_result,
     normalize_attention_competitors,
@@ -63,6 +64,259 @@ class LlmApiContractTests(unittest.TestCase):
                 reject_retired_model(model)
 
         reject_retired_model("qwen3-vl-plus")
+
+    def test_llm_transport_preserves_finalization_reserve(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            raw_path = root / "response.json"
+            payload_path.write_text('{"model":"qwen3-vl-plus","messages":[]}', encoding="utf-8")
+            budget = mock.Mock()
+            budget.limits.max_single_request_bytes = 1024 * 1024
+            budget.remaining_wall_seconds.return_value = 20.0
+            response_meta: dict[str, object] = {}
+
+            with (
+                mock.patch("flayr_core.llm.api.validate_outbound_url", return_value=mock.Mock(
+                    hostname="example.test", port=443, resolved_addresses=("203.0.113.10",)
+                )),
+                mock.patch("flayr_core.llm.api.run_command") as run,
+                self.assertRaisesRegex(SystemExit, "preserving 30s for deterministic finalization"),
+            ):
+                call_llm_api(
+                    "https://example.test/v1/chat/completions",
+                    "secret",
+                    payload_path,
+                    raw_path,
+                    budget=budget,
+                    response_meta=response_meta,
+                )
+
+            run.assert_not_called()
+            budget.reserve_api_call.assert_not_called()
+            self.assertEqual(response_meta["transport_attempts"], 0)
+            self.assertEqual(response_meta["transport_status"], "failed")
+
+    def test_llm_transport_clamps_curl_and_wrapper_before_finalization_reserve(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            raw_path = root / "response.json"
+            payload_path.write_text('{"model":"qwen3-vl-plus","messages":[]}', encoding="utf-8")
+            budget = mock.Mock()
+            budget.limits.max_single_request_bytes = 1024 * 1024
+            budget.remaining_wall_seconds.return_value = 100.0
+            calls: list[tuple[list[str], dict[str, object]]] = []
+
+            def fake_run(command: list[str], **kwargs: object) -> mock.Mock:
+                calls.append((command, kwargs))
+                callback = kwargs["stdout_callback"]
+                assert callable(callback)
+                callback(
+                    b'data: {"choices":[{"delta":{"content":"{}"},"finish_reason":"stop"}]}\n\n'
+                    b'data: [DONE]\n\n'
+                )
+                return mock.Mock(returncode=0, stderr="__FLAYR_HTTP_STATUS__200\n", stdout="")
+
+            with (
+                mock.patch("flayr_core.llm.api.validate_outbound_url", return_value=mock.Mock(
+                    hostname="example.test", port=443, resolved_addresses=("203.0.113.10",)
+                )),
+                mock.patch("flayr_core.llm.api.run_command", side_effect=fake_run),
+            ):
+                call_llm_api(
+                    "https://example.test/v1/chat/completions",
+                    "secret",
+                    payload_path,
+                    raw_path,
+                    budget=budget,
+                )
+
+            self.assertEqual(len(calls), 1)
+            command, options = calls[0]
+            self.assertEqual(command[command.index("--max-time") + 1], "61")
+            self.assertEqual(options["timeout_seconds"], 66)
+            budget.reserve_api_call.assert_called_once()
+            budget.reserve_download.assert_called_once()
+
+    def test_llm_transport_retry_accounts_each_actual_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            raw_path = root / "response.json"
+            payload_path.write_text('{"model":"qwen3-vl-plus","messages":[]}', encoding="utf-8")
+            budget = ResourceBudget(ResourceLimits(max_total_wall_time=120.0))
+            calls = 0
+
+            def fake_run(_command: list[str], **kwargs: object) -> mock.Mock:
+                nonlocal calls
+                calls += 1
+                callback = kwargs["stdout_callback"]
+                assert callable(callback)
+                if calls == 1:
+                    callback(b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n')
+                else:
+                    callback(
+                        b'data: {"choices":[{"delta":{"content":"{}"},"finish_reason":"stop"}]}\n\n'
+                        b'data: [DONE]\n\n'
+                    )
+                return mock.Mock(returncode=0, stderr="__FLAYR_HTTP_STATUS__200\n", stdout="")
+
+            with (
+                mock.patch("flayr_core.llm.api.validate_outbound_url", return_value=mock.Mock(
+                    hostname="example.test", port=443, resolved_addresses=("203.0.113.10",)
+                )),
+                mock.patch("flayr_core.llm.api.run_command", side_effect=fake_run),
+                mock.patch("flayr_core.llm.api.time.sleep"),
+            ):
+                call_llm_api(
+                    "https://example.test/v1/chat/completions",
+                    "secret",
+                    payload_path,
+                    raw_path,
+                    retries=1,
+                    budget=budget,
+                )
+
+            self.assertEqual(calls, 2)
+            self.assertEqual(budget.llm_calls, 2)
+            self.assertEqual(len(budget.api_events), 2)
+            self.assertEqual([event["attempt"] for event in budget.api_events], [1, 2])
+            self.assertEqual(len({event["request_id"] for event in budget.api_events}), 1)
+            self.assertEqual(
+                budget.total_uploaded_bytes,
+                sum(event["request_bytes"] for event in budget.api_events),
+            )
+
+    def test_transport_retry_does_not_consume_output_expansion_allowance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            raw_path = root / "response.json"
+            payload_path.write_text('{"model":"qwen3-vl-plus","messages":[]}', encoding="utf-8")
+            calls = 0
+            response_meta: dict[str, object] = {}
+
+            def fake_run(_command: list[str], **kwargs: object) -> mock.Mock:
+                nonlocal calls
+                calls += 1
+                callback = kwargs["stdout_callback"]
+                assert callable(callback)
+                if calls == 1:
+                    return mock.Mock(returncode=28, stderr="curl: (28) timed out", stdout="")
+                if calls in {2, 3}:
+                    callback(
+                        b'data: {"choices":[{"delta":{"content":"partial"},'
+                        b'"finish_reason":"length"}]}\n\n'
+                        b'data: [DONE]\n\n'
+                    )
+                else:
+                    callback(
+                        b'data: {"choices":[{"delta":{"content":"{}"},"finish_reason":"stop"}]}\n\n'
+                        b'data: [DONE]\n\n'
+                    )
+                return mock.Mock(returncode=0, stderr="__FLAYR_HTTP_STATUS__200\n", stdout="")
+
+            with (
+                mock.patch("flayr_core.llm.api.validate_outbound_url", return_value=mock.Mock(
+                    hostname="example.test", port=443, resolved_addresses=("203.0.113.10",)
+                )),
+                mock.patch("flayr_core.llm.api.run_command", side_effect=fake_run),
+                mock.patch("flayr_core.llm.api.time.sleep"),
+            ):
+                raw = call_llm_api(
+                    "https://example.test/v1/chat/completions",
+                    "secret",
+                    payload_path,
+                    raw_path,
+                    retries=1,
+                    output_expansions=2,
+                    response_meta=response_meta,
+                )
+
+            self.assertEqual(calls, 4)
+            self.assertIn('"finish_reason": "stop"', raw)
+            self.assertEqual(
+                response_meta["request_retry_kinds"],
+                ["transport", "output_expansion", "output_expansion"],
+            )
+
+    def test_common_curl_connect_failures_are_retryable(self) -> None:
+        self.assertTrue(is_retryable_error("curl: (7) Failed to connect to host port 443"))
+        self.assertTrue(is_retryable_error("curl: (7) Couldn't connect to server"))
+        self.assertTrue(is_retryable_error("curl: (7) Could not connect to server"))
+
+    def test_no_retry_records_no_retry_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            raw_path = root / "response.json"
+            payload_path.write_text('{"model":"qwen3-vl-plus","messages":[]}', encoding="utf-8")
+            response_meta: dict[str, object] = {}
+
+            def fake_run(_command: list[str], **kwargs: object) -> mock.Mock:
+                kwargs["stdout_callback"](
+                    b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+                )
+                return mock.Mock(returncode=0, stderr="__FLAYR_HTTP_STATUS__200\n", stdout="")
+
+            with (
+                mock.patch("flayr_core.llm.api.validate_outbound_url", return_value=mock.Mock(
+                    hostname="example.test", port=443, resolved_addresses=("203.0.113.10",)
+                )),
+                mock.patch("flayr_core.llm.api.run_command", side_effect=fake_run),
+                self.assertRaisesRegex(SystemExit, "流式响应不完整"),
+            ):
+                call_llm_api(
+                    "https://example.test/v1/chat/completions",
+                    "secret",
+                    payload_path,
+                    raw_path,
+                    retries=0,
+                    output_expansions=0,
+                    response_meta=response_meta,
+                )
+            self.assertEqual(response_meta["transport_attempts"], 1)
+            self.assertEqual(response_meta["request_retry_kinds"], [])
+
+    def test_budget_blocked_retry_records_no_retry_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            raw_path = root / "response.json"
+            payload_path.write_text('{"model":"qwen3-vl-plus","messages":[]}', encoding="utf-8")
+            budget = mock.Mock()
+            budget.limits.max_single_request_bytes = 1024 * 1024
+            budget.remaining_wall_seconds.side_effect = [100.0, 30.0]
+            response_meta: dict[str, object] = {}
+
+            def fake_run(_command: list[str], **kwargs: object) -> mock.Mock:
+                kwargs["stdout_callback"](
+                    b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+                )
+                return mock.Mock(returncode=0, stderr="__FLAYR_HTTP_STATUS__200\n", stdout="")
+
+            with (
+                mock.patch("flayr_core.llm.api.validate_outbound_url", return_value=mock.Mock(
+                    hostname="example.test", port=443, resolved_addresses=("203.0.113.10",)
+                )),
+                mock.patch("flayr_core.llm.api.run_command", side_effect=fake_run) as run,
+                mock.patch("flayr_core.llm.api.time.sleep") as sleep,
+                self.assertRaisesRegex(SystemExit, "流式响应不完整"),
+            ):
+                call_llm_api(
+                    "https://example.test/v1/chat/completions",
+                    "secret",
+                    payload_path,
+                    raw_path,
+                    retries=1,
+                    output_expansions=0,
+                    budget=budget,
+                    response_meta=response_meta,
+                )
+            self.assertEqual(run.call_count, 1)
+            sleep.assert_not_called()
+            self.assertEqual(response_meta["request_retry_kinds"], [])
 
     def test_stage1_resume_falls_back_to_provider_when_a_artifact_is_missing(self) -> None:
         args = Namespace(
@@ -125,6 +379,8 @@ class LlmApiContractTests(unittest.TestCase):
             ):
                 result = run_video_fact_extraction(args, analysis, run_dir, "secret")
             fetch.assert_called_once()
+            self.assertEqual(fetch.call_args.kwargs["request_max_time_seconds"], 300)
+            self.assertEqual(fetch.call_args.kwargs["request_retries"], 1)
             self.assertIn("creator", result)
             artifact = json.loads(
                 (run_dir / "stage1_provider_creator_A.json").read_text(encoding="utf-8")

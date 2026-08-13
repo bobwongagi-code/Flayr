@@ -881,6 +881,8 @@ class CompactEvalContractTests(unittest.TestCase):
                 self.assertEqual(kwargs["retries"], 0)
                 self.assertEqual(kwargs["call_kind"], "compact_eval")
                 self.assertFalse(kwargs["cleanup_raw"])
+                self.assertEqual(kwargs["budget"].limits.max_total_wall_time, 639.0)
+                self.assertEqual(kwargs["output_expansions"], 0)
                 kwargs["response_meta"].update(
                     {
                         "logical_request_id": "compact-fake-1",

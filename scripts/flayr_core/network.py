@@ -79,10 +79,14 @@ def validate_outbound_url(
     """
     try:
         parsed = urlsplit(str(url or ""))
-        hostname = (parsed.hostname or "").lower().rstrip(".")
         port = parsed.port
     except ValueError as exc:
         raise OutboundURLPolicyError("API URL 格式无效") from exc
+
+    raw_hostname = (parsed.hostname or "").lower()
+    if raw_hostname.endswith("."):
+        raise OutboundURLPolicyError("API 域名不得使用尾点形式")
+    hostname = raw_hostname
 
     allowed = {str(host).lower().rstrip(".") for host in allowed_hosts}
     if parsed.scheme.lower() != "https":

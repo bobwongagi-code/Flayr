@@ -61,6 +61,18 @@ class ResourceBudgetTests(unittest.TestCase):
         self.assertEqual(event["request_bytes"], 8)
         self.assertEqual(event["estimated_cost"], 0.25)
 
+    def test_rejected_api_reservation_is_atomic(self) -> None:
+        budget = ResourceBudget(ResourceLimits(max_llm_calls=2, max_cost_estimate=0.15))
+        budget.reserve_api_call(8, estimated_cost=0.1, request_id="request-1", attempt=1)
+        before = budget.snapshot()["used"]
+        with self.assertRaisesRegex(ResourceBudgetExceeded, "cost estimate budget exceeded"):
+            budget.reserve_api_call(8, estimated_cost=0.1, request_id="request-1", attempt=2)
+        after = budget.snapshot()["used"]
+        self.assertEqual(after["llm_calls"], before["llm_calls"])
+        self.assertEqual(after["total_uploaded_bytes"], before["total_uploaded_bytes"])
+        self.assertEqual(after["cost_estimate"], before["cost_estimate"])
+        self.assertEqual(after["api_events"], before["api_events"])
+
     def test_stale_temp_cleanup_removes_only_known_old_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

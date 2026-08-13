@@ -210,22 +210,37 @@ class ResourceBudget:
                 f"total upload budget exceeded: {self.total_uploaded_bytes + request_bytes} > "
                 f"{self.limits.max_total_uploaded_bytes}"
             )
+        next_ocr_calls = self.ocr_calls
+        next_llm_calls = self.llm_calls
         if kind == "ocr":
-            if self.ocr_calls + 1 > self.limits.max_ocr_calls:
+            next_ocr_calls += 1
+            if next_ocr_calls > self.limits.max_ocr_calls:
                 raise ResourceBudgetExceeded(
-                    f"OCR call budget exceeded: {self.ocr_calls + 1} > {self.limits.max_ocr_calls}"
+                    f"OCR call budget exceeded: {next_ocr_calls} > {self.limits.max_ocr_calls}"
                 )
-            self.ocr_calls += 1
         else:
-            if self.llm_calls + 1 > self.limits.max_llm_calls:
+            next_llm_calls += 1
+            if next_llm_calls > self.limits.max_llm_calls:
                 raise ResourceBudgetExceeded(
-                    f"LLM call budget exceeded: {self.llm_calls + 1} > {self.limits.max_llm_calls}"
+                    f"LLM call budget exceeded: {next_llm_calls} > {self.limits.max_llm_calls}"
                 )
-            self.llm_calls += 1
-        self.total_uploaded_bytes += request_bytes
-        cost = estimated_cost if estimated_cost is not None else (0.01 if kind == "ocr" else 0.10)
-        self.reserve_cost(cost)
+        cost = finite_nonnegative(
+            estimated_cost if estimated_cost is not None else (0.01 if kind == "ocr" else 0.10),
+            "cost estimate",
+        )
+        next_cost = self.cost_estimate + cost
+        if next_cost > self.limits.max_cost_estimate + 1e-9:
+            raise ResourceBudgetExceeded(
+                f"cost estimate budget exceeded: {next_cost:.4f} > "
+                f"{self.limits.max_cost_estimate:.4f}"
+            )
         self.check_wall_time()
+        # Commit the reservation only after every limit has passed so a
+        # rejected retry cannot leave counters and the event ledger divergent.
+        self.ocr_calls = next_ocr_calls
+        self.llm_calls = next_llm_calls
+        self.total_uploaded_bytes += request_bytes
+        self.cost_estimate = next_cost
         self.api_events.append(
             {
                 "request_id": str(request_id or ""),

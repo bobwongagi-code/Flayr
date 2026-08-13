@@ -289,6 +289,8 @@ def _call_asr_endpoint(
             "curl",
             "-sS",
             "--http1.1",
+            "--noproxy",
+            "*",
             "--proto",
             "=https",
             "--proto-redir",
@@ -316,17 +318,9 @@ def _call_asr_endpoint(
             "%{stderr}__FLAYR_HTTP_STATUS__%{http_code}\\n",
             api_url,
         ]
-        command[1:1] = [
-            item
-            for entry in resolve_entries
-            for item in ("--resolve", entry)
-        ]
+        command[1:1] = [item for entry in resolve_entries for item in ("--resolve", entry)]
         last_error = ""
         for attempt in range(ASR_RETRIES + 1):
-            if isinstance(response_meta, dict):
-                response_meta["completion_attempts"] = attempt + 1
-                if last_error:
-                    response_meta["retry_reasons"].append(last_error[:200])
             if active_budget is not None:
                 active_budget.reserve_api_call(
                     request_size,
@@ -335,6 +329,10 @@ def _call_asr_endpoint(
                     attempt=attempt + 1,
                     retry_reason=last_error,
                 )
+            if isinstance(response_meta, dict):
+                response_meta["completion_attempts"] = attempt + 1
+                if last_error:
+                    response_meta["retry_reasons"].append(last_error[:200])
             completed = run_command(
                 command,
                 timeout_seconds=ASR_REQUEST_TIMEOUT_SECONDS,
@@ -367,11 +365,13 @@ def _call_asr_endpoint(
 
 
 def _curl_resolve_entries(hostname: str, port: int, addresses: tuple[str, ...]) -> tuple[str, ...]:
-    entries = []
+    resolved = []
     for address in addresses:
         curl_address = f"[{address}]" if ":" in address else address
-        entries.append(f"{hostname}:{port}:{curl_address}")
-    return tuple(entries)
+        resolved.append(curl_address)
+    if not resolved:
+        return ()
+    return (f"{hostname}:{port}:{','.join(resolved)}",)
 
 
 def _parse_http_status(stderr: str) -> int | None:
@@ -389,7 +389,19 @@ def _retryable_asr_error(status: int | None, message: str) -> bool:
     if status is not None:
         return status in {408, 425, 429} or 500 <= status <= 599
     lowered = message.lower()
-    return any(marker in lowered for marker in ("timeout", "timed out", "connection reset", "empty reply", "tls"))
+    return any(
+        marker in lowered
+        for marker in (
+            "timeout",
+            "timed out",
+            "connection reset",
+            "empty reply",
+            "failed to connect",
+            "couldn't connect",
+            "could not connect",
+            "tls",
+        )
+    )
 
 
 def normalize_asr_response(data: dict[str, Any]) -> dict[str, Any]:

@@ -269,6 +269,7 @@ def ocr_frame_with_retry(
                             max_time_seconds=OCR_REQUEST_MAX_TIME_SECONDS,
                             low_speed_time_seconds=OCR_REQUEST_LOW_SPEED_TIME_SECONDS,
                             retries=0,
+                            output_expansions=0,
                             budget=budget,
                             call_kind="ocr",
                             request_id=f"ocr-{index:03d}-{attempt + 1}",

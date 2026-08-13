@@ -27,7 +27,14 @@ from ..report_metadata import current_code_commit
 from ..stage_catalog import DEFAULT_STAGES
 from ..utils import write_bytes, write_json
 from ..video import probe_duration_seconds
-from .api import call_llm_api, extract_chat_completion_text, image_to_data_url, read_llm_api_key, video_to_data_url
+from .api import (
+    LLM_RUN_OVERHEAD_RESERVE_SECONDS,
+    call_llm_api,
+    extract_chat_completion_text,
+    image_to_data_url,
+    read_llm_api_key,
+    video_to_data_url,
+)
 from .provider_artifacts import provider_call_with_artifact
 from .parse import parse_json_text
 
@@ -2709,7 +2716,10 @@ def _run_isolated_evaluation(
         write_json(output_dir / failure_filename, failure)
         return failure
     limits = ResourceLimits(
-        max_total_wall_time=min(max(float(request_timeout_seconds) + 30.0, 60.0), 1800.0),
+        max_total_wall_time=max(
+            float(request_timeout_seconds) + LLM_RUN_OVERHEAD_RESERVE_SECONDS,
+            60.0,
+        ),
         max_llm_calls=1,
         max_total_uploaded_bytes=64 * 1024 * 1024,
         max_download_bytes=32 * 1024 * 1024,
@@ -2742,6 +2752,7 @@ def _run_isolated_evaluation(
                         max_time_seconds=request_timeout_seconds,
                         low_speed_time_seconds=min(180, max(30, request_timeout_seconds)),
                         retries=0,
+                        output_expansions=0,
                         budget=budget,
                         call_kind=call_kind,
                         cleanup_raw=False,
