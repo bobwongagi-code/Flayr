@@ -887,6 +887,9 @@ def video_to_data_url(
                 "-vf", f"fps={fps},scale={max_width}:-2",
                 "-c:v", "libx264", "-crf", "28", "-preset", "veryfast",
                 "-c:a", "aac", "-b:a", "64k",
+                # Multithreaded AAC output can differ byte-for-byte for the
+                # same tail window, which invalidates strict replay identity.
+                "-threads", "1",
                 "-movflags", "+faststart",
                 "-fs", str(max_data_bytes),
                 tmp_path,

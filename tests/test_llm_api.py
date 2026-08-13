@@ -26,6 +26,7 @@ from flayr_core.llm.api import (  # noqa: E402
     provider_capabilities,
     reject_retired_model,
     strip_curl_http_status,
+    video_to_data_url,
 )
 from flayr_core.llm.media import build_evidence_sensory_inputs  # noqa: E402
 from flayr_core.llm.payload import build_video_fact_payload  # noqa: E402
@@ -58,6 +59,33 @@ from flayr_core.llm.stage_fact_artifacts import StageFactArtifactError  # noqa: 
 
 
 class LlmApiContractTests(unittest.TestCase):
+    def test_video_transcode_is_single_threaded_for_replay_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.mp4"
+            source.write_bytes(b"source")
+            commands: list[list[str]] = []
+
+            def fake_run(command: list[str], **_kwargs: object) -> mock.Mock:
+                commands.append(command)
+                Path(command[-1]).write_bytes(b"encoded")
+                return mock.Mock(returncode=0)
+
+            with (
+                mock.patch("flayr_core.llm.api.shutil.which", return_value="/usr/bin/ffmpeg"),
+                mock.patch("flayr_core.llm.api.probe_media_duration_seconds", return_value=60.0),
+                mock.patch("flayr_core.llm.api.run_command", side_effect=fake_run),
+                mock.patch(
+                    "flayr_core.llm.api.encode_file_data_url",
+                    return_value="data:video/mp4;base64,ZW5jb2RlZA==",
+                ),
+            ):
+                result = video_to_data_url(source, start=48.6, duration=10.5)
+
+            self.assertTrue(result)
+            self.assertEqual(len(commands), 1)
+            command = commands[0]
+            self.assertEqual(command[command.index("-threads") + 1], "1")
+
     def test_retired_vl_flash_models_are_rejected(self) -> None:
         for model in ("qwen3-vl-flash", "qwen3-vl-flash-2026-01-01"):
             with self.subTest(model=model), self.assertRaisesRegex(SystemExit, "model has been retired"):
