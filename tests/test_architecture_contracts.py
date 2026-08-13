@@ -6394,6 +6394,8 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn('"id": "C7"', text)
         self.assertIn("beg kuning", text)
         self.assertIn("S6 尾段 CTA 定向复核", text)
+        self.assertIn("补齐了会改变 CTA 解释的完整上下文", text)
+        self.assertIn("必须追加一条补充候选观察", text)
         self.assertNotIn("当前 Stage1 明确把 S6 判为 absent", text)
 
     def test_stage1_recovery_does_not_tail_review_closed_s6(self) -> None:

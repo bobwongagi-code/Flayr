@@ -1064,6 +1064,8 @@ def build_video_fact_recovery_payload(
         "不要因为出现关键词就直接写成 CTA 结论，必须原样记录完整语句、说话对象、画面路径和真实时间。\n"
         "马来/东南亚电商口语可能用 beg kuning、bakul kuning、yellow bag/cart，或 tekan、klik、tap、beli、order、checkout、link 等表达；"
         "这些只是检索线索，不是自动等价规则。若观察中可能包含购买行动或路径，只追加一条保留原句和上下文的候选观察；"
+        "如果窗口安全 Fun-ASR 补齐了会改变 CTA 解释的完整上下文，即使它与已有 evidence unit 时间重叠，也必须追加一条补充候选观察；"
+        "这不属于重复事实。只有语义和上下文都已被已有 evidence unit 完整保留时，才不得重复追加。"
         "不得在本层输出 explicit_action、purchase_path、present、absent 或 coverage，最终语义由 Stage1-D 复核。"
     ) if (
         "S6" in target_set
