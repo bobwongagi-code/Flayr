@@ -27,6 +27,7 @@ from flayr_core.llm.pipeline import (
     _materialize_stage_recovery_audit,
     _maybe_recover_video_facts,
     _normalize_segmented_stage,
+    payload_has_direct_audio,
     _reproject_segmented_stage_results,
     _authoritative_segmented_comparison_contract,
     _build_stage1_to_stage2_handoff,
@@ -1217,6 +1218,31 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(result["stage1_recovery"]["effective_patch"]["candidate_units_added"], 0)
         self.assertGreaterEqual(result["stage1_recovery"]["elapsed_seconds"], 0)
 
+    def test_video_payload_does_not_imply_direct_audio_for_vl_model(self) -> None:
+        payload = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "video_url",
+                            "video_url": {"url": "data:video/mp4;base64,video"},
+                        }
+                    ],
+                }
+            ]
+        }
+        self.assertFalse(
+            payload_has_direct_audio(
+                payload,
+                api_url=(
+                    "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/"
+                    "compatible-mode/v1/chat/completions"
+                ),
+                model="qwen3-vl-plus",
+            )
+        )
+
     def test_focused_recovery_sanitizes_unsupported_audio_before_coverage_audit(self) -> None:
         facts = self._active_side("C", "present")
         facts["stage1_acquisition"]["channels"]["audio"] = {
@@ -1270,8 +1296,12 @@ class StageEvidenceContractTests(unittest.TestCase):
             (),
             {
                 "llm_dry_run": False,
-                "llm_model": "test-model",
-                "llm_api_url": "https://example.invalid/api",
+                "llm_model": "qwen3-vl-plus",
+                "vision_model": "qwen3-vl-plus",
+                "llm_api_url": (
+                    "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/"
+                    "compatible-mode/v1/chat/completions"
+                ),
                 "_resource_budget": None,
             },
         )()
@@ -1290,7 +1320,19 @@ class StageEvidenceContractTests(unittest.TestCase):
 
             with patch(
                 "flayr_core.llm.pipeline.build_video_fact_recovery_payload",
-                return_value={"messages": []},
+                return_value={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "video_url",
+                                    "video_url": {"url": "data:video/mp4;base64,video"},
+                                }
+                            ],
+                        }
+                    ]
+                },
             ), patch(
                 "flayr_core.llm.pipeline.fetch_json_completion",
                 side_effect=provider_call,

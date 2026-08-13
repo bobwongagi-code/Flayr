@@ -3527,6 +3527,18 @@ def payload_has_audio(payload: dict[str, Any]) -> bool:
     return False
 
 
+def payload_has_direct_audio(
+    payload: dict[str, Any],
+    *,
+    api_url: str,
+    model: str,
+) -> bool:
+    """Return whether this provider can perceive audio in the exact request."""
+    if not can_analyze_native_audio(api_url, model):
+        return False
+    return payload_has_video(payload) or payload_has_audio(payload)
+
+
 def _payload_size_bytes(payload: dict[str, Any]) -> int:
     """Count the serialized request without materializing a second media copy."""
     total = 0
@@ -4686,7 +4698,11 @@ def run_video_fact_extraction(
             raise
         fact_result = normalize_video_fact_result(role, parsed_response, analysis)
         fact_result["evidence_budget_exceeded"] = response_meta.get("finish_reason") == "length"
-        stage1_a_direct_audio = payload_has_video(payload) or payload_has_audio(payload)
+        stage1_a_direct_audio = payload_has_direct_audio(
+            payload,
+            api_url=args.llm_api_url,
+            model=vision_model(args),
+        )
         sanitize_audio_observations(
             {"video_understanding": {role: fact_result}, "stage_analysis": []},
             stage1_a_direct_audio,
@@ -4728,7 +4744,10 @@ def run_video_fact_extraction(
         )
         recovery_meta = fact_result.get("stage1_recovery") if isinstance(fact_result.get("stage1_recovery"), dict) else {}
         recovery_media_mode = str(recovery_meta.get("media_mode") or "")
-        recovery_direct_audio = recovery_media_mode in {"focused_native_video", "focused_audio"}
+        recovery_direct_audio = (
+            recovery_media_mode in {"focused_native_video", "focused_audio"}
+            and can_analyze_native_audio(args.llm_api_url, vision_model(args))
+        )
         sanitize_audio_observations(
             {"video_understanding": {role: fact_result}, "stage_analysis": []},
             stage1_a_direct_audio or recovery_direct_audio,
@@ -5497,7 +5516,11 @@ def _maybe_recover_video_facts(
         return failed
 
     recovery_for_merge = copy.deepcopy(recovery)
-    recovery_direct_audio = payload_has_video(payload) or payload_has_audio(payload)
+    recovery_direct_audio = payload_has_direct_audio(
+        payload,
+        api_url=args.llm_api_url,
+        model=vision_model(args),
+    )
     sanitize_audio_observations(
         {
             "video_understanding": {

@@ -582,6 +582,11 @@ def build_video_fact_payload(
             "functions 只能作为原子事实的功能标签，不能替代 Stage1-B 资格。"
             "每个 evidence_unit 必须填写 fact_quality 的六个观察轴：subject、visibility、composition、completion、proof、causal_link。"
             "这些字段只描述这条事实看得是否清楚、是否是直接对比/结果/主张以及是否有因果连接，不是阶段资格或 severity；"
+            "字段职责必须分开：completion 只记录关键动作过程是否完整可见（complete=关键动作从开始到结束可见，partial=只见部分动作，none=没有可见动作过程）；"
+            "proof 只记录结果证明形态（direct_comparison=画面直接呈现对照/控制与差异，result_only=只看到结果但没看到产品如何造成结果，"
+            "claim_only=只有口播或字幕声称且没有可见结果，none=没有结果证明）；"
+            "causal_link 只记录动作与结果的可见连接（supported=连续画面足以归因，weak=有剪切或间接连接，unsupported=结果/主张无法归因到动作）。"
+            "看到完整使用动作不等于 direct_comparison；看到结果也不等于 causal_link=supported；口播声称不得写成 result_only 或 direct_comparison。"
             "无法判断时填 uncertain 或 not_applicable，不要省略该对象。"
             "Stage1 输出严格禁止 severity、model_severity、gap、comparison、commercial_priority、recommendations、improvements、stage_analysis 和 stage_evidence_links；"
             "stage1_acquisition、stage1_qualification、evidence_set_* 和 stage1_recovery 是代码拥有的采集/冻结元数据，模型不得输出或覆盖；"
@@ -1053,7 +1058,11 @@ def build_video_fact_recovery_payload(
                     "只有实际来源、报告、认证、用户原话或过程信息才可作为合格背书依据。",
                     "若候选观察的 functions 含 S6_cta，必须检查其完整口播、字幕、画面和时间范围；"
                     "不能把它静默丢掉后仍返回 S6 absent/unknown，除非在 reason 中说明独立核查为何不成立。",
-                    "每个新 candidate_evidence_unit 必须填写 fact_quality 的六个观察轴；无法判断时填 uncertain 或 not_applicable。",
+                    "每个新 candidate_evidence_unit 必须填写 fact_quality 的六个观察轴；"
+                    "completion 只记录关键动作过程是否完整可见，proof 只记录结果证明形态，causal_link 只记录动作与结果的可见连接。"
+                    "direct_comparison 必须有画面直接对照/控制与差异；result_only 是只见结果、不见产品如何造成结果；"
+                    "claim_only 是只有口播或字幕声称、没有可见结果；完整使用动作本身不等于 direct_comparison，"
+                    "结果存在也不等于 causal_link=supported。无法判断时填 uncertain 或 not_applicable。",
                     recovery_audio_rule,
                     s6_tail_review_block,
                     "## 已锁定事实摘要（只读）",

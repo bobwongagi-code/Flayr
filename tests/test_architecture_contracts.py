@@ -5506,6 +5506,9 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn("Stage1-A 原子事实合同", primary_text)
         self.assertIn("fact_quality", primary_text)
         self.assertIn("causal_link", primary_text)
+        self.assertIn("completion 只记录关键动作过程是否完整可见", primary_text)
+        self.assertIn("result_only=只看到结果但没看到产品如何造成结果", primary_text)
+        self.assertIn("口播声称不得写成 result_only 或 direct_comparison", primary_text)
         self.assertNotIn('"stage_evidence_checks": [', primary_text)
         self.assertNotIn('"structure_event_checks": [', primary_text)
 
@@ -5688,6 +5691,9 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn('"stage": "S4"', text)
         self.assertIn('"result_difference"', text)
         self.assertIn('"effect_attribution"', text)
+        self.assertIn("completion 只记录关键动作过程是否完整可见", text)
+        self.assertIn("result_only 是只见结果、不见产品如何造成结果", text)
+        self.assertIn("完整使用动作本身不等于 direct_comparison", text)
         self.assertNotIn('"stop_trigger"', text)
         self.assertNotIn('"product_identity"', text)
 
