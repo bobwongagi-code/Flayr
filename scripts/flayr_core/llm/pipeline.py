@@ -5496,10 +5496,23 @@ def _maybe_recover_video_facts(
         failed["stage1_recovery"] = failure_meta
         return failed
 
+    recovery_for_merge = copy.deepcopy(recovery)
+    recovery_direct_audio = payload_has_video(payload) or payload_has_audio(payload)
+    sanitize_audio_observations(
+        {
+            "video_understanding": {
+                role: {
+                    "evidence_units": recovery_for_merge.get("candidate_evidence_units") or [],
+                }
+            },
+            "stage_analysis": [],
+        },
+        recovery_direct_audio,
+    )
     merged = _merge_video_fact_recovery(
         role,
         facts,
-        recovery,
+        recovery_for_merge,
         analysis,
         targets,
         budget_exceeded=response_meta.get("finish_reason") == "length",

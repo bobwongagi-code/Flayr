@@ -1217,6 +1217,115 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(result["stage1_recovery"]["effective_patch"]["candidate_units_added"], 0)
         self.assertGreaterEqual(result["stage1_recovery"]["elapsed_seconds"], 0)
 
+    def test_focused_recovery_sanitizes_unsupported_audio_before_coverage_audit(self) -> None:
+        facts = self._active_side("C", "present")
+        facts["stage1_acquisition"]["channels"]["audio"] = {
+            "status": "unavailable",
+            "coverage": "none",
+            "count": 0,
+        }
+        facts["stage_evidence_checks"] = [
+            {
+                "stage": stage,
+                "status": "absent" if stage == "S5" else "present",
+                "coverage": "partial" if stage == "S1" else "complete",
+                "evidence_ids": [] if stage == "S5" else [f"C{index}"],
+                "observed_signals": []
+                if stage == "S5"
+                else list(stage_evidence_contract(stage).required_signals),
+                "missing_signals": list(stage_evidence_contract(stage).required_signals)
+                if stage == "S5"
+                else [],
+                "signal_bindings": {}
+                if stage == "S5"
+                else self._signal_bindings(stage, f"C{index}"),
+            }
+            for index, stage in enumerate(stage_codes(), start=1)
+        ]
+        recovery_response = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "candidate_evidence_units": [
+                {
+                    "id": "RECOVERY_S1",
+                    "time_range": "0.0s - 1.0s",
+                    "evidence_strength": "direct",
+                    "visual_fact": "开场画面直接展示清洁痛点。",
+                    "audio_fact": "模型臆造的语气和音效判断。",
+                }
+            ],
+            "stage_evidence_checks": [
+                {
+                    "stage": "S1",
+                    "status": "present",
+                    "coverage": "complete",
+                    "evidence_ids": ["RECOVERY_S1"],
+                    "observed_signals": list(stage_evidence_contract("S1").required_signals),
+                    "missing_signals": [],
+                    "signal_bindings": self._signal_bindings("S1", "RECOVERY_S1"),
+                }
+            ],
+        }
+        args = type(
+            "Args",
+            (),
+            {
+                "llm_dry_run": False,
+                "llm_model": "test-model",
+                "llm_api_url": "https://example.invalid/api",
+                "_resource_budget": None,
+            },
+        )()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir)
+            def provider_call(*_args, **kwargs):
+                kwargs["response_meta"].update(
+                    {
+                        "logical_request_id": "stage1-recovery-audio-sanitization",
+                        "transport_attempts": 1,
+                        "transport_retry_reasons": [],
+                        "usage": {},
+                    }
+                )
+                return json.dumps(recovery_response)
+
+            with patch(
+                "flayr_core.llm.pipeline.build_video_fact_recovery_payload",
+                return_value={"messages": []},
+            ), patch(
+                "flayr_core.llm.pipeline.fetch_json_completion",
+                side_effect=provider_call,
+            ):
+                result = _maybe_recover_video_facts(
+                    args,
+                    self._analysis(),
+                    run_dir,
+                    "secret",
+                    "creator",
+                    facts,
+                )
+            provider_artifact = json.loads(
+                next(run_dir.glob("stage1_provider_creator_C_*.json")).read_text()
+            )
+
+        s1_audit = result["stage1_coverage_audit"]["stages"]["S1"]
+        self.assertGreater(
+            len(result["evidence_units"]),
+            6,
+            result.get("stage1_recovery"),
+        )
+        recovered_unit = next(
+            unit for unit in result["evidence_units"] if unit["id"] not in {f"C{i}" for i in range(1, 7)}
+        )
+        self.assertIn("未直接感知音轨", recovered_unit["audio_fact"])
+        self.assertEqual(
+            provider_artifact["provider_response"]["candidate_evidence_units"][0]["audio_fact"],
+            "模型臆造的语气和音效判断。",
+        )
+        self.assertEqual(s1_audit["status"], "found")
+        self.assertEqual(s1_audit["coverage"], "complete")
+        self.assertEqual(result["stage1_recovery"]["status"], "focused_recovery")
+        self.assertEqual(stage1_coverage_audit_issues(result, "S1"), [])
+
     def test_recovery_windows_use_canonical_stage_codes_and_merge_adjacent_stages(self) -> None:
         analysis = {
             "videos": {
