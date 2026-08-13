@@ -392,6 +392,60 @@ class BitterLessonContractTests(unittest.TestCase):
                 )
             self.assertEqual(artifact_path.read_bytes(), source_before)
 
+    def test_auxiliary_provider_resume_reuses_matching_artifact_and_falls_back_live(self) -> None:
+        payload = {"messages": [{"role": "user", "content": "fixture"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_path = root / "provider_comparison_eligibility.json"
+            calls = {"count": 0}
+
+            def live_call() -> tuple[dict[str, object], dict[str, object]]:
+                calls["count"] += 1
+                return {"result": calls["count"]}, _provider_meta(f"request-{calls['count']}")
+
+            response, _, _ = provider_call_with_artifact(
+                artifact_path=artifact_path,
+                replay_root=None,
+                call_kind="comparison_eligibility",
+                payload=payload,
+                model="test-model",
+                api_url="https://example.test/v1",
+                call=live_call,
+                response_meta={},
+            )
+            self.assertEqual(calls["count"], 1)
+
+            resumed, metadata, source = provider_call_with_artifact(
+                artifact_path=artifact_path,
+                replay_root=None,
+                resume_root=root,
+                call_kind="comparison_eligibility",
+                payload=payload,
+                model="test-model",
+                api_url="https://example.test/v1",
+                call=lambda: (_ for _ in ()).throw(AssertionError("resume called provider")),
+                response_meta={},
+            )
+            self.assertEqual(resumed, response)
+            self.assertEqual(source, "technical_resume")
+            self.assertEqual(metadata["execution_source"], "technical_resume")
+            self.assertEqual(calls["count"], 1)
+
+            changed, _, source = provider_call_with_artifact(
+                artifact_path=artifact_path,
+                replay_root=None,
+                resume_root=root,
+                call_kind="comparison_eligibility",
+                payload={"changed": True},
+                model="test-model",
+                api_url="https://example.test/v1",
+                call=live_call,
+                response_meta={},
+            )
+            self.assertEqual(changed, {"result": 2})
+            self.assertEqual(source, "live")
+            self.assertEqual(calls["count"], 2)
+
     def test_failed_provider_artifact_keeps_failure_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             metadata = {"logical_request_id": "req-1", "completion_attempts": 2}

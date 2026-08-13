@@ -6192,6 +6192,31 @@ class ArchitectureContractTests(unittest.TestCase):
                     "",
                 )
 
+    def test_comparison_eligibility_does_not_hide_strict_stage2_replay_failure(self) -> None:
+        args = SimpleNamespace(
+            llm_model="test-model",
+            llm_api_url="https://example.invalid/v1",
+            provider_replay_from=None,
+            stage2_replay_from=Path("/strict-stage2-replay"),
+            stage2_resume_from=None,
+            comparison_scope_override=None,
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            pipeline,
+            "provider_call_with_artifact",
+            side_effect=ProviderReplayError("provider replay request identity mismatch"),
+        ):
+            with self.assertRaisesRegex(
+                ProviderReplayError,
+                "request identity mismatch",
+            ):
+                pipeline.establish_comparison_eligibility(
+                    args,
+                    {"benchmark": {}, "creator": {}},
+                    Path(tmp),
+                    "",
+                )
+
     def test_comparison_eligibility_payload_is_stable_across_stage_set_order(self) -> None:
         side = {
             "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,

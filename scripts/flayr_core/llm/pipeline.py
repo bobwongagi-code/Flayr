@@ -235,7 +235,10 @@ def _localized_failure_kind(
 def _is_strict_replay_failure(args: argparse.Namespace, exc: BaseException) -> bool:
     """Return whether a replay-integrity failure must escape a degradable lane."""
     if isinstance(exc, ProviderReplayError):
-        return getattr(args, "provider_replay_from", None) is not None
+        return any(
+            getattr(args, name, None) is not None
+            for name in ("provider_replay_from", "stage2_replay_from")
+        )
     if isinstance(exc, StageFactArtifactError):
         return getattr(args, "stage1_replay_from", None) is not None
     if isinstance(exc, StageGroupArtifactError):
@@ -4419,7 +4422,11 @@ def establish_comparison_eligibility(
     try:
         response, response_meta, execution_source = provider_call_with_artifact(
             artifact_path=run_dir / "provider_comparison_eligibility.json",
-            replay_root=getattr(args, "provider_replay_from", None),
+            replay_root=(
+                getattr(args, "provider_replay_from", None)
+                or getattr(args, "stage2_replay_from", None)
+            ),
+            resume_root=getattr(args, "stage2_resume_from", None),
             call_kind="comparison_eligibility",
             payload=payload,
             model=judgment_model(args),

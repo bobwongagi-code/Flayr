@@ -276,40 +276,47 @@ _S3_S4_RELATIONSHIPS = {
 _PROMISE_BREAK_POINTS = {"S2", "S3", "S4", "none", "unknown"}
 
 
+def _normalize_stage_type(value: Any, prefix: str, allowed: set[str]) -> str:
+    """Normalize one selected module type without treating a range as a choice."""
+    text = str(value or "").strip().upper()
+    for marker in (f"{prefix}-", f"{prefix}_"):
+        if text.startswith(marker):
+            text = text[len(marker) :].strip()
+            break
+    if re.match(r"^[A-Z]\s*(?:[-~—–/|]|至|到|TO|OR)\s*[A-Z]", text):
+        return "unknown"
+    if text in allowed:
+        return text
+    match = re.match(r"^([A-Z])(?:\s+|[:：（(])", text)
+    if match and match.group(1) in allowed:
+        return match.group(1)
+    return "unknown"
+
+
 def normalize_hook_type(value: Any) -> str:
     """归一 S1 钩子类型到单字母 A-G（结构库 S1-A~G），无法识别→unknown。
     容忍 'B' / 'S1-B' / 's1_b' / 'S1-B：反差震惊型' 等写法。"""
-    s = str(value or "").strip().upper().replace("S1-", "").replace("S1_", "")
-    s = s[:1]  # 取首字母，容忍 'B：反差震惊型' 这类带后缀写法
-    return s if s in _HOOK_TYPE_LETTERS else "unknown"
+    return _normalize_stage_type(value, "S1", _HOOK_TYPE_LETTERS)
 
 
 def normalize_s2_type(value: Any) -> str:
     """归一 S2 产品引出类型到 A-D（结构库 S2-A~D），无法识别→unknown。"""
-    s = str(value or "").strip().upper().replace("S2-", "").replace("S2_", "")
-    s = s[:1]
-    return s if s in _S2_TYPE_LETTERS else "unknown"
+    return _normalize_stage_type(value, "S2", _S2_TYPE_LETTERS)
 
 
 def normalize_s3_type(value: Any) -> str:
     """归一 S3 使用过程类型到 A-E（结构库 S3-A~E），无法识别→unknown。"""
-    s = str(value or "").strip().upper().replace("S3-", "").replace("S3_", "")
-    s = s[:1]
-    return s if s in _S3_TYPE_LETTERS else "unknown"
+    return _normalize_stage_type(value, "S3", _S3_TYPE_LETTERS)
 
 
 def normalize_s5_type(value: Any) -> str:
     """归一 S5 信任放大类型到 A-E（结构库 S5-A~E），无法识别→unknown。"""
-    s = str(value or "").strip().upper().replace("S5-", "").replace("S5_", "")
-    s = s[:1]
-    return s if s in _S5_TYPE_LETTERS else "unknown"
+    return _normalize_stage_type(value, "S5", _S5_TYPE_LETTERS)
 
 
 def normalize_s6_type(value: Any) -> str:
     """归一 S6 CTA 类型到 A-E（结构库 S6-A~E），无法识别→unknown。"""
-    s = str(value or "").strip().upper().replace("S6-", "").replace("S6_", "")
-    s = s[:1]
-    return s if s in _S6_TYPE_LETTERS else "unknown"
+    return _normalize_stage_type(value, "S6", _S6_TYPE_LETTERS)
 
 
 def normalize_s3_scene_mode(value: Any) -> str:
@@ -509,7 +516,10 @@ def normalize_s3_flags(value: Any) -> dict[str, Any] | None:
 
     def mode_flag(key: str, applicable: bool | None) -> bool | None:
         if applicable is None:
-            return None
+            # An unknown mode must not erase an explicit model observation.
+            # This keeps the uncertainty in the mode field while preserving
+            # the independently supplied boolean for validation and audit.
+            return normalize_demo_flag(value.get(key))
         if not applicable:
             return False
         return normalize_demo_flag(value.get(key))

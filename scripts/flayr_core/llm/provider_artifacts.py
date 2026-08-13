@@ -257,6 +257,7 @@ def provider_call_with_artifact(
     *,
     artifact_path: Path,
     replay_root: Path | None,
+    resume_root: Path | None = None,
     call_kind: str,
     payload: Any,
     model: str,
@@ -268,8 +269,42 @@ def provider_call_with_artifact(
 
     ``replay_root`` is intentionally strict. Missing or mismatched artifacts
     fail instead of silently falling back to a new provider request.
+    ``resume_root`` reuses an identity-matched completed artifact and falls
+    back to the supplied live call only when no reusable result exists.
     """
     initialize_provider_response_meta(response_meta)
+    if replay_root is not None and resume_root is not None:
+        raise ProviderArtifactError("provider replay and resume are mutually exclusive")
+    if resume_root is not None:
+        resume_source_path = (Path(resume_root) / artifact_path.name).expanduser().resolve()
+        try:
+            source = read_provider_artifact(resume_source_path)
+            response, metadata = reusable_provider_response(
+                source,
+                call_kind=call_kind,
+                payload=payload,
+                model=model,
+                api_url=api_url,
+            )
+        except (Exception, SystemExit):
+            pass
+        else:
+            resumed = completed_provider_artifact(
+                call_kind=call_kind,
+                payload=payload,
+                response=response,
+                model=model,
+                api_url=api_url,
+                response_meta=metadata,
+                execution_source="technical_resume",
+            )
+            write_provider_artifact(artifact_path, resumed)
+            metadata = validated_provider_response_meta(
+                metadata,
+                completed=True,
+                execution_source="technical_resume",
+            )
+            return response, metadata, "technical_resume"
     if replay_root is not None:
         replay_source_path = (replay_root / artifact_path.name).expanduser().resolve()
         output_path = artifact_path.expanduser().resolve()

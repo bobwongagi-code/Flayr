@@ -43,10 +43,15 @@ from flayr_core.llm.parse import (  # noqa: E402
     normalize_evidence,
     normalize_fact_evidence_checklist,
     normalize_hook_flags,
+    normalize_hook_type,
     normalize_loop_closure,
     normalize_presentation_overlays,
     normalize_product_coverage,
     normalize_ratio,
+    normalize_s3_flags,
+    normalize_s3_type,
+    normalize_s5_type,
+    normalize_s6_type,
     normalize_selling_point_observations,
     normalize_stage_evidence_contract_version,
     normalize_support_status,
@@ -59,6 +64,29 @@ from flayr_core.llm.stage_fact_artifacts import StageFactArtifactError  # noqa: 
 
 
 class LlmApiContractTests(unittest.TestCase):
+    def test_stage_type_ranges_are_not_silently_coerced_to_module_a(self) -> None:
+        self.assertEqual(normalize_hook_type("A-G"), "unknown")
+        self.assertEqual(normalize_s3_type("A-E"), "unknown")
+        self.assertEqual(normalize_s3_type("A - E"), "unknown")
+        self.assertEqual(normalize_s3_type("A 至 E"), "unknown")
+        self.assertEqual(normalize_s3_type("A|B"), "unknown")
+        self.assertEqual(normalize_s5_type("A-E|unknown"), "unknown")
+        self.assertEqual(normalize_s6_type("A-E"), "unknown")
+        self.assertEqual(normalize_s3_type("S3-B：多场景使用"), "B")
+
+    def test_unknown_overlay_does_not_erase_explicit_s3_mode_flags(self) -> None:
+        normalized = normalize_s3_flags(
+            {
+                "scene_mode": "single_scene",
+                "presentation_overlays": ["黄色字幕"],
+                "steps_clear_met": True,
+                "pov_immersive_met": False,
+            }
+        )
+        self.assertEqual(normalized["presentation_overlays"], ["unknown"])
+        self.assertTrue(normalized["steps_clear_met"])
+        self.assertFalse(normalized["pov_immersive_met"])
+
     def test_video_transcode_is_single_threaded_for_replay_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "source.mp4"
