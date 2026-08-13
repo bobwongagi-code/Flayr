@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Sequence
 
+from .run_manifest import SUCCESS_MANIFEST_NAME, validate_success_manifest
+
 
 VERIFICATION_ORDER = (
     "fixture",
@@ -17,7 +19,7 @@ VERIFICATION_ORDER = (
     "boundary_sample",
 )
 PRODUCTION_STAGE = "production"
-MARKER_SCHEMA_VERSION = 3
+MARKER_SCHEMA_VERSION = 4
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -77,6 +79,10 @@ def _source_proof(repo_root: Path) -> tuple[str, str]:
         digest.update(encoded)
         digest.update(bytes.fromhex(_sha256_file(path)))
     return commit, digest.hexdigest()
+
+
+def _source_commit_short(repo_root: Path) -> str:
+    return _git(repo_root, "rev-parse", "--short", "HEAD").decode("ascii").strip().lower()
 
 
 def _read_marker(path: Path) -> dict[str, Any]:
@@ -142,6 +148,23 @@ def _verify_marker(
             raise VerificationOrderError(f"verification prerequisite {stage} evidence is missing")
         if item.get("sha256") != _sha256_file(evidence_path):
             raise VerificationOrderError(f"verification prerequisite {stage} evidence was tampered")
+    if stage in {"ordinary_sample", "boundary_sample"}:
+        completed_run = proof.get("completed_run")
+        if not isinstance(completed_run, dict):
+            raise VerificationOrderError(f"verification prerequisite {stage} has no completed run proof")
+        run_dir = Path(str(completed_run.get("path") or "")).expanduser().resolve()
+        manifest_path = run_dir / SUCCESS_MANIFEST_NAME
+        if (
+            not validate_success_manifest(
+                run_dir,
+                expected_provenance={"code_commit": _source_commit_short(repo_root)},
+            )
+            or not manifest_path.is_file()
+            or completed_run.get("success_manifest_sha256") != _sha256_file(manifest_path)
+        ):
+            raise VerificationOrderError(
+                f"verification prerequisite {stage} completed run is invalid or stale"
+            )
     return _sha256_file(marker_path)
 
 
@@ -171,17 +194,36 @@ def run_verification_stage(
     *,
     command: Sequence[str],
     evidence_paths: Sequence[Path],
+    completed_run_dir: Path | None = None,
     repo_root: Path = REPOSITORY_ROOT,
     cwd: Path | None = None,
 ) -> Path:
     """Execute one verifier and mint a marker only from its changed evidence."""
+    repo_root = repo_root.expanduser().resolve()
     normalized = str(stage or "").strip().lower()
     if normalized not in VERIFICATION_ORDER:
         raise VerificationOrderError(f"unknown verification stage: {stage}")
     if not command or not all(isinstance(item, str) and item for item in command):
         raise VerificationOrderError("verification command must be a non-empty string sequence")
+    requires_completed_run = normalized in {"ordinary_sample", "boundary_sample"}
+    if requires_completed_run and completed_run_dir is None:
+        raise VerificationOrderError(
+            f"verification stage {normalized} requires --run-dir for semantic completion proof"
+        )
+    completed_manifest_before: str | None = None
+    completed_manifest_path: Path | None = None
+    if completed_run_dir is not None:
+        completed_run_path = completed_run_dir.expanduser().resolve()
+        try:
+            completed_run_path.relative_to(repo_root)
+        except ValueError:
+            pass
+        else:
+            raise VerificationOrderError("completed verification run must be outside the source repository")
+        completed_manifest_path = completed_run_path / SUCCESS_MANIFEST_NAME
+        if completed_manifest_path.is_file():
+            completed_manifest_before = _sha256_file(completed_manifest_path)
     root = root.expanduser().resolve()
-    repo_root = repo_root.expanduser().resolve()
     try:
         root.relative_to(repo_root)
     except ValueError:
@@ -231,6 +273,31 @@ def run_verification_stage(
             f"verification stage {normalized} failed with exit code {completed.returncode}"
         )
 
+    completed_run_proof: dict[str, str] | None = None
+    if requires_completed_run:
+        assert completed_run_dir is not None
+        run_dir = completed_run_dir.expanduser().resolve()
+        manifest_path = run_dir / SUCCESS_MANIFEST_NAME
+        if (
+            not validate_success_manifest(
+                run_dir,
+                expected_provenance={"code_commit": _source_commit_short(repo_root)},
+            )
+            or not manifest_path.is_file()
+        ):
+            raise VerificationOrderError(
+                f"verification stage {normalized} command exited successfully but run is not completed"
+            )
+        manifest_sha256 = _sha256_file(manifest_path)
+        if manifest_sha256 == completed_manifest_before:
+            raise VerificationOrderError(
+                f"verification stage {normalized} completed run was not produced by this command"
+            )
+        completed_run_proof = {
+            "path": str(run_dir),
+            "success_manifest_sha256": manifest_sha256,
+        }
+
     evidence_manifest: list[dict[str, str]] = []
     for path in evidence:
         if not path.is_file() or path.stat().st_size <= 0:
@@ -254,6 +321,8 @@ def run_verification_stage(
         "evidence": evidence_manifest,
         "predecessor_marker_sha256": predecessor_sha256,
     }
+    if completed_run_proof is not None:
+        proof_body["completed_run"] = completed_run_proof
     proof = {**proof_body, "proof_sha256": _canonical_sha256(proof_body)}
     marker = root / f"{normalized}.json"
     marker.write_text(

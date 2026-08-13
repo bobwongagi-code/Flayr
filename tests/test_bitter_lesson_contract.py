@@ -48,6 +48,15 @@ from flayr_core.verification_order import (  # noqa: E402
     assert_verification_order,
     run_verification_stage,
 )
+from flayr_core.run_manifest import write_success_manifest  # noqa: E402
+from flayr_core.run_state import (  # noqa: E402
+    ANALYSIS_COMPLETED,
+    COMPLETED,
+    PROCESSING,
+    REPORT_GENERATING,
+    initialize_run_state,
+    transition_run_state,
+)
 
 
 def _provider_meta(request_id: str = "fixture-request") -> dict[str, object]:
@@ -67,12 +76,59 @@ def _run_verifier(root: Path, stage: str, *, content: str = "passed") -> Path:
         "from pathlib import Path; "
         f"Path({str(evidence)!r}).write_text({content!r}, encoding='utf-8')",
     ]
+    completed_run_dir = None
+    if stage in {"ordinary_sample", "boundary_sample"}:
+        completed_run_dir = root / f"{stage}.run"
+        completed_run_dir.mkdir(parents=True, exist_ok=True)
+        command[-1] += (
+            "; "
+            f"Path({str(completed_run_dir / '_SUCCESS.json')!r}).write_text({content!r}, encoding='utf-8')"
+        )
     return run_verification_stage(
         root,
         stage,
         command=command,
         evidence_paths=[evidence],
+        completed_run_dir=completed_run_dir,
         repo_root=ROOT,
+    )
+
+
+def _write_completed_run(run_dir: Path, code_commit: str) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    initialize_run_state(run_dir)
+    for state in (PROCESSING, ANALYSIS_COMPLETED, REPORT_GENERATING, COMPLETED):
+        transition_run_state(run_dir, state)
+    (run_dir / "analysis.json").write_text(
+        json.dumps({"analysis_run_state": "completed", "mode": "analyze"}),
+        encoding="utf-8",
+    )
+    (run_dir / "report.html").write_text("<html></html>", encoding="utf-8")
+    for artifact in (
+        "raw_model_response.json",
+        "validated_normalized_result.json",
+        "postprocess_change_log.json",
+    ):
+        (run_dir / artifact).write_text("{}\n", encoding="utf-8")
+    (run_dir / "final_derived_result.json").write_text(
+        json.dumps(
+            {
+                "postprocess_provenance": {
+                    "field_sources": {
+                        "coverage": "complete",
+                        "unresolved_paths": [],
+                        "truncated": False,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    write_success_manifest(
+        run_dir,
+        {},
+        {"analysis_run_state": "completed", "mode": "analyze"},
+        {"code_commit": code_commit},
     )
 
 
@@ -425,14 +481,111 @@ class BitterLessonContractTests(unittest.TestCase):
             root = Path(directory)
             with self.assertRaises(VerificationOrderError):
                 assert_verification_order(root, "boundary_sample")
-            for stage in ("fixture", "offline_replay", "fake_provider", "ordinary_sample"):
-                _run_verifier(root, stage)
-            assert_verification_order(root, "boundary_sample")
-            (root / "ordinary_sample.evidence.txt").write_text("tampered", encoding="utf-8")
-            with self.assertRaises(VerificationOrderError):
+            with mock.patch(
+                "flayr_core.verification_order.validate_success_manifest",
+                return_value=True,
+            ):
+                for stage in ("fixture", "offline_replay", "fake_provider", "ordinary_sample"):
+                    _run_verifier(root, stage)
                 assert_verification_order(root, "boundary_sample")
-            _run_verifier(root, "ordinary_sample", content="passed-again")
-            assert_verification_order(root, "boundary_sample")
+                (root / "ordinary_sample.evidence.txt").write_text("tampered", encoding="utf-8")
+                with self.assertRaises(VerificationOrderError):
+                    assert_verification_order(root, "boundary_sample")
+                _run_verifier(root, "ordinary_sample", content="passed-again")
+                assert_verification_order(root, "boundary_sample")
+
+    def test_ordinary_marker_requires_semantically_completed_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for stage in ("fixture", "offline_replay", "fake_provider"):
+                _run_verifier(root, stage)
+            evidence = root / "ordinary.evidence.txt"
+            command = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; "
+                f"Path({str(evidence)!r}).write_text('process exited zero', encoding='utf-8')",
+            ]
+            with self.assertRaisesRegex(VerificationOrderError, "requires --run-dir"):
+                run_verification_stage(
+                    root,
+                    "ordinary_sample",
+                    command=command,
+                    evidence_paths=[evidence],
+                    repo_root=ROOT,
+                )
+            degraded_run = root / "degraded-run"
+            degraded_run.mkdir()
+            (degraded_run / "analysis.json").write_text(
+                json.dumps({"analysis_run_state": "degraded"}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(VerificationOrderError, "run is not completed"):
+                run_verification_stage(
+                    root,
+                    "ordinary_sample",
+                    command=command,
+                    evidence_paths=[evidence],
+                    completed_run_dir=degraded_run,
+                    repo_root=ROOT,
+                )
+
+    def test_ordinary_marker_rejects_unrelated_preexisting_completed_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for stage in ("fixture", "offline_replay", "fake_provider"):
+                _run_verifier(root, stage)
+            completed_run = root / "old-completed-run"
+            completed_run.mkdir()
+            (completed_run / "_SUCCESS.json").write_text("{}\n", encoding="utf-8")
+            evidence = root / "ordinary.evidence.txt"
+            with mock.patch(
+                "flayr_core.verification_order.validate_success_manifest",
+                return_value=True,
+            ), self.assertRaisesRegex(VerificationOrderError, "not produced by this command"):
+                run_verification_stage(
+                    root,
+                    "ordinary_sample",
+                    command=[
+                        sys.executable,
+                        "-c",
+                        "from pathlib import Path; "
+                        f"Path({str(evidence)!r}).write_text('unrelated command', encoding='utf-8')",
+                    ],
+                    evidence_paths=[evidence],
+                    completed_run_dir=completed_run,
+                    repo_root=ROOT,
+                )
+
+    def test_ordinary_marker_accepts_new_real_success_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for stage in ("fixture", "offline_replay", "fake_provider"):
+                _run_verifier(root, stage)
+            completed_run = root / "completed-run"
+            evidence = root / "ordinary.evidence.txt"
+            code_commit = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=ROOT,
+                text=True,
+            ).strip().lower()
+            marker = run_verification_stage(
+                root,
+                "ordinary_sample",
+                command=[
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; "
+                    "from tests.test_bitter_lesson_contract import _write_completed_run; "
+                    f"Path({str(evidence)!r}).write_text('semantic completion\\n', encoding='utf-8'); "
+                    f"_write_completed_run(Path({str(completed_run)!r}), {code_commit!r})",
+                ],
+                evidence_paths=[evidence],
+                completed_run_dir=completed_run,
+                repo_root=ROOT,
+            )
+            self.assertTrue(marker.is_file())
+            assert_verification_order(root, "boundary_sample", repo_root=ROOT)
 
     def test_verification_marker_is_stale_after_source_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

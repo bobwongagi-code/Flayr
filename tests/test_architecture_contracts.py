@@ -89,6 +89,7 @@ from flayr_core.llm.parse import (
 )
 from flayr_core.multimodal import channel_requirement_for, multimodal_execution
 from flayr_core.stage_evidence_contracts import (
+    STAGE1_OBSERVATION_CONTRACT_VERSION,
     STAGE1_QUALIFICATION_GROUPS,
     STAGE_EVIDENCE_CONTRACT_VERSION,
     stage_codes,
@@ -936,7 +937,7 @@ class ArchitectureContractTests(unittest.TestCase):
                 repo_root=ROOT,
             )
             value = json.loads(marker.read_text(encoding="utf-8"))
-            self.assertEqual(value["schema_version"], 3)
+            self.assertEqual(value["schema_version"], 4)
             self.assertEqual(value["stage"], "fixture")
             self.assertEqual(value["status"], "passed")
             self.assertNotEqual(value["proof"]["source_commit"], "0" * 40)
@@ -5977,6 +5978,11 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn("口播声称不得写成 result_only 或 direct_comparison", primary_text)
         self.assertNotIn('"stage_evidence_checks": [', primary_text)
         self.assertNotIn('"structure_event_checks": [', primary_text)
+        primary_contract = primary["messages"][1]["content"][0]["text"]
+        self.assertIn(
+            f'"stage_evidence_contract_version": {STAGE1_OBSERVATION_CONTRACT_VERSION}',
+            primary_contract,
+        )
 
         vl_primary = build_video_fact_payload(
             "qwen3-vl-plus",
@@ -6022,6 +6028,10 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn("Stage1 阶段资格投影", qualification_text)
         self.assertIn("fact_quality", qualification_text)
         self.assertIn('"stage_evidence_checks"', qualification_text)
+        self.assertIn(
+            f'"stage_evidence_contract_version": {STAGE_EVIDENCE_CONTRACT_VERSION}',
+            qualification_text,
+        )
         self.assertEqual(
             [item.get("type") for item in qualification["messages"][1]["content"] if isinstance(item, dict)],
             ["text"],

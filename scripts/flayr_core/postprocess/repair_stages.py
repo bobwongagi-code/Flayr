@@ -17,7 +17,6 @@ from ..artifacts import format_seconds, parse_time_range_seconds, parse_timestam
 from ..evidence_states import S1_HOOK_FLOOR_FIELDS, hard_fact_fingerprint
 from ..stage_catalog import stage_tuples
 from ..stage_evidence_contracts import (
-    S5_NON_QUALIFYING_DISQUALIFIERS,
     STAGE_EVIDENCE_CONTRACT_VERSION,
     materialize_stage_evidence_gates,
     qualified_stage_evidence_ids,
@@ -639,16 +638,6 @@ def _refresh_comparison_contract_views(contract: dict[str, Any]) -> dict[str, An
     return contract
 
 
-def _s5_has_non_qualifying_observation(side: dict[str, Any]) -> bool:
-    check = stage_evidence_check_map(side).get("S5") or {}
-    return bool(
-        S5_NON_QUALIFYING_DISQUALIFIERS.intersection(
-            str(item or "").strip()
-            for item in check.get("observed_disqualifiers") or []
-        )
-    )
-
-
 def _s5_bilateral_scope_state(
     understanding: dict[str, Any],
 ) -> tuple[dict[str, str], bool]:
@@ -666,10 +655,7 @@ def _s5_bilateral_scope_state(
         role: stage_evidence_readiness(side, "S5")
         for role, side in sides.items()
     }
-    closes_scope = (
-        all(value == "absent" for value in readiness.values())
-        and not any(_s5_has_non_qualifying_observation(side) for side in sides.values())
-    )
+    closes_scope = all(value == "absent" for value in readiness.values())
     return readiness, closes_scope
 
 
@@ -691,10 +677,9 @@ def _apply_fact_scoped_s5(result: dict[str, Any], contract: dict[str, Any]) -> d
         return contract
 
     readiness, both_closed_negative = _s5_bilateral_scope_state(understanding)
-    # Unsupported claims are not qualified S5 evidence, but they are still
-    # observed S5-related material. Keep the bilateral scope active so a
-    # product/category prior cannot erase a real creator/benchmark difference.
-    # Only an explicit bilateral Stage1 absence closes this optional slot.
+    # Unsupported claims remain auditable atomic facts, but they do not keep
+    # the optional trust-comparison slot active. Only qualified trust evidence
+    # can create an S5 difference; bilateral complete absence closes the slot.
     # ``not_applicable`` is a different scope/status vocabulary and must not
     # become an accidental product-category shortcut here.
     current_status = str(current.get("status") or "not_comparable").strip().lower()

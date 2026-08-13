@@ -24,6 +24,7 @@ from ..multimodal import multimodal_output_example, render_multimodal_prompt_con
 from ..shot_track import render_shot_track_markdown
 from ..speech_mode import speech_mode_prompt
 from ..stage_evidence_contracts import (
+    STAGE1_OBSERVATION_CONTRACT_VERSION,
     STAGE_EVIDENCE_CONTRACT_VERSION,
     STAGE1_QUALIFICATION_GROUPS,
     qualified_stage_evidence_ids,
@@ -712,7 +713,7 @@ def build_video_fact_payload(
                             "channels": ["visual|voiceover|subtitle"],
                         }
                     ],
-                    "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                    "stage_evidence_contract_version": STAGE1_OBSERVATION_CONTRACT_VERSION,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -884,7 +885,8 @@ def build_stage_evidence_qualification_payload(
         "当某条已锁定观察被标记为 S6_cta，或完整口播包含可能的本地电商行动/路径表达时，"
         "必须结合整句、销售语境和当地平台惯用表达核对语义，不能只按一个错误 token 的字面翻译否定。"
         "例如 beg/bakul kuning、yellow bag/cart 以及 klik/tekan/tap/beli/order/checkout/link/retail 等只作为检索线索，"
-        "不是自动命中规则；只有整句能同时支持面向观众的行动和可执行路径时才可判 present。"
+        "不是自动命中规则；只有整句至少能支持面向观众的行动或可执行购买路径时才可判 present，"
+        "是否有行动与路径双重支撑属于后续强弱判断。"
         "画面里存在实体袋子不能单独否定口播中的平台隐语；若近音修复仍有多个合理解释，保持 unknown 并在 reason 写明歧义。"
         if "S6" in normalized_targets
         else ""
@@ -1149,6 +1151,7 @@ def _stage_evidence_signal_codebook(stages: list[str] | tuple[str, ...] | None =
             {
                 "stage": contract.code,
                 "required_signals": list(contract.required_signals),
+                "required_signal_mode": contract.required_signal_mode,
                 "optional_signals": list(contract.optional_signals),
                 "allowed_signal_names": list(contract.allowed_signals),
                 "disqualifiers": list(contract.disqualifiers),

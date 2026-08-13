@@ -22,7 +22,11 @@ from .artifacts import (
 from .transcript import current_transcript_segments_path, current_transcript_words_path
 
 
-STAGE_EVIDENCE_CONTRACT_VERSION = 5
+STAGE_EVIDENCE_CONTRACT_VERSION = 6
+# Stage1-A only records atomic observations. Its provider contract did not
+# change when the downstream S5/S6 qualification semantics moved to v6, so
+# keep that request identity stable and re-project the saved observations.
+STAGE1_OBSERVATION_CONTRACT_VERSION = 5
 STAGE_EVIDENCE_SNAPSHOT_VERSION = 1
 STAGE_EVIDENCE_GATE_VERSION = 1
 STAGE1_ACQUISITION_VERSION = 4
@@ -203,17 +207,6 @@ STAGE_DISQUALIFIER_DEFINITIONS: dict[str, str] = {
     "benefit_only_without_action": "只回顾产品利益，没有面向观众的可执行行动",
 }
 
-# These are observed S5-related claims, but they are not an explicit negative
-# observation. Keeping them separate prevents an unsupported benchmark claim
-# from being silently converted into "both sides did not use S5".
-S5_NON_QUALIFYING_DISQUALIFIERS = frozenset(
-    {
-        "product_claim_only",
-        "offer_only",
-        "unattributed_social_claim",
-    }
-)
-
 # Every stage is tested against the same four boundary questions: own positive,
 # non-own negative, previous-stage confusion, and next-stage confusion.  This
 # is deliberately declarative so a new stage cannot be added without stating
@@ -250,7 +243,7 @@ STAGE_BOUNDARY_TESTS: dict[str, dict[str, str]] = {
         "next_stage_confusion": "价格、优惠或行动指令属于 S6，不构成来源可信度。",
     },
     "S6": {
-        "own_positive": "有明确面向观众的行动指令和可执行路径。",
+        "own_positive": "至少有明确面向观众的行动指令或可执行购买路径。",
         "not_own_negative": "只有推荐、好用或产品价值回顾，没有可执行行动。",
         "previous_stage_confusion": "信任来源属于 S5，不能替代购买行动。",
         "next_stage_confusion": "S6 没有后续功能阶段；不得把泛泛收尾当成 CTA。",
@@ -268,6 +261,7 @@ class StageEvidenceContract:
     non_substitutable_channels: tuple[str, ...]
     disqualifiers: tuple[str, ...]
     scan_instruction: str
+    required_signal_mode: str = "all"
 
     @property
     def allowed_signals(self) -> tuple[str, ...]:
@@ -278,6 +272,7 @@ class StageEvidenceContract:
             "stage": self.code,
             "label": self.label,
             "required_signals": list(self.required_signals),
+            "required_signal_mode": self.required_signal_mode,
             "optional_signals": list(self.optional_signals),
             "signal_definitions": {
                 signal: STAGE_SIGNAL_DEFINITIONS.get(signal, "只记录该信号的直接观察，不做强弱评价。")
@@ -354,7 +349,8 @@ STAGE_EVIDENCE_CONTRACTS: tuple[StageEvidenceContract, ...] = (
         "visual_or_voiceover",
         (),
         ("generic_praise_only", "benefit_only_without_action"),
-        "检查是否有面向观众的明确行动和可执行购买路径；只有推荐或产品价值回顾不算完整 CTA。",
+        "检查是否至少存在面向观众的行动指令或可执行购买路径；只有推荐或产品价值回顾不算 CTA。",
+        "any",
     ),
 )
 
@@ -368,6 +364,18 @@ def stage_codes() -> tuple[str, ...]:
 def stage_evidence_contract(stage: Any) -> StageEvidenceContract | None:
     code = str(stage or "").strip().upper()[:2]
     return _CONTRACT_BY_STAGE.get(code)
+
+
+def required_stage_signals_satisfied(
+    contract: StageEvidenceContract,
+    observed_signals: set[str] | list[str] | tuple[str, ...],
+) -> bool:
+    """Apply the canonical all-of/any-of requirement for one stage."""
+    observed = set(observed_signals)
+    required = set(contract.required_signals)
+    if contract.required_signal_mode == "any":
+        return bool(required.intersection(observed))
+    return required.issubset(observed)
 
 
 def stage_evidence_contract_prompt(stages: list[Any] | tuple[Any, ...] | set[Any] | None = None) -> str:
@@ -1609,6 +1617,22 @@ def normalize_stage_evidence_checks(value: Any, valid_ids: set[str]) -> list[dic
         raw_coverage = str(raw.get("coverage") or "").strip().lower()
         coverage = raw_coverage if raw_coverage in STAGE_EVIDENCE_COVERAGE_STATES else "unknown"
         status = normalize_stage_evidence_state(raw.get("status") or raw.get("state"))
+        if (
+            contract.code == "S5"
+            and status == "absent"
+            and coverage == "complete"
+            and observed_disqualifiers
+            and not required_stage_signals_satisfied(contract, observed)
+        ):
+            # A closed negative may retain disqualifier observations in the
+            # atomic ledger, but none of those facts qualifies as stage-owned
+            # positive evidence. Keep the audit vocabulary and project an empty
+            # stage index deterministically.
+            evidence_ids = []
+            observed = []
+            signal_bindings = {}
+            missing = list(contract.required_signals)
+            strength = "absent"
         by_stage[stage] = {
             "stage": stage,
             "status": status,
@@ -1944,13 +1968,23 @@ def _stage_check_issues(
         if not evidence_ids:
             issues.append(f"{contract.code}:present_without_evidence")
         missing_required = sorted(required - observed)
-        if missing_required:
+        if not required_stage_signals_satisfied(contract, observed):
             issues.append(f"{contract.code}:present_missing_required_signals:{','.join(missing_required)}")
         missing_bindings: list[str] = []
-        for signal in sorted(required):
-            binding = signal_bindings.get(signal)
-            if not isinstance(binding, dict) or binding.get("status") != "supported":
-                missing_bindings.append(signal)
+        if contract.required_signal_mode == "any":
+            supported_required = {
+                signal
+                for signal in required
+                if isinstance(signal_bindings.get(signal), dict)
+                and signal_bindings[signal].get("status") == "supported"
+            }
+            if not supported_required:
+                missing_bindings = sorted(required)
+        else:
+            for signal in sorted(required):
+                binding = signal_bindings.get(signal)
+                if not isinstance(binding, dict) or binding.get("status") != "supported":
+                    missing_bindings.append(signal)
         if missing_bindings:
             issues.append(
                 f"{contract.code}:present_missing_required_signal_bindings:{','.join(missing_bindings)}"
@@ -1989,11 +2023,6 @@ def _stage_check_issues(
         )
         if coverage != "complete" or evidence_ids or supported_bindings or not required.issubset(missing):
             issues.append(f"{contract.code}:absence_without_complete_coverage")
-        if (
-            contract.code == "S5"
-            and S5_NON_QUALIFYING_DISQUALIFIERS.intersection(observed_disqualifiers)
-        ):
-            issues.append("S5:absence_with_non_qualifying_observation")
     elif status == "not_applicable":
         if coverage != "complete" or evidence_ids or signal_bindings or not str(check.get("reason") or "").strip():
             issues.append(f"{contract.code}:not_applicable_without_explicit_basis")
@@ -2473,16 +2502,22 @@ def stage1_qualification_projection(
             })
             for signal in (contract.required_signals if contract else ())
         }
+        any_requirement_satisfied = bool(
+            contract
+            and contract.required_signal_mode == "any"
+            and required_stage_signals_satisfied(contract, check.get("observed_signals") or [])
+        )
         missing_requirements = [
             f"required_signal:{signal}"
             for signal in check.get("missing_signals") or []
-            if str(signal).strip()
+            if str(signal).strip() and not any_requirement_satisfied
         ]
-        missing_requirements.extend(
-            f"required_signal_binding:{signal}"
-            for signal, binding in required_bindings.items()
-            if not isinstance(binding, dict) or binding.get("status") != "supported"
-        )
+        if not any_requirement_satisfied:
+            missing_requirements.extend(
+                f"required_signal_binding:{signal}"
+                for signal, binding in required_bindings.items()
+                if not isinstance(binding, dict) or binding.get("status") != "supported"
+            )
         diagnostics = diagnostics_by_stage[stage]
         missing_requirements.extend(
             f"gate:{reason}"

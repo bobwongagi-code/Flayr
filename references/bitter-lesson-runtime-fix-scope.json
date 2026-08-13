@@ -19,6 +19,7 @@
       "references/stage-evidence-contract.md",
       "README.md",
       "SKILL.md",
+      "structure_library_full.md",
       "scripts/batch_analyze.py",
       "scripts/check_change_scope.py",
       "scripts/audit_result_field_ownership.py",

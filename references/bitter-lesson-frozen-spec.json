@@ -172,6 +172,6 @@
     "tests/test_bitter_lesson_contract.py"
   ],
   "frozen_contract_test_hashes": {
-    "tests/test_bitter_lesson_contract.py": "cd138bb81f01c6c08f2156c6c05706daafff9887fa357459008856924171e2f8"
+    "tests/test_bitter_lesson_contract.py": "156c92e8ca3306d6402b2a71bfc965bb771329f06c708ad34e4f94143b6d59bc"
   }
 }

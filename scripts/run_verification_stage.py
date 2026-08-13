@@ -14,6 +14,11 @@ def main() -> int:
     parser.add_argument("stage")
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--evidence", type=Path, action="append", required=True)
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        help="completed Flayr run directory; required for ordinary and boundary samples",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = list(args.command)
@@ -24,6 +29,7 @@ def main() -> int:
         args.stage,
         command=command,
         evidence_paths=args.evidence,
+        completed_run_dir=args.run_dir,
     )
     return 0
 

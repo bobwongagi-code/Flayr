@@ -67,6 +67,7 @@ from ..stage_evidence_contracts import (
     stage1_pipeline_owned_field_issues,
     merge_stage_signal_bindings,
     reconcile_stage_evidence_links,
+    required_stage_signals_satisfied,
 )
 from ..structure_modules import canonical_module_id
 from .api import (
@@ -4982,6 +4983,7 @@ def _run_stage1_qualification(
         list(checks_by_stage.values()),
         valid_ids,
     )
+    facts["stage_evidence_contract_version"] = STAGE_EVIDENCE_CONTRACT_VERSION
     failed_stage_codes = list(dict.fromkeys(failed_stage_codes))
     qualification = {
         "source": "pipeline",
@@ -5431,7 +5433,7 @@ def _merge_video_fact_coverage_audit(
             if (
                 contract is not None
                 and coverage == "complete"
-                and set(contract.required_signals).issubset(set(observed))
+                and required_stage_signals_satisfied(contract, observed)
             ):
                 primary_status = "present"
                 missing = []

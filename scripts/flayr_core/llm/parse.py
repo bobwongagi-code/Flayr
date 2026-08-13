@@ -38,6 +38,7 @@ from ..multimodal import (
 )
 from ..stage_catalog import stage_tuples
 from ..stage_evidence_contracts import (
+    STAGE1_OBSERVATION_CONTRACT_VERSION,
     STAGE_EVIDENCE_CONTRACT_VERSION,
     STAGE_EVIDENCE_SNAPSHOT_VERSION,
     normalize_stage_evidence_checks,
@@ -1971,8 +1972,15 @@ def normalize_video_fact_result(
         "product_identity": normalize_video_product_identity(result.get("product_identity")),
         "temporal_evidence_mode": normalize_temporal_evidence_mode(result.get("temporal_evidence_mode")),
         "evidence_units": [],
-        "stage_evidence_contract_version": normalize_stage_evidence_contract_version(
-            result.get("stage_evidence_contract_version")
+        # Stage1-A's atomic-observation request has an independent stable
+        # identity. Qualification owns the active evidence contract and will
+        # re-project these observations before the ledger is frozen.
+        "stage_evidence_contract_version": (
+            STAGE_EVIDENCE_CONTRACT_VERSION
+            if result.get("stage_evidence_contract_version") == STAGE1_OBSERVATION_CONTRACT_VERSION
+            else normalize_stage_evidence_contract_version(
+                result.get("stage_evidence_contract_version")
+            )
         ),
         # Set by the transport metadata after parsing; never trust a model
         # self-report for a pipeline control flag.

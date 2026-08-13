@@ -79,6 +79,7 @@ from flayr_core.postprocess.validate import (
     validate_stage_evidence_qualification,
 )
 from flayr_core.stage_evidence_contracts import (
+    STAGE1_OBSERVATION_CONTRACT_VERSION,
     STAGE_EVIDENCE_CONTRACT_VERSION,
     STAGE_EVIDENCE_SNAPSHOT_VERSION,
     STAGE1_PROJECTION_VERSION,
@@ -237,6 +238,33 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(stage_evidence_readiness(side, "S4"), "unknown")
         diagnostics = stage_evidence_diagnostics(side, "S4")
         self.assertIn("primary_qualification_gate", diagnostics["reason_codes"])
+
+    def test_s6_presence_accepts_either_action_or_purchase_path(self) -> None:
+        for signal in ("explicit_action", "purchase_path"):
+            with self.subTest(signal=signal):
+                side = self._active_side("C", "present")
+                check = next(
+                    item for item in side["stage_evidence_checks"] if item["stage"] == "S6"
+                )
+                check["observed_signals"] = [signal]
+                check["missing_signals"] = [
+                    value
+                    for value in stage_evidence_contract("S6").required_signals
+                    if value != signal
+                ]
+                check["signal_bindings"] = {
+                    signal: {
+                        "status": "supported",
+                        "evidence_ids": ["C6"],
+                        "invalid_evidence_ids": [],
+                        "reason": "fixture binding",
+                    }
+                }
+                freeze_stage_evidence(side)
+                self.assertEqual(stage_evidence_readiness(side, "S6"), "present")
+                self.assertEqual(stage_evidence_contract_issues(side), [])
+                projection = stage1_qualification_projection(side, ["S6"])["stages"]["S6"]
+                self.assertEqual(projection["missing_requirements"], [])
 
     def test_signal_binding_must_stay_inside_the_stage_evidence_list(self) -> None:
         checks = self._checks("present", "direct")
@@ -2244,6 +2272,53 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(qualified_stage_evidence_ids(merged, "S4"), {"C_A1"})
         self.assertEqual(stage_evidence_readiness(merged, "S4"), "present")
 
+    def test_s6_recovery_promotes_with_purchase_path_without_imperative(self) -> None:
+        base = self._active_side("C", "unknown")
+        checks = self._checks("unknown")
+        base["stage_evidence_checks"] = checks
+        base["stage1_coverage_audit"] = self._coverage_audit(checks)
+        base["stage1_acquisition"]["channels"]["subtitle"] = {
+            "status": "ready",
+            "coverage": "full",
+            "count": 1,
+            "boundary_precision": "word",
+        }
+        candidate = {
+            "id": "C_A1",
+            "time_range": "53s - 55s",
+            "information": "完整口播说明购买链接在黄色购物车里",
+            "voiceover": "retail pun ada dekat beg kuning",
+            "evidence_strength": "explicit",
+        }
+        audit = {
+            "version": STAGE1_COVERAGE_AUDIT_VERSION,
+            "status": "completed",
+            "independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
+            "candidate_evidence_units": [candidate],
+            "stages": {
+                "S6": {
+                    "status": "found",
+                    "coverage": "complete",
+                    "evidence_ids": ["C_A1"],
+                    "observed_signals": ["purchase_path"],
+                    "missing_signals": ["explicit_action"],
+                    "signal_bindings": {
+                        "purchase_path": {
+                            "status": "supported",
+                            "evidence_ids": ["C_A1"],
+                            "reason": "完整口播给出平台购买路径",
+                        }
+                    },
+                }
+            },
+        }
+        merged = _merge_video_fact_coverage_audit("creator", base, audit, self._analysis())
+        freeze_stage_evidence(merged)
+        s6 = next(item for item in merged["stage_evidence_checks"] if item["stage"] == "S6")
+        self.assertEqual(s6["status"], "present")
+        self.assertEqual(s6["observed_signals"], ["purchase_path"])
+        self.assertEqual(stage_evidence_readiness(merged, "S6"), "present")
+
     def test_complete_audit_closes_partial_coverage_without_rewriting_primary_fact(self) -> None:
         base = self._active_side("C", "unknown")
         checks = self._checks("unknown")
@@ -2545,6 +2620,27 @@ class StageEvidenceContractTests(unittest.TestCase):
         )
         self.assertEqual(len(normalized["evidence_units"]), 10)
         self.assertFalse(normalized["evidence_budget_exceeded"])
+
+    def test_stage1_observation_contract_migrates_without_reextracting_media(self) -> None:
+        normalized = normalize_video_fact_result(
+            "creator",
+            {
+                "stage_evidence_contract_version": STAGE1_OBSERVATION_CONTRACT_VERSION,
+                "evidence_units": [
+                    {
+                        "id": "C1",
+                        "time_range": "1s - 2s",
+                        "information": "看到产品被拿起",
+                        "visual_fact": "手拿产品",
+                    }
+                ],
+            },
+            self._analysis(),
+        )
+        self.assertEqual(
+            normalized["stage_evidence_contract_version"],
+            STAGE_EVIDENCE_CONTRACT_VERSION,
+        )
 
     def test_fact_quality_is_retained_in_stage_scoped_handoff(self) -> None:
         quality = {
@@ -3725,24 +3821,80 @@ class StageEvidenceContractTests(unittest.TestCase):
         result = self._s5_comparison_result("absent", "product_claim")
         apply_comparison_eligibility(result)
         contract = result["comparison_contract"]["stage_eligibility"]["S5"]
-        self.assertEqual(contract["status"], "direct")
-        self.assertNotIn("status_source", contract)
-        self.assertNotEqual(result["stage_analysis"][4].get("comparison_status"), "not_applicable")
+        self.assertEqual(contract["status"], "not_applicable")
+        self.assertEqual(contract["status_source"], "bilateral_stage1_facts")
+        self.assertEqual(result["stage_analysis"][4].get("comparison_status"), "not_applicable")
         self.assertEqual(
             result["stage_analysis"][4]["stage_evidence_gate"]["status"],
-            "blocked",
+            "not_applicable",
         )
 
-        # The compatibility path without a comparison contract must apply the
-        # same rule; it may not close S5 from bilateral "absent" after one
-        # side actually contained an unsupported trust-like claim.
+        # The compatibility path applies the same fact rule. Non-qualifying
+        # claims remain audit observations and cannot create an S5 difference.
         result = self._s5_comparison_result("absent", "product_claim")
         result.pop("comparison_contract")
         apply_comparison_eligibility(result)
         self.assertEqual(
             result["stage_analysis"][4]["stage_evidence_gate"]["status"],
-            "blocked",
+            "not_applicable",
         )
+
+    def test_s5_absent_projection_keeps_disqualifier_but_drops_stage_positive_ids(self) -> None:
+        raw = {
+            "stage": "S5",
+            "status": "absent",
+            "coverage": "complete",
+            "evidence_ids": ["B5"],
+            "observed_signals": ["product_relevance"],
+            "missing_signals": ["source_identity", "source_basis"],
+            "signal_bindings": {
+                "product_relevance": {
+                    "status": "supported",
+                    "evidence_ids": ["B5"],
+                    "reason": "产品自述与本品相关，但不是独立来源",
+                }
+            },
+            "observed_disqualifiers": ["product_claim_only"],
+        }
+        check = next(
+            item
+            for item in normalize_stage_evidence_checks([raw], {"B5"})
+            if item["stage"] == "S5"
+        )
+        self.assertEqual(check["status"], "absent")
+        self.assertEqual(check["evidence_ids"], [])
+        self.assertEqual(check["observed_signals"], [])
+        self.assertEqual(check["signal_bindings"], {})
+        self.assertEqual(check["observed_disqualifiers"], ["product_claim_only"])
+        self.assertEqual(
+            check["missing_signals"],
+            list(stage_evidence_contract("S5").required_signals),
+        )
+
+    def test_s5_absent_projection_does_not_hide_fully_qualified_trust_source(self) -> None:
+        contract = stage_evidence_contract("S5")
+        raw = {
+            "stage": "S5",
+            "status": "absent",
+            "coverage": "complete",
+            "evidence_ids": ["B5"],
+            "observed_signals": list(contract.required_signals),
+            "missing_signals": [],
+            "signal_bindings": self._signal_bindings("S5", "B5"),
+            "observed_disqualifiers": ["product_claim_only"],
+        }
+        check = next(
+            item
+            for item in normalize_stage_evidence_checks([raw], {"B5"})
+            if item["stage"] == "S5"
+        )
+        self.assertEqual(check["evidence_ids"], ["B5"])
+        side = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage_evidence_checks": normalize_stage_evidence_checks([raw], {"B5"}),
+            "evidence_units": [{"id": "B5", "evidence_strength": "direct"}],
+        }
+        self.assertIn("S5:absence_without_complete_coverage", stage_evidence_contract_issues(side))
 
     def test_s5_unknown_does_not_close_scope_even_if_provider_says_not_applicable(self) -> None:
         result = self._s5_comparison_result("unknown", "absent")
