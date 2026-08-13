@@ -218,9 +218,12 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     try:
-        limits = ResourceLimits(max_total_wall_time=args.max_total_wall_time)
+        limits = ResourceLimits(
+            max_total_wall_time=args.max_total_wall_time,
+            max_llm_calls=args.max_llm_calls,
+        )
     except ValueError as exc:
-        raise SystemExit(f"--max-total-wall-time 无效：{exc}") from exc
+        raise SystemExit(f"运行资源预算无效：{exc}") from exc
     budget = ResourceBudget(limits)
     # 所有预处理、OCR、LLM、下载、报告和子进程都从这个 run 级对象取预算。
     budget.activate()
@@ -496,6 +499,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "单次运行总墙钟上限（秒），默认 1800；只影响本次 run 的资源预算，"
             "不改变单个 HTTP 请求的 timeout。慢模型验证可显式提高。"
+        ),
+    )
+    parser.add_argument(
+        "--max-llm-calls",
+        type=int,
+        default=ResourceLimits().max_llm_calls,
+        help=(
+            "本次运行允许的真实 LLM 网络尝试上限，默认 32；重放命中不计数。"
+            "恢复运行可显式收紧，防止局部失效意外扩散成整链重跑。"
         ),
     )
     parser.add_argument(

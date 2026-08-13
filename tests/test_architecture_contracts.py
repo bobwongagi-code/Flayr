@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import inspect
 import hashlib
 import json
@@ -2525,11 +2526,21 @@ class ArchitectureContractTests(unittest.TestCase):
     def test_cli_exposes_an_explicit_run_wall_time_budget(self) -> None:
         default_args = flayr.build_parser().parse_args(["compare", "--verification-stage", "production"])
         self.assertEqual(default_args.max_total_wall_time, 1800.0)
+        self.assertEqual(default_args.max_llm_calls, 32)
         self.assertEqual(default_args.asr_model, "fun-asr-flash-2026-06-15")
         extended_args = flayr.build_parser().parse_args(
-            ["compare", "--max-total-wall-time", "3600", "--verification-stage", "production"]
+            [
+                "compare",
+                "--max-total-wall-time",
+                "3600",
+                "--max-llm-calls",
+                "8",
+                "--verification-stage",
+                "production",
+            ]
         )
         self.assertEqual(extended_args.max_total_wall_time, 3600.0)
+        self.assertEqual(extended_args.max_llm_calls, 8)
 
     def test_llm_transfer_closed_error_is_retryable(self) -> None:
         self.assertTrue(
@@ -5966,6 +5977,43 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(
             [item.get("type") for item in payload["messages"][1]["content"] if isinstance(item, dict)],
             ["text"],
+        )
+
+    def test_stage_group_identity_ignores_unrelated_comparison_stage_changes(self) -> None:
+        base_contract = {
+            "identity_relation": "exact_product",
+            "substitution_relation": "same_solution",
+            "scope": "same_product",
+            "confidence": "high",
+            "shared_job": {
+                "same_consumer_job": True,
+                "same_target_object": True,
+                "same_desired_outcome": True,
+                "same_purchase_decision": True,
+                "complement_or_dependency": False,
+                "reason": "global prose must not enter a stage request",
+            },
+            "stage_eligibility": {
+                stage: {"status": "direct", "basis": f"{stage} basis"}
+                for stage in ("S1", "S2", "S3", "S4", "S5", "S6")
+            },
+        }
+        changed_s6 = copy.deepcopy(base_contract)
+        changed_s6["stage_eligibility"]["S6"] = {
+            "status": "not_comparable",
+            "basis": "S6 changed",
+        }
+        changed_s6["reason"] = "unrelated global reason changed"
+        shared = {"videos": {}, "comparison_contract": base_contract}
+        changed = {"videos": {}, "comparison_contract": changed_s6}
+
+        self.assertEqual(
+            build_stage_group_judgment_payload("test-model", "", {}, shared, ["S1", "S2"]),
+            build_stage_group_judgment_payload("test-model", "", {}, changed, ["S1", "S2"]),
+        )
+        self.assertNotEqual(
+            build_stage_group_judgment_payload("test-model", "", {}, shared, ["S6"]),
+            build_stage_group_judgment_payload("test-model", "", {}, changed, ["S6"]),
         )
 
     def test_model_uncertainty_alone_cannot_trigger_phase_c(self) -> None:

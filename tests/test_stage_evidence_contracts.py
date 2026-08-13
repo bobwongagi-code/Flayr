@@ -2717,6 +2717,23 @@ class StageEvidenceContractTests(unittest.TestCase):
                 self._analysis(),
             )
 
+    def test_stage_group_identity_ignores_unrelated_stage_ledger_changes(self) -> None:
+        without_s6 = self._active_side("C", "unknown")
+        with_s6 = self._active_side("C", "present")
+
+        self.assertNotEqual(
+            without_s6["evidence_set_sha256"],
+            with_s6["evidence_set_sha256"],
+        )
+        self.assertEqual(
+            _compact_stage_group_facts({"creator": without_s6}, ["S1", "S2"]),
+            _compact_stage_group_facts({"creator": with_s6}, ["S1", "S2"]),
+        )
+        self.assertNotEqual(
+            _compact_stage_group_facts({"creator": without_s6}, ["S6"]),
+            _compact_stage_group_facts({"creator": with_s6}, ["S6"]),
+        )
+
     def test_stage1_recovery_is_append_only_for_existing_units(self) -> None:
         base = normalize_video_fact_result(
             "creator",

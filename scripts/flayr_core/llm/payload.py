@@ -1392,6 +1392,14 @@ def _compact_stage_group_facts(
         side = view.get(role) if isinstance(view.get(role), dict) else {}
         original = facts.get(role) if isinstance(facts.get(role), dict) else {}
         projection = stage1_qualification_projection(original, target)
+        # The persisted handoff validates the complete immutable ledger. A
+        # stage-scoped model request must not also carry that global digest:
+        # otherwise an S6-only recovery changes the request identity for S1-S4
+        # even when every fact visible to those groups is unchanged.
+        projection.pop("ledger_hash", None)
+        for stage_projection in (projection.get("stages") or {}).values():
+            if isinstance(stage_projection, dict):
+                stage_projection.pop("ledger_hash", None)
         stage_payload: dict[str, Any] = {}
         for stage in sorted(target):
             stage_units = (side.get("stage_evidence_units") or {}).get(stage) or []
@@ -1429,9 +1437,44 @@ def _compact_stage_group_facts(
         compact[role] = {
             "product_identity": side.get("product_identity") or {},
             "stages": stage_payload,
-            "ledger_hash": original.get("evidence_set_sha256") or "",
         }
     return compact
+
+
+def _compact_stage_group_comparison_contract(
+    value: Any,
+    target_stages: list[str],
+) -> dict[str, Any]:
+    """Keep only comparison semantics that can affect this Stage2 group."""
+    source = value if isinstance(value, dict) else {}
+    target = {str(stage).strip().upper() for stage in target_stages}
+    shared_job = source.get("shared_job") if isinstance(source.get("shared_job"), dict) else {}
+    stage_eligibility = (
+        source.get("stage_eligibility")
+        if isinstance(source.get("stage_eligibility"), dict)
+        else {}
+    )
+    return {
+        "identity_relation": source.get("identity_relation"),
+        "substitution_relation": source.get("substitution_relation"),
+        "shared_job": {
+            key: shared_job.get(key)
+            for key in (
+                "same_consumer_job",
+                "same_target_object",
+                "same_desired_outcome",
+                "same_purchase_decision",
+                "complement_or_dependency",
+            )
+        },
+        "stage_eligibility": {
+            stage: stage_eligibility.get(stage)
+            for stage in sorted(target)
+            if stage in stage_eligibility
+        },
+        "scope": source.get("scope"),
+        "confidence": source.get("confidence"),
+    }
 
 
 def _stage_group_flag_contract(stage: str) -> str:
@@ -1506,7 +1549,10 @@ def build_stage_group_judgment_payload(
     if not targets:
         raise ValueError("stage group must contain at least one known stage")
     scoped_facts = _compact_stage_group_facts(facts, targets)
-    eligibility = analysis.get("comparison_contract") or analysis.get("comparison_eligibility") or {}
+    eligibility = _compact_stage_group_comparison_contract(
+        analysis.get("comparison_contract") or analysis.get("comparison_eligibility") or {},
+        targets,
+    )
     foundation = analysis.get("product_foundation") or {}
     flag_contract = "\n".join(f"{stage}: {_stage_group_flag_contract(stage)}" for stage in targets)
     text = "\n\n".join(
