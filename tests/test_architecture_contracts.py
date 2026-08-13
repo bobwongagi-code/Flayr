@@ -6219,6 +6219,47 @@ class ArchitectureContractTests(unittest.TestCase):
                     "",
                 )
 
+    def test_comparison_eligibility_closes_bilateral_absent_s5_before_stage2(self) -> None:
+        args = SimpleNamespace(
+            llm_model="test-model",
+            llm_api_url="https://example.invalid/v1",
+            provider_replay_from=None,
+            stage2_replay_from=None,
+            stage2_resume_from=None,
+            comparison_scope_override=None,
+        )
+        provider_contract = normalize_comparison_contract(
+            {
+                "identity_relation": "exact_product",
+                "substitution_relation": "same_solution",
+                "reason": "fixture same product",
+            }
+        )
+        facts = {"benchmark": {}, "creator": {}}
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(
+                pipeline,
+                "provider_call_with_artifact",
+                return_value=(provider_contract, {}, "replay"),
+            ),
+            mock.patch(
+                "flayr_core.postprocess.repair_stages.stage_evidence_readiness",
+                return_value="absent",
+            ),
+        ):
+            contract = pipeline.establish_comparison_eligibility(
+                args,
+                facts,
+                Path(tmp),
+                "",
+            )
+
+        s5 = contract["stage_eligibility"]["S5"]
+        self.assertEqual(s5["status"], "not_applicable")
+        self.assertEqual(s5["status_source"], "bilateral_stage1_facts")
+        self.assertNotIn("S5", contract["comparable_stages"])
+
     def test_comparison_eligibility_payload_is_stable_across_stage_set_order(self) -> None:
         side = {
             "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,

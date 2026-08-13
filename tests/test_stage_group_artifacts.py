@@ -719,6 +719,51 @@ class StageGroupPipelineReplayTests(unittest.TestCase):
                 self.assertEqual(value["status"], "completed")
                 self.assertEqual(value["response_meta"]["completion_attempts"], 1)
 
+    def test_code_closed_s5_skips_provider_and_allows_synthesis(self) -> None:
+        contract = {
+            "stage_eligibility": {
+                **{
+                    stage: {"status": "direct"}
+                    for stage in ("S1", "S2", "S3", "S4", "S6")
+                },
+                "S5": {
+                    "status": "not_applicable",
+                    "status_source": "bilateral_stage1_facts",
+                    "basis": "双方 Stage1 完整且均 absent",
+                },
+            }
+        }
+        calls: list[tuple[str, ...]] = []
+
+        def fetch_response(_args, _api_key, request_path, _response_path, **kwargs):
+            payload = json.loads(Path(request_path).read_text(encoding="utf-8"))
+            group = tuple(payload["group"])
+            calls.append(group)
+            kwargs["response_meta"].update(_provider_meta(f"provider-{'-'.join(group)}"))
+            return json.dumps(self._response(group))
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            pipeline,
+            "_authoritative_segmented_comparison_contract",
+            return_value=contract,
+        ):
+            result = self._run(
+                self._args(),
+                Path(tmp),
+                unittest.mock.Mock(side_effect=fetch_response),
+            )
+
+        self.assertNotIn(("S5",), calls)
+        self.assertIn(("SYNTHESIS",), calls)
+        s5_record = next(
+            item
+            for item in result["segmented_pipeline"]["stage_groups"]
+            if item["group"] == ["S5"]
+        )
+        self.assertEqual(s5_record["status"], "completed")
+        self.assertEqual(s5_record["execution_source"], "deterministic_scope")
+        self.assertEqual(result["segmented_pipeline"]["synthesis_status"], "completed")
+
     def test_default_entrypoint_runs_phase_c_without_legacy_s4_hook(self) -> None:
         args = Namespace(
             llm_include_images=True,

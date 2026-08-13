@@ -659,7 +659,10 @@ def _s5_bilateral_scope_state(
     return readiness, closes_scope
 
 
-def _apply_fact_scoped_s5(result: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
+def apply_fact_scoped_s5_comparison_contract(
+    contract: dict[str, Any],
+    understanding: dict[str, Any],
+) -> dict[str, Any]:
     """Derive S5 comparison scope from bilateral Stage1 facts only.
 
     ``structure_library_full.md`` defines S5 as an optional trust-amplification
@@ -669,7 +672,6 @@ def _apply_fact_scoped_s5(result: dict[str, Any], contract: dict[str, Any]) -> d
     pass the Stage1 qualification contract.
     """
     stage_contracts = contract.get("stage_eligibility")
-    understanding = result.get("video_understanding")
     if not isinstance(stage_contracts, dict) or not isinstance(understanding, dict):
         return contract
     current = stage_contracts.get("S5")
@@ -783,7 +785,11 @@ def apply_comparison_eligibility(result: dict[str, Any]) -> None:
     from ..llm.parse import normalize_comparison_contract
 
     contract = normalize_comparison_contract(contract)
-    contract = _apply_fact_scoped_s5(result, contract)
+    understanding = result.get("video_understanding")
+    contract = apply_fact_scoped_s5_comparison_contract(
+        contract,
+        understanding if isinstance(understanding, dict) else {},
+    )
     result["comparison_contract"] = contract
     result["comparison_eligibility"] = contract
     stage_contracts = contract.get("stage_eligibility")

@@ -155,6 +155,7 @@ from ..postprocess.repair import (
     remove_unverified_brand_models,
     stabilize_improvement_priorities,
 )
+from ..postprocess.repair_stages import apply_fact_scoped_s5_comparison_contract
 from ..postprocess.validate import (
     validate_analysis_dimensions,
     validate_evidence_alignment,
@@ -2625,6 +2626,38 @@ def run_segmented_stage_pipeline(
         label = "_".join(group)
         target = list(group)
         record: dict[str, Any] = {"group": target, "status": "pending", "stages": []}
+        comparison_eligibility = _authoritative_segmented_comparison_contract(analysis, {})
+        stage_contracts = (
+            comparison_eligibility.get("stage_eligibility")
+            if isinstance(comparison_eligibility.get("stage_eligibility"), dict)
+            else {}
+        )
+        closed_scope = bool(target) and all(
+            isinstance(stage_contracts.get(code), dict)
+            and str(stage_contracts[code].get("status") or "").strip().lower()
+            in {"not_comparable", "not_applicable"}
+            for code in target
+        )
+        if closed_scope:
+            projected = [
+                _normalize_segmented_stage({}, code, facts, comparison_eligibility)
+                for code in target
+            ]
+            record.update(
+                {
+                    "status": "completed",
+                    "stages": target,
+                    "response_sha256": _stable_digest(projected),
+                    "execution_source": "deterministic_scope",
+                    "completion_attempts": 0,
+                    "retry_reasons": [],
+                    "usage": {},
+                }
+            )
+            stage_results.extend(projected)
+            group_records.append(record)
+            write_json(run_dir / f"stage_group_{label}.json", record)
+            continue
         provider_artifact_path = stage_group_artifact_path(run_dir, target)
         request_path = run_dir / f"llm_stage_group_{label}_request.json"
         response_path = run_dir / f"llm_stage_group_{label}_response.json"
@@ -2691,7 +2724,6 @@ def run_segmented_stage_pipeline(
                 ),
             )
             resume_failure_path.unlink(missing_ok=True)
-            comparison_eligibility = _authoritative_segmented_comparison_contract(analysis, {})
             projected = [
                 _normalize_segmented_stage(by_code[code], code, facts, comparison_eligibility)
                 for code in target
@@ -4459,6 +4491,7 @@ def establish_comparison_eligibility(
         eligibility,
         getattr(args, "comparison_scope_override", None),
     )
+    eligibility = apply_fact_scoped_s5_comparison_contract(eligibility, facts)
     write_json(run_dir / "comparison_contract.json", eligibility)
     write_json(run_dir / "comparison_eligibility.json", eligibility)
     write_json(run_dir / "comparison_provider_meta.json", response_meta)
