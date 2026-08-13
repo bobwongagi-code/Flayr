@@ -151,6 +151,53 @@ def reusable_stage_group_response(
     return response_copy
 
 
+def revalidatable_failed_stage_group_response(
+    artifact: Mapping[str, Any],
+    *,
+    group: Sequence[str],
+    payload: Mapping[str, Any],
+    model: str,
+    api_url: str,
+) -> dict[str, Any]:
+    """Recover a complete provider response rejected only by local validation.
+
+    This is intentionally narrower than normal replay.  A failed transport,
+    truncated generation, invalid JSON, changed request, or modified response
+    still requires a new provider call.
+    """
+    if artifact.get("schema_version") != STAGE_GROUP_ARTIFACT_SCHEMA_VERSION:
+        raise StageGroupArtifactError("stage group artifact schema version mismatch")
+    if artifact.get("status") != "failed":
+        raise StageGroupArtifactError("stage group artifact is not a failed response")
+    expected_identity = request_identity(
+        group=group,
+        payload=payload,
+        model=model,
+        api_url=api_url,
+    )
+    if artifact.get("request_identity") != expected_identity:
+        raise StageGroupArtifactError("stage group request identity mismatch")
+    response = artifact.get("provider_response")
+    if not isinstance(response, Mapping):
+        raise StageGroupArtifactError("stage group failed response is not revalidatable")
+    response_copy = copy.deepcopy(dict(response))
+    if artifact.get("response_sha256") != _stable_sha256(response_copy):
+        raise StageGroupArtifactError("stage group provider response hash mismatch")
+    try:
+        meta = validated_provider_response_meta(artifact.get("response_meta"), completed=True)
+    except ProviderArtifactError as exc:
+        raise StageGroupArtifactError(
+            f"stage group failed response is not revalidatable: {exc}"
+        ) from exc
+    if (
+        meta.get("transport_status") != "completed"
+        or meta.get("finish_reason") != "stop"
+        or meta.get("json_valid") is not True
+    ):
+        raise StageGroupArtifactError("stage group failed response is not revalidatable")
+    return response_copy
+
+
 def read_stage_group_artifact(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))

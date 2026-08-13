@@ -119,6 +119,7 @@ from .stage_group_artifacts import (
     completed_stage_group_artifact,
     failed_stage_group_artifact,
     read_stage_group_artifact,
+    revalidatable_failed_stage_group_response,
     reusable_stage_group_response,
     stage_group_artifact_path,
 )
@@ -2143,7 +2144,9 @@ def _project_synthesis_improvements(
             continue
         magnitude = str(stage.get("model_gap_magnitude") or "uncertain").strip().lower()
         priority = {"large": 1, "medium": 2, "small": 3, "none": 4}.get(magnitude, 4)
-        actions = item.get("actions") if isinstance(item.get("actions"), list) else []
+        raw_actions = item.get("actions")
+        actions = [raw_actions] if isinstance(raw_actions, str) else raw_actions
+        actions = actions if isinstance(actions, list) else []
         projected.append(
             {
                 "title": str(item.get("title") or f"复核{code}阶段").strip(),
@@ -2355,6 +2358,21 @@ def _resume_failure_artifact_path(path: Path) -> Path:
     return path.with_name(f"{path.stem}.resume-failed{path.suffix}")
 
 
+def _archive_stage_group_artifact(path: Path, label: str) -> Path:
+    artifact = read_stage_group_artifact(path)
+    digest = _stable_digest(artifact)[:12]
+    archived = path.with_name(f"{path.stem}.{label}.{digest}{path.suffix}")
+    if archived.exists():
+        existing = read_stage_group_artifact(archived)
+        if _stable_digest(existing) != _stable_digest(artifact):
+            raise StageGroupArtifactError(
+                f"stage group archive collision or corruption: {archived}"
+            )
+    else:
+        write_json(archived, artifact)
+    return archived
+
+
 def _validated_stage_group_response(
     parsed: Any,
     target: list[str],
@@ -2450,6 +2468,7 @@ def _validated_stage_group_response(
 def _validated_stage_synthesis_response(parsed: Any) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError("Stage3 synthesis must be a JSON object")
+    parsed = copy.deepcopy(parsed)
     required_types: dict[str, type] = {
         "one_line_verdict": str,
         "one_line_summary": str,
@@ -2496,9 +2515,11 @@ def _validated_stage_synthesis_response(parsed: Any) -> dict[str, Any]:
             if not isinstance(item.get(key), str) or not item[key].strip():
                 raise ValueError(f"Stage3 synthesis 的 improvements[{index}].{key} 不能为空")
         actions = item.get("actions")
-        if not isinstance(actions, list) or any(
-            not isinstance(action, str) or not action.strip() for action in actions
-        ):
+        valid_action_string = isinstance(actions, str) and bool(actions.strip())
+        valid_action_list = isinstance(actions, list) and all(
+            isinstance(action, str) and bool(action.strip()) for action in actions
+        )
+        if not valid_action_string and not valid_action_list:
             raise ValueError(f"Stage3 synthesis 的 improvements[{index}].actions 类型非法")
     return parsed
 
@@ -2532,18 +2553,32 @@ def _read_replayable_stage_group(
     group: list[str] | tuple[str, ...],
     payload: dict[str, Any],
     args: argparse.Namespace,
+    allow_validation_failed: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     path = stage_group_artifact_path(source_dir, group)
     artifact = read_stage_group_artifact(path)
-    response = reusable_stage_group_response(
-        artifact,
-        group=group,
-        payload=payload,
-        model=judgment_model(args),
-        api_url=args.llm_api_url,
-    )
+    if allow_validation_failed and artifact.get("status") == "failed":
+        response = revalidatable_failed_stage_group_response(
+            artifact,
+            group=group,
+            payload=payload,
+            model=judgment_model(args),
+            api_url=args.llm_api_url,
+        )
+    else:
+        response = reusable_stage_group_response(
+            artifact,
+            group=group,
+            payload=payload,
+            model=judgment_model(args),
+            api_url=args.llm_api_url,
+        )
     response_meta = artifact.get("response_meta")
-    return response, copy.deepcopy(response_meta) if isinstance(response_meta, dict) else {}
+    meta = copy.deepcopy(response_meta) if isinstance(response_meta, dict) else {}
+    if allow_validation_failed and artifact.get("status") == "failed":
+        meta["execution_source"] = "revalidation"
+        meta["revalidated_from_status"] = "failed"
+    return response, meta
 
 
 def run_segmented_stage_pipeline(
@@ -2712,16 +2747,18 @@ def run_segmented_stage_pipeline(
         group_records.append(record)
         write_json(run_dir / f"stage_group_{label}.json", record)
 
-    synthesis_status = "completed"
+    unresolved_before_synthesis = _segmented_stage_unresolved(stage_results)
+    skip_synthesis = any_group_failed or bool(unresolved_before_synthesis)
+    synthesis_status = "failed" if skip_synthesis else "completed"
     synthesis: dict[str, Any] = {}
     synthesis_request = run_dir / "llm_stage_synthesis_request.json"
     synthesis_response = run_dir / "llm_stage_synthesis_response.json"
     synthesis_provider_artifact = stage_group_artifact_path(run_dir, ("SYNTHESIS",))
     synthesis_payload: dict[str, Any] = {}
     synthesis_response_meta: dict[str, Any] = {}
-    synthesis_execution_source = "provider"
+    synthesis_execution_source = "not_run" if skip_synthesis else "provider"
     parsed_synthesis: dict[str, Any] | None = None
-    synthesis_artifact_record = synthesis_provider_artifact.name
+    synthesis_artifact_record = "" if skip_synthesis else synthesis_provider_artifact.name
     synthesis_replay_artifact = (
         stage_group_artifact_path(replay_source, ("SYNTHESIS",))
         if replay_source is not None
@@ -2732,81 +2769,100 @@ def run_segmented_stage_pipeline(
         and _same_existing_artifact(synthesis_replay_artifact, synthesis_provider_artifact)
     )
     synthesis_resume_failure = _resume_failure_artifact_path(synthesis_provider_artifact)
-    try:
-        synthesis_payload = build_stage_synthesis_payload(
-            judgment_model(args), analysis_input, facts, stage_results, analysis
-        )
-        if replay_source is not None:
-            synthesis_execution_source = "replay"
-            try:
-                parsed_synthesis, synthesis_response_meta = _read_replayable_stage_group(
-                    replay_source,
+    if skip_synthesis:
+        if preserve_synthesis_resume_source and synthesis_provider_artifact.is_file():
+            _archive_stage_group_artifact(synthesis_provider_artifact, "superseded")
+            synthesis_provider_artifact.unlink()
+        synthesis = {
+            "synthesis_error": "Stage3 synthesis 未执行：阶段组失败或存在 unresolved stage。",
+            "failure_kind": "upstream_stage_unresolved",
+            "cause_type": "UpstreamStageUnresolved",
+        }
+    else:
+        try:
+            synthesis_payload = build_stage_synthesis_payload(
+                judgment_model(args), analysis_input, facts, stage_results, analysis
+            )
+            if replay_source is not None:
+                synthesis_execution_source = "replay"
+                try:
+                    parsed_synthesis, synthesis_response_meta = _read_replayable_stage_group(
+                        replay_source,
+                        group=("SYNTHESIS",),
+                        payload=synthesis_payload,
+                        args=args,
+                        allow_validation_failed=True,
+                    )
+                    _validated_stage_synthesis_response(parsed_synthesis)
+                    if synthesis_response_meta.get("execution_source") == "revalidation":
+                        synthesis_execution_source = "revalidation"
+                except (StageGroupArtifactError, ValueError) as exc:
+                    if not provider_fallback_allowed:
+                        raise SystemExit(f"Stage3 synthesis 无法离线重放：{exc}") from exc
+                    synthesis_execution_source = "provider"
+                    parsed_synthesis = None
+                    synthesis_response_meta = {}
+            if parsed_synthesis is None:
+                write_json(synthesis_request, synthesis_payload)
+                response_text = fetch_json_completion(
+                    args,
+                    api_key,
+                    synthesis_request,
+                    synthesis_response,
+                    response_meta=synthesis_response_meta,
+                )
+                parsed_synthesis = parse_json_text(response_text)
+            parsed_synthesis = _validated_stage_synthesis_response(parsed_synthesis)
+            if (
+                preserve_synthesis_resume_source
+                and synthesis_response_meta.get("revalidated_from_status") == "failed"
+                and synthesis_provider_artifact.is_file()
+            ):
+                _archive_stage_group_artifact(
+                    synthesis_provider_artifact,
+                    "validation-failed",
+                )
+            write_json(
+                synthesis_provider_artifact,
+                completed_stage_group_artifact(
                     group=("SYNTHESIS",),
                     payload=synthesis_payload,
-                    args=args,
-                )
-                _validated_stage_synthesis_response(parsed_synthesis)
-            except (StageGroupArtifactError, ValueError) as exc:
-                if not provider_fallback_allowed:
-                    raise SystemExit(f"Stage3 synthesis 无法离线重放：{exc}") from exc
-                synthesis_execution_source = "provider"
-                parsed_synthesis = None
-                synthesis_response_meta = {}
-        if parsed_synthesis is None:
-            write_json(synthesis_request, synthesis_payload)
-            response_text = fetch_json_completion(
-                args,
-                api_key,
-                synthesis_request,
-                synthesis_response,
-                response_meta=synthesis_response_meta,
+                    response=parsed_synthesis,
+                    model=judgment_model(args),
+                    api_url=args.llm_api_url,
+                    response_meta=synthesis_response_meta,
+                ),
             )
-            parsed_synthesis = parse_json_text(response_text)
-        parsed_synthesis = _validated_stage_synthesis_response(parsed_synthesis)
-        write_json(
-            synthesis_provider_artifact,
-            completed_stage_group_artifact(
+            synthesis_resume_failure.unlink(missing_ok=True)
+            synthesis = parsed_synthesis
+        except (OSError, ValueError, RuntimeError, SystemExit, json.JSONDecodeError) as exc:
+            synthesis_status = "failed"
+            synthesis = {
+                "synthesis_error": str(exc),
+                "failure_kind": _localized_failure_kind(
+                    exc,
+                    execution_source=synthesis_execution_source,
+                    default="provider_call_or_validation",
+                ),
+                "cause_type": exc.__class__.__name__,
+            }
+            any_group_failed = True
+            failure_artifact = failed_stage_group_artifact(
                 group=("SYNTHESIS",),
                 payload=synthesis_payload,
-                response=parsed_synthesis,
                 model=judgment_model(args),
                 api_url=args.llm_api_url,
+                error=str(exc),
                 response_meta=synthesis_response_meta,
-            ),
-        )
-        synthesis_resume_failure.unlink(missing_ok=True)
-        synthesis = parsed_synthesis
-    except (OSError, ValueError, RuntimeError, SystemExit, json.JSONDecodeError) as exc:
-        synthesis_status = "failed"
-        synthesis = {
-            "synthesis_error": str(exc),
-            "failure_kind": _localized_failure_kind(
-                exc,
-                execution_source=synthesis_execution_source,
-                default="provider_call_or_validation",
-            ),
-            "cause_type": exc.__class__.__name__,
-        }
-        any_group_failed = True
-        failure_artifact = failed_stage_group_artifact(
-            group=("SYNTHESIS",),
-            payload=synthesis_payload,
-            model=judgment_model(args),
-            api_url=args.llm_api_url,
-            error=str(exc),
-            response_meta=synthesis_response_meta,
-            response=parsed_synthesis,
-        )
-        failure_path = (
-            synthesis_resume_failure
-            if preserve_synthesis_resume_source
-            else synthesis_provider_artifact
-        )
-        write_json(
-            failure_path,
-            failure_artifact,
-        )
-        synthesis_artifact_record = failure_path.name
+                response=parsed_synthesis,
+            )
+            failure_path = (
+                synthesis_resume_failure
+                if preserve_synthesis_resume_source
+                else synthesis_provider_artifact
+            )
+            write_json(failure_path, failure_artifact)
+            synthesis_artifact_record = failure_path.name
 
     synthesis = _prepare_segmented_synthesis(synthesis, stage_results)
     unresolved_stages = _segmented_stage_unresolved(stage_results)
@@ -2816,9 +2872,7 @@ def run_segmented_stage_pipeline(
         "stage_groups": group_records,
         "synthesis_status": synthesis_status,
         "synthesis_provider_artifact": synthesis_artifact_record,
-        "synthesis_execution_source": (
-            synthesis_execution_source if synthesis_status == "completed" else "failed"
-        ),
+        "synthesis_execution_source": synthesis_execution_source,
         "unresolved_stages": unresolved_stages,
         "synthesis": synthesis,
     }
@@ -2866,6 +2920,7 @@ def run_segmented_stage_pipeline(
             "version": "segmented_stage_v1",
             "stage_groups": group_records,
             "synthesis_status": synthesis_status,
+            "synthesis_execution_source": synthesis_execution_source,
             "unresolved_stages": unresolved_stages,
             "candidate_status": candidate_status,
         },
@@ -2895,6 +2950,11 @@ def _apply_live_postprocess_chain(
         analysis_input,
         locked_video_understanding,
     )
+    if (
+        result.get("stage2_candidate_status") in {"degraded", "failed"}
+        or result.get("stage2_pipeline_status") in {"degraded", "failed"}
+    ):
+        return result
     refined = maybe_refine_low_confidence_stages(
         args=args,
         api_key=api_key,

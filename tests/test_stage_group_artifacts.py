@@ -12,7 +12,9 @@ from flayr_core.llm.payload import STAGE_JUDGMENT_GROUPS
 from flayr_core.llm.stage_group_artifacts import (
     StageGroupArtifactError,
     completed_stage_group_artifact,
+    failed_stage_group_artifact,
     read_stage_group_artifact,
+    revalidatable_failed_stage_group_response,
     reusable_stage_group_response,
     stage_group_artifact_path,
 )
@@ -110,6 +112,102 @@ class StageGroupArtifactTests(unittest.TestCase):
             path.write_text(json.dumps(self._artifact()), encoding="utf-8")
             self.assertEqual(path.name, "stage2_provider_S1_S2.json")
             self.assertEqual(read_stage_group_artifact(path), self._artifact())
+
+    def test_validation_failed_response_can_be_revalidated_without_provider_call(self) -> None:
+        artifact = failed_stage_group_artifact(
+            group=self.group,
+            payload=self.payload,
+            response=self.response,
+            model="qwen-test",
+            api_url="https://example.test/v1/chat/completions",
+            error="local contract validation failed",
+            response_meta={
+                **_provider_meta(),
+                "transport_status": "completed",
+                "finish_reason": "stop",
+                "json_valid": True,
+            },
+        )
+
+        restored = revalidatable_failed_stage_group_response(
+            artifact,
+            group=self.group,
+            payload=self.payload,
+            model="qwen-test",
+            api_url="https://example.test/v1/chat/completions",
+        )
+
+        self.assertEqual(restored, self.response)
+
+    def test_incomplete_failed_response_cannot_be_revalidated(self) -> None:
+        artifact = failed_stage_group_artifact(
+            group=self.group,
+            payload=self.payload,
+            response=self.response,
+            model="qwen-test",
+            api_url="https://example.test/v1/chat/completions",
+            error="truncated response",
+            response_meta={
+                **_provider_meta(),
+                "transport_status": "completed",
+                "finish_reason": "length",
+                "json_valid": True,
+            },
+        )
+
+        with self.assertRaisesRegex(StageGroupArtifactError, "not revalidatable"):
+            revalidatable_failed_stage_group_response(
+                artifact,
+                group=self.group,
+                payload=self.payload,
+                model="qwen-test",
+                api_url="https://example.test/v1/chat/completions",
+            )
+
+    def test_revalidation_rejects_identity_response_and_transport_tampering(self) -> None:
+        def artifact(**meta_overrides) -> dict:
+            return failed_stage_group_artifact(
+                group=self.group,
+                payload=self.payload,
+                response=self.response,
+                model="qwen-test",
+                api_url="https://example.test/v1/chat/completions",
+                error="local contract validation failed",
+                response_meta={
+                    **_provider_meta(),
+                    "transport_status": "completed",
+                    "finish_reason": "stop",
+                    "json_valid": True,
+                    **meta_overrides,
+                },
+            )
+
+        changed_identity = artifact()
+        changed_identity["request_identity"]["payload_sha256"] = "tampered"
+        changed_response = artifact()
+        changed_response["provider_response"]["stages"][0]["stage"] = "S6"
+        failed_transport = artifact(transport_status="failed")
+        invalid_json = artifact(json_valid=False)
+        missing_response = artifact()
+        missing_response.pop("provider_response")
+        missing_response.pop("response_sha256")
+
+        for value, reason in (
+            (changed_identity, "request identity mismatch"),
+            (changed_response, "response hash mismatch"),
+            (failed_transport, "not revalidatable"),
+            (invalid_json, "not revalidatable"),
+            (missing_response, "not revalidatable"),
+        ):
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(StageGroupArtifactError, reason):
+                    revalidatable_failed_stage_group_response(
+                        value,
+                        group=self.group,
+                        payload=self.payload,
+                        model="qwen-test",
+                        api_url="https://example.test/v1/chat/completions",
+                    )
 
 
 class StageGroupPipelineReplayTests(unittest.TestCase):
@@ -212,6 +310,63 @@ class StageGroupPipelineReplayTests(unittest.TestCase):
                 run_dir,
                 "unused-key",
             )
+
+    def test_artifact_archive_identity_includes_failure_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = stage_group_artifact_path(root, ("SYNTHESIS",))
+            common = {
+                "group": ("SYNTHESIS",), "payload": self._synthesis_payload(),
+                "response": self._response(("SYNTHESIS",)), "model": self.model,
+                "api_url": self.api_url,
+                "response_meta": {
+                    **_provider_meta("archive-identity"),
+                    "transport_status": "completed", "finish_reason": "stop", "json_valid": True,
+                },
+            }
+            first = failed_stage_group_artifact(error="first contract failure", **common)
+            second = failed_stage_group_artifact(error="second contract failure", **common)
+            path.write_text(json.dumps(first), encoding="utf-8")
+            first_archive = pipeline._archive_stage_group_artifact(path, "validation-failed")
+            path.write_text(json.dumps(second), encoding="utf-8")
+            second_archive = pipeline._archive_stage_group_artifact(path, "validation-failed")
+
+            self.assertNotEqual(first_archive, second_archive)
+            self.assertEqual(
+                {
+                    json.loads(item.read_text(encoding="utf-8"))["error"]
+                    for item in root.glob("stage2_provider_SYNTHESIS.validation-failed.*.json")
+                },
+                {"first contract failure", "second contract failure"},
+            )
+
+    def test_artifact_archive_rejects_preexisting_wrong_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = stage_group_artifact_path(root, ("SYNTHESIS",))
+            artifact = failed_stage_group_artifact(
+                group=("SYNTHESIS",), payload=self._synthesis_payload(),
+                response=self._response(("SYNTHESIS",)), model=self.model,
+                api_url=self.api_url, error="current failure",
+                response_meta={
+                    **_provider_meta("archive-corruption"),
+                    "transport_status": "completed", "finish_reason": "stop", "json_valid": True,
+                },
+            )
+            path.write_text(json.dumps(artifact), encoding="utf-8")
+            digest = pipeline._stable_digest(artifact)[:12]
+            collision = path.with_name(
+                f"{path.stem}.validation-failed.{digest}{path.suffix}"
+            )
+            wrong = dict(artifact)
+            wrong["error"] = "wrong preexisting content"
+            collision.write_text(json.dumps(wrong), encoding="utf-8")
+            original = path.read_bytes()
+
+            with self.assertRaisesRegex(StageGroupArtifactError, "collision or corruption"):
+                pipeline._archive_stage_group_artifact(path, "validation-failed")
+
+            self.assertEqual(path.read_bytes(), original)
 
     def test_strict_replay_uses_all_saved_groups_without_provider_calls(self) -> None:
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as run_tmp:
@@ -357,6 +512,10 @@ class StageGroupPipelineReplayTests(unittest.TestCase):
             )
             self.assertEqual(json.loads(failure_path.read_text(encoding="utf-8"))["status"], "failed")
             self.assertEqual(result["stage2_candidate_status"], "degraded")
+            self.assertFalse(stage_group_artifact_path(source, ("SYNTHESIS",)).exists())
+            archived = list(source.glob("stage2_provider_SYNTHESIS.superseded.*.json"))
+            self.assertEqual(len(archived), 1)
+            self.assertEqual(json.loads(archived[0].read_text(encoding="utf-8"))["status"], "completed")
 
     def test_resume_retries_semantically_empty_synthesis(self) -> None:
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as run_tmp:
@@ -413,6 +572,123 @@ class StageGroupPipelineReplayTests(unittest.TestCase):
 
             self.assertEqual(fetch_mock.call_count, 1)
             self.assertEqual(result["segmented_pipeline"]["synthesis_status"], "completed")
+
+    def test_resume_revalidates_completed_synthesis_response_without_provider_call(self) -> None:
+        with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as run_tmp:
+            source = Path(source_tmp)
+            for group in (*STAGE_JUDGMENT_GROUPS, ("SYNTHESIS",)):
+                self._write_completed(source, group)
+            synthesis_path = stage_group_artifact_path(source, ("SYNTHESIS",))
+            synthesis_artifact = json.loads(synthesis_path.read_text(encoding="utf-8"))
+            response = dict(synthesis_artifact["provider_response"])
+            response["improvements"] = [{
+                "title": "修正钩子",
+                "target_stage": "S1",
+                "problem": "钩子不清楚",
+                "suggestion": "强化视觉痛点",
+                "actions": "增加痛点特写",
+                "gmv_reason": "减少首屏流失",
+                "gmv_impact": "提升停留",
+            }]
+            failed = failed_stage_group_artifact(
+                group=("SYNTHESIS",),
+                payload=self._synthesis_payload(),
+                response=response,
+                model=self.model,
+                api_url=self.api_url,
+                error="Stage3 synthesis actions type invalid",
+                response_meta={
+                    **_provider_meta("validation-only-failure"),
+                    "transport_status": "completed",
+                    "finish_reason": "stop",
+                    "json_valid": True,
+                },
+            )
+            synthesis_path.write_text(json.dumps(failed), encoding="utf-8")
+            fetch_mock = unittest.mock.Mock(side_effect=AssertionError("provider must not be called"))
+
+            result = self._run(self._args(resume=source), Path(run_tmp), fetch_mock)
+
+            fetch_mock.assert_not_called()
+            self.assertEqual(result["segmented_pipeline"]["synthesis_status"], "completed")
+            self.assertEqual(
+                result["segmented_pipeline"]["synthesis_execution_source"],
+                "revalidation",
+            )
+            self.assertEqual(result["improvements"][0]["actions"], ["增加痛点特写"])
+            recovered = json.loads(
+                stage_group_artifact_path(Path(run_tmp), ("SYNTHESIS",)).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                recovered["provider_response"]["improvements"][0]["actions"],
+                "增加痛点特写",
+            )
+
+    def test_in_place_revalidation_preserves_original_failure_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as source_tmp:
+            source = Path(source_tmp)
+            for group in (*STAGE_JUDGMENT_GROUPS, ("SYNTHESIS",)):
+                self._write_completed(source, group)
+            synthesis_path = stage_group_artifact_path(source, ("SYNTHESIS",))
+            synthesis_artifact = json.loads(synthesis_path.read_text(encoding="utf-8"))
+            response = dict(synthesis_artifact["provider_response"])
+            response["improvements"] = [{
+                "title": "修正钩子", "target_stage": "S1", "problem": "问题",
+                "suggestion": "建议", "actions": "动作", "gmv_reason": "原因",
+                "gmv_impact": "影响",
+            }]
+            failed = failed_stage_group_artifact(
+                group=("SYNTHESIS",), payload=self._synthesis_payload(), response=response,
+                model=self.model, api_url=self.api_url, error="old validation failure",
+                response_meta={
+                    **_provider_meta("in-place-revalidation"),
+                    "transport_status": "completed", "finish_reason": "stop", "json_valid": True,
+                },
+            )
+            synthesis_path.write_text(json.dumps(failed), encoding="utf-8")
+            old_snapshot = synthesis_path.with_name(
+                f"{synthesis_path.stem}.validation-failed.older.json"
+            )
+            old_failed = dict(failed)
+            old_failed["error"] = "older validation failure"
+            old_snapshot.write_text(json.dumps(old_failed), encoding="utf-8")
+            fetch_mock = unittest.mock.Mock(side_effect=AssertionError("provider must not be called"))
+
+            result = self._run(self._args(resume=source), source, fetch_mock)
+
+            fetch_mock.assert_not_called()
+            self.assertEqual(result["segmented_pipeline"]["synthesis_status"], "completed")
+            preserved = list(source.glob("stage2_provider_SYNTHESIS.validation-failed.*.json"))
+            self.assertEqual(len(preserved), 2)
+            errors = {
+                json.loads(path.read_text(encoding="utf-8"))["error"]
+                for path in preserved
+            }
+            self.assertEqual(errors, {"older validation failure", "old validation failure"})
+            self.assertEqual(json.loads(synthesis_path.read_text(encoding="utf-8"))["status"], "completed")
+
+    def test_failed_stage_group_skips_synthesis_provider_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            calls: list[tuple[str, ...]] = []
+
+            def fetch_response(_args, _api_key, request_path, _response_path, **kwargs):
+                payload = json.loads(Path(request_path).read_text(encoding="utf-8"))
+                group = tuple(payload["group"])
+                calls.append(group)
+                if group == STAGE_JUDGMENT_GROUPS[0]:
+                    raise RuntimeError("first group failed")
+                kwargs["response_meta"].update(_provider_meta(f"provider-{'-'.join(group)}"))
+                return json.dumps(self._response(group))
+
+            result = self._run(self._args(), run_dir, unittest.mock.Mock(side_effect=fetch_response))
+
+            self.assertEqual(calls, list(STAGE_JUDGMENT_GROUPS))
+            self.assertEqual(result["segmented_pipeline"]["synthesis_status"], "failed")
+            self.assertEqual(result["segmented_pipeline"]["synthesis_execution_source"], "not_run")
+            self.assertFalse(stage_group_artifact_path(run_dir, ("SYNTHESIS",)).exists())
 
     def test_provider_path_runs_all_groups_and_persists_retry_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -483,6 +759,32 @@ class StageGroupPipelineReplayTests(unittest.TestCase):
             process.assert_called_once()
             phase_c.assert_called_once()
             self.assertFalse(hasattr(pipeline, "maybe_apply_s4_visual_verifier"))
+
+    def test_degraded_stage2_does_not_spend_phase_c_or_reconciliation_calls(self) -> None:
+        for degraded in (
+            {"stage2_candidate_status": "degraded", "stage_analysis": []},
+            {
+                "stage2_candidate_status": "completed",
+                "stage2_pipeline_status": "degraded",
+                "stage_analysis": [],
+            },
+        ):
+            with self.subTest(degraded=degraded):
+                with (
+                    patch.object(pipeline, "_process_llm_result", return_value=degraded),
+                    patch.object(pipeline, "maybe_refine_low_confidence_stages") as phase_c,
+                    patch.object(pipeline, "maybe_reconcile_final_improvements") as reconcile,
+                ):
+                    result = pipeline._apply_live_postprocess_chain(
+                        args=Namespace(), api_key="unused",
+                        raw_result={"stage2_candidate_status": "completed"},
+                        analysis_input="input", run_dir=Path("unused"), analysis={},
+                        locked_video_understanding={},
+                    )
+
+                self.assertIs(result, degraded)
+                phase_c.assert_not_called()
+                reconcile.assert_not_called()
 
     def test_stage3_cannot_override_code_owned_ranges_or_evidence_ids(self) -> None:
         stage_results = [{
