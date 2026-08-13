@@ -382,10 +382,46 @@ class StageEvidenceContractTests(unittest.TestCase):
         }
         freeze_stage_evidence(facts)
 
-        recovered = _mark_stage1_qualification_recovered(facts, ["S4", "S6"])
+        with patch(
+            "flayr_core.llm.pipeline.stage_evidence_readiness",
+            side_effect=lambda _facts, stage: "present" if stage == "S6" else "unknown",
+        ):
+            recovered = _mark_stage1_qualification_recovered(facts, ["S4", "S6"])
 
         qualification = recovered["stage1_qualification"]
-        self.assertEqual(qualification["status"], "completed")
+        self.assertEqual(qualification["status"], "failed")
+        self.assertEqual(qualification["recovered_stage_codes"], ["S6"])
+        self.assertEqual(qualification["failed_stage_codes"], ["S4"])
+
+    def test_partial_stage1_d_recovery_preserves_b_failure_lineage(self) -> None:
+        facts = self._active_side("C", "present")
+        s4 = next(item for item in facts["stage_evidence_checks"] if item["stage"] == "S4")
+        s4.update(
+            {
+                "status": "unknown",
+                "coverage": "unknown",
+                "evidence_ids": [],
+                "observed_signals": [],
+                "missing_signals": list(stage_evidence_contract("S4").required_signals),
+                "signal_bindings": {},
+            }
+        )
+        facts["stage1_qualification"] = {
+            "source": "pipeline",
+            "status": "failed",
+            "failed_stage_codes": ["S4"],
+            "requalification_source_failed_stage_codes": ["S4", "S6"],
+            "failure_reason": "Stage1-D S4 failed",
+        }
+
+        with patch(
+            "flayr_core.llm.pipeline.stage_evidence_readiness",
+            side_effect=lambda _facts, stage: "present" if stage == "S6" else "unknown",
+        ):
+            recovered = _mark_stage1_qualification_recovered(facts, ["S4", "S6"])
+
+        qualification = recovered["stage1_qualification"]
+        self.assertEqual(qualification["status"], "failed")
         self.assertEqual(qualification["recovered_stage_codes"], ["S6"])
         self.assertEqual(qualification["failed_stage_codes"], ["S4"])
 
@@ -1178,28 +1214,36 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "_resource_budget": None,
             },
         )()
-        audit_response = {
+        recovery_response = {
             "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
             "candidate_evidence_units": [],
-            "stage_evidence_checks": [
-                {
-                    "stage": stage,
-                    "status": "unknown",
-                    "coverage": "unknown",
-                    "evidence_ids": [],
-                    "observed_signals": [],
-                    "missing_signals": [],
-                }
-                for stage in stage_codes()
-            ],
         }
+        qualification_responses = [
+            {
+                "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                "stage_evidence_checks": [
+                    {
+                        "stage": stage,
+                        "status": "unknown",
+                        "coverage": "unknown",
+                        "evidence_ids": [],
+                        "observed_signals": [],
+                        "missing_signals": list(stage_evidence_contract(stage).required_signals),
+                        "signal_bindings": {},
+                    }
+                    for stage in group
+                ],
+            }
+            for group in STAGE1_QUALIFICATION_GROUPS
+        ]
         with tempfile.TemporaryDirectory() as tmp_dir:
+            responses = iter((recovery_response, *qualification_responses))
             with patch(
                 "flayr_core.llm.pipeline.build_video_fact_recovery_payload",
                 return_value={"messages": []},
             ), patch(
                 "flayr_core.llm.pipeline.fetch_json_completion",
-                return_value=json.dumps(audit_response),
+                side_effect=lambda *_args, **_kwargs: json.dumps(next(responses)),
             ):
                 result = _maybe_recover_video_facts(
                     args,
@@ -1211,7 +1255,10 @@ class StageEvidenceContractTests(unittest.TestCase):
                 )
         self.assertEqual(result["stage1_recovery"]["status"], "focused_recovery_with_unresolved")
         self.assertEqual(result["stage1_coverage_audit"]["status"], "partial")
-        self.assertEqual(result["stage1_recovery"]["recovery_mode"], "stage1_c_focused_once")
+        self.assertEqual(
+            result["stage1_recovery"]["recovery_mode"],
+            "stage1_c_observe_stage1_d_qualify_once",
+        )
         self.assertIn("stage_coverage_incomplete", result["stage1_recovery"]["trigger_reasons"])
         self.assertIn("temporal_continuity_uncertain", result["stage1_recovery"]["trigger_reasons"])
         self.assertIn("s6_tail_unclosed", result["stage1_recovery"]["trigger_reasons"])
@@ -1279,15 +1326,18 @@ class StageEvidenceContractTests(unittest.TestCase):
                     "audio_fact": "模型臆造的语气和音效判断。",
                 }
             ],
+        }
+        qualification_response = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
             "stage_evidence_checks": [
                 {
                     "stage": "S1",
                     "status": "present",
                     "coverage": "complete",
-                    "evidence_ids": ["RECOVERY_S1"],
+                    "evidence_ids": ["C7"],
                     "observed_signals": list(stage_evidence_contract("S1").required_signals),
                     "missing_signals": [],
-                    "signal_bindings": self._signal_bindings("S1", "RECOVERY_S1"),
+                    "signal_bindings": self._signal_bindings("S1", "C7"),
                 }
             ],
         }
@@ -1298,6 +1348,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "llm_dry_run": False,
                 "llm_model": "qwen3-vl-plus",
                 "vision_model": "qwen3-vl-plus",
+                "judgment_model": "qwen3.7-plus",
                 "llm_api_url": (
                     "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/"
                     "compatible-mode/v1/chat/completions"
@@ -1307,6 +1358,8 @@ class StageEvidenceContractTests(unittest.TestCase):
         )()
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir)
+            provider_responses = iter((recovery_response, qualification_response))
+
             def provider_call(*_args, **kwargs):
                 kwargs["response_meta"].update(
                     {
@@ -1316,7 +1369,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                         "usage": {},
                     }
                 )
-                return json.dumps(recovery_response)
+                return json.dumps(next(provider_responses))
 
             with patch(
                 "flayr_core.llm.pipeline.build_video_fact_recovery_payload",
@@ -1348,6 +1401,14 @@ class StageEvidenceContractTests(unittest.TestCase):
             provider_artifact = json.loads(
                 next(run_dir.glob("stage1_provider_creator_C_*.json")).read_text()
             )
+            qualification_artifact = json.loads(
+                next(run_dir.glob("stage1_provider_creator_D_S1.json")).read_text()
+            )
+            qualification_request = json.loads(
+                (run_dir / "llm_facts_creator_requalification_S1_request.json").read_text(
+                    encoding="utf-8"
+                )
+            )
 
         s1_audit = result["stage1_coverage_audit"]["stages"]["S1"]
         self.assertGreater(
@@ -1362,6 +1423,26 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(
             provider_artifact["provider_response"]["candidate_evidence_units"][0]["audio_fact"],
             "模型臆造的语气和音效判断。",
+        )
+        self.assertNotIn("stage_evidence_checks", provider_artifact["provider_response"])
+        self.assertEqual(qualification_artifact["request_identity"]["model"], "qwen3.7-plus")
+        qualification_request_text = json.dumps(qualification_request, ensure_ascii=False)
+        self.assertIn(recovered_unit["id"], qualification_request_text)
+        self.assertIn("开场画面直接展示清洁痛点", qualification_request_text)
+        self.assertEqual(
+            result["stage1_recovery"]["candidate_id_map"],
+            [
+                {
+                    "candidate_index": 0,
+                    "raw_id": "RECOVERY_S1",
+                    "canonical_id": recovered_unit["id"],
+                    "status": "accepted",
+                }
+            ],
+        )
+        self.assertEqual(
+            result["stage1_recovery"]["qualification_provider_artifacts"],
+            ["stage1_provider_creator_D_S1.json"],
         )
         self.assertEqual(s1_audit["status"], "found")
         self.assertEqual(s1_audit["coverage"], "complete")
@@ -1393,6 +1474,120 @@ class StageEvidenceContractTests(unittest.TestCase):
         # tail window; the bounded review therefore starts at 49.5s here.
         self.assertGreaterEqual(tail_windows[-1][1], 49.5)
         self.assertEqual(tail_windows[-1][2], 60.0)
+
+    def test_native_stage1_c_observation_extends_acquisition_before_stage1_d_gate(self) -> None:
+        facts = self._active_side("C", "present")
+        s4 = next(item for item in facts["stage_evidence_checks"] if item["stage"] == "S4")
+        s4.update(
+            {
+                "status": "unknown",
+                "coverage": "unknown",
+                "evidence_ids": [],
+                "observed_signals": [],
+                "missing_signals": list(stage_evidence_contract("S4").required_signals),
+                "signal_bindings": {},
+            }
+        )
+        recovery_response = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "candidate_evidence_units": [
+                {
+                    "id": "REC_S4",
+                    "time_range": "5.5s - 5.8s",
+                    "information": "后段近景直接展示使用后的可见变化。",
+                    "visual_fact": "后段近景直接展示使用后的可见变化。",
+                    "evidence_strength": "direct",
+                    "functions": ["S4_effect"],
+                }
+            ],
+        }
+        qualification_responses = [
+            {
+                "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                "stage_evidence_checks": [
+                    {
+                        "stage": stage,
+                        "status": "present",
+                        "coverage": "complete",
+                        "evidence_ids": ["C7" if stage == "S4" else f"C{list(stage_codes()).index(stage) + 1}"],
+                        "observed_signals": list(stage_evidence_contract(stage).required_signals),
+                        "missing_signals": [],
+                        "signal_bindings": self._signal_bindings(
+                            stage,
+                            "C7" if stage == "S4" else f"C{list(stage_codes()).index(stage) + 1}",
+                        ),
+                    }
+                    for stage in group
+                ],
+            }
+            for group in STAGE1_QUALIFICATION_GROUPS
+        ]
+        args = type(
+            "Args",
+            (),
+            {
+                "llm_dry_run": False,
+                "llm_model": "qwen3-vl-plus",
+                "vision_model": "qwen3-vl-plus",
+                "judgment_model": "qwen3.7-plus",
+                "llm_api_url": "https://example.invalid/api",
+                "_resource_budget": None,
+            },
+        )()
+        responses = iter((recovery_response, *qualification_responses))
+
+        def provider_call(*_args, **kwargs):
+            kwargs["response_meta"].update(
+                {
+                    "logical_request_id": "native-stage1-c",
+                    "transport_attempts": 1,
+                    "transport_retry_reasons": [],
+                    "usage": {},
+                }
+            )
+            return json.dumps(next(responses))
+
+        with tempfile.TemporaryDirectory() as tmp_dir, patch(
+            "flayr_core.llm.pipeline.build_video_fact_recovery_payload",
+            return_value={
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,video"}}
+                        ],
+                    }
+                ]
+            },
+        ), patch(
+            "flayr_core.llm.pipeline.fetch_json_completion",
+            side_effect=provider_call,
+        ):
+            result = _maybe_recover_video_facts(
+                args,
+                self._analysis(),
+                Path(tmp_dir),
+                "secret",
+                "creator",
+                facts,
+            )
+
+        self.assertEqual(result["stage1_acquisition"]["input_mode"], "native_video")
+        self.assertEqual(result["stage1_acquisition"]["channels"]["visual"]["coverage"], "full")
+        freeze_stage_evidence(result)
+        self.assertEqual(
+            stage_evidence_readiness(result, "S4"),
+            "present",
+            {
+                "contract": stage_evidence_contract_issues(result, require_version=True),
+                "acquisition": stage1_acquisition_issues(result, "S4"),
+                "recovery": result.get("stage1_recovery"),
+            },
+        )
+        self.assertNotIn(
+            "S4:acquisition_visual_input_outside_evidence_range",
+            stage1_acquisition_issues(result, "S4"),
+        )
 
     def test_recovery_media_never_falls_back_to_full_video(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1544,19 +1739,28 @@ class StageEvidenceContractTests(unittest.TestCase):
                     "functions": ["S4_effect"],
                 }
             ],
-            "stage_evidence_checks": [
-                {
-                    "stage": "S4",
-                    "status": "unknown",
-                    "coverage": "partial",
-                    "evidence_ids": [],
-                    "observed_signals": [],
-                    "missing_signals": ["effect_attribution"],
-                    "signal_bindings": {},
-                }
-            ],
         }
+        qualification_responses = [
+            {
+                "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                "stage_evidence_checks": [
+                    {
+                        "stage": stage,
+                        "status": "unknown",
+                        "coverage": "partial",
+                        "evidence_ids": [],
+                        "observed_signals": [],
+                        "missing_signals": list(stage_evidence_contract(stage).required_signals),
+                        "signal_bindings": {},
+                    }
+                    for stage in group
+                ],
+            }
+            for group in STAGE1_QUALIFICATION_GROUPS
+        ]
         with tempfile.TemporaryDirectory() as tmp_dir:
+            provider_responses = iter((recovery_response, *qualification_responses))
+
             def provider_call(*_args, **kwargs):
                 kwargs["response_meta"].update(
                     {
@@ -1566,7 +1770,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                         "usage": {},
                     }
                 )
-                return json.dumps(recovery_response)
+                return json.dumps(next(provider_responses))
 
             with patch(
                 "flayr_core.llm.pipeline.build_video_fact_recovery_payload",
@@ -1584,7 +1788,11 @@ class StageEvidenceContractTests(unittest.TestCase):
                     facts,
                 )
 
-        self.assertIn("C_REC_S4", {item["id"] for item in result["evidence_units"]})
+        self.assertIn(
+            "C_REC_S4",
+            {item["id"] for item in result["evidence_units"]},
+            result.get("stage1_recovery"),
+        )
         s4 = next(item for item in result["stage_evidence_checks"] if item["stage"] == "S4")
         self.assertEqual(s4["status"], "unknown")
         view = stage_analysis_evidence_view(result, {"S4"})
@@ -1634,6 +1842,9 @@ class StageEvidenceContractTests(unittest.TestCase):
         recovery_response = {
             "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
             "candidate_evidence_units": [],
+        }
+        qualification_response = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
             "stage_evidence_checks": [
                 {
                     "stage": "S4",
@@ -1647,12 +1858,25 @@ class StageEvidenceContractTests(unittest.TestCase):
             ],
         }
         with tempfile.TemporaryDirectory() as tmp_dir:
+            responses = iter((recovery_response, qualification_response))
+
+            def provider_call(*_args, **kwargs):
+                kwargs["response_meta"].update(
+                    {
+                        "logical_request_id": "remaining-structural-issue",
+                        "transport_attempts": 1,
+                        "transport_retry_reasons": [],
+                        "usage": {},
+                    }
+                )
+                return json.dumps(next(responses))
+
             with patch(
                 "flayr_core.llm.pipeline.build_video_fact_recovery_payload",
                 return_value={"messages": []},
             ), patch(
                 "flayr_core.llm.pipeline.fetch_json_completion",
-                return_value=json.dumps(recovery_response),
+                side_effect=provider_call,
             ):
                 result = _maybe_recover_video_facts(
                     args,
@@ -1684,42 +1908,73 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "_resource_budget": None,
             },
         )()
-        audit_response = {
+        recovery_response = {
             "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
             "candidate_evidence_units": [],
-            "stage_evidence_checks": [
-                {
-                    "stage": stage,
-                    "status": "unknown",
-                    "coverage": "unknown",
-                    "evidence_ids": [],
-                    "observed_signals": [],
-                    "missing_signals": [],
-                    "reason": {"severity": "large"} if stage == "S4" else "未确认",
-                }
-                for stage in stage_codes()
-            ],
         }
+        qualification_responses = [
+            {
+                "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                "stage_evidence_checks": [
+                    {
+                        "stage": stage,
+                        "status": "unknown",
+                        "coverage": "unknown",
+                        "evidence_ids": [],
+                        "observed_signals": [],
+                        "missing_signals": list(stage_evidence_contract(stage).required_signals),
+                        "signal_bindings": {},
+                        "reason": {"severity": "large"} if stage == "S4" else "未确认",
+                    }
+                    for stage in group
+                ],
+            }
+            for group in STAGE1_QUALIFICATION_GROUPS
+        ]
         with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir)
+            responses = iter((recovery_response, *qualification_responses))
+
+            def provider_call(*_args, **kwargs):
+                kwargs["response_meta"].update(
+                    {
+                        "logical_request_id": "nested-downstream-field",
+                        "transport_attempts": 1,
+                        "transport_retry_reasons": [],
+                        "usage": {},
+                    }
+                )
+                return json.dumps(next(responses))
+
             with patch(
                 "flayr_core.llm.pipeline.build_video_fact_recovery_payload",
                 return_value={"messages": []},
             ), patch(
                 "flayr_core.llm.pipeline.fetch_json_completion",
-                return_value=json.dumps(audit_response),
+                side_effect=provider_call,
             ):
                 result = _maybe_recover_video_facts(
                     args,
                     self._analysis(),
-                    Path(tmp_dir),
+                    run_dir,
                     "secret",
                     "creator",
                     facts,
                 )
+            failed_d_artifact = json.loads(
+                (run_dir / "stage1_provider_creator_D_S3_S4.json").read_text(
+                    encoding="utf-8"
+                )
+            )
         self.assertEqual(result["stage1_coverage_audit"]["status"], "partial")
         self.assertEqual(result["stage1_recovery"]["status"], "focused_recovery_with_unresolved")
-        self.assertIn("returned downstream fields", result["stage1_recovery"]["failure_reason"])
-        self.assertIn("stage_evidence_checks[3].reason.severity", result["stage1_recovery"]["failure_reason"])
+        self.assertEqual(result["stage1_qualification"]["status"], "failed")
+        self.assertIn("S4", result["stage1_qualification"]["failed_stage_codes"])
+        self.assertEqual(failed_d_artifact["status"], "failed")
+        self.assertTrue(failed_d_artifact["request_identity"]["sha256"])
+        self.assertTrue(failed_d_artifact["response_sha256"])
+        self.assertIn("returned downstream fields", failed_d_artifact["error"])
+        self.assertIn("stage_evidence_checks[1].reason.severity", failed_d_artifact["error"])
 
     def test_alignment_uses_final_readiness_after_coverage_audit_failure(self) -> None:
         sides = {
@@ -2196,7 +2451,61 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(ids, ["C1", "C2"])
         self.assertEqual(len(ids), len(set(ids)))
 
-    def test_stage1_recovery_remaps_response_local_candidate_ids_and_references(self) -> None:
+    def test_stage1_c_duplicate_local_ids_are_disambiguated_and_audited(self) -> None:
+        base = normalize_video_fact_result(
+            "creator",
+            {
+                "evidence_units": [{"id": "C1", "time_range": "0s - 1s", "information": "原始事实"}],
+            },
+            self._analysis(),
+        )
+        candidate_id_map: list[dict[str, object]] = []
+        merged = _merge_video_fact_recovery(
+            "creator",
+            base,
+            {
+                "candidate_evidence_units": [
+                    {"id": "C2", "time_range": "1s - 2s", "information": "补充事实一"},
+                    {"id": "C2", "time_range": "2s - 3s", "information": "补充事实二"},
+                ]
+            },
+            self._analysis(),
+            [],
+            candidate_id_map=candidate_id_map,
+        )
+        self.assertEqual([item["id"] for item in merged["evidence_units"]], ["C1", "C2", "C3"])
+        self.assertEqual(
+            [(item["raw_id"], item["canonical_id"]) for item in candidate_id_map],
+            [("C2", "C2"), ("C2", "C3")],
+        )
+
+    def test_stage1_c_rejects_candidate_for_non_target_stage(self) -> None:
+        base = normalize_video_fact_result(
+            "creator",
+            {
+                "evidence_units": [{"id": "C1", "time_range": "0s - 1s", "information": "原始事实"}],
+            },
+            self._analysis(),
+        )
+        with self.assertRaisesRegex(ValueError, "escaped target stages: S5"):
+            _merge_video_fact_recovery(
+                "creator",
+                base,
+                {
+                    "candidate_evidence_units": [
+                        {
+                            "id": "C2",
+                            "time_range": "1s - 2s",
+                            "information": "越界候选",
+                            "functions": ["S5_trust"],
+                        }
+                    ]
+                },
+                self._analysis(),
+                ["S4"],
+            )
+
+    def test_stage1_c_allocates_candidate_id_but_cannot_write_qualification(self) -> None:
         base = normalize_video_fact_result(
             "creator",
             {
@@ -2222,17 +2531,6 @@ class StageEvidenceContractTests(unittest.TestCase):
                 }
             ],
             "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
-            "stage_evidence_checks": [
-                {
-                    "stage": "S1",
-                    "status": "present",
-                    "coverage": "complete",
-                    "evidence_ids": ["C1"],
-                    "observed_signals": list(stage_evidence_contract("S1").required_signals),
-                    "missing_signals": [],
-                    "signal_bindings": self._signal_bindings("S1", "C1"),
-                }
-            ],
         }
 
         merged = _merge_video_fact_recovery(
@@ -2245,10 +2543,8 @@ class StageEvidenceContractTests(unittest.TestCase):
 
         self.assertEqual([item["id"] for item in merged["evidence_units"]], ["C1", "C2"])
         check = {item["stage"]: item for item in merged["stage_evidence_checks"]}["S1"]
-        self.assertEqual(check["evidence_ids"], ["C2"])
-        self.assertTrue(
-            all(binding["evidence_ids"] == ["C2"] for binding in check["signal_bindings"].values())
-        )
+        self.assertEqual(check["status"], "unknown")
+        self.assertEqual(check["evidence_ids"], [])
         self.assertEqual(stage_evidence_contract_issues(merged), [])
 
     def test_fact_time_range_clamps_only_endpoint_rounding_noise(self) -> None:
@@ -2532,7 +2828,7 @@ class StageEvidenceContractTests(unittest.TestCase):
         derive_product_visibility(result, analysis)
         self.assertEqual(result["product_visibility"]["estimation_note"], "保留模型估计")
 
-    def test_missing_recovery_target_replaces_old_qualification_with_unknown(self) -> None:
+    def test_stage1_c_blocks_every_target_pending_stage1_d(self) -> None:
         base = normalize_video_fact_result(
             "creator",
             {
@@ -2559,21 +2855,10 @@ class StageEvidenceContractTests(unittest.TestCase):
         recovery = {
             "candidate_evidence_units": [],
             "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
-            "stage_evidence_checks": [
-                {
-                    "stage": "S1",
-                    "status": "present",
-                    "coverage": "complete",
-                    "evidence_ids": ["C1"],
-                    "observed_signals": list(stage_evidence_contract("S1").required_signals),
-                    "missing_signals": [],
-                    "signal_bindings": self._signal_bindings("S1", "C1"),
-                }
-            ],
         }
         merged = _merge_video_fact_recovery("creator", base, recovery, self._analysis(), ["S1", "S2"])
         checks = {item["stage"]: item for item in merged["stage_evidence_checks"]}
-        self.assertEqual(checks["S1"]["status"], "present")
+        self.assertEqual(checks["S1"]["status"], "unknown")
         self.assertEqual(checks["S2"]["status"], "unknown")
         self.assertEqual(qualified_stage_evidence_ids(merged, "S2"), set())
         self.assertEqual(stage_evidence_contract_issues(merged), [])
@@ -2983,7 +3268,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                 self._analysis(),
             )
 
-    def test_recovery_only_replaces_target_stage_and_keeps_old_observations(self) -> None:
+    def test_stage1_c_appends_observation_and_blocks_only_target_stage(self) -> None:
         base = normalize_video_fact_result(
             "creator",
             {
@@ -3009,17 +3294,6 @@ class StageEvidenceContractTests(unittest.TestCase):
                 }
             ],
             "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
-            "stage_evidence_checks": [
-                {
-                    "stage": "S1",
-                    "status": "present",
-                    "coverage": "complete",
-                    "evidence_ids": ["C2"],
-                    "observed_signals": list(stage_evidence_contract("S1").required_signals),
-                    "missing_signals": [],
-                    "signal_bindings": self._signal_bindings("S1", "C2"),
-                }
-            ],
         }
         merged = _merge_video_fact_recovery(
             "creator",
@@ -3030,8 +3304,8 @@ class StageEvidenceContractTests(unittest.TestCase):
         )
         self.assertEqual({"C1", "C2"}, {unit["id"] for unit in merged["evidence_units"]})
         checks = {item["stage"]: item for item in merged["stage_evidence_checks"]}
-        self.assertEqual(checks["S1"]["status"], "present")
-        self.assertEqual(checks["S1"]["evidence_ids"], ["C2"])
+        self.assertEqual(checks["S1"]["status"], "unknown")
+        self.assertEqual(checks["S1"]["evidence_ids"], [])
         self.assertEqual(checks["S2"]["status"], "unknown")
         self.assertEqual(stage_evidence_contract_issues(merged), [])
 

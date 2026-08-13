@@ -2169,16 +2169,132 @@ class ArchitectureContractTests(unittest.TestCase):
             pipeline._video_fact_cache_key(args, changed, "creator"),
         )
 
+    def test_cache_migration_keeps_new_c_and_d_artifact_provenance(self) -> None:
+        cached = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage1_qualification": {"status": "failed"},
+            "stage1_acquisition": {
+                "provider_artifacts": [
+                    {"phase": "A", "artifact": "stage1_provider_creator_A.json"}
+                ]
+            },
+            "evidence_units": [],
+        }
+        cached_record = {
+            "fact_result": cached,
+            "stage_fact_artifacts": {
+                "stage1_provider_creator_A.json": {
+                    "schema_version": 1,
+                    "status": "completed",
+                    "provider_response": {},
+                }
+            },
+        }
+        analysis = {
+            "videos": {
+                "creator": {
+                    "preprocess_fingerprint": {"source_video": {"sha256": "source"}}
+                }
+            }
+        }
+        args = SimpleNamespace(
+            llm_dry_run=False,
+            llm_model="test",
+            llm_api_url="https://example.test/v1/chat/completions",
+            llm_image_limit=8,
+            _resource_budget=None,
+        )
+
+        def qualify(*values, **_kwargs):
+            facts = values[-1]
+            facts["stage1_qualification"] = {
+                "status": "failed",
+                "group_records": [
+                    {
+                        "phase": "D",
+                        "status": "failed",
+                        "provider_artifact": "stage1_provider_creator_D_S6.json",
+                    }
+                ],
+            }
+            return facts
+
+        def recover(*values, **_kwargs):
+            facts = values[-1]
+            facts["stage1_recovery"] = {
+                "provider_status": "completed",
+                "provider_artifact": "stage1_provider_creator_C_S6.json",
+            }
+            return facts
+
+        with tempfile.TemporaryDirectory() as tmp, (
+            mock.patch.object(pipeline, "_read_cache_record", return_value=cached_record)
+        ), mock.patch.object(
+            pipeline, "_run_stage1_qualification", side_effect=qualify
+        ), mock.patch.object(
+            pipeline, "_maybe_recover_video_facts", side_effect=recover
+        ), mock.patch.object(
+            pipeline, "freeze_stage_evidence"
+        ):
+            result = pipeline.run_video_fact_extraction(
+                args, analysis, Path(tmp), "secret"
+            )
+
+        self.assertEqual(
+            [item["phase"] for item in result["creator"]["stage1_acquisition"]["provider_artifacts"]],
+            ["A", "C", "D"],
+        )
+
     def test_stage_fact_artifacts_round_trip_through_cache_helpers(self) -> None:
-        artifact = {"schema_version": 1, "status": "completed", "provider_response": {"ok": True}}
+        artifact = pipeline.completed_stage_fact_artifact(
+            role="creator",
+            phase="A",
+            payload={"model": "test", "messages": []},
+            response={"ok": True},
+            model="test",
+            api_url="https://example.test/v1/chat/completions",
+            response_meta={
+                "logical_request_id": "cache-artifact",
+                "completion_attempts": 1,
+                "retry_reasons": [],
+                "usage": {},
+            },
+            artifact_name="stage1_provider_creator_A.json",
+        )
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
             source = Path(source_tmp)
             target = Path(target_tmp)
             (source / "stage1_provider_creator_A.json").write_text(
                 json.dumps(artifact), encoding="utf-8"
             )
-            snapshot = pipeline._stage_fact_artifacts_for_cache(source, "creator")
+            (source / "stage1_provider_creator_D_S6.json").write_text(
+                json.dumps({**artifact, "provider_response": {"stale": True}}),
+                encoding="utf-8",
+            )
+            fact_result = {
+                "stage1_acquisition": {
+                    "provider_artifacts": [
+                        {"phase": "A", "artifact": "stage1_provider_creator_A.json"}
+                    ]
+                }
+            }
+            snapshot = pipeline._stage_fact_artifacts_for_cache(
+                source,
+                "creator",
+                fact_result,
+            )
             self.assertEqual(snapshot["stage1_provider_creator_A.json"], artifact)
+            self.assertNotIn("stage1_provider_creator_D_S6.json", snapshot)
+            missing_result = {
+                "stage1_acquisition": {
+                    "provider_artifacts": [
+                        {"phase": "A", "artifact": "stage1_provider_creator_A.json"},
+                        {"phase": "D", "artifact": "stage1_provider_creator_D_S5.json"},
+                    ]
+                }
+            }
+            with self.assertRaisesRegex(ValueError, "artifact missing"):
+                pipeline._stage_fact_artifacts_for_cache(source, "creator", missing_result)
             self.assertTrue(
                 pipeline._restore_stage_fact_artifacts_from_cache(
                     {"stage_fact_artifacts": snapshot}, target, "creator"
@@ -2193,6 +2309,46 @@ class ArchitectureContractTests(unittest.TestCase):
                     {"stage_fact_artifacts": {}}, target, "creator"
                 )
             )
+
+    def test_stage1_provider_manifest_keeps_failed_c_and_d_provenance(self) -> None:
+        facts = {
+            "stage1_acquisition": {
+                "provider_artifacts": [
+                    {
+                        "phase": "A",
+                        "artifact": "stage1_provider_creator_A.json",
+                        "status": "completed",
+                    }
+                ]
+            },
+            "stage1_qualification": {
+                "group_records": [
+                    {
+                        "phase": "D",
+                        "group": ["S6"],
+                        "status": "failed",
+                        "provider_artifact": "stage1_provider_creator_D_S6.json",
+                        "request_identity_sha256": "request-d",
+                        "response_sha256": "response-d",
+                        "failure_kind": "semantic_contract",
+                    }
+                ]
+            },
+            "stage1_recovery": {
+                "provider_status": "failed",
+                "provider_artifact": "stage1_provider_creator_C_S6.json",
+                "request_identity_sha256": "request-c",
+                "response_sha256": "response-c",
+                "failure_reason": "invalid C response",
+            },
+        }
+
+        manifest = pipeline._current_stage1_provider_artifacts(facts)
+
+        self.assertEqual([item["phase"] for item in manifest], ["A", "C", "D"])
+        self.assertEqual([item.get("status") for item in manifest], ["completed", "failed", "failed"])
+        self.assertEqual(manifest[1]["response_sha256"], "response-c")
+        self.assertEqual(manifest[2]["response_sha256"], "response-d")
 
     def test_ocr_uses_short_single_request_timeout_with_outer_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5582,7 +5738,7 @@ class ArchitectureContractTests(unittest.TestCase):
             },
         )
         qualification_text = qualification["messages"][1]["content"][0]["text"]
-        self.assertIn("Stage1-B 阶段资格投影", qualification_text)
+        self.assertIn("Stage1 阶段资格投影", qualification_text)
         self.assertIn("fact_quality", qualification_text)
         self.assertIn('"stage_evidence_checks"', qualification_text)
         self.assertEqual(
@@ -5712,6 +5868,30 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn('"stage": "S4"', scoped_text)
         self.assertNotIn('"stop_trigger"', scoped_text)
 
+    def test_stage1_s6_qualification_reviews_local_commerce_asr_ambiguity(self) -> None:
+        payload = build_stage_evidence_qualification_payload(
+            "qwen3.7-plus",
+            "creator",
+            {"videos": {"creator": {"duration_seconds": 60.0}}},
+            {
+                "evidence_units": [
+                    {
+                        "id": "C7",
+                        "time_range": "52.0s - 59.0s",
+                        "voiceover": "retail pun ada dekat beg kuning",
+                        "functions": ["S6_cta"],
+                    }
+                ],
+                "stage1_acquisition": {},
+            },
+            ["S6"],
+        )
+        text = payload["messages"][1]["content"][0]["text"]
+        self.assertIn("S6 本地化口播复核", text)
+        self.assertIn("beg/bakul kuning", text)
+        self.assertIn("不是自动命中规则", text)
+        self.assertIn("多个合理解释，保持 unknown", text)
+
     def test_stage1_qualification_groups_cover_each_stage_once(self) -> None:
         flattened = [stage for group in STAGE1_QUALIFICATION_GROUPS for stage in group]
         self.assertEqual(flattened, list(stage_codes()))
@@ -5738,6 +5918,10 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn("completion 只记录关键动作过程是否完整可见", text)
         self.assertIn("result_only 是只见结果、不见产品如何造成结果", text)
         self.assertIn("完整使用动作本身不等于 direct_comparison", text)
+        self.assertIn("不得输出 coverage 或 stage_evidence_checks", text)
+        self.assertIn("资格与覆盖由 Stage1-D", text)
+        self.assertIn("返回空 candidate_evidence_units", text)
+        self.assertNotIn("要明确拒绝它", text)
         self.assertNotIn('"stop_trigger"', text)
         self.assertNotIn('"product_identity"', text)
 

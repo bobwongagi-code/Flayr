@@ -147,6 +147,92 @@ class StageFactArtifactTests(unittest.TestCase):
                 api_url="https://example.test/v1/chat/completions",
             )
 
+    def test_failed_semantic_contract_preserves_parsed_provider_response(self) -> None:
+        response = {
+            "stage_evidence_contract_version": "stage_evidence_v1",
+            "candidate_evidence_units": [],
+            "stage_evidence_checks": [],
+        }
+        artifact = failed_stage_fact_artifact(
+            role="creator",
+            phase="C",
+            group=["S6"],
+            payload=self.payload,
+            model="qwen-test",
+            api_url="https://example.test/v1/chat/completions",
+            error="Stage1-C returned phase-D fields",
+            response_meta=_provider_meta("semantic-failure"),
+            response=response,
+        )
+        self.assertEqual(artifact["provider_response"], response)
+        self.assertTrue(artifact["response_sha256"])
+        with self.assertRaisesRegex(StageFactArtifactError, "not completed"):
+            reusable_stage_fact_response(
+                artifact,
+                role="creator",
+                phase="C",
+                group=["S6"],
+                payload=self.payload,
+                model="qwen-test",
+                api_url="https://example.test/v1/chat/completions",
+            )
+
+    def test_failed_artifact_response_hash_is_verified_when_read(self) -> None:
+        artifact = failed_stage_fact_artifact(
+            role="creator",
+            phase="D",
+            group=["S6"],
+            payload=self.payload,
+            model="qwen3.7-plus",
+            api_url="https://example.test/v1/chat/completions",
+            error="semantic contract failure",
+            response_meta=_provider_meta("failed-d"),
+            response=self.response,
+        )
+        artifact["provider_response"]["evidence_units"][0]["id"] = "TAMPERED"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "stage1_provider_creator_D_S6.json"
+            path.write_text(json.dumps(artifact), encoding="utf-8")
+            with self.assertRaisesRegex(StageFactArtifactError, "response hash mismatch"):
+                read_stage_fact_artifact(path)
+
+    def test_phase_d_replay_binds_judgment_model_and_request_identity(self) -> None:
+        artifact = completed_stage_fact_artifact(
+            role="creator",
+            phase="D",
+            group=["S6"],
+            payload=self.payload,
+            response=self.response,
+            model="qwen3.7-plus",
+            api_url="https://example.test/v1/chat/completions",
+            response_meta=_provider_meta("phase-d"),
+            artifact_name="stage1_provider_creator_D_S6.json",
+        )
+        response, _metadata = reusable_stage_fact_response(
+            artifact,
+            role="creator",
+            phase="D",
+            group=["S6"],
+            payload=self.payload,
+            model="qwen3.7-plus",
+            api_url="https://example.test/v1/chat/completions",
+        )
+        self.assertEqual(response, self.response)
+        with self.assertRaisesRegex(StageFactArtifactError, "request identity mismatch"):
+            reusable_stage_fact_response(
+                artifact,
+                role="creator",
+                phase="D",
+                group=["S6"],
+                payload=self.payload,
+                model="qwen3.6-plus",
+                api_url="https://example.test/v1/chat/completions",
+            )
+
+    def test_focused_requalification_has_distinct_phase_d_artifact(self) -> None:
+        path = stage_fact_artifact_path(Path("/tmp/run"), "benchmark", "D", ["S5"])
+        self.assertEqual(path.name, "stage1_provider_benchmark_D_S5.json")
+
 
 if __name__ == "__main__":
     unittest.main()

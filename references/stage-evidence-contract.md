@@ -52,7 +52,7 @@ Stage1 还必须带一份代码生成的 `stage1_acquisition`。它只记录本�
 
 Stage1 不能输出或推导 `severity`、双方比较、差距、商业优先级、建议、报告结论或 `stage_evidence_links`。这些字段即使嵌套在别的对象中，也必须在 active contract 下拒绝，而不是静默丢弃。
 
-当前生产实现把 Stage1-A 和 Stage1-B 作为两个独立请求执行：Stage1-A 固定使用 canonical 帧/时间线、窗口安全 ASR 与 OCR，只产生原子观察；即使 provider 支持原生视频，首次抽取也不发送整支视频。Stage1-B 是无媒体的只读资格投影，只读取已归一化的 `evidence_units` 和代码拥有的采集状态。Stage1-B 进一步按 `S1+S2 / S3+S4 / S5 / S6` 四个独立阶段组请求，避免一个阶段组的跨阶段引用、超时或 JSON 失败清空其他组；代码只合并成功组，失败组单独置为 `unknown`。Stage1-A 响应中的阶段资格字段不再作为权威输入；Stage1-B 失败时保留原子账本，并将失败阶段交给一次有边界的 Stage1-C 决定是否需要补观察。
+当前生产实现把观察和资格分开：Stage1-A 固定使用 canonical 帧/时间线、窗口安全 ASR 与 OCR，只产生原子观察；Stage1-B 是无媒体的首次只读资格投影。B 按 `S1+S2 / S3+S4 / S5 / S6` 四组执行，失败组单独置为 `unknown`。一次有边界的 Stage1-C 只能追加目标阶段候选观察；代码完成 canonical ID 映射并把 C 的真实媒体输入并入 acquisition manifest 后，Stage1-D 使用判断模型只读 A/C 账本重投影目标资格。C 不能输出资格，D 不能补写事实。
 
 ### C. 定向缺口补观察
 
@@ -63,7 +63,7 @@ Stage1 不能输出或推导 `severity`、双方比较、差距、商业优先�
 只有以下情况才允许进入 Stage1-C：必需槽位为 `unknown`、阶段覆盖未闭合、候选事实的时间/渠道无法确认、S3/S4 连续动作或效果链无法由离散帧确认、S6 尾段仍未闭合，或硬事实之间出现机械冲突。触发原因使用稳定代码 `stage_coverage_incomplete`、`temporal_continuity_uncertain`、`evidence_qualification_conflict`、`s6_tail_unclosed`。每个角色最多一次，多个目标阶段合并进同一请求；补观察仍不足时保持
 `unknown` 或 `conflict`，不递归重试。
 
-补观察返回候选原子事实和目标阶段资格，代码随后追加 Evidence Ledger、重新运行目标阶段投影，并生成
+Stage1-C 只返回候选原子观察，代码追加 Evidence Ledger；Stage1-D 才返回目标阶段资格。代码随后生成
 `stage1_coverage_audit` 兼容投影：
 
 - `status=found` / `coverage=complete`：目标阶段已形成合格的 `present` 投影；

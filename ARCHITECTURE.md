@@ -27,12 +27,11 @@
 
 ### 0.2 Step-0 + 分层分析架构 + Phase C
 
-模型路由只有一份：`qwen3-vl-plus` 写入视觉观察并承担定向视频复核，`qwen3.7-plus` 负责产品合同、Stage1-B 资格投影、Stage2/Stage3、综合与世界知识判断。路由只改变 provider 执行者，不改变 ADR-007 的字段所有权、Evidence Ledger、resolver 或 Phase C 合同。`qwen3.6-plus` 只能显式替代 judgment 角色并继续与 `qwen3-vl-plus` 配对，不是自动 fallback；旧单模型参数仅服务历史严格回放，`qwen3-vl-flash` 已退役。
+模型路由只有一份：`qwen3-vl-plus` 写入 Stage1-A/C 视觉观察并承担 Phase C 定向视频复核，`qwen3.7-plus` 负责产品合同、Stage1-B/D 资格投影、Stage2/Stage3、综合与世界知识判断。路由只改变 provider 执行者，不改变 ADR-007 的字段所有权、Evidence Ledger、resolver 或 Phase C 合同。`qwen3.6-plus` 只能显式替代 judgment 角色并继续与 `qwen3-vl-plus` 配对，不是自动 fallback；旧单模型参数仅服务历史严格回放，`qwen3-vl-flash` 已退役。
 
 - **Step-0（产品合同）**：只吃运营产品信息与品类知识，先生成卖点分流计划和 `proof_contract`；
   `observable_dimension` 是 S4 单一主证明的硬边界，`consumer_outcome` 只负责自然语言表达结果。
-- **阶段一（事实）**：Stage1-A 固定消费 canonical 帧/时间线、在线 Fun-ASR 和 OCR，不把整支原生视频作为首次事实源；再做 Stage1-B 的 S1-S6 阶段证据资格投影，产出
-  `video_facts_{role}.json` 的 `evidence_units[]`、`stage_evidence_checks[]`。Stage1-A/B/C 每次 provider 响应都先写入带完整 request identity、response hash、retry/usage 元数据的 `stage1_provider_*.json`；严格回放缺失或身份变化时直接失败，不得回退到缓存或 provider。若必需信号缺失、未知或冲突，最多做一次按阶段定向的预锁定补观察；补观察只能追加候选事实、替换目标阶段资格投影，不能删除或改写已有事实。补观察完成后才锁定 facts。
+- **阶段一（事实）**：Stage1-A 固定消费 canonical 帧/时间线、在线 Fun-ASR 和 OCR，不把整支原生视频作为首次事实源；Stage1-B 负责首次 S1-S6 资格投影。若必需信号缺失、未知或冲突，Stage1-C 最多一次只追加目标阶段的原生视频候选观察，随后 Stage1-D 使用判断模型只读 Canonical A/C 账本并重投影目标资格。C 不能输出 `stage_evidence_checks`，D 不能补写事实。A/B/C/D 每次 provider 响应都先写入带完整 request identity、response hash、retry/usage 元数据的 `stage1_provider_*.json`；严格回放缺失或身份变化时直接失败，不得回退到缓存或 provider。补观察完成后才锁定 facts。
 - **阶段二（判断）**：只消费锁定 facts 中已经资格化的阶段证据 + analysis_input.md，不附视频或音频。默认路径按 `S1+S2 / S3+S4 / S5 / S6` 四个小阶段组分别请求，随后由只读 Stage3 综合；Stage2/Stage3 provider 原文先写入 `stage2_provider_*.json`，单个阶段组失败不得让其他组重跑或丢失。Stage3 只输出建议 prose 和 target stage，时间范围、证据 ID、gap type、priority 由代码从已锁定 Stage2 结果投影，不能由模型重新编写。
 - **Phase C（回看）**：代码确定性检测覆盖、资格、连续性或 resolver 冲突，≤2 阶段、仅一次；模型自报低置信只能与独立信号相关联，不能单独花费视频预算。切对应阶段原生视频片段，并同时提供窗口安全 ASR；VL 只负责视觉内容，不能把视频音轨当作已理解语义。回看只接受受限 `stage_patches[]`，再重跑目标阶段的后处理链。Phase C 不能绕过 Stage1，也不能新增或改写已锁定 facts。规范见 0.7。
 - **后处理链**：确定性投影、validate、resolver、局部 patch repair 与 qa_warnings；默认路径不做整对象 Stage2 repair。
@@ -453,7 +452,7 @@ json_codec / product_profile / parse → pipeline`。下游（translation）只 
 
 | 阶段 | 函数 | 输入 | 产出 | 意图 |
 |------|------|------|------|------|
-| 一：事实抽取 | `run_video_fact_extraction` → `build_video_fact_payload` → `build_video_fact_recovery_payload`（最多一次） | Stage1-A 固定使用 canonical 帧/时间线图 + 窗口安全 ASR/OCR；Stage1-C 只向目标窗口发送原生片段 | Stage1-A 原子 `evidence_units` + Stage1-B `stage_evidence_checks`，补观察后锁定 | 先建立可审计主账本；原生视频只补连续性/资格缺口，不重新扫描并覆盖主账本 |
+| 一：事实抽取 | `run_video_fact_extraction` → Stage1-A/B → `build_video_fact_recovery_payload`（C，最多一次）→ Stage1-D | A 固定使用 canonical 帧/时间线图 + 窗口安全 ASR/OCR；C 只向目标窗口发送原生片段；B/D 只读 Canonical 账本 | A/C 原子 `evidence_units` + B/D `stage_evidence_checks`，补观察后锁定 | 视觉模型只观察，判断模型才投影资格；原生视频不重新扫描并覆盖主账本 |
 | 二：分段对比判断 | `build_stage_group_judgment_payload` → `run_segmented_stage_pipeline` | 每个阶段组的锁定 facts + 必要感官材料 | 阶段事实状态 / relation / model gap | 每个阶段组独立失败与收口，避免完整大对象互相拖累 |
 | 三：只读综合 | `build_stage_synthesis_payload` | 已收口的阶段结果 | 全局结论 / 建议草稿 | 不能修改阶段事实、relation、model gap 或 resolver severity |
 | C：低置信回看 | `build_stage_review_payload` → `stage_patches[]` | 目标阶段锁定 facts + 对应阶段原生视频片段 | 仅局部 patch | 只修改目标阶段允许字段，硬限制预算和次数 |
@@ -579,7 +578,7 @@ flayr.py
   │   ├─ llm/api.py        HTTP 调用 + 临时目录传输
   │   ├─ llm/analysis_contract.py  结果结构契约
   │   ├─ llm/parse.py      JSON 解析 + schema normalize
-  │   ├─ Stage1-A/B/C       原子账本、资格投影、一次定向补观察
+  │   ├─ Stage1-A/B/C/D     原子观察、首次资格、一次定向补观察、定向重投影
   │   ├─ Stage2 groups       S1+S2 / S3+S4 / S5 / S6 独立判断
   │   ├─ Stage3 synthesis    只读阶段结果的综合
   │   └─ postprocess/        投影、validate、resolver、局部 patch

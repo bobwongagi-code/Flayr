@@ -582,10 +582,18 @@ def normalize_stage1_acquisition(value: Any) -> dict[str, Any]:
             {
                 "phase": str(item.get("phase") or "").strip().upper(),
                 "artifact": str(item.get("artifact") or "").strip(),
+                "status": (
+                    str(item.get("status") or "completed").strip().lower()
+                    if str(item.get("status") or "completed").strip().lower() in {"completed", "failed"}
+                    else "failed"
+                ),
                 "execution_source": str(item.get("execution_source") or "provider").strip().lower(),
                 "request_identity_sha256": str(item.get("request_identity_sha256") or "").strip(),
                 "response_sha256": str(item.get("response_sha256") or "").strip(),
                 "completion_attempts": _nonnegative_int(item.get("completion_attempts")),
+                "failure_kind": str(item.get("failure_kind") or "").strip(),
+                "cause_type": str(item.get("cause_type") or "").strip(),
+                "failure_reason": str(item.get("failure_reason") or "").strip()[:500],
             }
             for item in (value.get("provider_artifacts") if isinstance(value.get("provider_artifacts"), list) else [])
             if isinstance(item, dict) and str(item.get("artifact") or "").strip()

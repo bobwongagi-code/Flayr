@@ -878,21 +878,33 @@ def build_stage_evidence_qualification_payload(
         "evidence_units": units,
     }
     output_stages = _stage_evidence_qualification_examples(normalized_targets)
+    s6_language_review = (
+        "## S6 本地化口播复核\n"
+        "Fun-ASR 是可审计的语音事实入口，但短口语可能出现分词、近音词或单词拼写错误。"
+        "当某条已锁定观察被标记为 S6_cta，或完整口播包含可能的本地电商行动/路径表达时，"
+        "必须结合整句、销售语境和当地平台惯用表达核对语义，不能只按一个错误 token 的字面翻译否定。"
+        "例如 beg/bakul kuning、yellow bag/cart 以及 klik/tekan/tap/beli/order/checkout/link/retail 等只作为检索线索，"
+        "不是自动命中规则；只有整句能同时支持面向观众的行动和可执行路径时才可判 present。"
+        "画面里存在实体袋子不能单独否定口播中的平台隐语；若近音修复仍有多个合理解释，保持 unknown 并在 reason 写明歧义。"
+        if "S6" in normalized_targets
+        else ""
+    )
     text = "\n\n".join(
         [
-            f"# Stage1-B 阶段资格投影：{role}（{target_text}）",
+            f"# Stage1 阶段资格投影：{role}（{target_text}）",
             f"你只负责把已锁定的原子观察投影到目标阶段 {target_text}。不要看视频、不要补写事实、不要比较 benchmark 与 creator。",
             "只能引用输入中实际存在的 evidence_units。没有满足 required signal、渠道不可用、时间边界不精确或 coverage 不完整时，必须返回 unknown/conflict；不能把缺失当 absent。",
             "present 只能由 direct 或 explicit 的真实 evidence_ids 支撑；inferred、unknown、冲突或缺字段不得触发正式资格。",
             "absent 只有在相关观察范围已完整覆盖、且合同要求的信号明确未出现时才允许。离散采样、粗粒度口播或未完成覆盖不能证明 absent。",
             "not_applicable 只有在比较合同明确说明该阶段不适用时才允许，并必须在 reason 中写明依据；不能用它掩盖采集缺失。",
             "每个 signal_binding 必须引用当前输入中真实存在的 evidence_id；不得跨角色、跨视频或跨阶段创造引用。",
-            "fact_quality 是 Stage1-A 对每条观察的描述性质量元数据；只能结合输入中的这些字段判断资格，不能把缺失或 uncertain 猜成已验证。",
+            "fact_quality 是 Canonical Stage1-A/C 对每条观察的描述性质量元数据；只能结合输入中的这些字段判断资格，不能把缺失或 uncertain 猜成已验证。",
             "## 阶段合同",
             stage_evidence_contract_prompt(normalized_targets),
             "## 输出时必须遵守的阶段信号白名单",
             _stage_evidence_signal_codebook(normalized_targets),
-            "## 已锁定 Stage1-A 事实（只读）",
+            s6_language_review,
+            "## 已锁定 Canonical Stage1-A/C 事实（只读）",
             json.dumps(context, ensure_ascii=False, indent=2),
             "## 严格 JSON 输出",
             json.dumps(
@@ -909,7 +921,7 @@ def build_stage_evidence_qualification_payload(
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": "你是 Flayr Stage1-B 资格投影器。只输出严格 JSON，不要 Markdown。"},
+            {"role": "system", "content": "你是 Flayr Stage1 资格投影器。只输出严格 JSON，不要 Markdown。"},
             {"role": "user", "content": [{"type": "text", "text": text}]},
         ],
         "temperature": 0.0,
@@ -1005,12 +1017,13 @@ def build_video_fact_recovery_payload(
         else "你不能直接理解视频音轨；口播语义只能来自本轮提供的窗口安全 Fun-ASR，缺失时保持 unknown，不得脑补。"
     )
     recovery_system = (
-        "你是 Flayr Stage1 的定向证据复核器。只输出严格 JSON。"
+        "你是 Flayr Stage1-C 的定向视觉观察器。只输出严格 JSON。"
         "这是一次且仅一次的事实恢复，不得改写、删除或合并已有 evidence_units，"
-        "只能补充当前视频中可直接观察到的新 candidate_evidence_units，并重新给出目标阶段资格。"
+        "只能补充当前视频中可直接观察到的新 candidate_evidence_units。"
+        "目标阶段资格由后续判断模型的 Stage1-D 独立投影，你不得输出 stage_evidence_checks 或其他判断字段。"
         "候选观察是未资格化的恢复线索，不是事实；必须结合其内容、时间和本轮媒体独立核实，"
         "不得仅凭 functions、关键词或旧资格表把候选直接升级为证据。"
-        "没有确认事实就写空数组和 unknown，不得为了让阶段成立而推断。"
+        "没有确认的新观察就写空数组，不得为了让阶段成立而推断。"
         + recovery_audio_rule
     )
     payload["messages"][0]["content"] = recovery_system
@@ -1035,10 +1048,10 @@ def build_video_fact_recovery_payload(
     s6_tail_review_block = (
         "## S6 尾段 CTA 定向复核\n"
         "当前 S6 资格未闭合（可能是 absent、unknown 或 conflict）。本轮只对原始视频最后 8-12 秒做一次漏检复核；"
-        "不要因为出现关键词就直接判定 CTA，必须确认完整语义、说话对象、画面路径和真实时间。\n"
+        "不要因为出现关键词就直接写成 CTA 结论，必须原样记录完整语句、说话对象、画面路径和真实时间。\n"
         "马来/东南亚电商口语可能用 beg kuning、bakul kuning、yellow bag/cart，或 tekan、klik、tap、beli、order、checkout、link 等表达；"
-        "这些只是检索线索，不是自动等价规则。若完整语义确认了购买行动和可执行路径，必须把 explicit_action 与 purchase_path"
-        "分别绑定到同一条或对应的候选 evidence_id，并将 S6 返回为 present/complete；若未确认，保持 unknown 或在完整覆盖后返回 absent，不要脑补。"
+        "这些只是检索线索，不是自动等价规则。若观察中可能包含购买行动或路径，只追加一条保留原句和上下文的候选观察；"
+        "不得在本层输出 explicit_action、purchase_path、present、absent 或 coverage，最终语义由 Stage1-D 复核。"
     ) if (
         "S6" in target_set
         and not (s6_current_status == "present" and s6_current_coverage == "complete")
@@ -1054,17 +1067,14 @@ def build_video_fact_recovery_payload(
                     "## 目标阶段信号白名单",
                     _stage_evidence_signal_codebook(normalized_targets),
                     "这是一次追加观察，不是重新抽取整条视频；不得改写、删除或合并已有 evidence_units。",
-                    "已有资格化事实只用于避免重复，不得把它们当成可修改的模型输出。候选观察位于恢复线索区，必须逐条核实后才能被当前响应引用；"
-                    "如果候选内容不满足目标阶段 required_signals，要明确拒绝它，不得仅因 functions 标签而引用。",
-                    "present 必须同时满足 coverage=complete、required_signals 全部 observed、每个 required signal 都绑定真实 evidence_id；"
-                    "absent 只有在本轮覆盖完整、没有任何合格 evidence_id 且 required_signals 均明确 missing 时才允许。"
-                    "只看了尾段或局部窗口时不得返回 absent，应返回 unknown/partial。",
-                    "coverage 指目标阶段的复核范围，不要求重新扫描整条视频；如果本轮已完整检查所提供的目标阶段窗口，"
-                    "应标记 coverage=complete。S6 尾段定向复核只足以确认发现的 CTA，不足以单独证明 S6 全阶段 absent。",
+                    "已有资格化事实只用于避免重复，不得把它们当成可修改的模型输出。候选观察位于恢复线索区，必须逐条核实；"
+                    "如果没有可直接观察且与目标阶段相关的新内容，返回空 candidate_evidence_units，不得输出拒绝理由或资格字段。",
+                    "你只记录观察，不判断 present/absent/unknown，也不得输出 coverage 或 stage_evidence_checks；"
+                    "资格与覆盖由 Stage1-D 根据代码拥有的媒体范围投影。",
                     "S5 是可选的信任放大阶段，不得根据品类先验强行要求或关闭；品牌/logo/产品身份本身不等于 source_basis，"
                     "只有实际来源、报告、认证、用户原话或过程信息才可作为合格背书依据。",
-                    "若候选观察的 functions 含 S6_cta，必须检查其完整口播、字幕、画面和时间范围；"
-                    "不能把它静默丢掉后仍返回 S6 absent/unknown，除非在 reason 中说明独立核查为何不成立。",
+                    "若候选观察可能承担 S6_cta，必须原样保留完整窗口口播、字幕、画面和时间范围，"
+                    "不要在本层裁决它最终是否构成购买行动。",
                     "每个新 candidate_evidence_unit 必须填写 fact_quality 的六个观察轴；"
                     "completion 只记录关键动作过程是否完整可见，proof 只记录结果证明形态，causal_link 只记录动作与结果的可见连接。"
                     "direct_comparison 必须有画面直接对照/控制与差异；result_only 是只见结果、不见产品如何造成结果；"
@@ -1106,7 +1116,6 @@ def build_video_fact_recovery_payload(
                             "functions": [],
                         }
                     ],
-                    "stage_evidence_checks": _stage_evidence_qualification_examples(normalized_targets),
                     "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
                         },
                         ensure_ascii=False,

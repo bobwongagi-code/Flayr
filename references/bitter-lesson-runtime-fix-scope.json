@@ -14,6 +14,8 @@
       "references/bitter-lesson-runtime-fix-scope.json",
       "references/ADR007.md",
       "references/ADR008.md",
+      "references/analysis-output-schema.json",
+      "references/result-pipeline-architecture.md",
       "references/stage-evidence-contract.md",
       "README.md",
       "SKILL.md",

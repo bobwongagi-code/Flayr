@@ -17,7 +17,7 @@ Provider response
 ### Provider response
 
 - Owns only the structured response returned by one provider request.
-- Stage1-A/B/C and Stage2/Stage3 responses are stored as provider artifacts
+- Stage1-A/B/C/D and Stage2/Stage3 responses are stored as provider artifacts
   before projection or normalization. Every artifact binds role/phase or group,
   model, endpoint and payload digest, and stores response hash plus retry/usage
   metadata.

@@ -195,7 +195,7 @@ Web worker 使用同一条路由：同时设置 `FLAYR_JUDGMENT_MODEL=qwen3.7-pl
 | `analysis_replay_context.json` / `postprocess_provenance` | 绑定确定性重放所需的分析上下文、输入哈希和规范化结果哈希；缺失或哈希不匹配时不得重放 |
 | `postprocess_change_log.json` | 后处理字段变更、规则、证据和字段来源记录 |
 | `video_facts_{benchmark,creator}.json` | 阶段一单视频事实清单 |
-| `stage1_provider_{role}_{A|B|C}*.json` | Stage1-A/B/C provider 原始 JSON、完整请求身份、响应哈希、重试与 usage 元数据；可用 `--stage1-replay-from` 严格重放 |
+| `stage1_provider_{role}_{A|B|C|D}*.json` | Stage1-A 观察、B 资格投影、C 定向补观察、D 定向重投影的 provider 原始 JSON、完整请求身份、响应哈希、重试与 usage 元数据；可用 `--stage1-replay-from` 严格重放 |
 | `stage2_provider_{GROUP}.json` | Stage2/Stage3 provider 原始 JSON、请求身份、响应哈希、重试与 usage 元数据；可用 `--stage2-replay-from` 严格重放 |
 | `provider_asr.json` | Fun-ASR 原始响应、请求身份、响应哈希和执行来源；可随主运行严格技术重放 |
 | `provider_compact_eval.json` | 独立 compact/cohort/control provider 原始响应；各评估入口支持严格技术重放 |

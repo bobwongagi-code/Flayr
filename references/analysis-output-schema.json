@@ -105,7 +105,7 @@
       "communication_strategy": "概括口播、画面、字幕如何配合。",
       "temporal_evidence_mode": "full_temporal | focused_temporal | static_only | unknown。由代码按实际请求能力写入，不由模型猜。",
       "stage1_acquisition": {
-        "version": 3,
+        "version": 4,
         "source": "pipeline",
         "status": "complete | partial | failed | unknown。代码从预处理产物生成；不是模型结论。",
         "input_mode": "native_video | canonical_frames | unknown",
@@ -114,17 +114,19 @@
         "channels": "visual、voiceover、subtitle、audio 的代码拥有状态、覆盖、计数和时间边界精度；voiceover 只有 boundary_precision=word 且存在窗口安全转写时才可用于阶段级口播归因；coverage=full 才表示可用于否定性结论的全覆盖，sampled 表示只有离散采样。",
         "visual_input_timestamps": "本次请求实际送入模型的、带时间戳的采样帧；时间线概览图没有时间戳，不能单独证明时间范围内的视觉事实。",
         "stage_coverage": "代码拥有的粗粒度诊断字段；阶段资格不使用固定时间片推断，而是用原生视频或 evidence_unit 自身时间范围与实际输入时间戳核对。",
+        "provider_artifacts": "本次 Canonical Ledger 实际消费的 Stage1-A/B/C/D provider 产物清单；含 phase、completed/failed、request/response hash、重试次数和失败分类。目录中的旧文件不得自动进入此清单。",
         "errors": ["采集或边界能力的机器可读问题"],
         "note": "Stage1 的 absent 只有在相关采集通道闭合后才可进入后续分析。"
       },
       "stage1_qualification": {
         "source": "pipeline",
-        "status": "completed | failed | deferred_dry_run。Stage1-B 按 S1+S2、S3+S4、S5、S6 四个独立阶段组执行；completed 表示请求已收口，不表示每个阶段都有资格证据。",
+        "status": "completed | failed | deferred_dry_run。Stage1-B 首次投影、Stage1-D 定向重投影均按独立阶段组执行；failed 表示至少一个当前 D 目标组未完成，不能被缓存伪装为成功。",
         "contract_version": 5,
         "stage_codes": ["S1", "S2", "S3", "S4", "S5", "S6"],
         "evidence_id_count": "Stage1-B 读取的锁定原子事实数量。",
-        "group_records": "每个阶段组的 completed/failed 状态、请求产物和失败原因；组失败只阻断该组。",
-        "failed_stage_codes": "Stage1-B 失败且尚未由 Stage1-C 恢复的阶段；不等于 Stage1-A 没有采集事实。",
+        "group_records": "每个 Stage1-B/D 阶段组的 phase、completed/failed 状态、请求身份、响应哈希和失败原因；组失败只阻断该组。",
+        "failed_stage_codes": "Stage1-B/D 调用或合同失败且尚未闭合的阶段；不等于 Stage1-A/C 没有采集观察。",
+        "requalification_source_failed_stage_codes": "进入本次 Stage1-D 前的失败阶段，用于保留部分恢复的谱系。",
         "failure_reason": "资格投影失败时的机器可读原因；不得替代 unknown。"
       },
       "selling_point_observations": [
@@ -154,7 +156,7 @@
       "stage1_coverage_audit": {
         "version": 2,
         "source": "pipeline",
-        "status": "completed | partial | failed | unknown。代码保存一次 Stage1-C 定向补观察的投影状态。",
+        "status": "completed | partial | failed | unknown。代码保存一次 Stage1-C 观察 + Stage1-D 资格投影的兼容审计状态。",
         "independence": "focused_stage_recovery_v1",
         "target_stages": ["本次定向补观察请求的阶段；未包含的阶段不属于本次投影范围"],
         "stages": "S1-S6 各自的 found | clear | conflict | unknown、coverage、候选 evidence_ids 和观察信号；由 pipeline 归一化，模型不能回写最终字段。",
@@ -192,7 +194,7 @@
         }
       ],
       "evidence_budget_exceeded": "true | false。代码根据实际响应 finish_reason=length 生成；模型不得填写或覆盖。",
-      "stage1_recovery": "Stage1 预锁定一次定向补观察的状态、目标阶段和候选事实数量；失败不得伪装成完成。",
+      "stage1_recovery": "Stage1 预锁定一次 C 观察 + D 资格重投影的状态、目标阶段、raw_id→canonical_id 映射、C/D provider 产物和实际新增数量；失败不得伪装成完成。",
       "attention_scan_audit": {
         "recording_equipment_visible": "true | false | null",
         "foreground_non_task_object_visible": "true | false | null",
@@ -248,7 +250,7 @@
       "communication_strategy": "概括口播、画面、字幕如何配合。",
       "temporal_evidence_mode": "full_temporal | focused_temporal | static_only | unknown。",
       "stage1_acquisition": {
-        "version": 3,
+        "version": 4,
         "source": "pipeline",
         "status": "complete | partial | failed | unknown。代码从预处理产物生成；不是模型结论。",
         "input_mode": "native_video | canonical_frames | unknown",
@@ -257,17 +259,19 @@
         "channels": "visual、voiceover、subtitle、audio 的代码拥有状态、覆盖、计数和时间边界精度；coverage=full 才表示可用于否定性结论的全覆盖，sampled 表示只有离散采样。",
         "visual_input_timestamps": "本次请求实际送入模型的、带时间戳的采样帧；时间线概览图没有时间戳，不能单独证明时间范围内的视觉事实。",
         "stage_coverage": "代码拥有的粗粒度诊断字段；阶段资格不使用固定时间片推断，而是用原生视频或 evidence_unit 自身时间范围与实际输入时间戳核对。",
+        "provider_artifacts": "本次 Canonical Ledger 实际消费的 Stage1-A/B/C/D provider 产物清单；含 phase、completed/failed、request/response hash、重试次数和失败分类。目录中的旧文件不得自动进入此清单。",
         "errors": ["采集或边界能力的机器可读问题"],
         "note": "Stage1 的 absent 只有在相关采集通道闭合后才可进入后续分析。"
       },
       "stage1_qualification": {
         "source": "pipeline",
-        "status": "completed | failed | deferred_dry_run。Stage1-B 按 S1+S2、S3+S4、S5、S6 四个独立阶段组执行；completed 表示请求已收口，不表示每个阶段都有资格证据。",
+        "status": "completed | failed | deferred_dry_run。Stage1-B 首次投影、Stage1-D 定向重投影均按独立阶段组执行；failed 表示至少一个当前 D 目标组未完成，不能被缓存伪装为成功。",
         "contract_version": 5,
         "stage_codes": ["S1", "S2", "S3", "S4", "S5", "S6"],
         "evidence_id_count": "Stage1-B 读取的锁定原子事实数量。",
-        "group_records": "每个阶段组的 completed/failed 状态、请求产物和失败原因；组失败只阻断该组。",
-        "failed_stage_codes": "Stage1-B 失败且尚未由 Stage1-C 恢复的阶段；不等于 Stage1-A 没有采集事实。",
+        "group_records": "每个 Stage1-B/D 阶段组的 phase、completed/failed 状态、请求身份、响应哈希和失败原因；组失败只阻断该组。",
+        "failed_stage_codes": "Stage1-B/D 调用或合同失败且尚未闭合的阶段；不等于 Stage1-A/C 没有采集观察。",
+        "requalification_source_failed_stage_codes": "进入本次 Stage1-D 前的失败阶段，用于保留部分恢复的谱系。",
         "failure_reason": "资格投影失败时的机器可读原因；不得替代 unknown。"
       },
       "selling_point_observations": [],
@@ -286,7 +290,7 @@
       "stage1_coverage_audit": {
         "version": 2,
         "source": "pipeline",
-        "status": "completed | partial | failed | unknown。代码保存一次 Stage1-C 定向补观察的投影状态。",
+        "status": "completed | partial | failed | unknown。代码保存一次 Stage1-C 观察 + Stage1-D 资格投影的兼容审计状态。",
         "independence": "focused_stage_recovery_v1",
         "target_stages": ["本次定向补观察请求的阶段；未包含的阶段不属于本次投影范围"],
         "stages": "S1-S6 各自的 found | clear | conflict | unknown、coverage、候选 evidence_ids 和观察信号；由 pipeline 归一化，模型不能回写最终字段。",
@@ -324,7 +328,7 @@
         }
       ],
       "evidence_budget_exceeded": "true | false。代码根据实际响应 finish_reason=length 生成；模型不得填写或覆盖。",
-      "stage1_recovery": "Stage1 预锁定一次定向补观察的状态、目标阶段和候选事实数量；失败不得伪装成完成。",
+      "stage1_recovery": "Stage1 预锁定一次 C 观察 + D 资格重投影的状态、目标阶段、raw_id→canonical_id 映射、C/D provider 产物和实际新增数量；失败不得伪装成完成。",
       "attention_scan_audit": {
         "recording_equipment_visible": "true | false | null",
         "foreground_non_task_object_visible": "true | false | null",

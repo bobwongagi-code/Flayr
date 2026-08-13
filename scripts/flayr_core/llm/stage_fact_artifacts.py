@@ -33,7 +33,7 @@ def stage_fact_artifact_path(
     phase_token = str(phase or "").strip().upper()
     if role_token not in {"benchmark", "creator"}:
         raise StageFactArtifactError(f"invalid Stage1 role: {role!r}")
-    if phase_token not in {"A", "B", "C"}:
+    if phase_token not in {"A", "B", "C", "D"}:
         raise StageFactArtifactError(f"invalid Stage1 phase: {phase!r}")
     suffix = ""
     if group:
@@ -110,8 +110,9 @@ def failed_stage_fact_artifact(
     group: Sequence[str] | None = None,
     artifact_name: str = "",
     response_meta: Mapping[str, Any],
+    response: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    artifact = {
         "schema_version": STAGE_FACT_ARTIFACT_SCHEMA_VERSION,
         "status": "failed",
         "artifact_name": str(artifact_name or ""),
@@ -128,6 +129,11 @@ def failed_stage_fact_artifact(
             dict(response_meta), execution_source=str(response_meta.get("execution_source") or "live")
         ),
     }
+    if isinstance(response, Mapping):
+        response_copy = copy.deepcopy(dict(response))
+        artifact["provider_response"] = response_copy
+        artifact["response_sha256"] = _stable_sha256(response_copy)
+    return artifact
 
 
 def reusable_stage_fact_response(
@@ -187,4 +193,11 @@ def read_stage_fact_artifact(path: Path) -> dict[str, Any]:
         )
     except ProviderArtifactError as exc:
         raise StageFactArtifactError(f"Stage1 provider metadata invalid: {exc}") from exc
+    response = value.get("provider_response")
+    response_sha256 = value.get("response_sha256")
+    if response is not None or response_sha256 is not None:
+        if not isinstance(response, dict):
+            raise StageFactArtifactError(f"Stage1 provider response is missing: {path}")
+        if response_sha256 != _stable_sha256(response):
+            raise StageFactArtifactError(f"Stage1 provider response hash mismatch: {path}")
     return value
