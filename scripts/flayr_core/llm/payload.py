@@ -1503,8 +1503,8 @@ def _stage_group_flag_contract(stage: str) -> str:
             '"creator_hook":{"exists":true,"type":"A-G|unknown","dims":{"camera":true,"copy":true,"sound":true,"rhythm":true},'
             '"hook_boundary_seconds":0,"hook_boundary_reason":"...","s2_start_signal":"...","landing_met":false,'
             '"landing_reason":"...","window_evidence":"...","landing_window_leak":false,"anchors_proposition":false,"evidence_ids":[]},'
-            '"benchmark_hook":{...}。window_evidence 通常必须非空；仅当该侧 Stage1 已闭合为 absent、'
-            'exists=false 且 evidence_ids=[] 时允许空字符串，不得编造窗口证据'
+            '"benchmark_hook":{...}。s2_start_signal 与 window_evidence 通常必须非空；仅当该侧 Stage1 已闭合为 absent、'
+            'exists=false 且 evidence_ids=[] 时允许空字符串，不得编造转换信号或窗口证据'
         ),
         "S2": (
             '"creator_s2":{"exists":true,"merged_with_s3":false,"module_type":"A-D|unknown","handoff_met":false,'
@@ -2220,7 +2220,8 @@ def build_llm_comparison_payload(
         '产品在 S1 画面里出现不自动算 S2；但一旦口播/字幕开始把某个东西作为解决方案承接 Hook，即使还没露出包装，也已经是 S2。'
         '若第一句完整 Hook 跨过 5 秒，可取第一句结束；但不能把后续产品解释并入 S1）, '
         '"hook_boundary_reason": "一句话说明为什么这里是 S1/S2 边界：S1 主导信息是什么，S2 起点信号是什么", '
-        '"s2_start_signal": "边界后第一个 S2 信号，如产品名/解决方案承接/产品揭晓/认证卖点/产品成为画面主角", '
+        '"s2_start_signal": "边界后第一个 S2 信号，如产品名/解决方案承接/产品揭晓/认证卖点/产品成为画面主角；'
+        '通常必须非空，仅当该侧 Stage1 已闭合为 absent、exists=false 且 evidence_ids=[] 时允许空字符串", '
         '"landing_met": bool（钩子有没有"打穿"，【与 type 无关】。判 true 当且仅当：0 到 hook_boundary_seconds 内用户能 get 到一个【可停留的理由】，'
         '且【同时】满足三件——①对象明确：在说谁的问题/谁的场景/谁会关心（油皮、脱妆、经期痛、孩子抗拒刷牙）；'
         '②张力明确：为什么要继续看（痛点/反差/结果/悬念/场景共鸣/身份代入/认知颠覆 任一）；'
@@ -3351,7 +3352,7 @@ def build_llm_repair_payload(
                     + "一条事实只归属一个主要阶段；口播提及但画面不可见时标记 voice_only。"
                     + render_multimodal_prompt_contract(native_audio)
                     + "每个阶段必须补齐 creator_multimodal 与 benchmark_multimodal；只能引用该侧该阶段已有 evidence_ids，不得为补多模态字段新增事实。"
-                    "S1 Hook 必须补齐 creator_hook 与 benchmark_hook 两个对象，字段为 exists(bool)、type(A-G 或 unknown)、dims{camera,copy,sound,rhythm}(bool)、hook_boundary_seconds(number)、hook_boundary_reason(非空)、s2_start_signal(非空)、landing_met(bool)、landing_reason(非空)、window_evidence（通常非空；仅当该侧 Stage1 已闭合为 absent、exists=false 且 evidence_ids=[] 时可为空）、landing_window_leak(bool)、anchors_proposition(bool)、evidence_ids(数组)、proposition_ids(数组)。exists 只判是否有具体面向用户的留人尝试；弱 Hook 可以 exists=true、landing_met=false，不能与完全无 Hook 混淆。"
+                    "S1 Hook 必须补齐 creator_hook 与 benchmark_hook 两个对象，字段为 exists(bool)、type(A-G 或 unknown)、dims{camera,copy,sound,rhythm}(bool)、hook_boundary_seconds(number)、hook_boundary_reason(非空)、s2_start_signal（通常非空）、landing_met(bool)、landing_reason(非空)、window_evidence（通常非空）、landing_window_leak(bool)、anchors_proposition(bool)、evidence_ids(数组)、proposition_ids(数组)。仅当该侧 Stage1 已闭合为 absent、exists=false 且 evidence_ids=[] 时，s2_start_signal 与 window_evidence 可为空，不得编造转换信号或窗口证据。exists 只判是否有具体面向用户的留人尝试；弱 Hook 可以 exists=true、landing_met=false，不能与完全无 Hook 混淆。"
                     "hook_boundary_seconds 按 structure_library_full.md 的 S1 留人机制→S2 产品引出/解决方案承接功能切换判断，不得写死固定秒数；S2-A 承接式引出可早于产品实物或产品名出现，不能等产品画面才切 S2。"
                     "landing_met 按 type 无关三件套判断：0 到 hook_boundary_seconds 内对象明确、张力明确、可感知承诺/证据或具体未解问题，缺一即 false；痛点提问的答案可以在 S2 承接，不要求 S1 先说出产品；不得用后续 S2/S3 产品介绍补足 S1 landing。若引用边界后材料，landing_window_leak=true 且 landing_met=false。"
                     + "S2 产品引出必须补齐 creator_s2 与 benchmark_s2 两个对象，字段为 exists(bool)、merged_with_s3(bool)、module_type(A-D或unknown)、handoff_met(bool)、s1_s2_compatible(bool)、product_identity_clear(bool)、product_role_clear(bool)、excluded_or_risky_module(bool)、start_seconds(number)、end_seconds(number)、handoff_reason(非空)、evidence_ids(非空数组)、proposition_ids(数组)。"

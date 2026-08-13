@@ -148,8 +148,9 @@ def repair_s1_hook_boundaries(result: dict[str, Any], analysis: dict[str, Any]) 
         if not isinstance(hook, dict):
             continue
         repair_s1_hook_observable_floor(role, hook, result)
+        closed_absence = hook.get("exists") is False and hook.get("evidence_ids") == []
         candidate = infer_s1_boundary_candidate(role, result, analysis)
-        if candidate:
+        if candidate and not closed_absence:
             current = hook.get("hook_boundary_seconds")
             if isinstance(current, bool) or not isinstance(current, (int, float)):
                 current = None

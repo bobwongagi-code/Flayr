@@ -680,7 +680,7 @@ def validate_s1_hook_flags(result: dict[str, Any], analysis: dict[str, Any]) -> 
             errors.append(f"S1 {key}.hook_boundary_seconds 必须是非负数字")
         if not str(hook.get("hook_boundary_reason") or "").strip():
             errors.append(f"S1 {key}.hook_boundary_reason 不能为空")
-        if not str(hook.get("s2_start_signal") or "").strip():
+        if not str(hook.get("s2_start_signal") or "").strip() and not closed_absence:
             errors.append(f"S1 {key}.s2_start_signal 不能为空")
         if hook.get("landing_window_leak") not in {True, False}:
             errors.append(f"S1 {key}.landing_window_leak 必须是 bool")

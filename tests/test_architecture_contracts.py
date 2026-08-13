@@ -126,7 +126,7 @@ from flayr_core.postprocess.repair import (
     validate_s3_s4_hard_fact_consistency,
     validate_stage_evidence_temporal_consistency,
 )
-from flayr_core.postprocess.repair_stages import infer_s1_boundary_candidate
+from flayr_core.postprocess.repair_stages import infer_s1_boundary_candidate, repair_s1_hook_boundaries
 from flayr_core.postprocess.repair_stages import align_clear_commerce_evidence
 from flayr_core.postprocess.repair_stages import comparison_scope_summary
 from flayr_core.postprocess.health_rewrite import (
@@ -3484,7 +3484,7 @@ class ArchitectureContractTests(unittest.TestCase):
             "dims": {"camera": False, "copy": False, "sound": False, "rhythm": False},
             "hook_boundary_seconds": 0,
             "hook_boundary_reason": "Stage1 已闭合为 absent。",
-            "s2_start_signal": "0s 起进入产品展示。",
+            "s2_start_signal": "",
             "landing_met": False,
             "landing_reason": "Stage1 无可引用的 Hook 事实。",
             "window_evidence": "",
@@ -3510,7 +3510,10 @@ class ArchitectureContractTests(unittest.TestCase):
             {"evidence_ids": ["B1"]},
         ):
             invalid_hook = {**copy.deepcopy(absent_hook), **invalid_update}
-            with self.assertRaisesRegex(SystemExit, "window_evidence 不能为空"):
+            with self.assertRaisesRegex(
+                SystemExit,
+                "window_evidence 不能为空.*s2_start_signal 不能为空",
+            ):
                 validate_s1_hook_flags(
                     {
                         "stage_analysis": [
@@ -3523,6 +3526,50 @@ class ArchitectureContractTests(unittest.TestCase):
                     },
                     {"s1_hook_flags_required": True},
                 )
+
+    def test_s1_closed_absence_is_not_rewritten_from_boundary_candidate(self) -> None:
+        absent_hook = {
+            "exists": False,
+            "type": "unknown",
+            "dims": {"camera": False, "copy": False, "sound": False, "rhythm": False},
+            "hook_boundary_seconds": 0,
+            "hook_boundary_reason": "Stage1 已闭合为 absent。",
+            "s2_start_signal": "",
+            "landing_met": False,
+            "landing_reason": "Stage1 无可引用的 Hook 事实。",
+            "window_evidence": "",
+            "landing_window_leak": False,
+            "anchors_proposition": False,
+            "evidence_ids": [],
+        }
+        absent_hook["hook_boundary_seconds"] = None
+        result = {
+            "stage_analysis": [
+                {
+                    "stage": "S1 Hook",
+                    "creator_hook": copy.deepcopy(absent_hook),
+                    "benchmark_hook": copy.deepcopy(absent_hook),
+                }
+            ]
+        }
+        candidate = {
+            "seconds": 6.8,
+            "cue": "产品展示",
+            "source": "transcript_window",
+            "reason": "第二句进入产品承接。",
+        }
+
+        with mock.patch(
+            "flayr_core.postprocess.repair_stages.infer_s1_boundary_candidate",
+            return_value=candidate,
+        ):
+            repair_s1_hook_boundaries(result, {})
+
+        for role in ("creator", "benchmark"):
+            hook = result["stage_analysis"][0][f"{role}_hook"]
+            self.assertIsNone(hook["hook_boundary_seconds"])
+            self.assertEqual(hook["hook_boundary_reason"], "Stage1 已闭合为 absent。")
+            self.assertEqual(hook["s2_start_signal"], "")
 
     def test_s6_soft_invitation_with_offer_is_not_absent_cta(self) -> None:
         complete = {
