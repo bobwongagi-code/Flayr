@@ -887,6 +887,9 @@ def build_stage_evidence_qualification_payload(
         "例如 beg/bakul kuning、yellow bag/cart 以及 klik/tekan/tap/beli/order/checkout/link/retail 等只作为检索线索，"
         "不是自动命中规则；只有整句至少能支持面向观众的行动或可执行购买路径时才可判 present，"
         "是否有行动与路径双重支撑属于后续强弱判断。"
+        "判读时原始口播和整句句法优先，voiceover_zh 只是上游释义，冲突时不得用释义覆盖原句。"
+        "要区分可获得性表达（如 ada dekat、boleh dapat/beli/order dekat）与实体处置表达（如 buang、letak、masuk dalam）；"
+        "前者在销售收尾语境中可以支持 purchase_path，后者才通常描述把物品放入实体袋子。"
         "画面里存在实体袋子不能单独否定口播中的平台隐语；若近音修复仍有多个合理解释，保持 unknown 并在 reason 写明歧义。"
         if "S6" in normalized_targets
         else ""

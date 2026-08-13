@@ -6305,6 +6305,9 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn("S6 本地化口播复核", text)
         self.assertIn("beg/bakul kuning", text)
         self.assertIn("不是自动命中规则", text)
+        self.assertIn("ada dekat、boleh dapat/beli/order dekat", text)
+        self.assertIn("buang、letak、masuk dalam", text)
+        self.assertIn("原始口播和整句句法优先", text)
         self.assertIn("多个合理解释，保持 unknown", text)
 
     def test_stage1_qualification_groups_cover_each_stage_once(self) -> None:
