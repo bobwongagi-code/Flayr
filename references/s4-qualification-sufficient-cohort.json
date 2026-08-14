@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "decision_scope": "seen_mechanism_calibration_only",
+  "promotion_eligible": false,
+  "source": "references/s4-qualification-calibration-cases.json",
+  "selection_rule": "qualification_review.comparison_sufficiency == sufficient",
+  "samples": [
+    {
+      "sample_id": "aavini-foot-care",
+      "run_dir": "../runs/model-selection-20260802/new12-raw-video/aavini-foot-care"
+    },
+    {
+      "sample_id": "frosty-pearl-mineral-mix-cassava-litter",
+      "run_dir": "../runs/model-selection-20260802/new12-raw-video/frosty-pearl-mineral-mix-cassava-litter"
+    },
+    {
+      "sample_id": "niumo-nose-hair-trimmer",
+      "run_dir": "../runs/model-selection-20260802/new12-raw-video/niumo-nose-hair-trimmer"
+    },
+    {
+      "sample_id": "pet-chews-pet-healer",
+      "run_dir": "../runs/model-selection-20260802/new12-raw-video/pet-chews-pet-healer"
+    }
+  ]
+}

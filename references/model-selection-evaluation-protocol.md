@@ -101,6 +101,39 @@ scripts/evaluate_compact_model.py --variant s5_audit ...
 生产结果的既有 S4 四态和 Batch B `evidence_strength` 仍由生产 validator/derive 负责；本节新增
 的是可回放的分层诊断链，不把未经 blind 验证的诊断结果直接提升为生产规则。
 
+#### S4 状态所有权与梯度传递实验
+
+`effect_evidence_state` 由资格层负责，`relation` 和 `gap_magnitude` 由判断层负责。资格层输出
+`none` 表示已经确定该侧没有合格效果证据；证据是否存在仍未确定时，资格层必须输出
+`uncertain`，不能用 `none` 代替。判断层不得把资格层已经确定的状态重新解释：双方均为
+`none` 时只能输出 `tie/none`，不能把 `claim_only`、产品形态或操作过程重新升级成一侧优势，
+也不能把上游的确定状态降回 `uncertain/uncertain`。这不是全局禁止不确定性；任一侧资格状态为
+`uncertain` 时，判断层仍可输出不确定结论。
+
+人工复核的 S4 梯度只允许在 `seen_mechanism_calibration_only` 实验中通过显式开关传入。允许字段
+仅为 `effect_basis`、`salience`、`focus`、`coverage` 和已锁定 `evidence_ids`；人工理由、结论文本
+和复核备注不得进入模型输入。梯度实验禁止用于 `blind_validation`，产物永久保持
+`promotion_eligible: false`。
+
+S4 梯度传递 A/B 必须在调用前冻结以下规则：
+
+1. 两臂使用同一模型、同一资格状态、同一判断合同、同一输出预算和零重试策略；唯一变量是是否传入人工复核梯度。
+2. 合同变化后不得复用旧响应充当任一实验臂；两臂都必须产生新响应。
+3. 四个 seen 样本全部完成且合同通过后才评分。任一调用失败即停止，先归因，不重跑已成功样本。
+4. 梯度臂至少净增 1/4 个精确命中，不得损失无梯度臂已命中的样本，不得新增两档错误或方向错误。
+5. 平均 completion token 增幅不得超过 35%，平均延迟增幅不得超过 30%。
+6. 满足以上条件只说明梯度传递值得进入更大范围机制验证；不满足、精确命中无提升或出现严重回归，则停止该路线，不接入生产 resolver。
+
+本实验分别报告四类机制，不只报告平均分：相同粗状态但视觉梯度不同、直接对比证据、双方均无
+合格效果证据、以及曾发生资格误投影的边界样本。样本类别用于解释结果，不改变事前通过标准。
+
+2026-08-14 的严格 A/B 使用 4 个 seen 样本、每臂 4 次全新调用，两臂的模型、资格状态、判断
+合同、预算、重试策略和 `protocol_hash` 完全一致。无梯度和有梯度两臂均为 2/4 精确命中、4/4
+复核方向正确、0 个两档错误；梯度臂没有改变任何最终 relation 或 gap，仅增加了模型理由对梯度
+字段的引用。该结果未达到“至少净增 1 格”的事前门槛，因此梯度传递路线停止扩大验证，不扩展
+生产 Q 层 schema，也不接入 resolver。更早一轮因条件式 prompt 导致两臂协议哈希不同的 pilot
+已经作废，不参与这一结论。
+
 历史 v1 artifact 可以用于诊断和兼容读取，但不能与 v2 artifact 静默合并成“当前模型表现”。需要重新运行的地方必须显式标记 schema、source commit、source identity 和协议 hash。
 
 当前 9 组重评分中的 `carslan-b0`、`tashadiyana` 仍来自旧 calibration severity 标签，缺少

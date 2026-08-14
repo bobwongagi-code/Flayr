@@ -14,12 +14,14 @@ from scripts.flayr_core.llm.compact_eval import (
     CompactEvaluationError,
     MODEL_INDEPENDENT_SCHEMA_VERSION,
     S4_FACT_STATE_SCHEMA_VERSION,
+    S4_CALIBRATED_JUDGMENT_SCHEMA_VERSION,
     S4_FREE_TEXT_STEPS_SCHEMA_VERSION,
     S4_JUDGMENT_SCHEMA_VERSION,
     S4_SINGLE_PASS_SCHEMA_VERSION,
     S5_AUDIT_SCHEMA_VERSION,
     VISUAL_EXTRACTION_SCHEMA_VERSION,
     build_s4_fact_state_payload,
+    build_s4_calibrated_judgment_payload,
     build_s4_free_text_steps_payload,
     build_s4_judgment_payload,
     build_s4_single_pass_payload,
@@ -37,16 +39,20 @@ from scripts.flayr_core.llm.compact_eval import (
     load_frozen_video_bundle,
     load_frozen_visual_bundle,
     load_gt_stage_labels,
+    load_model_owned_fact_artifact,
     normalize_visual_extraction_result,
     score_compact_result,
     select_frozen_video_bundle,
+    s4_qualification_gradient_compression,
     summarize_visual_extraction_result,
     validate_compact_result,
     validate_model_independent_result,
     validate_s4_fact_state_artifact_metadata,
     validate_s4_fact_state_result,
+    validate_s4_calibrated_judgment_result,
     validate_s4_free_text_steps_result,
     validate_s4_judgment_result,
+    validate_s4_qualification_review,
     validate_s4_single_pass_result,
     validate_s5_audit_result,
     validate_severity_only_result,
@@ -267,6 +273,22 @@ def _s4_judgment_result() -> dict:
     }
 
 
+def _s4_calibrated_judgment_result() -> dict:
+    return {
+        "schema_version": S4_CALIBRATED_JUDGMENT_SCHEMA_VERSION,
+        "stage": "S4 效果呈现",
+        "comparison_sufficiency": "sufficient",
+        "relation": "benchmark_better",
+        "weaker_side_core_value": "partial",
+        "decisive_axes": ["proof_quality", "causal_completeness"],
+        "gap_floor": "medium",
+        "gap_ceiling": "large",
+        "gap_magnitude": "large",
+        "confidence": "high",
+        "decision_basis": "标杆同时具备直接对照和完整因果链，达人只有结果，差异跨越两个独立核心轴。",
+    }
+
+
 def _s4_single_pass_result() -> dict:
     state = _s4_fact_state_result()
     return {
@@ -397,6 +419,8 @@ class CompactEvalContractTests(unittest.TestCase):
             self.assertEqual(validate_s4_fact_state_result(state, base), [])
             state_payload = build_s4_fact_state_payload("qwen3.6-plus", base, output_budget=4096)
             self.assertIn("不输出 severity", state_payload["messages"][0]["content"])
+            self.assertIn("开封倒出", state_payload["messages"][0]["content"])
+            self.assertIn("都不能升级为result_only或verified", state_payload["messages"][0]["content"])
             locked = build_s4_state_locked_bundle(
                 base,
                 state,
@@ -409,10 +433,33 @@ class CompactEvalContractTests(unittest.TestCase):
             self.assertEqual(locked.visual_inputs, ())
             self.assertNotIn("facts", locked.context)
             self.assertIn("s4_fact_state", locked.context)
+            self.assertNotIn(
+                "state_artifact",
+                locked.context["s4_fact_state_provenance"],
+            )
+            self.assertEqual(locked.audit_provenance["s4_state_artifact"], "state.json")
             self.assertNotEqual(locked.source_digest, base.source_digest)
             judgment_payload = build_s4_judgment_payload("qwen3.6-plus", locked, output_budget=4096)
             self.assertIn("已经锁定", judgment_payload["messages"][0]["content"])
             self.assertEqual(validate_s4_judgment_result(_s4_judgment_result()), [])
+            calibrated_payload = build_s4_calibrated_judgment_payload(
+                "qwen3.6-plus", locked, output_budget=4096
+            )
+            calibrated_system = calibrated_payload["messages"][0]["content"]
+            self.assertIn("跨阶段通用差距标尺", calibrated_system)
+            self.assertIn("同一事实不得重复计入多个决定性轴", calibrated_system)
+            self.assertEqual(
+                validate_s4_calibrated_judgment_result(_s4_calibrated_judgment_result()),
+                [],
+            )
+            invalid_calibrated = _s4_calibrated_judgment_result()
+            invalid_calibrated["gap_magnitude"] = "small"
+            self.assertTrue(
+                any(
+                    "outside declared gap range" in error
+                    for error in validate_s4_calibrated_judgment_result(invalid_calibrated)
+                )
+            )
             with self.assertRaises(compact_eval.CompactEvaluationError):
                 build_s4_state_locked_bundle(
                     base,
@@ -421,6 +468,49 @@ class CompactEvalContractTests(unittest.TestCase):
                     state_model="qwen3.6-plus",
                     expected_model="qwen3.6-plus",
                 )
+
+    def test_s4_locked_state_identity_ignores_artifact_location_but_not_state_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = load_frozen_compact_bundle(_write_bundle(Path(tmp)), include_images=False)
+            state = _s4_fact_state_result()
+            first = build_s4_state_locked_bundle(
+                base,
+                state,
+                state_artifact="/first/run/state.json",
+                state_source_digest=base.source_digest,
+                state_model="qwen3.7-plus",
+                expected_model="qwen3.7-plus",
+            )
+            moved = build_s4_state_locked_bundle(
+                base,
+                state,
+                state_artifact="/moved/run/state.json",
+                state_source_digest=base.source_digest,
+                state_model="qwen3.7-plus",
+                expected_model="qwen3.7-plus",
+            )
+            self.assertEqual(first.source_digest, moved.source_digest)
+            self.assertEqual(
+                build_s4_judgment_payload("qwen3.7-plus", first),
+                build_s4_judgment_payload("qwen3.7-plus", moved),
+            )
+            self.assertNotEqual(first.audit_provenance, moved.audit_provenance)
+
+            changed_state = json.loads(json.dumps(state))
+            changed_state["creator"]["reason"] = "不同但仍合规的锁定事实说明"
+            changed = build_s4_state_locked_bundle(
+                base,
+                changed_state,
+                state_artifact="/moved/run/state.json",
+                state_source_digest=base.source_digest,
+                state_model="qwen3.7-plus",
+                expected_model="qwen3.7-plus",
+            )
+            self.assertNotEqual(first.source_digest, changed.source_digest)
+            self.assertNotEqual(
+                build_s4_judgment_payload("qwen3.7-plus", first),
+                build_s4_judgment_payload("qwen3.7-plus", changed),
+            )
             with self.assertRaises(compact_eval.CompactEvaluationError):
                 build_s4_state_locked_bundle(
                     base,
@@ -429,6 +519,175 @@ class CompactEvalContractTests(unittest.TestCase):
                     state_model="qwen3.7-plus",
                     expected_model="qwen3.6-plus",
                 )
+
+    def test_s4_judgment_forbids_claim_only_advantage_when_both_effect_states_are_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = load_frozen_compact_bundle(_write_bundle(Path(tmp)), include_images=False)
+            state = _s4_fact_state_result()
+            state["creator"].update(
+                {
+                    "effect_evidence_state": "none",
+                    "visibility": "not_applicable",
+                    "proof": "none",
+                    "causal_link": "not_applicable",
+                    "evidence_ids": [],
+                }
+            )
+            state["benchmark"].update(
+                {
+                    "effect_evidence_state": "none",
+                    "visibility": "not_applicable",
+                    "proof": "claim_only",
+                    "causal_link": "not_applicable",
+                }
+            )
+            locked = build_s4_state_locked_bundle(
+                base,
+                state,
+                state_source_digest=base.source_digest,
+                state_model="qwen3.7-plus",
+                expected_model="qwen3.7-plus",
+            )
+            invalid = _s4_judgment_result()
+            invalid.update({"relation": "benchmark_better", "gap_magnitude": "small"})
+            self.assertTrue(
+                any(
+                    "claim_only cannot create" in error
+                    for error in validate_s4_judgment_result(invalid, locked)
+                )
+            )
+            valid = _s4_judgment_result()
+            valid.update({"relation": "tie", "gap_magnitude": "none"})
+            self.assertEqual(validate_s4_judgment_result(valid, locked), [])
+
+            invalid_calibrated = _s4_calibrated_judgment_result()
+            invalid_calibrated.update(
+                {
+                    "relation": "benchmark_better",
+                    "weaker_side_core_value": "absent",
+                    "decisive_axes": ["proof_quality"],
+                    "gap_floor": "small",
+                    "gap_ceiling": "medium",
+                    "gap_magnitude": "small",
+                }
+            )
+            self.assertTrue(
+                any(
+                    "claim_only cannot create" in error
+                    for error in validate_s4_calibrated_judgment_result(invalid_calibrated, locked)
+                )
+            )
+
+    def test_s4_judgment_preserves_uncertainty_when_qualification_is_uncertain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = load_frozen_compact_bundle(_write_bundle(Path(tmp)), include_images=False)
+            state = _s4_fact_state_result()
+            state["creator"].update(
+                {
+                    "effect_evidence_state": "uncertain",
+                    "visibility": "uncertain",
+                    "proof": "uncertain",
+                    "causal_link": "uncertain",
+                }
+            )
+            state["benchmark"].update(
+                {
+                    "effect_evidence_state": "none",
+                    "visibility": "not_applicable",
+                    "proof": "claim_only",
+                    "causal_link": "not_applicable",
+                }
+            )
+            locked = build_s4_state_locked_bundle(
+                base,
+                state,
+                state_source_digest=base.source_digest,
+                state_model="qwen3.7-plus",
+                expected_model="qwen3.7-plus",
+            )
+            uncertain = _s4_judgment_result()
+            uncertain.update({"relation": "uncertain", "gap_magnitude": "uncertain"})
+            self.assertEqual(validate_s4_judgment_result(uncertain, locked), [])
+
+    def test_human_reviewed_s4_gradients_reach_judgment_without_review_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = load_frozen_compact_bundle(_write_bundle(Path(tmp)), include_images=False)
+            base = compact_eval.replace(base, source_run="sample")
+            state = _s4_fact_state_result()
+            review = {
+                "schema_version": 1,
+                "sample_id": "sample",
+                "decision_scope": "seen_mechanism_calibration_only",
+                "comparison_sufficiency": "sufficient",
+                "source_basis": ["human_initial:S4"],
+                "creator": {
+                    "effect_basis": "post_use_result",
+                    "salience": "subtle",
+                    "focus": "peripheral",
+                    "coverage": "single_moment",
+                    "evidence_ids": state["creator"]["evidence_ids"],
+                    "reason": "Human creator review text must not reach judgment.",
+                },
+                "benchmark": {
+                    "effect_basis": "direct_comparison",
+                    "salience": "strong",
+                    "focus": "central",
+                    "coverage": "multi_moment",
+                    "evidence_ids": state["benchmark"]["evidence_ids"],
+                    "reason": "Human benchmark review text must not reach judgment.",
+                },
+                "review_note": "Human summary must not reach judgment.",
+            }
+            without_gradients = build_s4_state_locked_bundle(
+                base,
+                state,
+                state_source_digest=base.source_digest,
+                state_model="human_review",
+                state_owner="human_review",
+                expected_model="qwen3.7-plus",
+            )
+            with_gradients = build_s4_state_locked_bundle(
+                base,
+                state,
+                state_source_digest=base.source_digest,
+                state_model="human_review",
+                state_owner="human_review",
+                expected_model="qwen3.7-plus",
+                qualification_review=review,
+            )
+            self.assertNotIn("s4_effect_gradients", without_gradients.context)
+            self.assertEqual(
+                with_gradients.context["s4_effect_gradients"]["creator"]["salience"],
+                "subtle",
+            )
+            payload_without_gradients = build_s4_judgment_payload(
+                "qwen3.7-plus",
+                without_gradients,
+            )
+            payload_with_gradients = build_s4_judgment_payload(
+                "qwen3.7-plus",
+                with_gradients,
+            )
+            payload_text = json.dumps(
+                payload_with_gradients,
+                ensure_ascii=False,
+            )
+            self.assertEqual(
+                payload_without_gradients["messages"][0]["content"],
+                payload_with_gradients["messages"][0]["content"],
+            )
+            self.assertIn("s4_effect_gradients", payload_text)
+            self.assertIn("必须用于比较", payload_text)
+            self.assertNotIn("Human creator review text", payload_text)
+            self.assertNotIn("Human summary", payload_text)
+            self.assertTrue(
+                with_gradients.context["s4_fact_state_provenance"]["human_review_loaded"]
+            )
+            self.assertTrue(
+                with_gradients.context["s4_fact_state_provenance"]["human_initial_loaded"]
+            )
+            self.assertTrue(with_gradients.context["s4_fact_state_provenance"]["gt_loaded"])
+            self.assertNotEqual(without_gradients.source_digest, with_gradients.source_digest)
 
     def test_s5_audit_distinguishes_claim_from_credible_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -457,6 +716,228 @@ class CompactEvalContractTests(unittest.TestCase):
             invalid["creator"]["proof"] = "direct_comparison"
             errors = validate_s4_fact_state_result(invalid, bundle)
             self.assertTrue(any("none has effect proof" in error for error in errors))
+
+            valid = _s4_fact_state_result()
+            valid["creator"].update({
+                "effect_evidence_state": "none",
+                "proof": "claim_only",
+                "causal_link": "weak",
+            })
+            valid["benchmark"].update({
+                "effect_evidence_state": "verified",
+                "proof": "result_only",
+                "causal_link": "supported",
+            })
+            self.assertEqual(validate_s4_fact_state_result(valid, bundle), [])
+
+            ungrounded_claim = _s4_fact_state_result()
+            ungrounded_claim["creator"].update({
+                "effect_evidence_state": "none",
+                "proof": "claim_only",
+                "causal_link": "weak",
+                "evidence_ids": [],
+            })
+            self.assertTrue(
+                any(
+                    "claim_only proof requires evidence_ids" in error
+                    for error in validate_s4_fact_state_result(ungrounded_claim, bundle)
+                )
+            )
+
+            valid["creator"].update({
+                "effect_evidence_state": "result_only",
+                "proof": "direct_comparison",
+                "causal_link": "weak",
+            })
+            self.assertEqual(validate_s4_fact_state_result(valid, bundle), [])
+
+    def test_s4_qualification_review_rejects_product_form_as_effect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = load_frozen_compact_bundle(_write_bundle(Path(tmp)), include_images=False)
+            corrected = _s4_fact_state_result()
+            corrected["creator"].update(
+                {
+                    "effect_evidence_state": "none",
+                    "visibility": "not_applicable",
+                    "proof": "none",
+                    "causal_link": "not_applicable",
+                }
+            )
+            review = {
+                "schema_version": 1,
+                "sample_id": "sample",
+                "decision_scope": "seen_mechanism_calibration_only",
+                "comparison_sufficiency": "sufficient",
+                "source_basis": ["human_initial:S4"],
+                "creator": {
+                    "effect_basis": "product_form",
+                    "salience": "none",
+                    "focus": "none",
+                    "coverage": "none",
+                    "evidence_ids": corrected["creator"]["evidence_ids"],
+                    "reason": "Only the product form is visible.",
+                },
+                "benchmark": {
+                    "effect_basis": "direct_comparison",
+                    "salience": "strong",
+                    "focus": "central",
+                    "coverage": "multi_moment",
+                    "evidence_ids": corrected["benchmark"]["evidence_ids"],
+                    "reason": "A visible comparison supports the result.",
+                },
+                "review_note": "Generic qualification boundary fixture.",
+            }
+            self.assertEqual(validate_s4_qualification_review(review, corrected, bundle), [])
+
+            invalid = json.loads(json.dumps(corrected))
+            invalid["creator"].update(
+                {
+                    "effect_evidence_state": "result_only",
+                    "visibility": "clear",
+                    "proof": "result_only",
+                }
+            )
+            errors = validate_s4_qualification_review(review, invalid, bundle)
+            self.assertTrue(any("product_form cannot qualify as result_only" in error for error in errors))
+
+    def test_s4_qualification_review_detects_hidden_gradient(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = load_frozen_compact_bundle(_write_bundle(Path(tmp)), include_images=False)
+            corrected = _s4_fact_state_result()
+            corrected["creator"].update(
+                {
+                    "effect_evidence_state": "result_only",
+                    "visibility": "partial",
+                    "proof": "result_only",
+                    "causal_link": "weak",
+                }
+            )
+            corrected["benchmark"].update(
+                {
+                    "effect_evidence_state": "result_only",
+                    "visibility": "clear",
+                    "proof": "result_only",
+                    "causal_link": "supported",
+                }
+            )
+            review = {
+                "schema_version": 1,
+                "sample_id": "sample",
+                "decision_scope": "seen_mechanism_calibration_only",
+                "comparison_sufficiency": "sufficient",
+                "source_basis": ["human_initial:S4"],
+                "creator": {
+                    "effect_basis": "post_use_result",
+                    "salience": "subtle",
+                    "focus": "peripheral",
+                    "coverage": "single_moment",
+                    "evidence_ids": corrected["creator"]["evidence_ids"],
+                    "reason": "The result is weak and peripheral.",
+                },
+                "benchmark": {
+                    "effect_basis": "post_use_result",
+                    "salience": "strong",
+                    "focus": "central",
+                    "coverage": "sustained",
+                    "evidence_ids": corrected["benchmark"]["evidence_ids"],
+                    "reason": "The result is strong, central, and sustained.",
+                },
+                "review_note": "Equal coarse states retain different gradients.",
+            }
+            self.assertEqual(validate_s4_qualification_review(review, corrected, bundle), [])
+            self.assertTrue(s4_qualification_gradient_compression(review, corrected))
+
+    def test_s4_qualification_review_is_bound_to_locked_sample_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = load_frozen_compact_bundle(_write_bundle(Path(tmp)), include_images=False)
+            bundle = compact_eval.replace(bundle, source_run="sample-a")
+            corrected = _s4_fact_state_result()
+            review = {
+                "schema_version": 1,
+                "sample_id": "sample-b",
+                "decision_scope": "seen_mechanism_calibration_only",
+                "comparison_sufficiency": "sufficient",
+                "source_basis": ["human_initial:S4"],
+                "creator": {
+                    "effect_basis": "post_use_result",
+                    "salience": "clear",
+                    "focus": "central",
+                    "coverage": "single_moment",
+                    "evidence_ids": corrected["creator"]["evidence_ids"],
+                    "reason": "Creator result fixture.",
+                },
+                "benchmark": {
+                    "effect_basis": "direct_comparison",
+                    "salience": "strong",
+                    "focus": "central",
+                    "coverage": "multi_moment",
+                    "evidence_ids": corrected["benchmark"]["evidence_ids"],
+                    "reason": "Benchmark comparison fixture.",
+                },
+                "review_note": "Identity mismatch fixture.",
+            }
+            errors = validate_s4_qualification_review(review, corrected, bundle)
+            self.assertTrue(any("sample_id does not match" in error for error in errors))
+
+    def test_s4_sufficient_cohort_matches_reviewed_manifest(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        manifest = json.loads(
+            (root / "references" / "s4-qualification-calibration-cases.json").read_text(encoding="utf-8")
+        )
+        cohort = json.loads(
+            (root / "references" / "s4-qualification-sufficient-cohort.json").read_text(encoding="utf-8")
+        )
+        expected = {
+            case["sample_id"]
+            for case in manifest["cases"]
+            if case["qualification_review"]["comparison_sufficiency"] == "sufficient"
+        }
+        selected = {sample["sample_id"] for sample in cohort["samples"]}
+        self.assertEqual(selected, expected)
+
+    def test_human_reviewed_s4_artifact_declares_compatible_judgment_model(self) -> None:
+        qualification_review = {"schema_version": 1, "review": "locked"}
+        result = _s4_fact_state_result()
+        record = {
+            "status": "completed",
+            "variant": "s4_fact_state",
+            "schema_version": S4_FACT_STATE_SCHEMA_VERSION,
+            "state_owner": "human_review",
+            "model": "human_review",
+            "compatible_judgment_models": ["qwen3.7-plus"],
+            "source_digest": "source",
+            "source_commit": "commit",
+            "protocol_hash": "protocol",
+            "qualification_review": qualification_review,
+            "qualification_review_digest": compact_eval._stable_digest(qualification_review),
+            "qualification_result_digest": compact_eval._stable_digest(result),
+            "result": result,
+            "decision_scope": "seen_mechanism_calibration_only",
+            "promotion_eligible": False,
+        }
+        self.assertEqual(
+            validate_s4_fact_state_artifact_metadata(
+                record,
+                expected_model="qwen3.7-plus",
+                expected_source_digest="source",
+            ),
+            [],
+        )
+        errors = validate_s4_fact_state_artifact_metadata(
+            record,
+            expected_model="qwen3.6-plus",
+            expected_source_digest="source",
+        )
+        self.assertTrue(any("does not declare" in error for error in errors))
+
+        tampered = json.loads(json.dumps(record))
+        tampered["qualification_review"]["review"] = "changed"
+        errors = validate_s4_fact_state_artifact_metadata(
+            tampered,
+            expected_model="qwen3.7-plus",
+            expected_source_digest="source",
+        )
+        self.assertTrue(any("review digest mismatch" in error for error in errors))
 
     def test_s4_state_artifact_requires_explicit_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -578,6 +1059,52 @@ class CompactEvalContractTests(unittest.TestCase):
             self.assertIn("relation=tie 时 gap_magnitude 必须是 none 或 uncertain", payload["messages"][0]["content"])
             self.assertEqual(bundle.input_mode, "model_owned_locked_facts")
             self.assertFalse(bundle.context["model_owned_fact_provenance"]["human_initial_loaded"])
+            self.assertNotIn("source_artifact", bundle.context["model_owned_fact_provenance"])
+            self.assertEqual(bundle.audit_provenance["model_owned_fact_artifact"], "facts.json")
+
+            moved = build_model_owned_fact_bundle(
+                base_bundle,
+                _extraction_result(),
+                extraction_artifact="/moved/facts.json",
+            )
+            self.assertEqual(bundle.source_digest, moved.source_digest)
+            self.assertEqual(
+                build_model_independent_payload("qwen3.6-plus", bundle),
+                build_model_independent_payload("qwen3.6-plus", moved),
+            )
+            self.assertNotEqual(bundle.audit_provenance, moved.audit_provenance)
+
+    def test_archived_extraction_artifact_rebuilds_read_only_fact_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "visual_extraction_evaluation.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "schema_version": VISUAL_EXTRACTION_SCHEMA_VERSION,
+                        "model": "qwen3.7-plus",
+                        "source_run": "sample",
+                        "source_digest": "a" * 64,
+                        "video_role_order": ["benchmark", "creator"],
+                        "video_source_sha256": ["b" * 64, "c" * 64],
+                        "video_source_duration_seconds": [60.0, 60.0],
+                        "result": _extraction_result(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            bundle = load_model_owned_fact_artifact(
+                path,
+                expected_model="qwen3.7-plus",
+                expected_source_run="sample",
+            )
+        self.assertEqual(bundle.input_mode, "model_owned_locked_facts")
+        self.assertEqual(bundle.visual_inputs, ())
+        self.assertFalse(bundle.context["model_owned_fact_provenance"]["original_run_bundle_available"])
+        self.assertNotIn("source_artifact", bundle.context["model_owned_fact_provenance"])
+        self.assertEqual(bundle.audit_provenance["model_owned_fact_artifact"], str(path.resolve()))
+        self.assertEqual(bundle.source_run, "sample")
+        self.assertEqual(bundle.allowed_evidence_ids["creator"]["S1"], {"C1"})
 
     def test_model_independent_contract_rejects_invalid_winner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

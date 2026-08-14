@@ -41,9 +41,11 @@ from flayr_core.llm.compact_eval import (  # noqa: E402
     load_frozen_compact_bundle,
     load_frozen_visual_bundle,
     load_frozen_video_bundle,
+    load_model_owned_fact_artifact,
     load_gt_stages,
     run_compact_evaluation,
     run_s4_fact_state_evaluation,
+    run_s4_calibrated_judgment_evaluation,
     run_s4_free_text_steps_evaluation,
     run_s4_judgment_evaluation,
     run_s4_single_pass_evaluation,
@@ -153,6 +155,8 @@ def _run_variant(
         return run_s4_free_text_steps_evaluation(**common)
     if variant == "s4_judgment":
         return run_s4_judgment_evaluation(**common)
+    if variant == "s4_calibrated_judgment":
+        return run_s4_calibrated_judgment_evaluation(**common)
     return run_s5_audit_evaluation(**common)
 
 
@@ -162,6 +166,7 @@ def _load_s4_state_locked_bundle(
     sample_id: str,
     model: str,
     base_bundle: Any,
+    include_reviewed_gradients: bool = False,
 ) -> tuple[Any, Path]:
     path = (
         state_root
@@ -175,6 +180,10 @@ def _load_s4_state_locked_bundle(
         raise CompactEvaluationError(f"invalid S4 state artifact: {path}: {exc}") from exc
     if not isinstance(record, dict) or record.get("status") != "completed":
         raise CompactEvaluationError(f"S4 state artifact is not completed: {path}")
+    if include_reviewed_gradients and record.get("state_owner") != "human_review":
+        raise CompactEvaluationError(
+            f"reviewed S4 gradients require a human-reviewed state artifact: {path}"
+        )
     metadata_errors = validate_s4_fact_state_artifact_metadata(
         record,
         expected_model=model,
@@ -193,7 +202,13 @@ def _load_s4_state_locked_bundle(
         state_artifact=str(path),
         state_source_digest=str(record.get("source_digest") or "") or None,
         state_model=str(record.get("model") or "") or None,
+        state_owner=str(record.get("state_owner") or "model"),
         expected_model=model,
+        qualification_review=(
+            record.get("qualification_review")
+            if include_reviewed_gradients
+            else None
+        ),
     )
     return locked, path
 
@@ -207,14 +222,20 @@ def _load_model_owned_s4_bundle(
 ) -> Any:
     """Load a current raw-video fact artifact as the fixed S4 experiment input."""
 
-    base_bundle = load_frozen_visual_bundle(run_dir, include_images=False)
-    source_identity = frozen_raw_video_source_identity(run_dir)
     extraction_path = (
         extraction_root
         / _safe_component(sample_id)
         / _safe_component(fact_source_model)
         / "visual_extraction_evaluation.json"
     )
+    if not (run_dir / "product_foundation.json").is_file():
+        return load_model_owned_fact_artifact(
+            extraction_path,
+            expected_model=fact_source_model,
+            expected_source_run=sample_id,
+        )
+    base_bundle = load_frozen_visual_bundle(run_dir, include_images=False)
+    source_identity = frozen_raw_video_source_identity(run_dir)
     try:
         record = json.loads(extraction_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -286,6 +307,7 @@ def build_parser() -> argparse.ArgumentParser:
             "s4_single_pass",
             "s4_free_text_steps",
             "s4_judgment",
+            "s4_calibrated_judgment",
             "s5_audit",
         ),
         default="severity_only",
@@ -316,7 +338,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--s4-state-root",
         type=Path,
         default=None,
-        help="s4_judgment 必填：按 sample_id/model 保存 s4_fact_state_evaluation.json 的目录。",
+        help="S4 judgment variants 必填：按 sample_id/model 保存 s4_fact_state_evaluation.json 的目录。",
+    )
+    parser.add_argument(
+        "--include-reviewed-s4-gradients",
+        action="store_true",
+        help="仅用于人工复核 S4 状态的单变量实验；把锁定梯度传给判断层，默认关闭。",
     )
     parser.add_argument(
         "--fact-extraction-root",
@@ -360,9 +387,14 @@ def main() -> int:
         raise SystemExit("--max-stage-evidence-ids must be between 1 and 16")
     if args.max_stage_evidence_ids is not None and args.variant != "evidence_grounded":
         raise SystemExit("--max-stage-evidence-ids is only valid with --variant evidence_grounded")
-    if args.variant == "s4_judgment" and args.s4_state_root is None:
-        raise SystemExit("--s4-state-root is required with --variant s4_judgment")
-    s4_variants = {"s4_fact_state", "s4_single_pass", "s4_free_text_steps", "s4_judgment"}
+    s4_judgment_variants = {"s4_judgment", "s4_calibrated_judgment"}
+    if args.variant in s4_judgment_variants and args.s4_state_root is None:
+        raise SystemExit("--s4-state-root is required with S4 judgment variants")
+    if args.include_reviewed_s4_gradients and args.variant not in s4_judgment_variants:
+        raise SystemExit("--include-reviewed-s4-gradients is only valid with S4 judgment variants")
+    if args.include_reviewed_s4_gradients and args.evaluation_role == "blind_validation":
+        raise SystemExit("--include-reviewed-s4-gradients cannot be used with blind_validation")
+    s4_variants = {"s4_fact_state", "s4_single_pass", "s4_free_text_steps", *s4_judgment_variants}
     if (args.fact_extraction_root is None) != (args.fact_source_model is None):
         raise SystemExit("--fact-extraction-root and --fact-source-model must be provided together")
     if args.fact_extraction_root is not None and args.variant not in s4_variants:
@@ -398,7 +430,7 @@ def main() -> int:
         elif args.variant == "visual_extraction":
             bundle = load_frozen_video_bundle(run_dir)
             gt_stages = None
-        elif args.variant in {"s4_fact_state", "s4_single_pass", "s4_free_text_steps", "s4_judgment", "s5_audit"}:
+        elif args.variant in {*s4_variants, "s5_audit"}:
             bundle = load_frozen_compact_bundle(run_dir, include_images=False)
             gt_stages = None
         else:
@@ -406,7 +438,7 @@ def main() -> int:
             gt_stages = load_gt_stages(args.gt_path, sample["sample_id"])
         preflight.append((sample, bundle, gt_stages))
     locked_state_bundles: dict[tuple[str, str], tuple[Any, Path]] = {}
-    if args.variant == "s4_judgment":
+    if args.variant in s4_judgment_variants:
         state_root = args.s4_state_root.expanduser().resolve()
         for sample, bundle, _ in preflight:
             for model in args.models:
@@ -415,6 +447,7 @@ def main() -> int:
                     sample_id=sample["sample_id"],
                     model=model,
                     base_bundle=bundle,
+                    include_reviewed_gradients=args.include_reviewed_s4_gradients,
                 )
 
     contract_limits = contract_limits_for_variant(
@@ -446,6 +479,7 @@ def main() -> int:
         "fact_extraction_root": str(fact_extraction_root) if fact_extraction_root else None,
         "fact_source_model": args.fact_source_model,
         "provider_replay_from": str(args.provider_replay_from) if args.provider_replay_from else None,
+        "reviewed_s4_gradients_included": args.include_reviewed_s4_gradients,
         "samples": [],
     }
     for sample, bundle, gt_stages in preflight:
@@ -458,7 +492,7 @@ def main() -> int:
         for model in args.models:
             run_bundle = bundle
             state_artifact = None
-            if args.variant == "s4_judgment":
+            if args.variant in s4_judgment_variants:
                 run_bundle, state_path = locked_state_bundles[(sample["sample_id"], model)]
                 state_artifact = str(state_path)
             result = _run_variant(

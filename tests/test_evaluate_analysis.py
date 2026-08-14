@@ -14,14 +14,77 @@ from scripts.evaluate_analysis import (
     _phase_c_audit,
     _stage_oracle_audit,
     blind_contract_violations,
+    evaluate,
     ground_truth_label_inventory,
     normalize_human_gap,
     promotion_readiness,
+    semantic_acceptance,
     severity_diagnostics,
 )
 
 
 class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
+    def test_evaluate_uses_semantic_gap_axis_and_tracks_unavailable_predictions(self) -> None:
+        labels = {
+            "samples": {
+                "sample": {
+                    "partition": "new",
+                    "human_gap": {
+                        "S1": "none",
+                        "S2": "large",
+                        "S3": "none",
+                    },
+                }
+            }
+        }
+        result = {
+            "comparison_eligibility": {"direct_product_stages": ["S1", "S2"]},
+            "stage_analysis": [
+                {
+                    "stage": "S1 Hook",
+                    "severity": None,
+                    "model_gap_magnitude": "none",
+                    "model_severity": None,
+                    "stage_state": "completed",
+                    "analysis_status": "grounded",
+                },
+                {
+                    "stage": "S2 Product",
+                    "severity": "large",
+                    "model_gap_magnitude": "medium",
+                    "model_severity": "medium",
+                    "severity_derivation": {
+                        "status": "constrained",
+                        "constraints": [{"kind": "floor", "level": "large"}],
+                    },
+                },
+                {
+                    "stage": "S3 Usage",
+                    "severity": None,
+                    "model_gap_magnitude": "none",
+                    "model_severity": None,
+                    "stage_state": "unknown",
+                    "analysis_status": "evidence_blocked",
+                },
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "analysis.json"
+            path.write_text(json.dumps(result), encoding="utf-8")
+            report = evaluate(labels, {}, {"sample": path})
+
+        self.assertEqual(report["summary"]["valid_gt_cells"], 3)
+        self.assertEqual(report["summary"]["evaluated"], 2)
+        self.assertEqual(report["summary"]["matched"], 2)
+        self.assertEqual(report["summary"]["prediction_unavailable"], 1)
+        self.assertEqual(report["summary"]["accuracy"], 0.6667)
+        self.assertEqual(report["summary"]["accuracy_on_available"], 1.0)
+        self.assertEqual(report["summary"]["evaluation_coverage"], 0.6667)
+        self.assertEqual(report["schema_version"], 5)
+        self.assertEqual(report["semantic_acceptance"]["overall"], "incomplete")
+        self.assertEqual(report["confusion_matrix"]["values"]["none"]["none"], 1)
+        self.assertEqual(report["prediction_unavailable"][0]["stage"], "S3")
+
     def test_promotion_lock_rejects_visual_model_drift(self) -> None:
         rows = [
             {
@@ -162,6 +225,57 @@ class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
         self.assertEqual(diagnostics["derivation_path"], "constraint_conflict")
         self.assertEqual(diagnostics["decision_mechanism"], "floor_ceiling_conflict")
         self.assertTrue(diagnostics["constraint_conflict"])
+
+    def test_semantic_acceptance_requires_every_human_axis(self) -> None:
+        rows = [
+            {
+                "sample_id": f"sample-{index}",
+                "matched": True,
+                "ordinal_distance": 0,
+            }
+            for index in range(12)
+        ]
+        gate = semantic_acceptance(rows, [], {"records": []}, {"summary": {}})
+        self.assertEqual(gate["gap_magnitude"]["status"], "passed")
+        self.assertEqual(gate["relation"]["status"], "unavailable")
+        self.assertEqual(gate["fact_recall"]["status"], "unavailable")
+        self.assertEqual(gate["overall"], "incomplete")
+        self.assertTrue(gate["independent_from_engineering_acceptance"])
+
+    def test_semantic_acceptance_passes_only_when_all_components_pass(self) -> None:
+        rows = [
+            {
+                "sample_id": f"sample-{index}",
+                "matched": True,
+                "ordinal_distance": 0,
+            }
+            for index in range(12)
+        ]
+        relation_records = [
+            {"expected_relation": "benchmark_better", "relation_match": True}
+            for _ in range(12)
+        ]
+        gate = semantic_acceptance(
+            rows,
+            [],
+            {"records": relation_records},
+            {"summary": {"present_events": 12, "stage1_recall": 1.0}},
+        )
+        self.assertEqual(gate["overall"], "passed")
+        self.assertEqual(gate["gap_magnitude"]["status"], "passed")
+        self.assertEqual(gate["relation"]["status"], "passed")
+        self.assertEqual(gate["fact_recall"]["status"], "passed")
+
+        rows[0]["ordinal_distance"] = 2
+        rows[0]["matched"] = False
+        failed = semantic_acceptance(
+            rows,
+            [],
+            {"records": relation_records},
+            {"summary": {"present_events": 12, "stage1_recall": 1.0}},
+        )
+        self.assertEqual(failed["gap_magnitude"]["status"], "failed")
+        self.assertEqual(failed["overall"], "failed")
 
 
 class LayeredEvaluationTest(unittest.TestCase):

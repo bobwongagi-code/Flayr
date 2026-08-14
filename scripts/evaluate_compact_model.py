@@ -26,6 +26,7 @@ from flayr_core.llm.compact_eval import (  # noqa: E402
     load_frozen_video_bundle,
     load_gt_stages,
     run_compact_evaluation,
+    run_s4_calibrated_judgment_evaluation,
     run_s4_fact_state_evaluation,
     run_s4_free_text_steps_evaluation,
     run_s4_judgment_evaluation,
@@ -57,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
             "s4_single_pass",
             "s4_free_text_steps",
             "s4_judgment",
+            "s4_calibrated_judgment",
             "s5_audit",
         ),
         default="evidence_grounded",
@@ -101,7 +103,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--s4-state-path",
         type=Path,
         default=None,
-        help="s4_judgment 必填：同一运行、同一模型生成的 s4_fact_state_evaluation.json。",
+        help="S4 judgment variants 必填：同一运行、同一模型生成的 s4_fact_state_evaluation.json。",
+    )
+    parser.add_argument(
+        "--include-reviewed-s4-gradients",
+        action="store_true",
+        help="仅用于人工复核 S4 状态的单变量实验；把锁定梯度传给判断层，默认关闭。",
     )
     parser.add_argument(
         "--no-images",
@@ -123,12 +130,17 @@ def main() -> int:
         raise SystemExit("--max-stage-evidence-ids must be between 1 and 16")
     if args.max_stage_evidence_ids is not None and args.variant != "evidence_grounded":
         raise SystemExit("--max-stage-evidence-ids is only valid with --variant evidence_grounded")
-    if args.variant == "s4_judgment" and args.s4_state_path is None:
-        raise SystemExit("--s4-state-path is required with --variant s4_judgment")
+    s4_judgment_variants = {"s4_judgment", "s4_calibrated_judgment"}
+    if args.variant in s4_judgment_variants and args.s4_state_path is None:
+        raise SystemExit("--s4-state-path is required with S4 judgment variants")
+    if args.include_reviewed_s4_gradients and args.variant not in s4_judgment_variants:
+        raise SystemExit("--include-reviewed-s4-gradients is only valid with S4 judgment variants")
+    if args.include_reviewed_s4_gradients and args.evaluation_role == "blind_validation":
+        raise SystemExit("--include-reviewed-s4-gradients cannot be used with blind_validation")
     try:
         if args.variant == "visual_extraction":
             bundle = load_frozen_video_bundle(args.run_dir)
-        elif args.variant in {"s4_fact_state", "s4_single_pass", "s4_free_text_steps", "s4_judgment", "s5_audit"}:
+        elif args.variant in {"s4_fact_state", "s4_single_pass", "s4_free_text_steps", *s4_judgment_variants, "s5_audit"}:
             bundle = load_frozen_compact_bundle(args.run_dir, include_images=False)
         else:
             bundle = load_frozen_compact_bundle(args.run_dir, include_images=not args.no_images)
@@ -182,6 +194,10 @@ def main() -> int:
                 raise CompactEvaluationError(f"invalid S4 state artifact: {state_path}: {exc}") from exc
             if not isinstance(state_record, dict) or state_record.get("status") != "completed":
                 raise CompactEvaluationError("S4 state artifact must be a completed evaluation artifact")
+            if args.include_reviewed_s4_gradients and state_record.get("state_owner") != "human_review":
+                raise CompactEvaluationError(
+                    "--include-reviewed-s4-gradients requires a human-reviewed S4 state artifact"
+                )
             metadata_errors = validate_s4_fact_state_artifact_metadata(
                 state_record,
                 expected_model=args.model,
@@ -200,9 +216,20 @@ def main() -> int:
                 state_artifact=str(state_path),
                 state_source_digest=str(state_record.get("source_digest") or "") or None,
                 state_model=str(state_record.get("model") or "") or None,
+                state_owner=str(state_record.get("state_owner") or "model"),
                 expected_model=args.model,
+                qualification_review=(
+                    state_record.get("qualification_review")
+                    if args.include_reviewed_s4_gradients
+                    else None
+                ),
             )
-            result = run_s4_judgment_evaluation(**{**common, "bundle": locked_bundle})
+            judgment_runner = (
+                run_s4_calibrated_judgment_evaluation
+                if args.variant == "s4_calibrated_judgment"
+                else run_s4_judgment_evaluation
+            )
+            result = judgment_runner(**{**common, "bundle": locked_bundle})
     except CompactEvaluationError as exc:
         raise SystemExit(str(exc)) from exc
     print(result.get("status", "unknown"))

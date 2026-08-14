@@ -41,6 +41,9 @@ from flayr_core.validation_cohort import (
 
 SEVERITIES = ("small", "medium", "large")
 SEVERITY_RANK = {value: index for index, value in enumerate(SEVERITIES)}
+GAP_MAGNITUDES = ("none", *SEVERITIES)
+GAP_RANK = {value: index for index, value in enumerate(GAP_MAGNITUDES)}
+EVALUATION_REPORT_SCHEMA_VERSION = 5
 NOT_APPLICABLE = "na"
 HUMAN_GAP_VALUES = frozenset({"none", "small", "medium", "large", "uncertain", NOT_APPLICABLE})
 STAGE_SEVERITY_SCOPE = "stage_severity"
@@ -57,6 +60,9 @@ PROMOTION_MIN_STAGE_ACCURACY = 0.7
 PROMOTION_MIN_EVENT_RECALL = 0.9
 PROMOTION_MIN_STAGE2_USE = 0.9
 PROMOTION_MIN_DECISION_RECALL = 0.8
+SEMANTIC_ACCEPTANCE_MIN_SAMPLE_PAIRS = 12
+SEMANTIC_ACCEPTANCE_MIN_RELATION_CELLS = 12
+SEMANTIC_ACCEPTANCE_MIN_FACT_EVENTS = 12
 STAGE1_EVENT_IDS = tuple(str(item["id"]) for item in stage1_event_catalog())
 
 # 这是分析链的字段所有权表，不是新的判断规则。它让 GT 评测能审计：
@@ -145,6 +151,41 @@ def normalize_human_gap(value: Any) -> str | None:
     return normalized if normalized in HUMAN_GAP_VALUES else None
 
 
+def normalize_gap_magnitude(value: Any) -> str | None:
+    """Normalize an evaluable semantic gap, including an explicit no-gap state."""
+    normalized = normalize_human_gap(value)
+    return normalized if normalized in GAP_RANK else None
+
+
+def model_gap_magnitude(stage: dict[str, Any]) -> str | None:
+    """Read the model's semantic gap before deterministic resolution."""
+    return normalize_gap_magnitude(stage.get("model_gap_magnitude")) or normalize_severity(
+        stage.get("model_severity")
+    )
+
+
+def final_gap_magnitude(stage: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Read the final semantic gap without treating explicit none as missing.
+
+    Non-empty severities remain authoritative because resolver constraints can
+    legitimately narrow or raise the model output. A completed no-gap result has
+    no severity by design, so its canonical source is model_gap_magnitude.
+    """
+    severity = normalize_severity(stage.get("severity"))
+    if severity is not None:
+        return severity, "severity"
+    gap = normalize_gap_magnitude(stage.get("model_gap_magnitude"))
+    if gap == "none":
+        stage_state = str(stage.get("stage_state") or "").strip().lower()
+        analysis_status = str(stage.get("analysis_status") or "").strip().lower()
+        if stage_state and stage_state != "completed":
+            return None, None
+        if analysis_status and analysis_status not in {"grounded", "legacy_evidence_contract"}:
+            return None, None
+        return gap, "model_gap_magnitude"
+    return None, None
+
+
 def ground_truth_gap_values(label: dict[str, Any]) -> dict[str, Any]:
     """Use canonical human_gap for new labels and stages for legacy labels."""
     human_gap = label.get("human_gap")
@@ -156,7 +197,7 @@ def ground_truth_gap_values(label: dict[str, Any]) -> dict[str, Any]:
 
 def severity_diagnostics(expected: str, final: str, stage: dict[str, Any]) -> dict[str, Any]:
     """给标签偏差标出 resolver 路径；不再用连续分或阈值解释 severity。"""
-    distance = abs(SEVERITY_RANK[final] - SEVERITY_RANK[expected])
+    distance = abs(GAP_RANK[final] - GAP_RANK[expected])
     trace = stage.get("severity_derivation")
     if not isinstance(trace, dict):
         trace = {}
@@ -236,7 +277,7 @@ def eligible_stages(
     eligible = {
         stage
         for stage, severity in labels.items()
-        if stage_id(stage) is not None and normalize_ground_truth(severity) in SEVERITY_RANK
+        if stage_id(stage) is not None and normalize_gap_magnitude(severity) in GAP_RANK
     }
     sources = ["ground_truth"]
 
@@ -253,8 +294,14 @@ def eligible_stages(
     if isinstance(eligibility, dict):
         current = eligibility.get("direct_product_stages")
         if isinstance(current, list):
-            eligible &= {str(item) for item in current}
-            sources.append("analysis")
+            if isinstance(label.get("human_gap"), dict):
+                # A model result cannot remove a canonically labeled stage from
+                # its own evaluation denominator. Keep its scope declaration as
+                # audit metadata; unavailable predictions are counted later.
+                sources.append("analysis_audit_only")
+            else:
+                eligible &= {str(item) for item in current}
+                sources.append("analysis")
 
     return eligible, "+".join(sources)
 
@@ -290,7 +337,7 @@ def ground_truth_label_inventory(labels: dict[str, Any]) -> dict[str, Any]:
 
 def diagnosis(expected: str, final: str, stage: dict[str, Any]) -> str:
     """定位偏差发生在哪一层，不把模型错误伪装成事实错误。"""
-    model = normalize_severity(stage.get("model_severity"))
+    model = model_gap_magnitude(stage)
     derivation = stage.get("severity_derivation")
     derived = isinstance(derivation, dict) and derivation.get("status") in {"constrained", "conflict"}
     if final == expected:
@@ -1140,11 +1187,18 @@ def promotion_readiness(
     chain: dict[str, Any],
     decision: dict[str, Any],
     phase_c: dict[str, Any],
+    prediction_unavailable: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """新版本晋级硬门：只消费冻结且未用来改规则的 blind cohort。"""
     samples = manifest_samples(manifest)
+    unavailable = prediction_unavailable or []
     blind_rows = [row for row in rows if row["partition"] == "blind"]
-    blind_ids = {row["sample_id"] for row in blind_rows}
+    blind_unavailable = [row for row in unavailable if row.get("partition") == "blind"]
+    blind_ids = {
+        str(row["sample_id"])
+        for row in [*blind_rows, *blind_unavailable]
+        if str(row.get("sample_id") or "").strip()
+    }
     categories = {
         str((samples.get(sample_id) or {}).get("product_category") or "").strip()
         for sample_id in blind_ids
@@ -1166,12 +1220,17 @@ def promotion_readiness(
 
     for stage in FLAG_SUFFIXES:
         stage_rows = [row for row in blind_rows if row["stage"] == stage]
+        stage_unavailable = [row for row in blind_unavailable if row.get("stage") == stage]
         gap_examples = sum(1 for row in stage_rows if row["expected"] in {"medium", "large"})
-        control_examples = sum(1 for row in stage_rows if row["expected"] == "small")
+        control_examples = sum(1 for row in stage_rows if row["expected"] in {"none", "small"})
         matched = sum(1 for row in stage_rows if row["matched"])
-        accuracy = round(matched / len(stage_rows), 4) if stage_rows else None
+        valid_gt_pairs = len(stage_rows) + len(stage_unavailable)
+        accuracy = round(matched / valid_gt_pairs, 4) if valid_gt_pairs else None
         stage_coverage[stage] = {
+            "valid_gt_pairs": valid_gt_pairs,
             "evaluated_pairs": len(stage_rows),
+            "prediction_unavailable": len(stage_unavailable),
+            "evaluation_coverage": round(len(stage_rows) / valid_gt_pairs, 4) if valid_gt_pairs else None,
             "gap_examples": gap_examples,
             "no_gap_controls": control_examples,
             "accuracy": accuracy,
@@ -1182,9 +1241,11 @@ def promotion_readiness(
         if gap_examples < required_per_class:
             reasons.append(f"{stage} 缺少至少 {required_per_class} 个中/大差距样本")
         if control_examples < required_per_class:
-            reasons.append(f"{stage} 缺少至少 {required_per_class} 个 small 对照样本")
+            reasons.append(f"{stage} 缺少至少 {required_per_class} 个 none/small 对照样本")
         if accuracy is None or accuracy < PROMOTION_MIN_STAGE_ACCURACY:
             reasons.append(f"{stage} 准确率未达到 {PROMOTION_MIN_STAGE_ACCURACY:.0%}")
+        if stage_unavailable:
+            reasons.append(f"{stage} 存在 {len(stage_unavailable)} 个不可评分预测")
 
     blind_violations = blind_contract_violations(labels, manifest)
     reasons.extend(blind_violations)
@@ -1234,12 +1295,17 @@ def promotion_readiness(
             if run_temperatures != {expected_temperature}:
                 reasons.append("analysis_result comparison temperature 与 cohort lock 不一致或缺失")
 
-    overall_accuracy = round(sum(1 for row in blind_rows if row["matched"]) / len(blind_rows), 4) if blind_rows else None
-    two_band_errors = sum(1 for row in blind_rows if row.get("ordinal_distance") == 2)
+    blind_valid_gt = len(blind_rows) + len(blind_unavailable)
+    overall_accuracy = (
+        round(sum(1 for row in blind_rows if row["matched"]) / blind_valid_gt, 4)
+        if blind_valid_gt
+        else None
+    )
+    two_band_errors = sum(1 for row in blind_rows if int(row.get("ordinal_distance") or 0) >= 2)
     if overall_accuracy is None or overall_accuracy < PROMOTION_MIN_OVERALL_ACCURACY:
         reasons.append(f"blind 总准确率未达到 {PROMOTION_MIN_OVERALL_ACCURACY:.0%}")
     if two_band_errors:
-        reasons.append("blind 存在 small↔large 两档错误")
+        reasons.append("blind 存在跨两档及以上错误")
 
     human_events = ((chain.get("human_key_event_audit") or {}).get("records") or [])
     blind_events = [row for row in human_events if row.get("sample_id") in blind_ids and row.get("expected_state") == "present"]
@@ -1287,6 +1353,7 @@ def promotion_readiness(
             "blind_contract_violations": blind_violations,
             "cohort_lock_errors": lock_errors,
             "overall_accuracy": overall_accuracy,
+            "prediction_unavailable": len(blind_unavailable),
             "two_band_errors": two_band_errors,
             "stage1_event_recall": event_recall,
             "stage2_evidence_use": stage2_use,
@@ -1294,6 +1361,127 @@ def promotion_readiness(
             "phase_c_regressions": phase_regressions,
         },
         "reasons": list(dict.fromkeys(reasons)),
+    }
+
+
+def semantic_acceptance(
+    rows: list[dict[str, Any]],
+    prediction_unavailable: list[dict[str, Any]],
+    stage_oracles: dict[str, Any],
+    human_key_event_audit: dict[str, Any],
+) -> dict[str, Any]:
+    """Report business acceptance independently from engineering verification.
+
+    Missing human axes stay unavailable.  They are never inferred from the
+    model output and never converted into a pass by an engineering marker.
+    """
+
+    sample_ids = {
+        str(row.get("sample_id") or "")
+        for row in [*rows, *prediction_unavailable]
+        if str(row.get("sample_id") or "").strip()
+    }
+    valid_gap_cells = len(rows) + len(prediction_unavailable)
+    gap_matches = sum(1 for row in rows if row.get("matched") is True)
+    gap_accuracy = round(gap_matches / valid_gap_cells, 4) if valid_gap_cells else None
+    gap_coverage = round(len(rows) / valid_gap_cells, 4) if valid_gap_cells else None
+    two_band_errors = sum(1 for row in rows if int(row.get("ordinal_distance") or 0) >= 2)
+    if len(sample_ids) < SEMANTIC_ACCEPTANCE_MIN_SAMPLE_PAIRS or not valid_gap_cells:
+        gap_status = "unavailable"
+        gap_reason = (
+            f"requires at least {SEMANTIC_ACCEPTANCE_MIN_SAMPLE_PAIRS} labeled sample pairs; "
+            f"found {len(sample_ids)}"
+        )
+    else:
+        gap_status = (
+            "passed"
+            if gap_accuracy is not None
+            and gap_accuracy >= PROMOTION_MIN_OVERALL_ACCURACY
+            and gap_coverage == 1.0
+            and two_band_errors == 0
+            else "failed"
+        )
+        gap_reason = "measured against canonical human_gap"
+
+    relation_records = stage_oracles.get("records") if isinstance(stage_oracles, dict) else None
+    relation_rows = [row for row in relation_records or [] if row.get("expected_relation") is not None]
+    relation_matches = sum(1 for row in relation_rows if row.get("relation_match") is True)
+    relation_accuracy = round(relation_matches / len(relation_rows), 4) if relation_rows else None
+    if len(relation_rows) < SEMANTIC_ACCEPTANCE_MIN_RELATION_CELLS:
+        relation_status = "unavailable"
+        relation_reason = (
+            f"requires at least {SEMANTIC_ACCEPTANCE_MIN_RELATION_CELLS} human relation cells; "
+            f"found {len(relation_rows)}"
+        )
+    else:
+        relation_status = (
+            "passed"
+            if relation_accuracy is not None and relation_accuracy >= PROMOTION_MIN_OVERALL_ACCURACY
+            else "failed"
+        )
+        relation_reason = "measured against stage_oracles.relation"
+
+    event_summary = (
+        human_key_event_audit.get("summary")
+        if isinstance(human_key_event_audit, dict) and isinstance(human_key_event_audit.get("summary"), dict)
+        else {}
+    )
+    present_events = int(event_summary.get("present_events") or 0)
+    fact_recall = event_summary.get("stage1_recall")
+    if present_events < SEMANTIC_ACCEPTANCE_MIN_FACT_EVENTS or not isinstance(fact_recall, (int, float)):
+        fact_status = "unavailable"
+        fact_reason = (
+            f"requires at least {SEMANTIC_ACCEPTANCE_MIN_FACT_EVENTS} human key events; "
+            f"found {present_events}"
+        )
+    else:
+        fact_status = "passed" if float(fact_recall) >= PROMOTION_MIN_EVENT_RECALL else "failed"
+        fact_reason = "measured against human key_events"
+
+    component_statuses = (gap_status, relation_status, fact_status)
+    overall = (
+        "failed"
+        if "failed" in component_statuses
+        else "passed"
+        if all(status == "passed" for status in component_statuses)
+        else "incomplete"
+    )
+    return {
+        "overall": overall,
+        "independent_from_engineering_acceptance": True,
+        "promotion_eligible": False,
+        "policy": {
+            "min_sample_pairs": SEMANTIC_ACCEPTANCE_MIN_SAMPLE_PAIRS,
+            "min_gap_accuracy": PROMOTION_MIN_OVERALL_ACCURACY,
+            "min_gap_coverage": 1.0,
+            "max_two_band_errors": 0,
+            "min_relation_cells": SEMANTIC_ACCEPTANCE_MIN_RELATION_CELLS,
+            "min_relation_accuracy": PROMOTION_MIN_OVERALL_ACCURACY,
+            "min_fact_events": SEMANTIC_ACCEPTANCE_MIN_FACT_EVENTS,
+            "min_fact_recall": PROMOTION_MIN_EVENT_RECALL,
+        },
+        "gap_magnitude": {
+            "status": gap_status,
+            "reason": gap_reason,
+            "sample_pairs": len(sample_ids),
+            "valid_gt_cells": valid_gap_cells,
+            "evaluated_cells": len(rows),
+            "accuracy": gap_accuracy,
+            "evaluation_coverage": gap_coverage,
+            "two_band_errors": two_band_errors,
+        },
+        "relation": {
+            "status": relation_status,
+            "reason": relation_reason,
+            "cells": len(relation_rows),
+            "accuracy": relation_accuracy,
+        },
+        "fact_recall": {
+            "status": fact_status,
+            "reason": fact_reason,
+            "present_events": present_events,
+            "recall": fact_recall,
+        },
     }
 
 
@@ -1370,6 +1558,7 @@ def evaluate(
     label_samples = labels.get("samples") if isinstance(labels.get("samples"), dict) else {}
     input_samples = manifest_samples(manifest)
     rows: list[dict[str, Any]] = []
+    prediction_unavailable: list[dict[str, Any]] = []
     missing_runs: list[dict[str, str]] = []
     missing_labels: list[str] = []
     whole_video_observations: list[dict[str, Any]] = []
@@ -1397,15 +1586,37 @@ def evaluate(
         expected_stages = ground_truth_gap_values(label)
         for current_stage in sorted(allowed):
             stage = by_id.get(current_stage)
-            expected = normalize_severity(expected_stages.get(current_stage))
-            if not isinstance(stage, dict) or expected is None:
+            expected = normalize_gap_magnitude(expected_stages.get(current_stage))
+            if expected is None:
                 continue
-            final = normalize_severity(stage.get("severity"))
+            if not isinstance(stage, dict):
+                prediction_unavailable.append({
+                    "sample_id": sample_id,
+                    "partition": str(label.get("partition") or "unknown"),
+                    "run_path": str(path),
+                    "stage": current_stage,
+                    "expected": expected,
+                    "reason": "missing_stage_result",
+                })
+                continue
+            final, final_source = final_gap_magnitude(stage)
             if final is None:
+                prediction_unavailable.append({
+                    "sample_id": sample_id,
+                    "partition": str(label.get("partition") or "unknown"),
+                    "run_path": str(path),
+                    "stage": current_stage,
+                    "expected": expected,
+                    "reason": "non_evaluable_final_gap",
+                    "model_gap_magnitude": stage.get("model_gap_magnitude"),
+                    "severity": stage.get("severity"),
+                    "stage_state": stage.get("stage_state"),
+                    "analysis_status": stage.get("analysis_status"),
+                })
                 continue
             direction = "matched"
             if final != expected:
-                direction = "underestimated" if SEVERITY_RANK[final] < SEVERITY_RANK[expected] else "overestimated"
+                direction = "underestimated" if GAP_RANK[final] < GAP_RANK[expected] else "overestimated"
             row = {
                 "sample_id": sample_id,
                 "partition": str(label.get("partition") or "unknown"),
@@ -1414,7 +1625,8 @@ def evaluate(
                 "scope_source": scope_source,
                 "expected": expected,
                 "final": final,
-                "model": normalize_severity(stage.get("model_severity")),
+                "final_source": final_source,
+                "model": model_gap_magnitude(stage),
                 "matched": final == expected,
                 "direction": direction,
                 "diagnosis": diagnosis(expected, final, stage),
@@ -1445,8 +1657,8 @@ def evaluate(
         lambda: {"all": Counter(), "matched": Counter(), "mismatched": Counter()}
     )
     confusion = {
-        expected: {final: 0 for final in SEVERITIES}
-        for expected in SEVERITIES
+        expected: {final: 0 for final in GAP_MAGNITUDES}
+        for expected in GAP_MAGNITUDES
     }
     partition_counts: dict[str, Counter[str]] = defaultdict(Counter)
     for row in rows:
@@ -1466,6 +1678,11 @@ def evaluate(
         confusion[row["expected"]][row["final"]] += 1
         partition_counts[row["partition"]]["total"] += 1
         partition_counts[row["partition"]]["matched"] += int(row["matched"])
+    for row in prediction_unavailable:
+        stage_counts[str(row["stage"])]["total"] += 1
+        stage_counts[str(row["stage"])]["prediction_unavailable"] += 1
+        partition_counts[str(row["partition"])]["total"] += 1
+        partition_counts[str(row["partition"])]["prediction_unavailable"] += 1
 
     unstable = [
         {
@@ -1509,20 +1726,45 @@ def evaluate(
         stage_oracles,
         phase_c,
     )
-    readiness = promotion_readiness(rows, labels, manifest, cohort_lock, chain, decision, phase_c)
+    readiness = promotion_readiness(
+        rows,
+        labels,
+        manifest,
+        cohort_lock,
+        chain,
+        decision,
+        phase_c,
+        prediction_unavailable,
+    )
+    valid_gt_cells = len(rows) + len(prediction_unavailable)
+    matched_cells = sum(1 for row in rows if row["matched"])
+    semantic_gate = semantic_acceptance(
+        rows,
+        prediction_unavailable,
+        stage_oracles,
+        chain.get("human_key_event_audit") or {},
+    )
     return {
-        "schema_version": 3,
+        "schema_version": EVALUATION_REPORT_SCHEMA_VERSION,
         "sources": {
             "ground_truth": labels.get("source"),
             "ground_truth_policy": labels.get("policy"),
             "uses_final_analysis_json": True,
         },
         "summary": {
+            "valid_gt_cells": valid_gt_cells,
             "evaluated": len(rows),
-            "matched": sum(1 for row in rows if row["matched"]),
-            "accuracy": round(sum(1 for row in rows if row["matched"]) / len(rows), 4) if rows else None,
+            "matched": matched_cells,
+            "prediction_unavailable": len(prediction_unavailable),
+            "accuracy": round(matched_cells / valid_gt_cells, 4) if valid_gt_cells else None,
+            "accuracy_on_available": round(matched_cells / len(rows), 4) if rows else None,
+            "evaluation_coverage": round(len(rows) / valid_gt_cells, 4) if valid_gt_cells else None,
             "ordinal_distance": dict(sorted(distance_counts.items())),
-            "two_band_errors": distance_counts.get("off_by_2", 0),
+            "two_band_errors": sum(
+                count
+                for key, count in distance_counts.items()
+                if key.startswith("off_by_") and int(key.removeprefix("off_by_")) >= 2
+            ),
             "directions": dict(sorted(direction_counts.items())),
             "diagnoses": dict(sorted(diagnosis_counts.items())),
             "by_partition": {key: dict(value) for key, value in sorted(partition_counts.items())},
@@ -1532,7 +1774,7 @@ def evaluate(
         "by_stage": {key: dict(value) for key, value in sorted(stage_counts.items())},
         "confusion_matrix": {
             "rows": "ground_truth",
-            "columns": "final_severity",
+            "columns": "final_gap_magnitude",
             "values": confusion,
         },
         "boundary_diagnostics": {
@@ -1564,10 +1806,12 @@ def evaluate(
         "phase_c_evaluation": phase_c,
         "layer_attribution": layered,
         "mismatches": mismatches,
+        "prediction_unavailable": prediction_unavailable,
         "execution_invariance_violations": unstable,
         "shadow_execution_invariance_violations": shadow_unstable,
         "whole_video_observations": whole_video_observations,
         "promotion_readiness": readiness,
+        "semantic_acceptance": semantic_gate,
         "chain_audit": chain,
         "missing_runs": missing_runs,
         "missing_labels": sorted(missing_labels),

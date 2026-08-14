@@ -1,0 +1,320 @@
+{
+  "schema_version": 1,
+  "decision_scope": "seen_mechanism_calibration_only",
+  "promotion_eligible": false,
+  "fact_source_model": "qwen3.6-plus",
+  "qualification_contract": {
+    "non_effect_bases": ["none", "product_form", "process_only", "claim_only"],
+    "effect_bases": ["post_use_result", "direct_comparison"],
+    "gradient_fields": ["salience", "focus", "coverage"],
+    "rule": "产品形态、操作过程和口头主张不能升级为效果结果；同一粗状态下的显著性、焦点和覆盖差异必须保留为审计信号。"
+  },
+  "cases": [
+    {
+      "sample_id": "aavini-foot-care",
+      "fact_artifact": "../runs/model-selection-20260806/s4-structure-calibration/raw-facts/aavini-foot-care/qwen3.6-plus/visual_extraction_evaluation.json",
+      "qualification_review": {
+        "schema_version": 1,
+        "sample_id": "aavini-foot-care",
+        "decision_scope": "seen_mechanism_calibration_only",
+        "comparison_sufficiency": "sufficient",
+        "source_basis": [
+          "runs/model-selection-20260802/new12-human-initial-working-gt.json:aavini-foot-care/S4",
+          "runs/model-selection-20260809/role-separation-validation/common-error-human-review-completion.json:aavini-foot-care/S4"
+        ],
+        "creator": {
+          "effect_basis": "post_use_result",
+          "salience": "subtle",
+          "focus": "peripheral",
+          "coverage": "sustained",
+          "evidence_ids": ["C5"],
+          "reason": "人工复核确认这是使用后阶段，但脚部不在主要视觉焦点，效果变化难以确认。"
+        },
+        "benchmark": {
+          "effect_basis": "post_use_result",
+          "salience": "strong",
+          "focus": "central",
+          "coverage": "sustained",
+          "evidence_ids": ["B3"],
+          "reason": "足部近景持续展示涂抹后的光泽和滋润变化。"
+        },
+        "review_note": "双方都有结果侧事实，但相同粗状态会压掉焦点与显著性差异。"
+      },
+      "corrected_result": {
+        "schema_version": 1,
+        "stage": "S4 效果呈现",
+        "creator": {
+          "effect_evidence_state": "result_only",
+          "visibility": "partial",
+          "proof": "result_only",
+          "causal_link": "weak",
+          "evidence_ids": ["C5"],
+          "reason": "C5处于使用后阶段，但主体偏离焦点，效果变化只能部分确认。"
+        },
+        "benchmark": {
+          "effect_evidence_state": "result_only",
+          "visibility": "clear",
+          "proof": "result_only",
+          "causal_link": "supported",
+          "evidence_ids": ["B3"],
+          "reason": "B3清楚展示足部涂抹后的光泽与滋润变化，并与使用过程连接。"
+        }
+      }
+    },
+    {
+      "sample_id": "frosty-pearl-mineral-mix-cassava-litter",
+      "fact_artifact": "../runs/model-selection-20260806/s4-structure-calibration/raw-facts/frosty-pearl-mineral-mix-cassava-litter/qwen3.6-plus/visual_extraction_evaluation.json",
+      "qualification_review": {
+        "schema_version": 1,
+        "sample_id": "frosty-pearl-mineral-mix-cassava-litter",
+        "decision_scope": "seen_mechanism_calibration_only",
+        "comparison_sufficiency": "sufficient",
+        "source_basis": [
+          "runs/model-selection-20260802/new12-human-initial-working-gt.json:frosty-pearl-mineral-mix-cassava-litter/S4",
+          "runs/model-selection-20260809/role-separation-validation/common-error-human-review-pilot.json:frosty-pearl-mineral-mix-cassava-litter/S4"
+        ],
+        "creator": {
+          "effect_basis": "post_use_result",
+          "salience": "clear",
+          "focus": "central",
+          "coverage": "sustained",
+          "evidence_ids": ["C5"],
+          "reason": "creator展示单一成形团块结果，没有失败对照。"
+        },
+        "benchmark": {
+          "effect_basis": "direct_comparison",
+          "salience": "strong",
+          "focus": "central",
+          "coverage": "multi_moment",
+          "evidence_ids": ["B2", "B3"],
+          "reason": "benchmark直接并置完整与易碎团块，并补充保持形状的结果。"
+        },
+        "review_note": "直接对比是合格效果证明，不能因缺少完整制备过程降成弱于单一结果。"
+      },
+      "corrected_result": {
+        "schema_version": 1,
+        "stage": "S4 效果呈现",
+        "creator": {
+          "effect_evidence_state": "result_only",
+          "visibility": "clear",
+          "proof": "result_only",
+          "causal_link": "weak",
+          "evidence_ids": ["C5"],
+          "reason": "C5展示成形团块结果，但没有直接失败对照。"
+        },
+        "benchmark": {
+          "effect_evidence_state": "verified",
+          "visibility": "clear",
+          "proof": "direct_comparison",
+          "causal_link": "supported",
+          "evidence_ids": ["B2", "B3"],
+          "reason": "B2直接比较完整与易碎团块，B3补充保持形状的结果。"
+        }
+      }
+    },
+    {
+      "sample_id": "niumo-nose-hair-trimmer",
+      "fact_artifact": "../runs/model-selection-20260806/s4-structure-calibration/raw-facts/niumo-nose-hair-trimmer/qwen3.6-plus/visual_extraction_evaluation.json",
+      "qualification_review": {
+        "schema_version": 1,
+        "sample_id": "niumo-nose-hair-trimmer",
+        "decision_scope": "seen_mechanism_calibration_only",
+        "comparison_sufficiency": "sufficient",
+        "source_basis": [
+          "runs/model-selection-20260802/new12-human-initial-working-gt.json:niumo-nose-hair-trimmer/S4",
+          "runs/model-selection-20260809/role-separation-validation/common-error-human-review-pilot.json:niumo-nose-hair-trimmer/S4"
+        ],
+        "creator": {
+          "effect_basis": "none",
+          "salience": "none",
+          "focus": "none",
+          "coverage": "none",
+          "evidence_ids": [],
+          "reason": "creator没有使用后效果事实。"
+        },
+        "benchmark": {
+          "effect_basis": "claim_only",
+          "salience": "none",
+          "focus": "none",
+          "coverage": "none",
+          "evidence_ids": ["B5"],
+          "reason": "不要拔鼻毛是主张，不是修剪结果或效果证明。"
+        },
+        "review_note": "claim-only不能形成benchmark效果优势，双方S4均无合格效果证据。"
+      },
+      "corrected_result": {
+        "schema_version": 1,
+        "stage": "S4 效果呈现",
+        "creator": {
+          "effect_evidence_state": "none",
+          "visibility": "not_applicable",
+          "proof": "none",
+          "causal_link": "not_applicable",
+          "evidence_ids": [],
+          "reason": "creator没有S4效果事实。"
+        },
+        "benchmark": {
+          "effect_evidence_state": "none",
+          "visibility": "not_applicable",
+          "proof": "claim_only",
+          "causal_link": "not_applicable",
+          "evidence_ids": ["B5"],
+          "reason": "B5只有不要拔鼻毛的主张，没有结果证明。"
+        }
+      }
+    },
+    {
+      "sample_id": "pet-chews-pet-healer",
+      "fact_artifact": "../runs/model-selection-20260806/s4-structure-calibration/raw-facts/pet-chews-pet-healer/qwen3.6-plus/visual_extraction_evaluation.json",
+      "qualification_review": {
+        "schema_version": 1,
+        "sample_id": "pet-chews-pet-healer",
+        "decision_scope": "seen_mechanism_calibration_only",
+        "comparison_sufficiency": "sufficient",
+        "source_basis": [
+          "runs/model-selection-20260802/new12-human-initial-working-gt.json:pet-chews-pet-healer/S4",
+          "runs/model-selection-20260814/gap-calibration-ab/summary.md:pet-chews-pet-healer"
+        ],
+        "creator": {
+          "effect_basis": "product_form",
+          "salience": "none",
+          "focus": "none",
+          "coverage": "none",
+          "evidence_ids": ["C4"],
+          "reason": "开瓶、铝膜和颗粒外观只证明产品形态，不证明使用后效果。"
+        },
+        "benchmark": {
+          "effect_basis": "claim_only",
+          "salience": "none",
+          "focus": "none",
+          "coverage": "none",
+          "evidence_ids": ["B4"],
+          "reason": "手持产品讲益处属于主张，没有效果画面。"
+        },
+        "review_note": "产品形态展示和功效主张都不能升级为效果结果，双方无S4差距。"
+      },
+      "corrected_result": {
+        "schema_version": 1,
+        "stage": "S4 效果呈现",
+        "creator": {
+          "effect_evidence_state": "none",
+          "visibility": "not_applicable",
+          "proof": "none",
+          "causal_link": "not_applicable",
+          "evidence_ids": ["C4"],
+          "reason": "C4仅展示产品开封和颗粒形态，不是使用后效果。"
+        },
+        "benchmark": {
+          "effect_evidence_state": "none",
+          "visibility": "not_applicable",
+          "proof": "claim_only",
+          "causal_link": "not_applicable",
+          "evidence_ids": ["B4"],
+          "reason": "B4只有功效或用法主张，没有结果证明。"
+        }
+      }
+    },
+    {
+      "sample_id": "papa-feel-5d-peptide-eye-cream-c2",
+      "fact_artifact": "../runs/model-selection-20260806/s4-structure-calibration/raw-facts/papa-feel-5d-peptide-eye-cream-c2/qwen3.6-plus/visual_extraction_evaluation.json",
+      "qualification_review": {
+        "schema_version": 1,
+        "sample_id": "papa-feel-5d-peptide-eye-cream-c2",
+        "decision_scope": "seen_mechanism_calibration_only",
+        "comparison_sufficiency": "insufficient",
+        "source_basis": [
+          "runs/model-selection-20260802/new12-human-initial-working-gt.json:papa-feel-5d-peptide-eye-cream-c2/S4",
+          "runs/model-selection-20260809/role-separation-validation/common-error-human-review-completion.json:papa-feel-5d-peptide-eye-cream-c2/S4"
+        ],
+        "creator": {
+          "effect_basis": "process_only",
+          "salience": "none",
+          "focus": "none",
+          "coverage": "none",
+          "evidence_ids": ["C6"],
+          "reason": "拿瓶并指向眼下区域不是前后效果证明。"
+        },
+        "benchmark": {
+          "effect_basis": "claim_only",
+          "salience": "none",
+          "focus": "none",
+          "coverage": "none",
+          "evidence_ids": ["B8"],
+          "reason": "质地卖点文字不是人工确认的红圈和效果对比视觉证据。"
+        },
+        "review_note": "锁定事实缺失benchmark关键视觉证明，不能用人工GT反向补造证据。"
+      },
+      "corrected_result": {
+        "schema_version": 1,
+        "stage": "S4 效果呈现",
+        "creator": {
+          "effect_evidence_state": "none",
+          "visibility": "not_applicable",
+          "proof": "none",
+          "causal_link": "not_applicable",
+          "evidence_ids": ["C6"],
+          "reason": "C6只有产品指示动作，没有效果结果。"
+        },
+        "benchmark": {
+          "effect_evidence_state": "none",
+          "visibility": "not_applicable",
+          "proof": "claim_only",
+          "causal_link": "not_applicable",
+          "evidence_ids": ["B8"],
+          "reason": "B8只有质地卖点主张，锁定事实未保留人工确认的视觉效果证明。"
+        }
+      }
+    },
+    {
+      "sample_id": "papa-feel-retinol",
+      "fact_artifact": "../runs/model-selection-20260806/s4-structure-calibration/raw-facts/papa-feel-retinol/qwen3.6-plus/visual_extraction_evaluation.json",
+      "qualification_review": {
+        "schema_version": 1,
+        "sample_id": "papa-feel-retinol",
+        "decision_scope": "seen_mechanism_calibration_only",
+        "comparison_sufficiency": "insufficient",
+        "source_basis": [
+          "runs/model-selection-20260802/new12-human-initial-working-gt.json:papa-feel-retinol/S4",
+          "runs/model-selection-20260806/s4-structure-calibration/raw-facts/papa-feel-retinol/qwen3.6-plus/visual_extraction_evaluation.json"
+        ],
+        "creator": {
+          "effect_basis": "post_use_result",
+          "salience": "clear",
+          "focus": "central",
+          "coverage": "multi_moment",
+          "evidence_ids": ["C5", "C7"],
+          "reason": "creator展示手部吸收结果，但没有人脸前后效果。"
+        },
+        "benchmark": {
+          "effect_basis": "product_form",
+          "salience": "none",
+          "focus": "none",
+          "coverage": "none",
+          "evidence_ids": ["B5"],
+          "reason": "开罐展示白色霜体只证明产品形态。"
+        },
+        "review_note": "人工large判断依赖达人自身皮肤状态与说服力，锁定S4事实未保留该相对信号。"
+      },
+      "corrected_result": {
+        "schema_version": 1,
+        "stage": "S4 效果呈现",
+        "creator": {
+          "effect_evidence_state": "result_only",
+          "visibility": "clear",
+          "proof": "result_only",
+          "causal_link": "weak",
+          "evidence_ids": ["C5", "C7"],
+          "reason": "C5和C7展示吸收结果与指示动作，但没有人脸前后效果。"
+        },
+        "benchmark": {
+          "effect_evidence_state": "none",
+          "visibility": "not_applicable",
+          "proof": "none",
+          "causal_link": "not_applicable",
+          "evidence_ids": ["B5"],
+          "reason": "B5只展示罐内霜体，不是使用后效果。"
+        }
+      }
+    }
+  ]
+}

@@ -43,7 +43,9 @@ COMPACT_EVAL_SCHEMA_VERSION = 1
 VISUAL_EXTRACTION_SCHEMA_VERSION = 2
 MODEL_INDEPENDENT_SCHEMA_VERSION = 2
 S4_FACT_STATE_SCHEMA_VERSION = 1
+S4_QUALIFICATION_REVIEW_SCHEMA_VERSION = 1
 S4_JUDGMENT_SCHEMA_VERSION = 1
+S4_CALIBRATED_JUDGMENT_SCHEMA_VERSION = 1
 S4_SINGLE_PASS_SCHEMA_VERSION = 1
 S4_FREE_TEXT_STEPS_SCHEMA_VERSION = 1
 S5_AUDIT_SCHEMA_VERSION = 1
@@ -53,6 +55,7 @@ VISUAL_EXTRACTION_ROLE = "visual_fact_extraction_on_locked_frames"
 MODEL_INDEPENDENT_ROLE = "model_independent_comparison_on_model_facts"
 S4_FACT_STATE_ROLE = "s4_fact_state_on_locked_facts"
 S4_JUDGMENT_ROLE = "s4_judgment_on_locked_fact_state"
+S4_CALIBRATED_JUDGMENT_ROLE = "s4_calibrated_judgment_on_locked_fact_state"
 S4_SINGLE_PASS_ROLE = "s4_single_pass_judgment_on_locked_facts"
 S4_FREE_TEXT_STEPS_ROLE = "s4_free_text_steps_judgment_on_locked_facts"
 S5_AUDIT_ROLE = "s5_source_audit_on_locked_facts"
@@ -69,6 +72,17 @@ COMPACT_MAX_EVIDENCE_IDS = 4
 MAX_STAGE_FRAME_INPUTS_PER_STAGE = 4
 S4_MAX_EVIDENCE_IDS = 8
 S4_FREE_TEXT_MAX_CHARS = 240
+GAP_CALIBRATION_AXES = frozenset({
+    "stage_completion",
+    "proof_quality",
+    "causal_completeness",
+    "perceptual_salience",
+    "purchase_relevance",
+})
+GAP_CALIBRATION_SUFFICIENCY = frozenset({"sufficient", "insufficient", "uncertain"})
+GAP_CALIBRATION_CORE_VALUE = frozenset({"complete", "partial", "absent", "uncertain"})
+SCORABLE_GAPS = ("none", "small", "medium", "large")
+SCORABLE_GAP_RANK = {value: index for index, value in enumerate(SCORABLE_GAPS)}
 S5_MAX_EVIDENCE_IDS = 8
 MODEL_INDEPENDENT_WINNERS = frozenset({"benchmark", "creator", "tie", "uncertain"})
 MODEL_INDEPENDENT_RELATIONS = frozenset({"benchmark_better", "creator_better", "tie", "uncertain"})
@@ -99,6 +113,20 @@ FACT_QUALITY_FIELDS = {
 S4_STATE_VISIBILITY = FACT_QUALITY_FIELDS["visibility"]
 S4_STATE_PROOF = FACT_QUALITY_FIELDS["proof"]
 S4_STATE_CAUSAL_LINK = FACT_QUALITY_FIELDS["causal_link"]
+S4_EFFECT_BASES = frozenset(
+    {
+        "none",
+        "product_form",
+        "process_only",
+        "claim_only",
+        "post_use_result",
+        "direct_comparison",
+        "uncertain",
+    }
+)
+S4_EFFECT_SALIENCE = frozenset({"none", "subtle", "clear", "strong", "uncertain"})
+S4_EFFECT_FOCUS = frozenset({"none", "peripheral", "central", "uncertain"})
+S4_EFFECT_COVERAGE = frozenset({"none", "single_moment", "multi_moment", "sustained", "uncertain"})
 S5_AUDIT_STATES = frozenset(S5_TRUST_STATES)
 
 
@@ -169,9 +197,11 @@ def contract_limits_for_variant(variant: str) -> dict[str, int]:
                 "max_decision_basis_chars": COMPACT_MAX_BASIS_CHARS,
             }
         )
-    if variant == "s4_judgment":
+    if variant in {"s4_judgment", "s4_calibrated_judgment"}:
         limits["stage_count"] = 1
         limits["max_decision_basis_chars"] = COMPACT_MAX_BASIS_CHARS
+    if variant == "s4_calibrated_judgment":
+        limits["max_decisive_axes"] = len(GAP_CALIBRATION_AXES)
     return limits
 
 
@@ -247,6 +277,8 @@ class FrozenCompactBundle:
     stage_time_ranges: dict[str, dict[str, str]] = field(default_factory=dict)
     input_mode: str = "locked_facts_and_frames"
     video_inputs: tuple[dict[str, Any], ...] = ()
+    source_run: str | None = None
+    audit_provenance: dict[str, Any] = field(default_factory=dict)
 
 
 def _read_json(path: Path, *, required: bool = True) -> dict[str, Any]:
@@ -1067,6 +1099,11 @@ def build_s4_fact_state_payload(
         "result_only=只有结果画面或结果口播，没有产品导致结果的因果桥；"
         "verified=效果肉眼可见，且产品使用/过程与结果之间存在可信连接；"
         "uncertain=事实冲突、看不清或证据不足。"
+        "资格边界：产品包装或外观、开封倒出、单纯质地展示只属于product form；"
+        "只有涂抹、操作或演示步骤但没有使用后结果只属于process；"
+        "一般功效或益处主张只属于claim，三者都不能升级为result_only或verified。"
+        "具体的使用后结果口播最多可支持result_only，不能单独支持verified；"
+        "肉眼可见的使用后结果或直接前后/对照结果，才可结合因果连接判断result_only或verified。"
         "visibility、proof、causal_link 只能描述锁定事实本身；不确定就填 uncertain。"
         f"evidence_ids 只能引用同侧 S4 事实，最多 {S4_MAX_EVIDENCE_IDS} 个；不能引用相邻阶段。"
         f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
@@ -1127,19 +1164,19 @@ def _validate_s4_state_side(
     causal_link = value.get("causal_link")
     if state in {"result_only", "verified"} and not evidence_ids:
         errors.append(f"{path}.{state} requires evidence_ids")
+    if proof not in {None, "none"} and not evidence_ids:
+        errors.append(f"{path}.{proof} proof requires evidence_ids")
     if state == "none":
-        if proof in {"direct_comparison", "result_only", "claim_only"}:
+        if proof in {"direct_comparison", "result_only"}:
             errors.append(f"{path}.none has effect proof")
         if causal_link == "supported":
             errors.append(f"{path}.none has supported causal_link")
     elif state == "result_only":
-        if proof == "direct_comparison":
-            errors.append(f"{path}.result_only has direct_comparison proof")
-        if causal_link == "supported":
-            errors.append(f"{path}.result_only has supported causal_link")
+        if proof not in {"direct_comparison", "result_only", "claim_only"}:
+            errors.append(f"{path}.result_only requires an observed or claimed result")
     elif state == "verified":
-        if proof != "direct_comparison":
-            errors.append(f"{path}.verified requires direct_comparison proof")
+        if proof not in {"direct_comparison", "result_only"}:
+            errors.append(f"{path}.verified requires visible result proof")
         if causal_link != "supported":
             errors.append(f"{path}.verified requires supported causal_link")
     reason = value.get("reason")
@@ -1175,6 +1212,153 @@ def validate_s4_fact_state_result(result: Any, bundle: FrozenCompactBundle) -> l
             )
         )
     return errors
+
+
+def validate_s4_qualification_review(
+    review: Any,
+    corrected_result: Any,
+    bundle: FrozenCompactBundle,
+) -> list[str]:
+    """Validate a seen-sample qualification review without inferring semantics in code.
+
+    Human review supplies the semantic classification.  This function only
+    enforces generic boundaries between product/process/claim observations and
+    qualified effect evidence, while preserving gradient fields for audit.
+    """
+
+    errors = validate_s4_fact_state_result(corrected_result, bundle)
+    if not isinstance(review, dict):
+        return [*errors, "qualification_review must be an object"]
+    expected_root = {
+        "schema_version",
+        "sample_id",
+        "decision_scope",
+        "comparison_sufficiency",
+        "source_basis",
+        "creator",
+        "benchmark",
+        "review_note",
+    }
+    extra = set(review) - expected_root
+    missing = expected_root - set(review)
+    if extra:
+        errors.append(f"qualification_review has unsupported fields: {sorted(extra)}")
+    if missing:
+        errors.append(f"qualification_review is missing fields: {sorted(missing)}")
+    if review.get("schema_version") != S4_QUALIFICATION_REVIEW_SCHEMA_VERSION:
+        errors.append("qualification_review schema_version mismatch")
+    review_sample_id = str(review.get("sample_id") or "").strip()
+    if not review_sample_id:
+        errors.append("qualification_review sample_id must be non-empty")
+    elif bundle.source_run is not None and review_sample_id != bundle.source_run:
+        errors.append("qualification_review sample_id does not match the locked fact source")
+    if review.get("decision_scope") != "seen_mechanism_calibration_only":
+        errors.append("qualification_review decision_scope is invalid")
+    sufficiency = review.get("comparison_sufficiency")
+    if sufficiency not in GAP_CALIBRATION_SUFFICIENCY:
+        errors.append("qualification_review comparison_sufficiency is invalid")
+    source_basis = review.get("source_basis")
+    if not isinstance(source_basis, list) or not source_basis or any(
+        not isinstance(item, str) or not item.strip() for item in source_basis
+    ):
+        errors.append("qualification_review source_basis must contain at least one source reference")
+    note = review.get("review_note")
+    if not isinstance(note, str) or not note.strip():
+        errors.append("qualification_review review_note must be non-empty")
+
+    for role in RAW_VIDEO_ROLES:
+        side = review.get(role)
+        state_side = corrected_result.get(role) if isinstance(corrected_result, dict) else None
+        path = f"qualification_review.{role}"
+        if not isinstance(side, dict) or not isinstance(state_side, dict):
+            errors.append(f"{path} and corrected_result.{role} must be objects")
+            continue
+        expected_side = {
+            "effect_basis",
+            "salience",
+            "focus",
+            "coverage",
+            "evidence_ids",
+            "reason",
+        }
+        side_extra = set(side) - expected_side
+        side_missing = expected_side - set(side)
+        if side_extra:
+            errors.append(f"{path} has unsupported fields: {sorted(side_extra)}")
+        if side_missing:
+            errors.append(f"{path} is missing fields: {sorted(side_missing)}")
+        basis = side.get("effect_basis")
+        salience = side.get("salience")
+        focus = side.get("focus")
+        coverage = side.get("coverage")
+        if basis not in S4_EFFECT_BASES:
+            errors.append(f"{path}.effect_basis is invalid")
+        if salience not in S4_EFFECT_SALIENCE:
+            errors.append(f"{path}.salience is invalid")
+        if focus not in S4_EFFECT_FOCUS:
+            errors.append(f"{path}.focus is invalid")
+        if coverage not in S4_EFFECT_COVERAGE:
+            errors.append(f"{path}.coverage is invalid")
+        evidence_ids = side.get("evidence_ids")
+        if not isinstance(evidence_ids, list) or any(
+            not isinstance(item, str) or not item.strip() for item in evidence_ids
+        ):
+            errors.append(f"{path}.evidence_ids must be a list of non-empty strings")
+            evidence_ids = []
+        if evidence_ids != state_side.get("evidence_ids"):
+            errors.append(f"{path}.evidence_ids must exactly match corrected_result.{role}.evidence_ids")
+        reason = side.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            errors.append(f"{path}.reason must be non-empty")
+
+        state = state_side.get("effect_evidence_state")
+        proof = state_side.get("proof")
+        causal_link = state_side.get("causal_link")
+        non_effect_bases = {"none", "product_form", "process_only", "claim_only"}
+        effect_bases = {"post_use_result", "direct_comparison"}
+        if basis in non_effect_bases and state not in {"none", "uncertain"}:
+            errors.append(f"{path}.{basis} cannot qualify as {state}")
+        if basis in effect_bases and state not in {"result_only", "verified", "uncertain"}:
+            errors.append(f"{path}.{basis} requires an effect-bearing state")
+        if basis == "direct_comparison" and proof != "direct_comparison":
+            errors.append(f"{path}.direct_comparison requires proof=direct_comparison")
+        if basis == "claim_only" and proof != "claim_only":
+            errors.append(f"{path}.claim_only requires proof=claim_only")
+        if basis in {"none", "product_form", "process_only"} and proof not in {"none", "uncertain"}:
+            errors.append(f"{path}.{basis} cannot retain effect proof={proof}")
+        if state == "verified" and (basis not in effect_bases or causal_link != "supported"):
+            errors.append(f"{path}.verified requires effect-bearing basis and supported causal_link")
+        if basis in non_effect_bases and any(value != "none" for value in (salience, focus, coverage)):
+            errors.append(f"{path}.{basis} must keep effect gradients at none")
+    if sufficiency == "sufficient" and any(
+        corrected_result.get(role, {}).get("effect_evidence_state") == "uncertain"
+        for role in RAW_VIDEO_ROLES
+        if isinstance(corrected_result, dict)
+    ):
+        errors.append("sufficient comparison cannot retain an uncertain effect state")
+    return errors
+
+
+def s4_qualification_gradient_compression(review: Any, corrected_result: Any) -> bool:
+    """Return whether equal coarse states hide different reviewed gradients."""
+
+    if not isinstance(review, dict) or not isinstance(corrected_result, dict):
+        return False
+    if review.get("comparison_sufficiency") != "sufficient":
+        return False
+    gradients: dict[str, tuple[Any, ...]] = {}
+    for role in RAW_VIDEO_ROLES:
+        side = review.get(role)
+        state_side = corrected_result.get(role)
+        if not isinstance(side, dict) or not isinstance(state_side, dict):
+            return False
+        gradients[role] = (
+            state_side.get("effect_evidence_state"),
+            side.get("salience"),
+            side.get("focus"),
+            side.get("coverage"),
+        )
+    return gradients["creator"][0] == gradients["benchmark"][0] and gradients["creator"][1:] != gradients["benchmark"][1:]
 
 
 def _s4_single_pass_shape() -> dict[str, Any]:
@@ -1406,8 +1590,36 @@ def validate_s4_fact_state_artifact_metadata(
         errors.append("artifact variant must be s4_fact_state")
     if record.get("schema_version") != S4_FACT_STATE_SCHEMA_VERSION:
         errors.append("artifact schema_version mismatch")
-    if record.get("model") != expected_model:
-        errors.append("artifact model does not match requested judgment model")
+    state_owner = record.get("state_owner", "model")
+    if state_owner == "model":
+        if record.get("model") != expected_model:
+            errors.append("artifact model does not match requested judgment model")
+    elif state_owner == "human_review":
+        compatible_models = record.get("compatible_judgment_models")
+        if record.get("model") != "human_review":
+            errors.append("human-reviewed artifact model must be human_review")
+        if not isinstance(compatible_models, list) or expected_model not in compatible_models:
+            errors.append("human-reviewed artifact does not declare the requested judgment model")
+        if record.get("decision_scope") != "seen_mechanism_calibration_only":
+            errors.append("human-reviewed artifact must be limited to seen mechanism calibration")
+        if record.get("promotion_eligible") is not False:
+            errors.append("human-reviewed artifact must explicitly disable promotion")
+        qualification_review = record.get("qualification_review")
+        qualification_review_digest = record.get("qualification_review_digest")
+        qualification_result_digest = record.get("qualification_result_digest")
+        if not isinstance(qualification_review_digest, str):
+            errors.append("human-reviewed artifact is missing qualification_review_digest")
+        elif not isinstance(qualification_review, dict) or qualification_review_digest != _stable_digest(
+            qualification_review
+        ):
+            errors.append("human-reviewed artifact qualification_review digest mismatch")
+        result = record.get("result")
+        if not isinstance(qualification_result_digest, str):
+            errors.append("human-reviewed artifact is missing qualification_result_digest")
+        elif not isinstance(result, dict) or qualification_result_digest != _stable_digest(result):
+            errors.append("human-reviewed artifact qualification result digest mismatch")
+    else:
+        errors.append("artifact state_owner is invalid")
     if record.get("source_digest") != expected_source_digest:
         errors.append("artifact source_digest does not match the locked base bundle")
     for provenance_field in ("source_commit", "protocol_hash"):
@@ -1424,7 +1636,9 @@ def build_s4_state_locked_bundle(
     state_artifact: str = "",
     state_source_digest: str | None = None,
     state_model: str | None = None,
+    state_owner: str = "model",
     expected_model: str | None = None,
+    qualification_review: dict[str, Any] | None = None,
 ) -> FrozenCompactBundle:
     """Create the second-step S4 bundle from a validated, immutable state result."""
 
@@ -1432,39 +1646,75 @@ def build_s4_state_locked_bundle(
         raise CompactEvaluationError("S4 fact state artifact is missing source_digest provenance")
     if state_source_digest is not None and state_source_digest != base_bundle.source_digest:
         raise CompactEvaluationError("S4 fact state source_digest does not match the locked base bundle")
-    if expected_model is not None and state_model != expected_model:
-        raise CompactEvaluationError("S4 fact state was produced by a different model")
+    if state_owner == "model":
+        if expected_model is not None and state_model != expected_model:
+            raise CompactEvaluationError("S4 fact state was produced by a different model")
+    elif state_owner == "human_review":
+        if state_model != "human_review":
+            raise CompactEvaluationError("human-reviewed S4 fact state has an invalid owner identity")
+    else:
+        raise CompactEvaluationError("S4 fact state owner is invalid")
     locked_state = deepcopy(state_result)
     errors = validate_s4_fact_state_result(locked_state, base_bundle)
     if errors:
         raise CompactEvaluationError("invalid S4 fact state: " + "; ".join(errors[:8]))
+    reviewed_gradients: dict[str, Any] | None = None
+    if qualification_review is not None:
+        if state_owner != "human_review":
+            raise CompactEvaluationError("reviewed S4 gradients require state_owner=human_review")
+        review_errors = validate_s4_qualification_review(qualification_review, locked_state, base_bundle)
+        if review_errors:
+            raise CompactEvaluationError("invalid S4 qualification review: " + "; ".join(review_errors[:8]))
+        reviewed_gradients = {
+            role: {
+                "effect_basis": qualification_review[role]["effect_basis"],
+                "salience": qualification_review[role]["salience"],
+                "focus": qualification_review[role]["focus"],
+                "coverage": qualification_review[role]["coverage"],
+                "evidence_ids": list(qualification_review[role]["evidence_ids"]),
+            }
+            for role in RAW_VIDEO_ROLES
+        }
     # The second step must not receive the original fact pack again.  Keeping
     # it in the prompt would let the judgment model silently re-extract or
     # reinterpret facts, defeating the extraction-vs-judgment split.
     context = {
         "s4_fact_state": locked_state,
     }
+    if reviewed_gradients is not None:
+        context["s4_effect_gradients"] = reviewed_gradients
     context["experiment_boundary"] = (
         "这是 S4 两步判断实验的第二步。S4 effect_evidence_state、proof、causal_link 和 visibility "
         "已经由第一步判定并锁定；本次只能基于这些状态输出 relation、gap_magnitude 和简短依据，不能重判或改写事实。"
     )
-    provenance = {
-        "state_artifact": state_artifact,
+    human_review_loaded = state_owner == "human_review"
+    semantic_provenance = {
+        "state_owner": state_owner,
         "state_model": state_model,
         "state_source_digest": state_source_digest,
         "state_result_digest": _stable_digest(locked_state),
         "base_source_digest": base_bundle.source_digest,
-        "human_initial_loaded": False,
-        "gt_loaded": False,
+        "human_review_loaded": human_review_loaded,
+        "human_initial_loaded": human_review_loaded,
+        "gt_loaded": human_review_loaded,
     }
-    context["s4_fact_state_provenance"] = provenance
+    if reviewed_gradients is not None:
+        semantic_provenance["qualification_gradient_digest"] = _stable_digest(reviewed_gradients)
+    context["s4_fact_state_provenance"] = semantic_provenance
+    audit_provenance = dict(base_bundle.audit_provenance)
+    if state_artifact:
+        audit_provenance["s4_state_artifact"] = state_artifact
+    source_identity = {"base": base_bundle.source_digest, "s4_state": locked_state}
+    if reviewed_gradients is not None:
+        source_identity["s4_effect_gradients"] = reviewed_gradients
     return replace(
         base_bundle,
         context=context,
-        source_digest=_stable_digest({"base": base_bundle.source_digest, "s4_state": locked_state}),
+        source_digest=_stable_digest(source_identity),
         input_mode="s4_fact_state_locked",
         visual_inputs=(),
         video_inputs=(),
+        audit_provenance=audit_provenance,
     )
 
 
@@ -1487,6 +1737,10 @@ def build_s4_judgment_payload(
         "confidence": "high|medium|low",
         "decision_basis": "一到两句不超过320字的可审计判断依据",
     }
+    gradient_instruction = (
+        "若输入包含人工复核且锁定的s4_effect_gradients，salience、focus、coverage是与粗状态并列的观察梯度，"
+        "必须用于比较，但不能据此新增事实；若输入不包含该字段，只能基于锁定的S4事实状态判断。"
+    )
     system = (
         "你是 Flayr 的 S4 判断器。只输出严格 JSON，不要 Markdown，不要解释。"
         "输入中的 S4 事实状态已经锁定，不得重新抽取、改写或补充证据。"
@@ -1494,7 +1748,10 @@ def build_s4_judgment_payload(
         "再输出 relation 和 gap_magnitude。relation 只能是 benchmark_better、creator_better、tie、uncertain；"
         "gap_magnitude 只能是 none、small、medium、large、uncertain。"
         "relation=tie 时 gap_magnitude 只能是 none 或 uncertain；gap_magnitude=none 时 relation 只能是 tie 或 uncertain。"
-        f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
+        "如果双方effect_evidence_state都为none，则proof=claim_only只能解释为何证据不合格，不能形成S4优势；"
+        "此时必须输出relation=tie且gap_magnitude=none。"
+        + gradient_instruction
+        + f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
     )
     user_text = (
         "请只基于已经锁定的 S4 事实状态进行比较。不要把 result_only 当作 verified，"
@@ -1511,7 +1768,32 @@ def build_s4_judgment_payload(
     )
 
 
-def validate_s4_judgment_result(result: Any) -> list[str]:
+def _validate_s4_no_effect_advantage(result: dict[str, Any], bundle: FrozenCompactBundle | None) -> list[str]:
+    if bundle is None:
+        return []
+    locked_state = bundle.context.get("s4_fact_state") if isinstance(bundle.context, dict) else None
+    if not isinstance(locked_state, dict):
+        return []
+    states = [
+        locked_state.get(role, {}).get("effect_evidence_state")
+        if isinstance(locked_state.get(role), dict)
+        else None
+        for role in RAW_VIDEO_ROLES
+    ]
+    if states != ["none", "none"]:
+        return []
+    if result.get("relation") != "tie" or result.get("gap_magnitude") != "none":
+        return [
+            "bilateral effect_evidence_state=none requires relation=tie and gap_magnitude=none; "
+            "claim_only cannot create an S4 advantage"
+        ]
+    return []
+
+
+def validate_s4_judgment_result(
+    result: Any,
+    bundle: FrozenCompactBundle | None = None,
+) -> list[str]:
     if not isinstance(result, dict):
         return ["result must be an object"]
     expected = {"schema_version", "stage", "relation", "gap_magnitude", "confidence", "decision_basis"}
@@ -1542,6 +1824,151 @@ def validate_s4_judgment_result(result: Any) -> list[str]:
             path="s4",
         )
     )
+    errors.extend(_validate_s4_no_effect_advantage(result, bundle))
+    return errors
+
+
+def build_s4_calibrated_judgment_payload(
+    model: str,
+    bundle: FrozenCompactBundle,
+    *,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+) -> dict[str, Any]:
+    """Build the calibrated arm of the S4 frozen-state mechanism experiment.
+
+    The rubric is intentionally phrased as a cross-stage magnitude scale. S4 is
+    only the first isolated test because it already has a locked fact-state
+    contract; the artifact is not consumed by the production resolver.
+    """
+
+    if bundle.input_mode != "s4_fact_state_locked" or "s4_fact_state" not in bundle.context:
+        raise CompactEvaluationError("calibrated S4 judgment requires a locked S4 fact-state bundle")
+    response_shape = {
+        "schema_version": S4_CALIBRATED_JUDGMENT_SCHEMA_VERSION,
+        "stage": "S4 效果呈现",
+        "comparison_sufficiency": "sufficient|insufficient|uncertain",
+        "relation": "benchmark_better|creator_better|tie|uncertain",
+        "weaker_side_core_value": "complete|partial|absent|uncertain",
+        "decisive_axes": sorted(GAP_CALIBRATION_AXES),
+        "gap_floor": "none|small|medium|large|uncertain",
+        "gap_ceiling": "none|small|medium|large|uncertain",
+        "gap_magnitude": "none|small|medium|large|uncertain",
+        "confidence": "high|medium|low",
+        "decision_basis": "一到两句不超过320字的可审计判断依据",
+    }
+    gradient_instruction = (
+        "若输入包含人工复核且锁定的s4_effect_gradients，必须把salience、focus、coverage作为独立观察梯度使用，"
+        "不能把它们压回粗状态，也不能据此新增事实；若输入不包含该字段，只能基于锁定的S4事实状态判断。"
+    )
+    system = (
+        "你是 Flayr 的隔离校准判断器。只输出严格 JSON，不要 Markdown，不要解释。"
+        "输入中的 S4 事实状态已经锁定，不得重新抽取、改写或补充证据。"
+        "本实验使用跨阶段通用差距标尺："
+        "none=没有可影响商业判断的有效差异；"
+        "small=双方都完整交付阶段核心价值，仅一个辅助轴略有优势；"
+        "medium=一个核心轴或多个辅助轴存在实质优势，但弱侧仍交付有用的核心价值；"
+        "large=弱侧缺失核心价值，或强侧在至少两个相互独立的核心轴形成决定性优势并显著改变购买理解或信心。"
+        "先判断 comparison_sufficiency；事实不足时 relation、gap_floor、gap_ceiling、gap_magnitude 都必须为 uncertain。"
+        "事实充分时先判 relation 和 weaker_side_core_value，再从固定枚举中选择 decisive_axes，"
+        "给出 gap_floor 与 gap_ceiling，最后在闭区间内选择 gap_magnitude。"
+        "同一事实不得重复计入多个决定性轴；同一对象的近义描述也只算一个轴。"
+        "tie 时 decisive_axes 必须为空，且 floor、ceiling、magnitude 都必须为 none。"
+        "不要把 result_only 当作 verified，也不要因字段数量多就自动判 large。"
+        "如果双方effect_evidence_state都为none，claim_only不能形成S4优势，必须输出tie和none。"
+        + gradient_instruction
+        + f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
+    )
+    user_text = (
+        "请只基于已经锁定的 S4 事实状态，按通用差距标尺完成校准判断。"
+        "这个结果只用于 seen 样本机制 A/B，不是生产规则或晋级依据。\n\n"
+        + json.dumps(bundle.context, ensure_ascii=False, indent=2)
+    )
+    return _build_multimodal_payload(
+        model,
+        bundle,
+        system=system,
+        user_text=user_text,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+
+
+def validate_s4_calibrated_judgment_result(
+    result: Any,
+    bundle: FrozenCompactBundle | None = None,
+) -> list[str]:
+    if not isinstance(result, dict):
+        return ["result must be an object"]
+    expected = {
+        "schema_version",
+        "stage",
+        "comparison_sufficiency",
+        "relation",
+        "weaker_side_core_value",
+        "decisive_axes",
+        "gap_floor",
+        "gap_ceiling",
+        "gap_magnitude",
+        "confidence",
+        "decision_basis",
+    }
+    errors: list[str] = []
+    if result.get("schema_version") != S4_CALIBRATED_JUDGMENT_SCHEMA_VERSION:
+        errors.append("schema_version mismatch")
+    extra = set(result) - expected
+    missing = expected - set(result)
+    if extra:
+        errors.append(f"unsupported root fields: {sorted(extra)}")
+    if missing:
+        errors.append(f"missing root fields: {sorted(missing)}")
+    if result.get("stage") != "S4 效果呈现":
+        errors.append("stage must be S4 效果呈现")
+    sufficiency = result.get("comparison_sufficiency")
+    relation = result.get("relation")
+    weaker_value = result.get("weaker_side_core_value")
+    axes = result.get("decisive_axes")
+    floor = result.get("gap_floor")
+    ceiling = result.get("gap_ceiling")
+    magnitude = result.get("gap_magnitude")
+    if sufficiency not in GAP_CALIBRATION_SUFFICIENCY:
+        errors.append("comparison_sufficiency is invalid")
+    if relation not in MODEL_INDEPENDENT_RELATIONS:
+        errors.append("relation is invalid")
+    if weaker_value not in GAP_CALIBRATION_CORE_VALUE:
+        errors.append("weaker_side_core_value is invalid")
+    if not isinstance(axes, list) or any(axis not in GAP_CALIBRATION_AXES for axis in axes):
+        errors.append("decisive_axes contains unsupported values")
+        axes = []
+    elif len(axes) != len(set(axes)):
+        errors.append("decisive_axes contains duplicates")
+    if result.get("confidence") not in COMPACT_CONFIDENCES:
+        errors.append("confidence is invalid")
+    basis = result.get("decision_basis")
+    if not isinstance(basis, str) or not basis.strip() or len(basis) > COMPACT_MAX_BASIS_CHARS:
+        errors.append(f"decision_basis must be a non-empty string <= {COMPACT_MAX_BASIS_CHARS} chars")
+
+    if sufficiency in {"insufficient", "uncertain"}:
+        if relation != "uncertain" or any(value != "uncertain" for value in (floor, ceiling, magnitude)):
+            errors.append("insufficient comparison must keep relation and gap fields uncertain")
+        if axes:
+            errors.append("insufficient comparison cannot declare decisive_axes")
+    elif sufficiency == "sufficient":
+        if any(value not in SCORABLE_GAP_RANK for value in (floor, ceiling, magnitude)):
+            errors.append("sufficient comparison requires scorable gap range")
+        else:
+            if SCORABLE_GAP_RANK[floor] > SCORABLE_GAP_RANK[ceiling]:
+                errors.append("gap_floor cannot exceed gap_ceiling")
+            if not SCORABLE_GAP_RANK[floor] <= SCORABLE_GAP_RANK[magnitude] <= SCORABLE_GAP_RANK[ceiling]:
+                errors.append("gap_magnitude is outside declared gap range")
+        if relation == "tie":
+            if axes or any(value != "none" for value in (floor, ceiling, magnitude)):
+                errors.append("tie requires no decisive axes and an exact none gap range")
+        elif relation in {"benchmark_better", "creator_better"} and not axes:
+            errors.append("non-tie sufficient comparison requires at least one decisive axis")
+        elif relation == "uncertain":
+            errors.append("sufficient comparison cannot use uncertain relation")
+    errors.extend(_validate_s4_no_effect_advantage(result, bundle))
     return errors
 
 
@@ -2110,8 +2537,8 @@ def build_model_owned_fact_bundle(
         "事实包已经锁定；本次只判断整体比较和六阶段差距，不读取人工初始判断，不输出生产报告或 derive 结果。"
     )
     context["model_owned_fact_provenance"] = {
-        "source_artifact": extraction_artifact,
         "source_digest": base_bundle.source_digest,
+        "extraction_result_digest": _stable_digest(extraction_result),
         "human_initial_loaded": False,
         "gt_loaded": False,
     }
@@ -2119,8 +2546,11 @@ def build_model_owned_fact_bundle(
         "base_source_digest": base_bundle.source_digest,
         "input_mode": "model_owned_locked_facts",
         "facts": facts,
-        "extraction_artifact": extraction_artifact,
+        "extraction_result_digest": _stable_digest(extraction_result),
     }
+    audit_provenance = dict(base_bundle.audit_provenance)
+    if extraction_artifact:
+        audit_provenance["model_owned_fact_artifact"] = extraction_artifact
     return replace(
         base_bundle,
         context=context,
@@ -2129,6 +2559,127 @@ def build_model_owned_fact_bundle(
         input_mode="model_owned_locked_facts",
         visual_inputs=(),
         video_inputs=(),
+        audit_provenance=audit_provenance,
+    )
+
+
+def load_model_owned_fact_artifact(
+    artifact_path: Path,
+    *,
+    expected_model: str,
+    expected_source_run: str,
+) -> FrozenCompactBundle:
+    """Rebuild a read-only judgment bundle from a self-contained extraction artifact.
+
+    This replay path is for isolated experiments after the original preprocessing
+    directory has been retired. It trusts neither a directory name nor cached
+    Python state: model, source run, schema, role order, hashes, durations, and
+    the extraction contract are checked before a bundle is constructed.
+    """
+
+    artifact_path = artifact_path.expanduser().resolve()
+    record = _read_json(artifact_path)
+    if record.get("status") != "completed":
+        raise CompactEvaluationError(f"raw fact artifact is not completed: {artifact_path}")
+    if record.get("model") != expected_model:
+        raise CompactEvaluationError(f"raw fact artifact model does not match {expected_model}: {artifact_path}")
+    if record.get("source_run") != expected_source_run:
+        raise CompactEvaluationError(
+            f"raw fact artifact source_run does not match {expected_source_run}: {artifact_path}"
+        )
+    result = record.get("result")
+    if not isinstance(result, dict):
+        raise CompactEvaluationError(f"raw fact artifact has no result object: {artifact_path}")
+    if (
+        record.get("schema_version") != VISUAL_EXTRACTION_SCHEMA_VERSION
+        or result.get("schema_version") != VISUAL_EXTRACTION_SCHEMA_VERSION
+    ):
+        raise CompactEvaluationError(
+            f"raw fact artifact uses an incompatible schema: {artifact_path}; "
+            f"expected {VISUAL_EXTRACTION_SCHEMA_VERSION}"
+        )
+    roles = record.get("video_role_order")
+    hashes = record.get("video_source_sha256")
+    durations = record.get("video_source_duration_seconds")
+    if roles != list(RAW_VIDEO_ROLES) or not isinstance(hashes, list) or len(hashes) != len(roles):
+        raise CompactEvaluationError(f"raw fact artifact has invalid video identity metadata: {artifact_path}")
+    if not all(isinstance(value, str) and len(value) == 64 for value in hashes):
+        raise CompactEvaluationError(f"raw fact artifact has invalid video hashes: {artifact_path}")
+    if not isinstance(durations, list) or len(durations) != len(roles):
+        raise CompactEvaluationError(f"raw fact artifact is missing role durations: {artifact_path}")
+    source_durations: dict[str, float] = {}
+    for role, raw_duration in zip(roles, durations):
+        try:
+            duration = float(raw_duration)
+        except (TypeError, ValueError) as exc:
+            raise CompactEvaluationError(
+                f"raw fact artifact has an invalid duration for {role}: {artifact_path}"
+            ) from exc
+        if not math.isfinite(duration) or duration <= 0:
+            raise CompactEvaluationError(
+                f"raw fact artifact has a non-positive duration for {role}: {artifact_path}"
+            )
+        source_durations[role] = duration
+    errors = validate_visual_extraction_result(
+        result,
+        expected_roles=RAW_VIDEO_ROLES,
+        source_durations=source_durations,
+    )
+    if errors:
+        raise CompactEvaluationError(
+            f"raw fact artifact fails the current contract: {artifact_path}: " + "; ".join(errors[:8])
+        )
+
+    facts: dict[str, dict[str, Any]] = {}
+    for role in RAW_VIDEO_ROLES:
+        units = result.get(f"{role}_evidence_units")
+        facts[role] = {
+            "content_summary": "",
+            "communication_strategy": "",
+            "evidence_units": [_compact_fact_unit(item) for item in units if isinstance(item, dict)],
+        }
+    allowed = {role: _allowed_evidence_ids(facts[role]) for role in facts}
+    source_identity = {
+        "artifact_sha256": _file_digest(artifact_path),
+        "artifact_source_digest": record.get("source_digest"),
+        "model": expected_model,
+        "source_run": expected_source_run,
+        "video_role_order": roles,
+        "video_source_sha256": hashes,
+        "video_source_duration_seconds": durations,
+        "facts": facts,
+    }
+    context = {
+        "product_foundation": {},
+        "comparison_eligibility": {},
+        "stages": [
+            {"code": stage.code, "name": stage.name, "question": stage.core_question}
+            for stage in DEFAULT_STAGES
+        ],
+        "facts": facts,
+        "experiment_boundary": (
+            "这是已归档 raw_video_only 抽取 artifact 的只读重放。原视频和人工 GT 均不进入请求；"
+            "本次只做隔离判断，不输出生产报告或 derive 结果。"
+        ),
+        "model_owned_fact_provenance": {
+            "source_digest": record.get("source_digest"),
+            "artifact_sha256": _file_digest(artifact_path),
+            "human_initial_loaded": False,
+            "gt_loaded": False,
+            "original_run_bundle_available": False,
+        },
+    }
+    return FrozenCompactBundle(
+        run_dir=artifact_path.parent,
+        context=context,
+        allowed_evidence_ids=allowed,
+        visual_inputs=(),
+        source_digest=_stable_digest(source_identity),
+        stage_time_ranges={},
+        input_mode="model_owned_locked_facts",
+        video_inputs=(),
+        source_run=expected_source_run,
+        audit_provenance={"model_owned_fact_artifact": str(artifact_path)},
     )
 
 
@@ -2610,6 +3161,10 @@ def _run_isolated_evaluation(
 ) -> dict[str, Any]:
     if evaluation_role not in EVALUATION_ROLES:
         raise CompactEvaluationError(f"unsupported evaluation_role: {evaluation_role}")
+    if evaluation_role == "blind_validation" and "s4_effect_gradients" in bundle.context:
+        raise CompactEvaluationError(
+            "human-reviewed S4 gradients cannot be consumed by blind validation"
+        )
     output_dir = output_dir.expanduser().resolve()
     if provider_replay_from is not None:
         replay_root = provider_replay_from.expanduser().resolve()
@@ -2636,6 +3191,8 @@ def _run_isolated_evaluation(
         "s4_single_pass_failure.json",
         "s4_free_text_steps_evaluation.json",
         "s4_free_text_steps_failure.json",
+        "s4_calibrated_judgment_evaluation.json",
+        "s4_calibrated_judgment_failure.json",
         "s5_audit_evaluation.json",
         "s5_audit_failure.json",
         "raw_model_response.json",
@@ -2663,6 +3220,8 @@ def _run_isolated_evaluation(
             if variant == "s4_fact_state"
             else S4_JUDGMENT_SCHEMA_VERSION
             if variant == "s4_judgment"
+            else S4_CALIBRATED_JUDGMENT_SCHEMA_VERSION
+            if variant == "s4_calibrated_judgment"
             else S4_SINGLE_PASS_SCHEMA_VERSION
             if variant == "s4_single_pass"
             else S4_FREE_TEXT_STEPS_SCHEMA_VERSION
@@ -2673,7 +3232,7 @@ def _run_isolated_evaluation(
         ),
         "model": model,
         "source_commit": current_code_commit(),
-        "source_run": bundle.run_dir.name,
+        "source_run": bundle.source_run or bundle.run_dir.name,
         "source_digest": bundle.source_digest,
         "input_mode": bundle.input_mode,
         "output_budget_field": output_budget_field,
@@ -2692,6 +3251,8 @@ def _run_isolated_evaluation(
     }
     if experiment_metadata:
         metadata["experiment"] = dict(experiment_metadata)
+    if bundle.audit_provenance:
+        metadata["audit_provenance"] = deepcopy(bundle.audit_provenance)
     metadata["protocol_hash"] = _stable_digest(
         {
             "task_role": task_role,
@@ -3282,7 +3843,7 @@ def run_s4_judgment_evaluation(
         api_url=api_url,
         api_key_args=api_key_args,
         payload=payload,
-        validator=validate_s4_judgment_result,
+        validator=lambda value: validate_s4_judgment_result(value, bundle),
         task_role=S4_JUDGMENT_ROLE,
         evaluation_role=evaluation_role,
         variant="s4_judgment",
@@ -3296,6 +3857,45 @@ def run_s4_judgment_evaluation(
     )
 
 
+def run_s4_calibrated_judgment_evaluation(
+    *,
+    model: str,
+    bundle: FrozenCompactBundle,
+    output_dir: Path,
+    api_url: str,
+    api_key_args: Any,
+    output_budget: int = COMPACT_OUTPUT_BUDGET,
+    output_budget_field: str = "max_tokens",
+    request_timeout_seconds: int = 600,
+    evaluation_role: str = "model_calibration",
+    provider_replay_from: Path | None = None,
+) -> dict[str, Any]:
+    """Run the calibrated S4 arm without changing production judgment."""
+    payload = build_s4_calibrated_judgment_payload(
+        model,
+        bundle,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+    )
+    return _run_isolated_evaluation(
+        model=model,
+        bundle=bundle,
+        output_dir=output_dir,
+        api_url=api_url,
+        api_key_args=api_key_args,
+        payload=payload,
+        validator=lambda value: validate_s4_calibrated_judgment_result(value, bundle),
+        task_role=S4_CALIBRATED_JUDGMENT_ROLE,
+        evaluation_role=evaluation_role,
+        variant="s4_calibrated_judgment",
+        success_filename="s4_calibrated_judgment_evaluation.json",
+        failure_filename="s4_calibrated_judgment_failure.json",
+        call_kind="s4_calibrated_judgment_eval",
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+        request_timeout_seconds=request_timeout_seconds,
+        provider_replay_from=provider_replay_from,
+    )
 def run_s5_audit_evaluation(
     *,
     model: str,
