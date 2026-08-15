@@ -81,6 +81,16 @@ class ProviderCapabilities:
     native_audio_analysis: bool
 
 
+@dataclass(frozen=True)
+class _StreamingAttemptResult:
+    content: str = ""
+    usage: dict[str, Any] | None = None
+    complete: bool = False
+    finish_reason: str | None = None
+    error: str = ""
+    retryable: bool = True
+
+
 def provider_capabilities(api_url: str, model: str = "") -> ProviderCapabilities:
     """Look up the explicit approved-provider profile for an endpoint/model pair."""
     normalized_model = str(model or "").strip().lower()
@@ -334,6 +344,424 @@ class IncrementalSSEParser:
             self._usage = usage
 
 
+def _load_streaming_payload(
+    payload_path: Path,
+    *,
+    cleanup_payload: bool,
+    request_limit: int,
+) -> dict[str, Any]:
+    request_size = payload_path.stat().st_size if payload_path.is_file() else -1
+    if request_size < 0:
+        raise SystemExit(f"LLM request payload is missing: {payload_path}")
+    if request_size > request_limit:
+        if cleanup_payload:
+            payload_path.unlink(missing_ok=True)
+        raise SystemExit(
+            f"LLM request payload exceeds the single-request byte limit: {request_size}"
+        )
+    try:
+        with payload_path.open("r", encoding="utf-8") as source:
+            payload = json.load(source)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"LLM request payload is invalid: {exc}") from exc
+    finally:
+        if cleanup_payload:
+            payload_path.unlink(missing_ok=True)
+    if not isinstance(payload, dict):
+        raise SystemExit("LLM request payload must be a JSON object")
+    reject_retired_model(str(payload.get("model") or ""))
+    payload["stream"] = True
+    stream_options = payload.get("stream_options")
+    if not isinstance(stream_options, dict):
+        stream_options = {}
+    stream_options["include_usage"] = True
+    payload["stream_options"] = stream_options
+    return payload
+
+
+def _normalize_transport_limits(
+    max_time_seconds: int,
+    low_speed_time_seconds: int,
+    retries: int,
+    output_expansions: int,
+) -> tuple[int, int, int, int]:
+    try:
+        return (
+            max(
+                1,
+                int(
+                    finite_nonnegative(
+                        max_time_seconds,
+                        "LLM request timeout",
+                        maximum=LLM_CURL_MAX_TIME_SECONDS,
+                    )
+                ),
+            ),
+            max(
+                1,
+                int(
+                    finite_nonnegative(
+                        low_speed_time_seconds,
+                        "LLM low-speed timeout",
+                        maximum=LLM_CURL_MAX_TIME_SECONDS,
+                    )
+                ),
+            ),
+            max(0, int(finite_nonnegative(retries, "LLM retries", maximum=10))),
+            max(
+                0,
+                int(
+                    finite_nonnegative(
+                        output_expansions,
+                        "LLM output expansions",
+                        maximum=10,
+                    )
+                ),
+            ),
+        )
+    except ValueError as exc:
+        raise SystemExit(f"invalid LLM resource limit: {exc}") from exc
+
+
+def _build_streaming_curl_command(
+    *,
+    api_url: str,
+    resolve_entries: tuple[str, ...],
+    logical_request_id: str,
+    request_path: Path,
+    max_time_seconds: int,
+    low_speed_time_seconds: int,
+    request_limit: int,
+) -> list[str]:
+    command = [
+        "curl",
+        "-sS",
+        "--http1.1",
+        "--no-buffer",
+        "--noproxy",
+        "*",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "--max-redirs",
+        "0",
+        "--fail-with-body",
+        "--connect-timeout",
+        "30",
+        "--max-time",
+        str(max_time_seconds),
+        "--speed-limit",
+        str(LLM_CURL_LOW_SPEED_LIMIT_BYTES_PER_SECOND),
+        "--speed-time",
+        str(low_speed_time_seconds),
+        "--max-filesize",
+        str(request_limit),
+        "-H",
+        "@-",
+        "-H",
+        "Content-Type: application/json",
+        "-H",
+        f"X-Flayr-Request-ID: {logical_request_id}",
+        "-H",
+        f"Idempotency-Key: {logical_request_id}",
+        "--data-binary",
+        f"@{request_path}",
+        "--write-out",
+        "%{stderr}__FLAYR_HTTP_STATUS__%{http_code}\n",
+        api_url,
+    ]
+    command[1:1] = [
+        item for entry in resolve_entries for item in ("--resolve", entry)
+    ]
+    return command
+
+
+def _transport_attempt_timeout(active_budget: Any, max_time_seconds: int) -> tuple[int, str]:
+    if active_budget is None:
+        return max_time_seconds, ""
+    available = int(
+        active_budget.remaining_wall_seconds() - LLM_RUN_OVERHEAD_RESERVE_SECONDS
+    )
+    if available <= 0:
+        return 0, (
+            "insufficient wall time for another LLM transport attempt "
+            f"while preserving {LLM_FINALIZATION_RESERVE_SECONDS}s for deterministic finalization"
+        )
+    return min(max_time_seconds, available), ""
+
+
+def _run_streaming_attempt(
+    *,
+    command: list[str],
+    request_path: Path,
+    temp_root: Path,
+    attempt: int,
+    attempt_timeout_seconds: int,
+    request_limit: int,
+    active_budget: Any,
+    call_kind: str,
+    logical_request_id: str,
+    retry_reason: str,
+    api_key: str,
+    response_meta: dict[str, Any] | None,
+) -> _StreamingAttemptResult:
+    attempt_command = list(command)
+    attempt_command[attempt_command.index("--max-time") + 1] = str(
+        attempt_timeout_seconds
+    )
+    current_request_size = request_path.stat().st_size
+    if current_request_size > request_limit:
+        raise SystemExit(
+            f"LLM request payload exceeds the single-request byte limit: {current_request_size}"
+        )
+    if active_budget is not None:
+        try:
+            active_budget.reserve_api_call(
+                current_request_size,
+                kind=call_kind,
+                request_id=logical_request_id,
+                attempt=attempt,
+                retry_reason=retry_reason,
+            )
+        except ResourceBudgetExceeded as exc:
+            raise SystemExit(str(exc)) from exc
+    if response_meta is not None:
+        response_meta["transport_attempts"] = attempt
+        response_meta["transport_timeout_seconds"] = attempt_timeout_seconds
+        response_meta["transport_attempt_timeouts_seconds"].append(
+            attempt_timeout_seconds
+        )
+    response_path = temp_root / f"attempt-{attempt}.sse"
+    parser = IncrementalSSEParser(max_total_bytes=request_limit)
+    with response_path.open("wb") as response_file:
+        def consume_response(chunk: bytes) -> None:
+            response_file.write(chunk)
+            parser.feed(chunk)
+
+        completed = run_command(
+            attempt_command,
+            timeout_seconds=attempt_timeout_seconds + LLM_COMMAND_WRAPPER_GRACE_SECONDS,
+            budget=active_budget,
+            max_output_bytes=request_limit + LLM_TRANSPORT_DIAGNOSTIC_BYTES,
+            stdin_text=f"Authorization: Bearer {api_key}\n",
+            stdout_callback=consume_response,
+            capture_stdout=False,
+        )
+    parser.finish()
+    response_size = response_path.stat().st_size if response_path.is_file() else 0
+    if active_budget is not None:
+        try:
+            active_budget.reserve_download(response_size)
+        except ResourceBudgetExceeded as exc:
+            raise SystemExit(str(exc)) from exc
+    http_status = parse_curl_http_status(completed.stderr)
+    if completed.returncode != 0 or http_status is None or not 200 <= http_status < 300:
+        body = ""
+        if response_path.is_file():
+            with response_path.open("r", encoding="utf-8", errors="replace") as source:
+                body = source.read(400).strip()
+        diagnostic = strip_curl_http_status(completed.stderr).strip()
+        error = diagnostic or completed.stdout.strip() or "curl failed"
+        if http_status is None:
+            error = f"missing HTTP status: {error}"
+        else:
+            error = f"HTTP {http_status}: {error}"
+            if 300 <= http_status < 400:
+                error = f"{error}（禁止跟随未重新校验的重定向）"
+        if body:
+            error = f"{error}\n{body}"
+        return _StreamingAttemptResult(
+            error=error,
+            retryable=is_retryable_error(error, http_status=http_status),
+        )
+    if response_size > request_limit:
+        return _StreamingAttemptResult(
+            error="LLM response exceeded the single-request byte limit"
+        )
+    content, usage, complete, finish_reason, parse_error = parser.result()
+    if parse_error:
+        return _StreamingAttemptResult(error=f"SSE parse failed: {parse_error}")
+    return _StreamingAttemptResult(
+        content=content,
+        usage=usage,
+        complete=complete,
+        finish_reason=finish_reason,
+    )
+
+
+def _write_successful_stream_response(
+    *,
+    raw_path: Path,
+    result: _StreamingAttemptResult,
+    finish_reason: str,
+    cleanup_raw: bool,
+    response_meta: dict[str, Any] | None,
+    retry_reasons: list[str],
+) -> str:
+    if response_meta is not None:
+        response_meta.update(
+            {
+                "transport_status": "completed",
+                "transport_retry_reasons": list(retry_reasons),
+                "finish_reason": finish_reason,
+                "usage": result.usage or {},
+            }
+        )
+    return _write_completion_response(
+        raw_path,
+        result.content,
+        result.usage,
+        finish_reason,
+        cleanup_raw=cleanup_raw,
+    )
+
+
+def _execute_streaming_request(
+    *,
+    api_url: str,
+    api_key: str,
+    raw_path: Path,
+    payload: dict[str, Any],
+    resolve_entries: tuple[str, ...],
+    logical_request_id: str,
+    max_time_seconds: int,
+    low_speed_time_seconds: int,
+    retries: int,
+    output_expansions: int,
+    request_limit: int,
+    active_budget: Any,
+    call_kind: str,
+    initial_retry_reason: str | None,
+    cleanup_raw: bool,
+    response_meta: dict[str, Any] | None,
+    transport_retry_reasons: list[str],
+) -> str:
+    with tempfile.TemporaryDirectory(
+        prefix=f".{raw_path.stem}.flayr-tmp.", dir=raw_path.parent
+    ) as temp_dir:
+        temp_root = Path(temp_dir)
+        request_path = temp_root / "request.json"
+        _write_request_json(request_path, payload)
+        command = _build_streaming_curl_command(
+            api_url=api_url,
+            resolve_entries=resolve_entries,
+            logical_request_id=logical_request_id,
+            request_path=request_path,
+            max_time_seconds=max_time_seconds,
+            low_speed_time_seconds=low_speed_time_seconds,
+            request_limit=request_limit,
+        )
+        last_error = ""
+        retry_reason = str(initial_retry_reason or "")[:200]
+        attempt = 0
+        transport_retries_used = 0
+        output_expansions_used = 0
+        while True:
+            attempt += 1
+            attempt_timeout, last_error = _transport_attempt_timeout(
+                active_budget, max_time_seconds
+            )
+            if attempt_timeout <= 0:
+                transport_retry_reasons.append(last_error)
+                break
+            retry_kind = "transport"
+            result = _run_streaming_attempt(
+                command=command,
+                request_path=request_path,
+                temp_root=temp_root,
+                attempt=attempt,
+                attempt_timeout_seconds=attempt_timeout,
+                request_limit=request_limit,
+                active_budget=active_budget,
+                call_kind=call_kind,
+                logical_request_id=logical_request_id,
+                retry_reason=retry_reason,
+                api_key=api_key,
+                response_meta=response_meta,
+            )
+            if result.error:
+                last_error = result.error
+                if (
+                    not result.retryable
+                    or "total wall time budget exceeded" in last_error
+                ):
+                    transport_retry_reasons.append(last_error[:200])
+                    break
+            elif result.complete and result.content and result.finish_reason != "length":
+                return _write_successful_stream_response(
+                    raw_path=raw_path,
+                    result=result,
+                    finish_reason=result.finish_reason or "stop",
+                    cleanup_raw=cleanup_raw,
+                    response_meta=response_meta,
+                    retry_reasons=transport_retry_reasons,
+                )
+            elif result.finish_reason == "length":
+                old_budget, new_budget = increase_output_budget(payload)
+                budget_field = output_budget_field(payload)
+                if new_budget > old_budget and output_expansions_used < output_expansions:
+                    output_expansions_used += 1
+                    retry_kind = "output_expansion"
+                    _write_request_json(request_path, payload)
+                    last_error = (
+                        f"输出被 {budget_field}={old_budget} 截断，"
+                        f"已提高至 {new_budget} 后重试"
+                    )
+                elif result.content:
+                    return _write_successful_stream_response(
+                        raw_path=raw_path,
+                        result=result,
+                        finish_reason="length",
+                        cleanup_raw=cleanup_raw,
+                        response_meta=response_meta,
+                        retry_reasons=transport_retry_reasons,
+                    )
+                else:
+                    last_error = f"输出在 {budget_field}={old_budget} 仍被截断"
+                    break
+            else:
+                last_error = (
+                    "流式响应不完整（连接在 [DONE] 前中断）"
+                    if result.content
+                    else "流式响应无内容"
+                )
+            retry_reason = last_error
+            transport_retry_reasons.append(last_error[:200])
+            if retry_kind == "transport":
+                if transport_retries_used >= retries:
+                    break
+                transport_retries_used += 1
+            sleep_seconds = (
+                float(5 * transport_retries_used) if retry_kind == "transport" else 0.0
+            )
+            if active_budget is not None:
+                retry_window = max(
+                    0.0,
+                    active_budget.remaining_wall_seconds()
+                    - LLM_RUN_OVERHEAD_RESERVE_SECONDS,
+                )
+                if retry_window <= 0:
+                    break
+                if retry_kind == "transport":
+                    sleep_seconds = min(sleep_seconds, retry_window)
+            if response_meta is not None:
+                response_meta["request_retry_kinds"].append(retry_kind)
+            if retry_kind == "transport":
+                if sleep_seconds <= 0:
+                    break
+                time.sleep(sleep_seconds)
+        if response_meta is not None:
+            response_meta.update(
+                {
+                    "transport_status": "failed",
+                    "transport_retry_reasons": list(transport_retry_reasons),
+                    "transport_error": last_error[:500],
+                }
+            )
+        raise SystemExit(f"LLM streaming request failed: {last_error}")
+
+
 def call_llm_api(
     api_url: str,
     api_key: str,
@@ -376,49 +804,23 @@ def call_llm_api(
         raise SystemExit("API 域名没有可用于连接的已验证公网地址")
 
     active_budget = budget or current_budget()
-    request_size = payload_path.stat().st_size if payload_path.is_file() else -1
-    if request_size < 0:
-        raise SystemExit(f"LLM request payload is missing: {payload_path}")
-    if request_size > (
+    request_limit = (
         active_budget.limits.max_single_request_bytes if active_budget else DEFAULT_SINGLE_REQUEST_BYTES
-    ):
-        if cleanup_payload:
-            payload_path.unlink(missing_ok=True)
-        raise SystemExit(f"LLM request payload exceeds the single-request byte limit: {request_size}")
-    try:
-        with payload_path.open("r", encoding="utf-8") as source:
-            payload = json.load(source)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"LLM request payload is invalid: {exc}") from exc
-    finally:
-        if cleanup_payload:
-            payload_path.unlink(missing_ok=True)
-    if not isinstance(payload, dict):
-        raise SystemExit("LLM request payload must be a JSON object")
-    reject_retired_model(str(payload.get("model") or ""))
-    payload["stream"] = True
-    stream_options = payload.get("stream_options")
-    if not isinstance(stream_options, dict):
-        stream_options = {}
-    stream_options["include_usage"] = True
-    payload["stream_options"] = stream_options
+    )
+    payload = _load_streaming_payload(
+        payload_path,
+        cleanup_payload=cleanup_payload,
+        request_limit=request_limit,
+    )
     raw_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        max_time_seconds = max(
-            1,
-            int(finite_nonnegative(max_time_seconds, "LLM request timeout", maximum=LLM_CURL_MAX_TIME_SECONDS)),
+    max_time_seconds, low_speed_time_seconds, retries, output_expansions = (
+        _normalize_transport_limits(
+            max_time_seconds,
+            low_speed_time_seconds,
+            retries,
+            output_expansions,
         )
-        low_speed_time_seconds = max(
-            1,
-            int(finite_nonnegative(low_speed_time_seconds, "LLM low-speed timeout", maximum=LLM_CURL_MAX_TIME_SECONDS)),
-        )
-        retries = max(0, int(finite_nonnegative(retries, "LLM retries", maximum=10)))
-        output_expansions = max(
-            0,
-            int(finite_nonnegative(output_expansions, "LLM output expansions", maximum=10)),
-        )
-    except ValueError as exc:
-        raise SystemExit(f"invalid LLM resource limit: {exc}") from exc
+    )
     cleanup_stale_temp_entries(
         raw_path.parent,
         (
@@ -427,11 +829,6 @@ def call_llm_api(
             f".{raw_path.stem}.attempt-",
             f".{raw_path.stem}.flayr-tmp.",
         ),
-    )
-    request_limit = (
-        active_budget.limits.max_single_request_bytes
-        if active_budget is not None
-        else DEFAULT_SINGLE_REQUEST_BYTES
     )
     logical_request_id = str(request_id or uuid.uuid4().hex)
     transport_retry_reasons: list[str] = []
@@ -447,271 +844,25 @@ def call_llm_api(
                 "request_retry_kinds": [],
             }
         )
-    # The request body is sensitive media, so keep it in a short-lived, known
-    # temporary directory. The bearer header is supplied through stdin and is
-    # never written to disk or exposed in the process argument list.
-    with tempfile.TemporaryDirectory(prefix=f".{raw_path.stem}.flayr-tmp.", dir=raw_path.parent) as temp_dir:
-        temp_root = Path(temp_dir)
-        req_path = temp_root / "request.json"
-        _write_request_json(req_path, payload)
-        curl_command = [
-            "curl",
-            "-sS",
-            "--http1.1",
-            "--no-buffer",
-            # A proxy would resolve/connect to the target independently and
-            # bypass the public IP set validated above. Provider transport is
-            # intentionally direct and pinned with --resolve.
-            "--noproxy",
-            "*",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--max-redirs",
-            "0",
-            "--fail-with-body",  # HTTP 4xx/5xx 时返回非零，同时保留错误体和结构化状态码
-            "--connect-timeout",
-            "30",
-            "--max-time",
-            str(max_time_seconds),
-            "--speed-limit",
-            str(LLM_CURL_LOW_SPEED_LIMIT_BYTES_PER_SECOND),
-            "--speed-time",
-            str(low_speed_time_seconds),
-            "--max-filesize",
-            str(request_limit),
-            "-H",
-            "@-",
-            "-H",
-            "Content-Type: application/json",
-            "-H",
-            f"X-Flayr-Request-ID: {logical_request_id}",
-            "-H",
-            f"Idempotency-Key: {logical_request_id}",
-            "--data-binary",
-            f"@{req_path}",
-            "--write-out",
-            "%{stderr}__FLAYR_HTTP_STATUS__%{http_code}\\n",
-            api_url,
-        ]
-        curl_command[1:1] = [item for entry in resolve_entries for item in ("--resolve", entry)]
-
-        last_error = ""
-        retry_reason = str(initial_retry_reason or "")[:200]
-        attempt = 0
-        transport_retries_used = 0
-        output_expansions_used = 0
-        while True:
-            attempt += 1
-            attempt_max_time_seconds = max_time_seconds
-            if active_budget is not None:
-                remaining = active_budget.remaining_wall_seconds()
-                available = int(
-                    remaining
-                    - LLM_RUN_OVERHEAD_RESERVE_SECONDS
-                )
-                if available <= 0:
-                    last_error = (
-                        "insufficient wall time for another LLM transport attempt "
-                        f"while preserving {LLM_FINALIZATION_RESERVE_SECONDS}s for deterministic finalization"
-                    )
-                    transport_retry_reasons.append(last_error)
-                    break
-                attempt_max_time_seconds = min(attempt_max_time_seconds, available)
-            attempt_command = list(curl_command)
-            attempt_command[attempt_command.index("--max-time") + 1] = str(attempt_max_time_seconds)
-            current_request_size = req_path.stat().st_size
-            if current_request_size > request_limit:
-                raise SystemExit(
-                    f"LLM request payload exceeds the single-request byte limit: {current_request_size}"
-                )
-            if active_budget is not None:
-                try:
-                    active_budget.reserve_api_call(
-                        current_request_size,
-                        kind=call_kind,
-                        request_id=logical_request_id,
-                        attempt=attempt,
-                        retry_reason=retry_reason,
-                    )
-                except ResourceBudgetExceeded as exc:
-                    raise SystemExit(str(exc)) from exc
-            if response_meta is not None:
-                response_meta["transport_attempts"] = attempt
-                response_meta["transport_timeout_seconds"] = attempt_max_time_seconds
-                response_meta["transport_attempt_timeouts_seconds"].append(attempt_max_time_seconds)
-            attempt_sse_path = temp_root / f"attempt-{attempt}.sse"
-            parser = IncrementalSSEParser(max_total_bytes=request_limit)
-            retry_kind = "transport"
-            with attempt_sse_path.open("wb") as response_file:
-                def consume_response(chunk: bytes) -> None:
-                    response_file.write(chunk)
-                    parser.feed(chunk)
-
-                completed = run_command(
-                    attempt_command,
-                    # Let curl own its deadline and emit the HTTP-status marker.
-                    # The command wrapper previously killed a configured 1800s
-                    # request at its unrelated 900s default.
-                    timeout_seconds=attempt_max_time_seconds + LLM_COMMAND_WRAPPER_GRACE_SECONDS,
-                    budget=active_budget,
-                    # stdout 是响应流，stderr 还包含 curl 诊断和 HTTP 状态标记；给诊断保留独立余量。
-                    max_output_bytes=request_limit + LLM_TRANSPORT_DIAGNOSTIC_BYTES,
-                    stdin_text=f"Authorization: Bearer {api_key}\n",
-                    stdout_callback=consume_response,
-                    capture_stdout=False,
-                )
-            parser.finish()
-            response_size = attempt_sse_path.stat().st_size if attempt_sse_path.is_file() else 0
-            if active_budget is not None:
-                try:
-                    active_budget.reserve_download(response_size)
-                except ResourceBudgetExceeded as exc:
-                    raise SystemExit(str(exc)) from exc
-            http_status = parse_curl_http_status(completed.stderr)
-            if completed.returncode != 0 or http_status is None or not 200 <= http_status < 300:
-                body = ""
-                if attempt_sse_path.is_file():
-                    with attempt_sse_path.open("r", encoding="utf-8", errors="replace") as body_file:
-                        body = body_file.read(400).strip()
-                stderr_text = strip_curl_http_status(completed.stderr).strip()
-                last_error = stderr_text or completed.stdout.strip() or "curl failed"
-                if http_status is None:
-                    last_error = f"missing HTTP status: {last_error}"
-                else:
-                    last_error = f"HTTP {http_status}: {last_error}"
-                    if 300 <= http_status < 400:
-                        last_error = f"{last_error}（禁止跟随未重新校验的重定向）"
-                if body:
-                    last_error = f"{last_error}\n{body}"
-                # 鉴权/请求错误等硬错误快速失败，不浪费重试。
-                if not is_retryable_error(last_error, http_status=http_status):
-                    transport_retry_reasons.append(last_error[:200])
-                    break
-                if "total wall time budget exceeded" in last_error:
-                    # Retrying after the shared run budget is exhausted cannot
-                    # make progress and would create an untracked extra call.
-                    transport_retry_reasons.append(last_error[:200])
-                    break
-            else:
-                if response_size > request_limit:
-                    last_error = "LLM response exceeded the single-request byte limit"
-                    content, usage, complete, finish_reason, parse_error = "", None, False, None, None
-                else:
-                    content, usage, complete, finish_reason, parse_error = parser.result()
-                if parse_error:
-                    last_error = f"SSE parse failed: {parse_error}"
-                elif complete and content and finish_reason != "length":
-                    if response_meta is not None:
-                        response_meta.update(
-                            {
-                                "transport_status": "completed",
-                                "transport_retry_reasons": list(transport_retry_reasons),
-                                "finish_reason": finish_reason or "stop",
-                                "usage": usage or {},
-                            }
-                        )
-                    return _write_completion_response(
-                        raw_path,
-                        content,
-                        usage,
-                        finish_reason or "stop",
-                        cleanup_raw=cleanup_raw,
-                    )
-                elif finish_reason == "length":
-                    # length 是服务端主动截断，不是可修复的残缺 JSON。先提高同一请求的输出预算再重发。
-                    old_budget, new_budget = increase_output_budget(payload)
-                    budget_field = output_budget_field(payload)
-                    if new_budget > old_budget:
-                        if output_expansions_used < output_expansions:
-                            output_expansions_used += 1
-                            retry_kind = "output_expansion"
-                            _write_request_json(req_path, payload)
-                            last_error = (
-                                f"输出被 {budget_field}={old_budget} 截断，"
-                                f"已提高至 {new_budget} 后重试"
-                            )
-                        elif content:
-                            if response_meta is not None:
-                                response_meta.update(
-                                    {
-                                        "transport_status": "completed",
-                                        "transport_retry_reasons": list(transport_retry_reasons),
-                                        "finish_reason": "length",
-                                        "usage": usage or {},
-                                    }
-                                )
-                            return _write_completion_response(
-                                raw_path,
-                                content,
-                                usage,
-                                "length",
-                                cleanup_raw=cleanup_raw,
-                            )
-                        else:
-                            break
-                    else:
-                        last_error = f"输出在 {budget_field}={old_budget} 仍被截断"
-                        # The cap is already reached. Returning the partial
-                        # text lets the outer pipeline perform its single JSON
-                        # repair; repeating the identical request only burns
-                        # wall time and model quota.
-                        if content:
-                            if response_meta is not None:
-                                response_meta.update(
-                                    {
-                                        "transport_status": "completed",
-                                        "transport_retry_reasons": list(transport_retry_reasons),
-                                        "finish_reason": "length",
-                                        "usage": usage or {},
-                                    }
-                                )
-                            return _write_completion_response(
-                                raw_path,
-                                content,
-                                usage,
-                                "length",
-                                cleanup_raw=cleanup_raw,
-                            )
-                        break
-                else:
-                    # 流被中途截断（无 [DONE]/finish_reason）→ 传输问题，可重试。
-                    last_error = "流式响应不完整（连接在 [DONE] 前中断）" if content else "流式响应无内容"
-            retry_reason = last_error
-            transport_retry_reasons.append(last_error[:200])
-            if retry_kind == "transport":
-                if transport_retries_used >= retries:
-                    break
-                transport_retries_used += 1
-            sleep_seconds = 0.0
-            if retry_kind == "transport":
-                sleep_seconds = float(5 * transport_retries_used)
-            if active_budget is not None:
-                retry_window = max(
-                    0.0,
-                    active_budget.remaining_wall_seconds()
-                    - LLM_RUN_OVERHEAD_RESERVE_SECONDS,
-                )
-                if retry_window <= 0:
-                    break
-                if retry_kind == "transport":
-                    sleep_seconds = min(sleep_seconds, retry_window)
-            if response_meta is not None:
-                response_meta["request_retry_kinds"].append(retry_kind)
-            if retry_kind == "transport":
-                if sleep_seconds <= 0:
-                    break
-                time.sleep(sleep_seconds)
-        if response_meta is not None:
-            response_meta.update(
-                {
-                    "transport_status": "failed",
-                    "transport_retry_reasons": list(transport_retry_reasons),
-                    "transport_error": last_error[:500],
-                }
-            )
-        raise SystemExit(f"LLM streaming request failed: {last_error}")
+    return _execute_streaming_request(
+        api_url=api_url,
+        api_key=api_key,
+        raw_path=raw_path,
+        payload=payload,
+        resolve_entries=resolve_entries,
+        logical_request_id=logical_request_id,
+        max_time_seconds=max_time_seconds,
+        low_speed_time_seconds=low_speed_time_seconds,
+        retries=retries,
+        output_expansions=output_expansions,
+        request_limit=request_limit,
+        active_budget=active_budget,
+        call_kind=call_kind,
+        initial_retry_reason=initial_retry_reason,
+        cleanup_raw=cleanup_raw,
+        response_meta=response_meta,
+        transport_retry_reasons=transport_retry_reasons,
+    )
 
 
 def increase_output_budget(payload: dict[str, Any]) -> tuple[int, int]:

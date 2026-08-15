@@ -108,6 +108,26 @@ from .payload import (
     stage1_recovery_media_windows,
     stage_review_media_windows,
 )
+from .stage2_projection import (
+    _SEGMENTED_FLAG_REQUIRED_KEYS,
+    _SEGMENTED_STAGE_NAMES,
+    _SEGMENTED_STAGE_QUESTIONS,
+    _deterministic_improvement,
+    _deterministic_product_visibility,
+    _normalize_segmented_stage,
+    _prepare_segmented_synthesis,
+    _project_synthesis_improvements,
+    _sanitize_segmented_flag,
+    _segmented_complete_flag,
+    _segmented_evidence_range,
+    _segmented_model_evidence_ids,
+    _segmented_qualified_units,
+    _segmented_side_summary,
+    _segmented_stage_code,
+    _segmented_stage_unresolved,
+    _segmented_support_status,
+    _segmented_text_items,
+)
 from .stage_review_contract import (
     PHASE_C_PATCH_SNAPSHOT_SCHEMA,
     PHASE_C_REVIEW_MODE,
@@ -1681,552 +1701,6 @@ def _is_valid_video_fact_cache(role: str, value: dict[str, Any], analysis: dict[
     return True
 
 
-_SEGMENTED_STAGE_NAMES = {
-    "S1": "S1 Hook",
-    "S2": "S2 产品引出",
-    "S3": "S3 使用过程",
-    "S4": "S4 效果呈现",
-    "S5": "S5 信任放大",
-    "S6": "S6 CTA",
-}
-_SEGMENTED_STAGE_QUESTIONS = {
-    "S1": "用户凭什么停下来",
-    "S2": "产品是否自然承接并成为解决方案",
-    "S3": "使用过程是否把核心卖点演示出来",
-    "S4": "目标效果是否被清楚且可信地证明",
-    "S5": "信任材料是否真实、相关且可追溯",
-    "S6": "用户是否知道下一步如何购买或行动",
-}
-_SEGMENTED_FLAG_REQUIRED_KEYS = {
-    "S1": ("exists", "type", "dims", "landing_met", "landing_reason", "window_evidence", "hook_boundary_seconds", "hook_boundary_reason", "s2_start_signal", "landing_window_leak", "anchors_proposition"),
-    "S2": ("exists", "merged_with_s3", "module_type", "handoff_met", "s1_s2_compatible", "product_identity_clear", "product_role_clear", "excluded_or_risky_module", "start_seconds", "end_seconds", "handoff_reason"),
-    "S3": ("exists", "module_type", "usage_evidence_state", "usage_process_visible", "result_only_without_process", "mouth_only_or_static", "real_usage_met", "core_selling_point_visible", "process_framing_met", "action_proof_met", "action_target_contact_met", "action_application_change_visible", "critical_action_continuity_met", "scene_mode", "usage_context_fit", "continuity_met", "richness_met", "single_scene_continuity_met", "single_scene_variation_met", "multi_scene_logic_met", "multi_scene_transition_met", "multi_scene_role_adaptation_met", "role_design_met", "role_interaction_met", "distinct_personas_met", "steps_clear_met", "pov_immersive_met", "fake_or_staged", "start_seconds", "end_seconds", "usage_reason"),
-    "S4": ("effect_type", "effect_evidence_state", "effect_visible", "effect_salience", "effect_proposition_matched", "comparison_control_met", "closeup_or_focus_met", "visual_difference_observed", "module_constraints_met", "effect_maximized", "requires_close_inspection", "effect_attribution_supported", "result_only_without_process", "process_linked_effect", "tamper_or_cut_risk", "effect_reason"),
-    "S5": ("exists", "module_type", "trust_evidence_type", "trust_basis", "trust_source_visible", "trust_source_credible", "trust_claim_specific", "product_relevance_met", "independent_trust_purpose", "duplicates_other_stage", "voice_only", "risky_or_unsupported", "start_seconds", "end_seconds", "trust_reason"),
-    "S6": ("exists", "module_type", "direct_order_met", "action_path_clear", "soft_purchase_invitation_met", "offer_or_incentive_clear", "price_anchor_met", "urgency_evidence_met", "gift_stack_met", "guarantee_clear_met", "urgency_met", "product_value_recalled", "module_fit_met", "ending_position_met", "depends_on_valid_s4", "compliance_risk", "start_seconds", "end_seconds", "cta_reason"),
-}
-
-
-def _segmented_stage_code(value: Any) -> str:
-    match = re.search(r"S[1-6]", str(value or "").upper())
-    return match.group(0) if match else ""
-
-
-def _segmented_text_items(value: Any, limit: int = 5) -> list[str]:
-    """Normalize bounded model text fields without iterating string characters."""
-    if isinstance(value, list):
-        items = [str(item).strip() for item in value if str(item).strip()]
-    elif str(value or "").strip():
-        items = [str(value).strip()]
-    else:
-        items = []
-    return items[:limit]
-
-
-def _segmented_evidence_range(facts: dict[str, Any], role: str, stage: str, ids: list[str]) -> str:
-    side = facts.get(role) if isinstance(facts.get(role), dict) else {}
-    units = {
-        str(unit.get("id") or ""): unit
-        for unit in side.get("evidence_units") or []
-        if isinstance(unit, dict)
-    }
-    parsed = [
-        parse_time_range_seconds(units[item].get("time_range"), None)
-        for item in ids
-        if item in units
-    ]
-    parsed = [item for item in parsed if item is not None]
-    if not parsed:
-        return ""
-    return f"{format_seconds(min(item[0] for item in parsed))} - {format_seconds(max(item[1] for item in parsed))}"
-
-
-def _segmented_qualified_units(
-    facts: dict[str, Any],
-    role: str,
-    stage: str,
-    ids: list[str],
-) -> list[dict[str, Any]]:
-    side = facts.get(role) if isinstance(facts.get(role), dict) else {}
-    units = {
-        str(unit.get("id") or ""): unit
-        for unit in side.get("evidence_units") or []
-        if isinstance(unit, dict) and str(unit.get("id") or "").strip()
-    }
-    qualified = qualified_stage_evidence_ids(side, stage)
-    return [
-        units[evidence_id]
-        for evidence_id in ids
-        if evidence_id in qualified and evidence_id in units
-    ]
-
-
-def _segmented_side_summary(units: list[dict[str, Any]], role: str, readiness: str) -> str:
-    if not units:
-        if readiness == "absent":
-            return f"{role}该阶段已完成观察，未发现合同要求的明确证据。"
-        if readiness == "unknown":
-            return f"{role}该阶段证据资格未知，暂不形成正式结论。"
-        if readiness == "conflict":
-            return f"{role}该阶段证据存在冲突，暂不形成正式结论。"
-        return f"{role}该阶段没有可交接的资格化证据。"
-    texts: list[str] = []
-    for unit in units:
-        text = next(
-            (
-                str(unit.get(field) or "").strip()
-                for field in ("information", "visual_fact", "voiceover_zh", "subtitle_fact")
-                if str(unit.get(field) or "").strip()
-            ),
-            "",
-        )
-        if text and text not in texts:
-            texts.append(text)
-    return "；".join(texts[:3]) or f"{role}该阶段已锁定证据，但缺少可展示的文字摘要。"
-
-
-def _segmented_support_status(units: list[dict[str, Any]]) -> str:
-    has_visual = any(str(unit.get("visual_fact") or "").strip() for unit in units)
-    has_voice = any(
-        str(unit.get(field) or "").strip()
-        for unit in units
-        for field in ("voiceover", "voiceover_zh", "subtitle_fact")
-    )
-    if has_visual and has_voice:
-        return "supported"
-    if has_voice:
-        return "voice_only"
-    if has_visual:
-        return "visual_only"
-    return "unknown"
-
-
-def _sanitize_segmented_flag(value: Any, qualified_ids: set[str]) -> Any:
-    """Keep semantic flags but strip any unqualified nested evidence IDs."""
-    if isinstance(value, dict):
-        return {
-            key: (
-                [str(item).strip() for item in nested if str(item).strip() in qualified_ids]
-                if key == "evidence_ids" and isinstance(nested, list)
-                else _sanitize_segmented_flag(nested, qualified_ids)
-            )
-            for key, nested in value.items()
-        }
-    if isinstance(value, list):
-        return [_sanitize_segmented_flag(item, qualified_ids) for item in value]
-    return value
-
-
-def _segmented_model_evidence_ids(raw: dict[str, Any], role: str) -> list[str]:
-    """Read only explicit Stage2 evidence-ID fields, including legacy nesting.
-
-    Some compatible providers return the two role judgments as nested
-    ``benchmark``/``creator`` objects even when the current compact contract
-    asks for top-level ``*_evidence_ids``.  The nested alias is still an
-    explicit structured field; free-text reasons are intentionally ignored.
-    """
-    candidates: list[Any] = [raw.get(f"{role}_evidence_ids")]
-    nested = raw.get(role)
-    if isinstance(nested, dict):
-        candidates.append(nested.get("evidence_ids"))
-    for key, value in raw.items():
-        if str(key).startswith(f"{role}_") and isinstance(value, dict):
-            candidates.append(value.get("evidence_ids"))
-    ids: list[str] = []
-    for candidate in candidates:
-        if not isinstance(candidate, list):
-            continue
-        ids.extend(str(item).strip() for item in candidate if str(item).strip())
-    return list(dict.fromkeys(ids))
-
-
-def _segmented_complete_flag(value: Any, stage: str) -> bool:
-    if not isinstance(value, dict):
-        return False
-    required = _SEGMENTED_FLAG_REQUIRED_KEYS.get(stage, ())
-    if any(key not in value for key in required):
-        return False
-    if stage == "S1" and not isinstance(value.get("dims"), dict):
-        return False
-    return True
-
-
-def _normalize_segmented_stage(
-    raw: dict[str, Any],
-    stage: str,
-    facts: dict[str, Any],
-    comparison_eligibility: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Project a small Stage2 judgment into the legacy report shape.
-
-    Only semantic judgment fields and complete stage-specific flags are read
-    from the model. Summaries, quotes, support status, ranges, and references
-    are rebuilt from the qualified Stage1 ledger so a prompt violation cannot
-    reclaim a code-owned field.
-    """
-    stage_contract = (
-        comparison_eligibility.get("stage_eligibility", {}).get(stage)
-        if isinstance(comparison_eligibility, dict)
-        and isinstance(comparison_eligibility.get("stage_eligibility"), dict)
-        and isinstance(comparison_eligibility.get("stage_eligibility", {}).get(stage), dict)
-        else {}
-    )
-    comparison_status = str(stage_contract.get("status") or "").strip().lower()
-    scope_closed = comparison_status in {"not_comparable", "not_applicable"}
-    output: dict[str, Any] = {
-        "stage": _SEGMENTED_STAGE_NAMES[stage],
-        "core_question": _SEGMENTED_STAGE_QUESTIONS[stage],
-        "stage_state": "unknown",
-        "relation": "uncertain",
-        "model_gap_magnitude": "uncertain",
-        "judgment_reason": str(raw.get("judgment_reason") or raw.get("reason") or "").strip(),
-    }
-    if scope_closed:
-        output["comparison_status"] = (
-            "not_applicable" if comparison_status == "not_applicable" else "not_directly_comparable"
-        )
-        output["model_comparison_status"] = comparison_status
-        output["judgment_reason"] = (
-            output["judgment_reason"]
-            or str(stage_contract.get("basis") or "该阶段不在当前比较合同范围内。").strip()
-        )
-    role_ids: dict[str, list[str]] = {}
-    readiness: dict[str, str] = {}
-    for role in ("benchmark", "creator"):
-        side = facts.get(role) if isinstance(facts.get(role), dict) else {}
-        qualified = qualified_stage_evidence_ids(side, stage)
-        key = f"{role}_evidence_ids"
-        ids = [item for item in _segmented_model_evidence_ids(raw, role) if item in qualified]
-        current_readiness = stage_evidence_readiness(side, stage)
-        readiness[role] = current_readiness
-        if current_readiness != "present":
-            ids = []
-        elif scope_closed:
-            # Closed comparison scopes still expose the qualified Stage1
-            # ledger for audit. They must not depend on the model repeating
-            # IDs for a stage that is intentionally not being judged.
-            ids = sorted(qualified)
-        role_ids[role] = list(dict.fromkeys(ids))
-        units = _segmented_qualified_units(facts, role, stage, role_ids[role])
-        output[key] = role_ids[role]
-        output[f"{role}_time_range"] = _segmented_evidence_range(facts, role, stage, role_ids[role])
-        output[f"{role}_summary"] = _segmented_side_summary(units, role, current_readiness)
-        output[f"{role}_key_message"] = output[f"{role}_summary"]
-        output[f"{role}_visual_evidence"] = [
-            str(unit.get("visual_fact") or "").strip()
-            for unit in units
-            if str(unit.get("visual_fact") or "").strip()
-        ]
-        output[f"{role}_support_status"] = _segmented_support_status(units)
-        output[f"{role}_quote"] = next(
-            (
-                str(unit.get("voiceover") or "").strip()
-                for unit in units
-                if str(unit.get("voiceover") or "").strip()
-            ),
-            "",
-        )
-        output[f"{role}_quote_zh"] = next(
-            (
-                str(unit.get("voiceover_zh") or "").strip()
-                for unit in units
-                if str(unit.get("voiceover_zh") or "").strip()
-            ),
-            "",
-        )
-
-    missing_model_references = not scope_closed and any(
-        readiness[role] == "present" and not role_ids[role]
-        for role in ("benchmark", "creator")
-    )
-    if scope_closed:
-        output["relation"] = "uncertain"
-        output["model_gap_magnitude"] = "uncertain"
-        output["stage_state"] = "unknown"
-        output["stage_handoff_status"] = (
-            "not_applicable" if comparison_status == "not_applicable" else "not_comparable"
-        )
-    elif missing_model_references:
-        output["relation"] = "uncertain"
-        output["model_gap_magnitude"] = "uncertain"
-        output["stage_state"] = "unknown"
-        output["judgment_reason"] = (
-            str(raw.get("judgment_reason") or "").strip()
-            or "Stage2 未返回可核验的阶段证据 ID，未将候选事实升级为正式引用。"
-        )
-        output["stage_handoff_status"] = "handoff_loss"
-    elif any(value not in {"present", "absent"} for value in readiness.values()):
-        output["relation"] = "uncertain"
-        output["model_gap_magnitude"] = "uncertain"
-        output["stage_state"] = "unknown" if "conflict" not in readiness.values() else "conflict"
-        output["judgment_reason"] = (
-            str(raw.get("judgment_reason") or "").strip()
-            or f"Stage1 资格未闭合：benchmark={readiness['benchmark']}，creator={readiness['creator']}。"
-        )
-        output["stage_handoff_status"] = "evidence_blocked"
-    else:
-        # A complete evidence handoff is necessary but not sufficient.  The
-        # group response must also close its own semantic state; otherwise a
-        # model-supplied relation or magnitude would become a conclusion merely
-        # because Stage1 happened to have evidence.
-        stage_state = str(raw.get("stage_state") or "unknown").strip().lower()
-        output["stage_state"] = stage_state if stage_state in {"completed", "unknown", "conflict", "blocked"} else "unknown"
-        output["judgment_reason"] = str(raw.get("judgment_reason") or raw.get("reason") or "").strip()
-        if output["stage_state"] != "completed":
-            output["relation"] = "uncertain"
-            output["model_gap_magnitude"] = "uncertain"
-            output["stage_handoff_status"] = "unknown" if output["stage_state"] == "unknown" else "evidence_blocked"
-        else:
-            relation = str(raw.get("relation") or "").strip().lower()
-            output["relation"] = relation if relation in {"creator_better", "benchmark_better", "equivalent", "uncertain"} else "uncertain"
-            magnitude = str(raw.get("model_gap_magnitude") or "").strip().lower()
-            output["model_gap_magnitude"] = magnitude if magnitude in {"none", "small", "medium", "large", "uncertain"} else "uncertain"
-            output["stage_handoff_status"] = "grounded"
-
-    # ``gap_type`` is a semantic Stage2 judgment, not a Stage3-owned field.
-    # Preserve it only after the evidence handoff and stage state are closed;
-    # an unknown/blocked stage must not inherit a diagnosis from raw prose.
-    raw_gap_type = str(raw.get("gap_type") or "").strip().lower()
-    output["gap_type"] = (
-        raw_gap_type
-        if output["stage_state"] == "completed" and raw_gap_type in {"structural", "execution", "resource", "unknown"}
-        else "unknown"
-    )
-    output["gap_summary"] = [output["judgment_reason"] or "待基于阶段证据复核。"]
-    output["evidence"] = [output["judgment_reason"] or "阶段证据由代码交接。"]
-    output["gap"] = output["judgment_reason"] or "阶段差距待复核。"
-    output["time_range"] = (
-        f"标杆 {output.get('benchmark_time_range') or '待复核'} / "
-        f"达人 {output.get('creator_time_range') or '待复核'}"
-    )
-    # Unknown, blocked, and handoff-loss stages must not acquire a synthetic
-    # medium severity before the resolver/finalizer runs.  A temporary default
-    # here would already be visible to Stage3 synthesis and could be mistaken
-    # for a model conclusion.
-    output["model_severity"] = (
-        output["model_gap_magnitude"]
-        if output["model_gap_magnitude"] in {"small", "medium", "large"}
-        else None
-    )
-    output["severity"] = output["model_severity"]
-    output["creator_module_id"] = "unknown"
-    output["benchmark_module_id"] = "unknown"
-    output["module_fit"] = "unknown"
-    output["module_fit_reason"] = output["judgment_reason"]
-    # Grounded evidence only proves that the handoff is usable; it does not
-    # prove the creator completed the stage.  Keep the legacy field unknown
-    # unless a separate semantic producer supplies it.
-    output["task_completion"] = None
-    output["voice_performance"] = {
-        "pace": "unknown",
-        "energy": "unknown",
-        "key_pause": None,
-        "note": "由阶段证据交接。",
-    }
-    output["benchmark_execution"] = None
-    output["creator_execution"] = None
-    output["painpoint_relevance"] = None
-    output["stage_standard_delivery"] = "unknown"
-
-    # A nested structured flag is accepted only as a complete object. Partial
-    # semantic objects are worse than an explicit unknown because the existing
-    # resolver/validators would otherwise mistake omitted booleans for facts.
-    if output.get("stage_handoff_status") == "grounded":
-        for role in ("benchmark", "creator"):
-            key = f"{role}_{stage.lower() if stage != 'S1' else 'hook'}"
-            value = raw.get(key)
-            if _segmented_complete_flag(value, stage):
-                output[key] = _sanitize_segmented_flag(value, set(role_ids[role]))
-    return output
-
-
-def _deterministic_product_visibility(facts: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
-    """Project product visibility from immutable creator facts, without LLM estimation."""
-    side = facts.get("creator") if isinstance(facts.get("creator"), dict) else {}
-    raw_duration = (analysis.get("videos", {}).get("creator", {}) or {}).get("duration_seconds")
-    try:
-        duration = float(raw_duration)
-    except (TypeError, ValueError):
-        duration = 0.0
-    if not math.isfinite(duration) or duration <= 0:
-        return {
-            "first_appearance_sec": None,
-            "total_screen_time_sec": None,
-            "video_duration_sec": None,
-            "ratio": None,
-            "estimation_note": "达人视频时长缺失或无效，无法从时间区间计算产品出镜统计，需人工复核。",
-        }
-    visibility_observed = any(
-        isinstance(unit, dict)
-        and (unit.get("product_visible") is True or unit.get("product_visible") is False)
-        for unit in side.get("evidence_units") or []
-    )
-    if not visibility_observed:
-        return {
-            "first_appearance_sec": None,
-            "total_screen_time_sec": None,
-            "video_duration_sec": round(duration, 3),
-            "ratio": None,
-            "estimation_note": "Stage1 未提供明确的 product_visible 观察，不能把未知当作产品未出镜，需人工复核。",
-        }
-    intervals: list[tuple[float, float]] = []
-    for unit in side.get("evidence_units") or []:
-        if not isinstance(unit, dict) or unit.get("product_visible") is not True:
-            continue
-        parsed = parse_time_range_seconds(unit.get("time_range"), duration or None)
-        if parsed is not None and parsed[1] > parsed[0]:
-            intervals.append(parsed)
-    intervals.sort()
-    merged: list[list[float]] = []
-    for start, end in intervals:
-        if merged and start <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], end)
-        else:
-            merged.append([start, end])
-    total = sum(end - start for start, end in merged)
-    first = merged[0][0] if merged else 0.0
-    ratio = total / duration
-    return {
-        "first_appearance_sec": round(first, 3),
-        "total_screen_time_sec": round(total, 3),
-        "video_duration_sec": round(duration, 3),
-        "ratio": round(min(max(ratio, 0.0), 1.0), 6),
-        "estimation_note": "由代码从达人 Stage1 evidence_units 的明确 product_visible 标记合并区间计算。",
-    }
-
-
-def _deterministic_improvement(stage_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    candidates = [
-        item for item in stage_results
-        if isinstance(item, dict) and item.get("model_gap_magnitude") in {"large", "medium"}
-    ]
-    selected = candidates[0] if candidates else (stage_results[0] if stage_results else {})
-    stage = _segmented_stage_code(selected.get("stage")) or "S1"
-    return [{
-        "title": f"优先复核{stage}阶段证据",
-        "target_stage": stage,
-        "gmv_impact": "待基于完整阶段证据确认",
-        "gap_type": selected.get("gap_type") if selected.get("gap_type") in {"structural", "execution", "resource", "unknown"} else "unknown",
-        "time_range": selected.get("creator_time_range") or "",
-        "creator_time_range": selected.get("creator_time_range") or "",
-        "benchmark_time_range": selected.get("benchmark_time_range") or "",
-        "problem": selected.get("gap") or "阶段证据不足，暂不生成确定性建议。",
-        "benchmark_reference": selected.get("benchmark_summary") or "暂无合格标杆证据。",
-        "benchmark_evidence_ids": selected.get("benchmark_evidence_ids") or [],
-        "suggestion": "待阶段证据完成后再生成具体改进动作。",
-        "actions": ["补齐并复核该阶段关键证据"],
-        "gmv_reason": "避免把证据未知误写成业务缺陷。",
-        "evidence": selected.get("evidence") or [],
-        "priority": 1,
-    }]
-
-
-def _project_synthesis_improvements(
-    raw_improvements: Any,
-    stage_results: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Project model prose onto code-owned stage evidence and ranges.
-
-    Stage3 may write prose and select a target stage. It cannot author IDs,
-    time ranges, gap types, or priority because those fields already have a
-    single authoritative source in the normalized Stage2 result.
-    """
-    by_code = {
-        code: stage
-        for stage in stage_results
-        if isinstance(stage, dict)
-        for code in [_segmented_stage_code(stage.get("stage"))]
-        if code in _SEGMENTED_STAGE_NAMES
-    }
-    projected: list[dict[str, Any]] = []
-    for item in raw_improvements if isinstance(raw_improvements, list) else []:
-        if not isinstance(item, dict):
-            continue
-        code = _segmented_stage_code(item.get("target_stage"))
-        stage = by_code.get(code)
-        if stage is None:
-            continue
-        magnitude = str(stage.get("model_gap_magnitude") or "uncertain").strip().lower()
-        priority = {"large": 1, "medium": 2, "small": 3, "none": 4}.get(magnitude, 4)
-        raw_actions = item.get("actions")
-        actions = [raw_actions] if isinstance(raw_actions, str) else raw_actions
-        actions = actions if isinstance(actions, list) else []
-        projected.append(
-            {
-                "title": str(item.get("title") or f"复核{code}阶段").strip(),
-                "target_stage": code,
-                "problem": str(item.get("problem") or stage.get("gap") or "阶段差距待复核").strip(),
-                "suggestion": str(item.get("suggestion") or "待基于阶段证据复核").strip(),
-                "actions": [str(value).strip() for value in actions if str(value).strip()][:5],
-                "gmv_reason": str(item.get("gmv_reason") or "避免把证据未知误写成业务缺陷").strip(),
-                "gmv_impact": str(item.get("gmv_impact") or "待基于完整阶段证据确认").strip(),
-                # Stage3 can supply prose only.  gap_type is projected from
-                # the already-closed Stage2 result.
-                "gap_type": stage.get("gap_type") if stage.get("gap_type") in {"structural", "execution", "resource", "unknown"} else "unknown",
-                "time_range": stage.get("time_range") or "",
-                "creator_time_range": stage.get("creator_time_range") or "",
-                "benchmark_time_range": stage.get("benchmark_time_range") or "",
-                "benchmark_reference": stage.get("benchmark_summary") or "暂无合格标杆证据。",
-                "benchmark_evidence_ids": list(stage.get("benchmark_evidence_ids") or []),
-                "evidence": list(stage.get("evidence") or []),
-                "priority": priority,
-            }
-        )
-    return projected[:5]
-
-
-def _prepare_segmented_synthesis(raw: dict[str, Any] | None, stage_results: list[dict[str, Any]]) -> dict[str, Any]:
-    raw = raw if isinstance(raw, dict) else {}
-    result = copy.deepcopy(raw)
-    result.setdefault("one_line_verdict", "基于分阶段证据完成分析，部分字段需按阶段状态复核。")
-    result.setdefault("one_line_summary", result["one_line_verdict"])
-    result.setdefault("executive_summary", result["one_line_summary"])
-    result.setdefault("holistic_assessment", {})
-    result.setdefault("key_conclusions", [])
-    result.setdefault("loop_closure", {})
-    result.setdefault("s3_s4_relationship", {})
-    result.setdefault("promise_chain", {})
-    result["improvements"] = _project_synthesis_improvements(
-        result.get("improvements"),
-        stage_results,
-    ) or _deterministic_improvement(stage_results)
-    return result
-
-
-def _segmented_stage_unresolved(stage_results: list[dict[str, Any]]) -> list[str]:
-    """Return core stages that cannot support a completed run marker."""
-    unresolved: list[str] = []
-    for stage in stage_results:
-        if not isinstance(stage, dict):
-            continue
-        code = _segmented_stage_code(stage.get("stage"))
-        comparison_status = str(stage.get("comparison_status") or "").strip().lower()
-        if comparison_status in {"not_directly_comparable", "not_applicable"}:
-            # A closed comparison scope is an intentional terminal state, not
-            # a failed Stage2 handoff. It must remain explicit in the report,
-            # but should not make an otherwise complete segmented run appear
-            # degraded.
-            continue
-        status = str(
-            stage.get("analysis_status")
-            or stage.get("stage_handoff_status")
-            or "unknown"
-        ).strip().lower()
-        stage_state = str(stage.get("stage_state") or "unknown").strip().lower()
-        magnitude = str(stage.get("model_gap_magnitude") or "unknown").strip().lower()
-        # ``stage_state`` is a required semantic output.  A grounded evidence
-        # handoff is necessary but not sufficient: if the model did not close
-        # the stage judgment itself, relation/magnitude must not become a
-        # publishable conclusion through a compatibility default.
-        if code and (
-            status != "grounded"
-            or stage_state != "completed"
-            or magnitude == "uncertain"
-        ):
-            unresolved.append(code)
-    return list(dict.fromkeys(unresolved))
-
-
 def _build_stage1_to_stage2_handoff(
     facts: dict[str, Any],
     analysis: dict[str, Any],
@@ -2448,6 +1922,25 @@ def _validated_stage_group_response(
                 raise ValueError(
                     f"阶段组 {label} 的 {code} relation 与 model_gap_magnitude 自相矛盾"
                 )
+            if facts is not None:
+                readiness = {
+                    role: stage_evidence_readiness(
+                        facts.get(role) if isinstance(facts.get(role), dict) else {},
+                        code,
+                    )
+                    for role in ("benchmark", "creator")
+                }
+                if set(readiness.values()) == {"present", "absent"}:
+                    expected_relation = next(
+                        f"{role}_better"
+                        for role, status in readiness.items()
+                        if status == "present"
+                    )
+                    if relation != expected_relation:
+                        raise ValueError(
+                            f"阶段组 {label} 的 {code} 单侧执行时 relation 必须为 {expected_relation}，"
+                            "不能输出 equivalent/none 或反向关系"
+                        )
         for key in ("benchmark_evidence_ids", "creator_evidence_ids"):
             if not isinstance(item.get(key), list):
                 raise ValueError(f"阶段组 {label} 的 {code} {key} 必须是数组")
@@ -2585,150 +2078,152 @@ def _read_replayable_stage_group(
     return response, meta
 
 
-def run_segmented_stage_pipeline(
+def _materialize_stage1_handoff(
+    run_dir: Path,
+    facts: dict[str, Any],
+    analysis: dict[str, Any],
+) -> dict[str, Any]:
+    value = _build_stage1_to_stage2_handoff(facts, analysis)
+    issues = _stage1_to_stage2_handoff_issues(value, facts, analysis)
+    value["integrity"] = {
+        "algorithm": "sha256",
+        "sha256": _stable_digest(
+            {
+                "version": value["version"],
+                "pipeline": value["pipeline"],
+                "roles": value["roles"],
+                "validation_status": "failed" if issues else "passed",
+                "validation_issues": issues,
+            }
+        ),
+        "validation_status": "failed" if issues else "passed",
+        "validation_issues": issues,
+        "preservation_target": "100% of Stage1 ledger IDs and hashes are represented in the handoff",
+    }
+    write_json(run_dir / "stage1_to_stage2_handoff.json", value)
+    if issues:
+        raise SystemExit("Stage1 到 Stage2 交接校验失败：" + ", ".join(issues))
+    return value
+
+
+def _run_segmented_stage_group(
+    *,
     args: argparse.Namespace,
     analysis: dict[str, Any],
     analysis_input: str,
     facts: dict[str, Any],
     run_dir: Path,
     api_key: str,
-) -> dict[str, Any]:
-    """Run the frozen Stage2/Stage3 path without whole-object model repair."""
-    def materialize_handoff() -> dict[str, Any]:
-        value = _build_stage1_to_stage2_handoff(facts, analysis)
-        issues = _stage1_to_stage2_handoff_issues(value, facts, analysis)
-        value["integrity"] = {
-            "algorithm": "sha256",
-            "sha256": _stable_digest(
-                {
-                    "version": value["version"],
-                    "pipeline": value["pipeline"],
-                    "roles": value["roles"],
-                    "validation_status": "failed" if issues else "passed",
-                    "validation_issues": issues,
-                }
-            ),
-            "validation_status": "failed" if issues else "passed",
-            "validation_issues": issues,
-            "preservation_target": "100% of Stage1 ledger IDs and hashes are represented in the handoff",
-        }
-        write_json(run_dir / "stage1_to_stage2_handoff.json", value)
-        if issues:
-            raise SystemExit("Stage1 到 Stage2 交接校验失败：" + ", ".join(issues))
-        return value
-
-    handoff = _run_pipeline_phase("stage1_handoff", "handoff", materialize_handoff)
-    stage_results: list[dict[str, Any]] = []
-    group_records: list[dict[str, Any]] = []
-    any_group_failed = False
-    replay_source, provider_fallback_allowed = _stage2_replay_source(args)
-    for group in STAGE_JUDGMENT_GROUPS:
-        label = "_".join(group)
-        target = list(group)
-        record: dict[str, Any] = {"group": target, "status": "pending", "stages": []}
-        comparison_eligibility = _authoritative_segmented_comparison_contract(analysis, {})
-        stage_contracts = (
-            comparison_eligibility.get("stage_eligibility")
-            if isinstance(comparison_eligibility.get("stage_eligibility"), dict)
-            else {}
-        )
-        closed_scope = bool(target) and all(
-            isinstance(stage_contracts.get(code), dict)
-            and str(stage_contracts[code].get("status") or "").strip().lower()
-            in {"not_comparable", "not_applicable"}
+    target: list[str],
+    replay_source: Path | None,
+    provider_fallback_allowed: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any], bool]:
+    label = "_".join(target)
+    record: dict[str, Any] = {"group": target, "status": "pending", "stages": []}
+    comparison_eligibility = _authoritative_segmented_comparison_contract(analysis, {})
+    stage_contracts = (
+        comparison_eligibility.get("stage_eligibility")
+        if isinstance(comparison_eligibility.get("stage_eligibility"), dict)
+        else {}
+    )
+    closed_scope = bool(target) and all(
+        isinstance(stage_contracts.get(code), dict)
+        and str(stage_contracts[code].get("status") or "").strip().lower()
+        in {"not_comparable", "not_applicable"}
+        for code in target
+    )
+    if closed_scope:
+        projected = [
+            _normalize_segmented_stage({}, code, facts, comparison_eligibility)
             for code in target
+        ]
+        record.update(
+            {
+                "status": "completed",
+                "stages": target,
+                "response_sha256": _stable_digest(projected),
+                "execution_source": "deterministic_scope",
+                "completion_attempts": 0,
+                "retry_reasons": [],
+                "usage": {},
+            }
         )
-        if closed_scope:
-            projected = [
-                _normalize_segmented_stage({}, code, facts, comparison_eligibility)
-                for code in target
-            ]
-            record.update(
-                {
-                    "status": "completed",
-                    "stages": target,
-                    "response_sha256": _stable_digest(projected),
-                    "execution_source": "deterministic_scope",
-                    "completion_attempts": 0,
-                    "retry_reasons": [],
-                    "usage": {},
-                }
-            )
-            stage_results.extend(projected)
-            group_records.append(record)
-            write_json(run_dir / f"stage_group_{label}.json", record)
-            continue
-        provider_artifact_path = stage_group_artifact_path(run_dir, target)
-        request_path = run_dir / f"llm_stage_group_{label}_request.json"
-        response_path = run_dir / f"llm_stage_group_{label}_response.json"
-        payload: dict[str, Any] = {}
-        response_meta: dict[str, Any] = {}
-        execution_source = "provider"
-        replay_artifact_path = (
-            stage_group_artifact_path(replay_source, target)
-            if replay_source is not None
-            else None
+        write_json(run_dir / f"stage_group_{label}.json", record)
+        return projected, record, False
+
+    provider_artifact_path = stage_group_artifact_path(run_dir, target)
+    replay_artifact_path = (
+        stage_group_artifact_path(replay_source, target)
+        if replay_source is not None
+        else None
+    )
+    preserve_resume_source = (
+        provider_fallback_allowed
+        and _same_existing_artifact(replay_artifact_path, provider_artifact_path)
+    )
+    resume_failure_path = _resume_failure_artifact_path(provider_artifact_path)
+    payload: dict[str, Any] = {}
+    response_meta: dict[str, Any] = {}
+    parsed: dict[str, Any] | None = None
+    execution_source = "provider"
+    failed = False
+    try:
+        payload = build_stage_group_judgment_payload(
+            judgment_model(args),
+            analysis_input,
+            facts,
+            analysis,
+            target,
+            api_url=args.llm_api_url,
+            budget=getattr(args, "_resource_budget", None),
         )
-        preserve_resume_source = (
-            provider_fallback_allowed
-            and _same_existing_artifact(replay_artifact_path, provider_artifact_path)
-        )
-        resume_failure_path = _resume_failure_artifact_path(provider_artifact_path)
-        try:
-            payload = build_stage_group_judgment_payload(
-                judgment_model(args),
-                analysis_input,
-                facts,
-                analysis,
-                target,
-                api_url=args.llm_api_url,
-                budget=getattr(args, "_resource_budget", None),
-            )
-            parsed: dict[str, Any] | None = None
-            if replay_source is not None:
-                execution_source = "replay"
-                try:
-                    parsed, response_meta = _read_replayable_stage_group(
-                        replay_source,
-                        group=target,
-                        payload=payload,
-                        args=args,
-                    )
-                    _validated_stage_group_response(parsed, target, label=label, facts=facts)
-                except (StageGroupArtifactError, ValueError) as exc:
-                    if not provider_fallback_allowed:
-                        raise SystemExit(f"阶段组 {label} 无法离线重放：{exc}") from exc
-                    execution_source = "provider"
-                    parsed = None
-                    response_meta = {}
-            if parsed is None:
-                write_json(request_path, payload)
-                response_text = fetch_json_completion(
-                    args,
-                    api_key,
-                    request_path,
-                    response_path,
-                    response_meta=response_meta,
-                )
-                parsed = parse_json_text(response_text)
-            by_code = _validated_stage_group_response(parsed, target, label=label, facts=facts)
-            write_json(
-                provider_artifact_path,
-                completed_stage_group_artifact(
+        if replay_source is not None:
+            execution_source = "replay"
+            try:
+                parsed, response_meta = _read_replayable_stage_group(
+                    replay_source,
                     group=target,
                     payload=payload,
-                    response=parsed,
-                    model=judgment_model(args),
-                    api_url=args.llm_api_url,
-                    response_meta=response_meta,
-                ),
+                    args=args,
+                )
+                _validated_stage_group_response(parsed, target, label=label, facts=facts)
+            except (StageGroupArtifactError, ValueError) as exc:
+                if not provider_fallback_allowed:
+                    raise SystemExit(f"阶段组 {label} 无法离线重放：{exc}") from exc
+                execution_source = "provider"
+                parsed = None
+                response_meta = {}
+        if parsed is None:
+            request_path = run_dir / f"llm_stage_group_{label}_request.json"
+            response_path = run_dir / f"llm_stage_group_{label}_response.json"
+            write_json(request_path, payload)
+            response_text = fetch_json_completion(
+                args,
+                api_key,
+                request_path,
+                response_path,
+                response_meta=response_meta,
             )
-            resume_failure_path.unlink(missing_ok=True)
-            projected = [
-                _normalize_segmented_stage(by_code[code], code, facts, comparison_eligibility)
-                for code in target
-            ]
-            record.update({
+            parsed = parse_json_text(response_text)
+        by_code = _validated_stage_group_response(parsed, target, label=label, facts=facts)
+        write_json(
+            provider_artifact_path,
+            completed_stage_group_artifact(
+                group=target,
+                payload=payload,
+                response=parsed,
+                model=judgment_model(args),
+                api_url=args.llm_api_url,
+                response_meta=response_meta,
+            ),
+        )
+        resume_failure_path.unlink(missing_ok=True)
+        projected = [
+            _normalize_segmented_stage(by_code[code], code, facts, comparison_eligibility)
+            for code in target
+        ]
+        record.update(
+            {
                 "status": "completed",
                 "stages": target,
                 "response_sha256": _stable_digest(parsed),
@@ -2738,200 +2233,233 @@ def run_segmented_stage_pipeline(
                 "completion_attempts": response_meta.get("completion_attempts", 0),
                 "retry_reasons": response_meta.get("retry_reasons", []),
                 "usage": response_meta.get("usage", {}),
-            })
-            stage_results.extend(projected)
-        except (OSError, ValueError, RuntimeError, SystemExit, json.JSONDecodeError) as exc:
-            any_group_failed = True
-            record.update(
+            }
+        )
+    except (OSError, ValueError, RuntimeError, SystemExit, json.JSONDecodeError) as exc:
+        failed = True
+        record.update(
+            {
+                "status": "failed",
+                "failure_kind": _localized_failure_kind(
+                    exc,
+                    execution_source=execution_source,
+                    default="provider_call_or_validation",
+                ),
+                "cause_type": exc.__class__.__name__,
+                "error": str(exc),
+            }
+        )
+        failure_artifact = failed_stage_group_artifact(
+            group=target,
+            payload=payload,
+            model=judgment_model(args),
+            api_url=args.llm_api_url,
+            error=str(exc),
+            response_meta=response_meta,
+            response=parsed,
+        )
+        failure_path = resume_failure_path if preserve_resume_source else provider_artifact_path
+        write_json(failure_path, failure_artifact)
+        record["provider_artifact"] = failure_path.name
+        projected = [
+            _normalize_segmented_stage(
                 {
-                    "status": "failed",
-                    "failure_kind": _localized_failure_kind(
-                        exc,
-                        execution_source=execution_source,
-                        default="provider_call_or_validation",
-                    ),
-                    "cause_type": exc.__class__.__name__,
-                    "error": str(exc),
-                }
+                    "stage": _SEGMENTED_STAGE_NAMES[code],
+                    "relation": "uncertain",
+                    "model_gap_magnitude": "uncertain",
+                    "judgment_reason": f"阶段组调用失败：{exc}",
+                },
+                code,
+                facts,
+                _authoritative_segmented_comparison_contract(analysis, {}),
             )
-            failure_artifact = failed_stage_group_artifact(
-                group=target,
-                payload=payload,
-                model=judgment_model(args),
-                api_url=args.llm_api_url,
-                error=str(exc),
-                response_meta=response_meta,
-                response=parsed,
-            )
-            failure_path = resume_failure_path if preserve_resume_source else provider_artifact_path
-            write_json(
-                failure_path,
-                failure_artifact,
-            )
-            record["provider_artifact"] = failure_path.name
-            projected = [
-                _normalize_segmented_stage(
-                    {"stage": _SEGMENTED_STAGE_NAMES[code], "relation": "uncertain", "model_gap_magnitude": "uncertain", "judgment_reason": f"阶段组调用失败：{exc}"},
-                    code,
-                    facts,
-                    _authoritative_segmented_comparison_contract(analysis, {}),
-                )
-                for code in target
-            ]
-            stage_results.extend(projected)
-        group_records.append(record)
-        write_json(run_dir / f"stage_group_{label}.json", record)
+            for code in target
+        ]
+    write_json(run_dir / f"stage_group_{label}.json", record)
+    return projected, record, failed
 
-    unresolved_before_synthesis = _segmented_stage_unresolved(stage_results)
-    skip_synthesis = any_group_failed or bool(unresolved_before_synthesis)
-    synthesis_status = "failed" if skip_synthesis else "completed"
-    synthesis: dict[str, Any] = {}
-    synthesis_request = run_dir / "llm_stage_synthesis_request.json"
-    synthesis_response = run_dir / "llm_stage_synthesis_response.json"
-    synthesis_provider_artifact = stage_group_artifact_path(run_dir, ("SYNTHESIS",))
-    synthesis_payload: dict[str, Any] = {}
-    synthesis_response_meta: dict[str, Any] = {}
-    synthesis_execution_source = "not_run" if skip_synthesis else "provider"
-    parsed_synthesis: dict[str, Any] | None = None
-    synthesis_artifact_record = "" if skip_synthesis else synthesis_provider_artifact.name
-    synthesis_replay_artifact = (
+
+def _run_segmented_synthesis(
+    *,
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    analysis_input: str,
+    facts: dict[str, Any],
+    stage_results: list[dict[str, Any]],
+    run_dir: Path,
+    api_key: str,
+    replay_source: Path | None,
+    provider_fallback_allowed: bool,
+    skip_synthesis: bool,
+) -> tuple[dict[str, Any], str, str, str, bool]:
+    status = "failed" if skip_synthesis else "completed"
+    execution_source = "not_run" if skip_synthesis else "provider"
+    provider_artifact = stage_group_artifact_path(run_dir, ("SYNTHESIS",))
+    artifact_record = "" if skip_synthesis else provider_artifact.name
+    replay_artifact = (
         stage_group_artifact_path(replay_source, ("SYNTHESIS",))
         if replay_source is not None
         else None
     )
-    preserve_synthesis_resume_source = (
+    preserve_resume_source = (
         provider_fallback_allowed
-        and _same_existing_artifact(synthesis_replay_artifact, synthesis_provider_artifact)
+        and _same_existing_artifact(replay_artifact, provider_artifact)
     )
-    synthesis_resume_failure = _resume_failure_artifact_path(synthesis_provider_artifact)
+    resume_failure = _resume_failure_artifact_path(provider_artifact)
     if skip_synthesis:
-        if preserve_synthesis_resume_source and synthesis_provider_artifact.is_file():
-            _archive_stage_group_artifact(synthesis_provider_artifact, "superseded")
-            synthesis_provider_artifact.unlink()
-        synthesis = {
-            "synthesis_error": "Stage3 synthesis 未执行：阶段组失败或存在 unresolved stage。",
-            "failure_kind": "upstream_stage_unresolved",
-            "cause_type": "UpstreamStageUnresolved",
-        }
-    else:
-        try:
-            synthesis_payload = build_stage_synthesis_payload(
-                judgment_model(args), analysis_input, facts, stage_results, analysis
-            )
-            if replay_source is not None:
-                synthesis_execution_source = "replay"
-                try:
-                    parsed_synthesis, synthesis_response_meta = _read_replayable_stage_group(
-                        replay_source,
-                        group=("SYNTHESIS",),
-                        payload=synthesis_payload,
-                        args=args,
-                        allow_validation_failed=True,
-                    )
-                    _validated_stage_synthesis_response(parsed_synthesis)
-                    if synthesis_response_meta.get("execution_source") == "revalidation":
-                        synthesis_execution_source = "revalidation"
-                except (StageGroupArtifactError, ValueError) as exc:
-                    if not provider_fallback_allowed:
-                        raise SystemExit(f"Stage3 synthesis 无法离线重放：{exc}") from exc
-                    synthesis_execution_source = "provider"
-                    parsed_synthesis = None
-                    synthesis_response_meta = {}
-            if parsed_synthesis is None:
-                write_json(synthesis_request, synthesis_payload)
-                response_text = fetch_json_completion(
-                    args,
-                    api_key,
-                    synthesis_request,
-                    synthesis_response,
-                    response_meta=synthesis_response_meta,
-                )
-                parsed_synthesis = parse_json_text(response_text)
-            parsed_synthesis = _validated_stage_synthesis_response(parsed_synthesis)
-            if (
-                preserve_synthesis_resume_source
-                and synthesis_response_meta.get("revalidated_from_status") == "failed"
-                and synthesis_provider_artifact.is_file()
-            ):
-                _archive_stage_group_artifact(
-                    synthesis_provider_artifact,
-                    "validation-failed",
-                )
-            write_json(
-                synthesis_provider_artifact,
-                completed_stage_group_artifact(
+        if preserve_resume_source and provider_artifact.is_file():
+            _archive_stage_group_artifact(provider_artifact, "superseded")
+            provider_artifact.unlink()
+        return (
+            {
+                "synthesis_error": "Stage3 synthesis 未执行：阶段组失败或存在 unresolved stage。",
+                "failure_kind": "upstream_stage_unresolved",
+                "cause_type": "UpstreamStageUnresolved",
+            },
+            status,
+            execution_source,
+            artifact_record,
+            False,
+        )
+
+    payload: dict[str, Any] = {}
+    response_meta: dict[str, Any] = {}
+    parsed: dict[str, Any] | None = None
+    try:
+        payload = build_stage_synthesis_payload(
+            judgment_model(args), analysis_input, facts, stage_results, analysis
+        )
+        if replay_source is not None:
+            execution_source = "replay"
+            try:
+                parsed, response_meta = _read_replayable_stage_group(
+                    replay_source,
                     group=("SYNTHESIS",),
-                    payload=synthesis_payload,
-                    response=parsed_synthesis,
-                    model=judgment_model(args),
-                    api_url=args.llm_api_url,
-                    response_meta=synthesis_response_meta,
-                ),
+                    payload=payload,
+                    args=args,
+                    allow_validation_failed=True,
+                )
+                _validated_stage_synthesis_response(parsed)
+                if response_meta.get("execution_source") == "revalidation":
+                    execution_source = "revalidation"
+            except (StageGroupArtifactError, ValueError) as exc:
+                if not provider_fallback_allowed:
+                    raise SystemExit(f"Stage3 synthesis 无法离线重放：{exc}") from exc
+                execution_source = "provider"
+                parsed = None
+                response_meta = {}
+        if parsed is None:
+            request_path = run_dir / "llm_stage_synthesis_request.json"
+            response_path = run_dir / "llm_stage_synthesis_response.json"
+            write_json(request_path, payload)
+            response_text = fetch_json_completion(
+                args,
+                api_key,
+                request_path,
+                response_path,
+                response_meta=response_meta,
             )
-            synthesis_resume_failure.unlink(missing_ok=True)
-            synthesis = parsed_synthesis
-        except (OSError, ValueError, RuntimeError, SystemExit, json.JSONDecodeError) as exc:
-            synthesis_status = "failed"
-            synthesis = {
-                "synthesis_error": str(exc),
-                "failure_kind": _localized_failure_kind(
-                    exc,
-                    execution_source=synthesis_execution_source,
-                    default="provider_call_or_validation",
-                ),
-                "cause_type": exc.__class__.__name__,
-            }
-            any_group_failed = True
-            failure_artifact = failed_stage_group_artifact(
+            parsed = parse_json_text(response_text)
+        parsed = _validated_stage_synthesis_response(parsed)
+        if (
+            preserve_resume_source
+            and response_meta.get("revalidated_from_status") == "failed"
+            and provider_artifact.is_file()
+        ):
+            _archive_stage_group_artifact(provider_artifact, "validation-failed")
+        write_json(
+            provider_artifact,
+            completed_stage_group_artifact(
                 group=("SYNTHESIS",),
-                payload=synthesis_payload,
+                payload=payload,
+                response=parsed,
                 model=judgment_model(args),
                 api_url=args.llm_api_url,
-                error=str(exc),
-                response_meta=synthesis_response_meta,
-                response=parsed_synthesis,
-            )
-            failure_path = (
-                synthesis_resume_failure
-                if preserve_synthesis_resume_source
-                else synthesis_provider_artifact
-            )
-            write_json(failure_path, failure_artifact)
-            synthesis_artifact_record = failure_path.name
+                response_meta=response_meta,
+            ),
+        )
+        resume_failure.unlink(missing_ok=True)
+        return parsed, status, execution_source, artifact_record, False
+    except (OSError, ValueError, RuntimeError, SystemExit, json.JSONDecodeError) as exc:
+        status = "failed"
+        synthesis = {
+            "synthesis_error": str(exc),
+            "failure_kind": _localized_failure_kind(
+                exc,
+                execution_source=execution_source,
+                default="provider_call_or_validation",
+            ),
+            "cause_type": exc.__class__.__name__,
+        }
+        failure_artifact = failed_stage_group_artifact(
+            group=("SYNTHESIS",),
+            payload=payload,
+            model=judgment_model(args),
+            api_url=args.llm_api_url,
+            error=str(exc),
+            response_meta=response_meta,
+            response=parsed,
+        )
+        failure_path = resume_failure if preserve_resume_source else provider_artifact
+        write_json(failure_path, failure_artifact)
+        return synthesis, status, execution_source, failure_path.name, True
 
+
+def _assemble_segmented_stage_result(
+    *,
+    analysis: dict[str, Any],
+    facts: dict[str, Any],
+    stage_results: list[dict[str, Any]],
+    group_records: list[dict[str, Any]],
+    synthesis: dict[str, Any],
+    synthesis_status: str,
+    synthesis_execution_source: str,
+    synthesis_artifact_record: str,
+    any_group_failed: bool,
+    run_dir: Path,
+) -> dict[str, Any]:
     synthesis = _prepare_segmented_synthesis(synthesis, stage_results)
     unresolved_stages = _segmented_stage_unresolved(stage_results)
-    raw_bundle = {
-        "source_format": "segmented_provider_bundle",
-        "pipeline": "segmented_stage_v1",
-        "stage_groups": group_records,
-        "synthesis_status": synthesis_status,
-        "synthesis_provider_artifact": synthesis_artifact_record,
-        "synthesis_execution_source": synthesis_execution_source,
-        "unresolved_stages": unresolved_stages,
-        "synthesis": synthesis,
-    }
     _write_raw_model_response(
         run_dir,
-        result=raw_bundle,
+        result={
+            "source_format": "segmented_provider_bundle",
+            "pipeline": "segmented_stage_v1",
+            "stage_groups": group_records,
+            "synthesis_status": synthesis_status,
+            "synthesis_provider_artifact": synthesis_artifact_record,
+            "synthesis_execution_source": synthesis_execution_source,
+            "unresolved_stages": unresolved_stages,
+            "synthesis": synthesis,
+        },
         source_format="segmented_provider_bundle",
         overwrite=True,
     )
-    candidate_status = (
-        "degraded" if any_group_failed or unresolved_stages else "completed"
+    candidate_status = "degraded" if any_group_failed or unresolved_stages else "completed"
+    analysis.update(
+        {
+            "stage2_candidate_status": candidate_status,
+            "stage2_pipeline_version": "segmented_stage_v1",
+            "stage_evidence_contract_required": True,
+            "evidence_state_required": False,
+            "multimodal_assessment_required": False,
+        }
     )
-    analysis["stage2_candidate_status"] = candidate_status
-    analysis["stage2_pipeline_version"] = "segmented_stage_v1"
-    analysis["stage_evidence_contract_required"] = True
-    analysis["evidence_state_required"] = False
-    analysis["multimodal_assessment_required"] = False
-    # Stage-specific flags are accepted only when the group returned a complete
-    # object. This prevents a partial semantic object from activating the old
-    # validator as a new source of truth.
-    for key in ("s1_hook_flags_required", "s2_flags_required", "s3_flags_required", "s4_flags_required", "s5_flags_required", "s6_flags_required"):
+    for key in (
+        "s1_hook_flags_required",
+        "s2_flags_required",
+        "s3_flags_required",
+        "s4_flags_required",
+        "s5_flags_required",
+        "s6_flags_required",
+    ):
         analysis[key] = False
-    foundation = analysis.get("product_foundation") if isinstance(analysis.get("product_foundation"), dict) else {}
-    result = {
+    foundation = (
+        analysis.get("product_foundation")
+        if isinstance(analysis.get("product_foundation"), dict)
+        else {}
+    )
+    return {
         "one_line_verdict": synthesis.get("one_line_verdict"),
         "one_line_summary": synthesis.get("one_line_summary"),
         "executive_summary": synthesis.get("executive_summary"),
@@ -2960,7 +2488,68 @@ def run_segmented_stage_pipeline(
             "candidate_status": candidate_status,
         },
     }
-    return result
+
+
+def run_segmented_stage_pipeline(
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    analysis_input: str,
+    facts: dict[str, Any],
+    run_dir: Path,
+    api_key: str,
+) -> dict[str, Any]:
+    """Run the frozen Stage2/Stage3 path without whole-object model repair."""
+    _run_pipeline_phase(
+        "stage1_handoff",
+        "handoff",
+        lambda: _materialize_stage1_handoff(run_dir, facts, analysis),
+    )
+    stage_results: list[dict[str, Any]] = []
+    group_records: list[dict[str, Any]] = []
+    any_group_failed = False
+    replay_source, provider_fallback_allowed = _stage2_replay_source(args)
+    for group in STAGE_JUDGMENT_GROUPS:
+        projected, record, failed = _run_segmented_stage_group(
+            args=args,
+            analysis=analysis,
+            analysis_input=analysis_input,
+            facts=facts,
+            run_dir=run_dir,
+            api_key=api_key,
+            target=list(group),
+            replay_source=replay_source,
+            provider_fallback_allowed=provider_fallback_allowed,
+        )
+        stage_results.extend(projected)
+        group_records.append(record)
+        any_group_failed = any_group_failed or failed
+    skip_synthesis = any_group_failed or bool(_segmented_stage_unresolved(stage_results))
+    synthesis, synthesis_status, execution_source, artifact_record, synthesis_failed = (
+        _run_segmented_synthesis(
+            args=args,
+            analysis=analysis,
+            analysis_input=analysis_input,
+            facts=facts,
+            stage_results=stage_results,
+            run_dir=run_dir,
+            api_key=api_key,
+            replay_source=replay_source,
+            provider_fallback_allowed=provider_fallback_allowed,
+            skip_synthesis=skip_synthesis,
+        )
+    )
+    return _assemble_segmented_stage_result(
+        analysis=analysis,
+        facts=facts,
+        stage_results=stage_results,
+        group_records=group_records,
+        synthesis=synthesis,
+        synthesis_status=synthesis_status,
+        synthesis_execution_source=execution_source,
+        synthesis_artifact_record=artifact_record,
+        any_group_failed=any_group_failed or synthesis_failed,
+        run_dir=run_dir,
+    )
 
 
 def _apply_live_postprocess_chain(
@@ -5108,6 +4697,297 @@ def _run_stage1_qualification(
     return facts
 
 
+def _load_cached_video_facts(
+    *,
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    run_dir: Path,
+    api_key: str,
+    role: str,
+    cache_path: Path,
+    cache_key: dict[str, Any],
+    replay_source: Path | None,
+) -> dict[str, Any] | None:
+    if args.llm_dry_run or replay_source is not None:
+        return None
+    cache_record = _read_cache_record(
+        cache_path,
+        "fact_result",
+        cache_key,
+        validator=lambda value: _is_valid_video_fact_cache(role, value, analysis),
+    )
+    if not isinstance(cache_record, dict) or not _restore_stage_fact_artifacts_from_cache(
+        cache_record, run_dir, role
+    ):
+        return None
+    cached = cache_record.get("fact_result")
+    if not isinstance(cached, dict):
+        return None
+    cached.setdefault("temporal_evidence_mode", "unknown")
+    current_contract = (
+        cached.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+    )
+    if not current_contract:
+        sanitize_audio_observations(
+            {"video_understanding": {role: cached}, "stage_analysis": []},
+            can_analyze_native_audio(args.llm_api_url, vision_model(args)),
+        )
+    qualification = cached.get("stage1_qualification")
+    if (
+        not current_contract
+        or not isinstance(qualification, dict)
+        or qualification.get("status") != "completed"
+    ):
+        cached = _run_stage1_qualification(args, analysis, run_dir, api_key, role, cached)
+    cached = _maybe_recover_video_facts(args, analysis, run_dir, api_key, role, cached)
+    acquisition = cached.get("stage1_acquisition")
+    if isinstance(acquisition, dict):
+        acquisition["provider_artifacts"] = _current_stage1_provider_artifacts(cached)
+    if cached.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+        freeze_stage_evidence(cached)
+    return cached
+
+
+def _run_stage1_a_extraction(
+    *,
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    run_dir: Path,
+    api_key: str,
+    role: str,
+    payload: dict[str, Any],
+    replay_source: Path | None,
+    provider_fallback_allowed: bool,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str, Path]:
+    response_meta: dict[str, Any] = {}
+    artifact_path = stage_fact_artifact_path(run_dir, role, "A")
+    replay_artifact_path = (
+        stage_fact_artifact_path(replay_source, role, "A")
+        if replay_source is not None
+        else None
+    )
+    preserve_resume_source = (
+        provider_fallback_allowed
+        and _same_existing_artifact(replay_artifact_path, artifact_path)
+    )
+    resume_failure_path = _resume_failure_artifact_path(artifact_path)
+    execution_source = "provider"
+    parsed_response: dict[str, Any] | None = None
+    fact_result: dict[str, Any] | None = None
+    try:
+        if replay_source is not None:
+            try:
+                parsed_response, response_meta, _source_artifact = _read_replayable_stage_fact(
+                    replay_source,
+                    role=role,
+                    phase="A",
+                    group=None,
+                    payload=payload,
+                    args=args,
+                )
+                execution_source = "replay"
+                fact_result = normalize_video_fact_result(role, parsed_response, analysis)
+            except (StageFactArtifactError, ValueError, SystemExit) as exc:
+                if not provider_fallback_allowed:
+                    if isinstance(exc, StageFactArtifactError):
+                        raise
+                    raise StageFactArtifactError(
+                        f"Stage1-A replay content contract invalid: {exc}"
+                    ) from exc
+                parsed_response = None
+                fact_result = None
+                response_meta = {}
+                execution_source = "provider"
+        if parsed_response is None:
+            request_path = run_dir / f"llm_facts_{role}_request.json"
+            response_path = run_dir / f"llm_facts_{role}_response.json"
+            write_json(request_path, payload)
+            result_text = fetch_json_completion(
+                args,
+                api_key,
+                request_path,
+                response_path,
+                request_max_time_seconds=STAGE1_A_REQUEST_TIMEOUT_SECONDS,
+                request_retries=STAGE1_A_REQUEST_RETRIES,
+                response_meta=response_meta,
+            )
+            parsed_response = parse_json_text(result_text)
+        if not isinstance(parsed_response, dict):
+            raise ValueError("Stage1-A provider response must be a JSON object")
+        if fact_result is None:
+            fact_result = normalize_video_fact_result(role, parsed_response, analysis)
+        artifact = completed_stage_fact_artifact(
+            role=role,
+            phase="A",
+            payload=payload,
+            response=parsed_response,
+            model=vision_model(args),
+            api_url=args.llm_api_url,
+            response_meta=response_meta,
+            artifact_name=artifact_path.name,
+        )
+        write_json(artifact_path, artifact)
+        resume_failure_path.unlink(missing_ok=True)
+    except (OSError, ValueError, RuntimeError, SystemExit) as exc:
+        safe_error = str(exc).replace(api_key, "[REDACTED]")[:1000]
+        failure_artifact = failed_stage_fact_artifact(
+            role=role,
+            phase="A",
+            payload=payload,
+            model=vision_model(args),
+            api_url=args.llm_api_url,
+            error=safe_error or type(exc).__name__,
+            artifact_name=artifact_path.name,
+            response_meta=response_meta,
+            response=parsed_response,
+        )
+        failure_path = resume_failure_path if preserve_resume_source else artifact_path
+        write_json(failure_path, failure_artifact)
+        raise
+    if fact_result is None:  # pragma: no cover - guarded by validation above
+        raise RuntimeError("Stage1-A normalized result is unavailable")
+    return fact_result, artifact, response_meta, execution_source, artifact_path
+
+
+def _qualification_provider_record(item: dict[str, Any], phase: str) -> dict[str, Any]:
+    return {
+        "phase": phase,
+        "artifact": item.get("provider_artifact"),
+        "status": item.get("status", "completed"),
+        "execution_source": item.get("execution_source", "provider"),
+        "request_identity_sha256": item.get("request_identity_sha256", ""),
+        "response_sha256": item.get("response_sha256", ""),
+        "completion_attempts": item.get("completion_attempts", 0),
+        "failure_kind": item.get("failure_kind", ""),
+        "cause_type": item.get("cause_type", ""),
+        "failure_reason": item.get("failure_reason", ""),
+    }
+
+
+def _stage1_provider_artifact_records(
+    fact_result: dict[str, Any],
+    artifact: dict[str, Any],
+    artifact_path: Path,
+    response_meta: dict[str, Any],
+    execution_source: str,
+) -> list[dict[str, Any]]:
+    records = [
+        {
+            "phase": "A",
+            "artifact": artifact_path.name,
+            "status": "completed",
+            "execution_source": execution_source,
+            "request_identity_sha256": artifact["request_identity"]["sha256"],
+            "response_sha256": artifact["response_sha256"],
+            "completion_attempts": response_meta.get("completion_attempts", 0),
+        }
+    ]
+    qualification = fact_result.get("stage1_qualification")
+    qualification_records = (
+        qualification.get("group_records", []) if isinstance(qualification, dict) else []
+    )
+    qualification_records = [
+        item
+        for item in qualification_records
+        if isinstance(item, dict) and item.get("provider_artifact")
+    ]
+    records.extend(
+        _qualification_provider_record(item, "B")
+        for item in qualification_records
+        if str(item.get("phase") or "B").strip().upper() == "B"
+    )
+    recovery = fact_result.get("stage1_recovery")
+    if isinstance(recovery, dict) and recovery.get("provider_artifact"):
+        records.append(
+            {
+                "phase": "C",
+                "artifact": recovery.get("provider_artifact"),
+                "status": recovery.get("provider_status", "completed"),
+                "execution_source": recovery.get("execution_source", "provider"),
+                "request_identity_sha256": recovery.get("request_identity_sha256", ""),
+                "response_sha256": recovery.get("response_sha256", ""),
+                "completion_attempts": recovery.get("completion_attempts", 0),
+                "failure_reason": recovery.get("failure_reason", ""),
+            }
+        )
+    records.extend(
+        _qualification_provider_record(item, "D")
+        for item in qualification_records
+        if str(item.get("phase") or "B").strip().upper() == "D"
+    )
+    return records
+
+
+def _finalize_extracted_video_facts(
+    *,
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    run_dir: Path,
+    api_key: str,
+    role: str,
+    fact_result: dict[str, Any],
+    payload: dict[str, Any],
+    visual_inputs: list[dict[str, Any]],
+    artifact: dict[str, Any],
+    artifact_path: Path,
+    response_meta: dict[str, Any],
+    execution_source: str,
+) -> dict[str, Any]:
+    fact_result["evidence_budget_exceeded"] = response_meta.get("finish_reason") == "length"
+    direct_audio = payload_has_direct_audio(
+        payload,
+        api_url=args.llm_api_url,
+        model=vision_model(args),
+    )
+    sanitize_audio_observations(
+        {"video_understanding": {role: fact_result}, "stage_analysis": []},
+        direct_audio,
+    )
+    fact_result["temporal_evidence_mode"] = "static_only"
+    fact_result["stage1_acquisition"] = build_stage1_acquisition_manifest(
+        analysis,
+        role,
+        native_video=payload_has_video(payload),
+        visual_input_count=len(visual_inputs),
+        visual_input_timestamps=_visual_input_timestamps(visual_inputs),
+        audio_input_available=direct_audio,
+    )
+    fact_result = _run_stage1_qualification(
+        args, analysis, run_dir, api_key, role, fact_result
+    )
+    fact_result = _maybe_recover_video_facts(
+        args, analysis, run_dir, api_key, role, fact_result
+    )
+    recovery = (
+        fact_result.get("stage1_recovery")
+        if isinstance(fact_result.get("stage1_recovery"), dict)
+        else {}
+    )
+    recovery_media_mode = str(recovery.get("media_mode") or "")
+    recovery_direct_audio = (
+        recovery_media_mode in {"focused_native_video", "focused_audio"}
+        and can_analyze_native_audio(args.llm_api_url, vision_model(args))
+    )
+    sanitize_audio_observations(
+        {"video_understanding": {role: fact_result}, "stage_analysis": []},
+        direct_audio or recovery_direct_audio,
+    )
+    if recovery_media_mode == "focused_native_video":
+        fact_result["temporal_evidence_mode"] = "focused_temporal"
+    fact_result["stage1_acquisition"]["provider_artifacts"] = (
+        _stage1_provider_artifact_records(
+            fact_result,
+            artifact,
+            artifact_path,
+            response_meta,
+            execution_source,
+        )
+    )
+    if fact_result.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+        freeze_stage_evidence(fact_result)
+    return fact_result
+
+
 def run_video_fact_extraction(
     args: argparse.Namespace,
     analysis: dict[str, Any],
@@ -5121,65 +5001,24 @@ def run_video_fact_extraction(
     # the image budget by the number of videos would halve each request's
     # temporal coverage even though no request ever contains both sides.
     per_role_limit = max(4, args.llm_image_limit)
-    stage1_replay_source, _provider_fallback_allowed = _stage1_replay_source(args)
+    stage1_replay_source, provider_fallback_allowed = _stage1_replay_source(args)
     for role in ("benchmark", "creator"):
         if role not in videos:
             continue
-        role_dir = run_dir / role
         result_path = run_dir / f"video_facts_{role}.json"
         cache_key = _video_fact_cache_key(args, analysis, role)
         cache_path = _cache_path(run_dir, ".video_fact_cache", cache_key)
-        cache_record = (
-            None
-            if args.llm_dry_run or stage1_replay_source is not None
-            else _read_cache_record(
-                cache_path,
-                "fact_result",
-                cache_key,
-                validator=lambda value: _is_valid_video_fact_cache(role, value, analysis),
-            )
-        )
-        cached = (
-            cache_record.get("fact_result")
-            if isinstance(cache_record, dict)
-            and _restore_stage_fact_artifacts_from_cache(cache_record, run_dir, role)
-            else None
+        cached = _load_cached_video_facts(
+            args=args,
+            analysis=analysis,
+            run_dir=run_dir,
+            api_key=api_key,
+            role=role,
+            cache_path=cache_path,
+            cache_key=cache_key,
+            replay_source=stage1_replay_source,
         )
         if cached is not None:
-            cached.setdefault("temporal_evidence_mode", "unknown")
-            # An active cache is already frozen. Re-running this sanitizer here
-            # could mutate immutable audio facts after the cached digest was
-            # validated; capability changes must invalidate the cache key/code
-            # version instead of rewriting a locked Stage1 record in place.
-            if cached.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
-                sanitize_audio_observations(
-                    {"video_understanding": {role: cached}, "stage_analysis": []},
-                    can_analyze_native_audio(args.llm_api_url, vision_model(args)),
-                )
-            # A valid current-contract cache already contains the frozen
-            # Stage1-B result. Re-running qualification here would spend four
-            # LLM calls and make a supposedly reusable fact set nondeterministic.
-            # Legacy cache records are still migrated once so they can acquire
-            # the current qualification metadata before being frozen again.
-            if (
-                cached.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION
-                or not isinstance(cached.get("stage1_qualification"), dict)
-                or cached.get("stage1_qualification", {}).get("status") != "completed"
-            ):
-                cached = _run_stage1_qualification(args, analysis, run_dir, api_key, role, cached)
-            cached = _maybe_recover_video_facts(
-                args,
-                analysis,
-                run_dir,
-                api_key,
-                role,
-                cached,
-            )
-            acquisition = cached.get("stage1_acquisition")
-            if isinstance(acquisition, dict):
-                acquisition["provider_artifacts"] = _current_stage1_provider_artifacts(cached)
-            if cached.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
-                freeze_stage_evidence(cached)
             facts[role] = cached
             write_json(result_path, cached)
             continue
@@ -5192,225 +5031,34 @@ def run_video_fact_extraction(
             api_url=args.llm_api_url,
             budget=getattr(args, "_resource_budget", None),
         )
-        request_path = run_dir / f"llm_facts_{role}_request.json"
-        response_path = run_dir / f"llm_facts_{role}_response.json"
         if args.llm_dry_run:
             continue
-        response_meta: dict[str, Any] = {}
-        artifact_path = stage_fact_artifact_path(run_dir, role, "A")
-        execution_source = "provider"
-        parsed_response: dict[str, Any] | None = None
-        fact_result: dict[str, Any] | None = None
-        replay_artifact_path = (
-            stage_fact_artifact_path(stage1_replay_source, role, "A")
-            if stage1_replay_source is not None
-            else None
-        )
-        preserve_resume_source = (
-            _provider_fallback_allowed
-            and _same_existing_artifact(replay_artifact_path, artifact_path)
-        )
-        resume_failure_path = _resume_failure_artifact_path(artifact_path)
-        try:
-            if stage1_replay_source is not None:
-                try:
-                    parsed_response, response_meta, _source_artifact = _read_replayable_stage_fact(
-                        stage1_replay_source,
-                        role=role,
-                        phase="A",
-                        group=None,
-                        payload=payload,
-                        args=args,
-                    )
-                    execution_source = "replay"
-                    fact_result = normalize_video_fact_result(
-                        role,
-                        parsed_response,
-                        analysis,
-                    )
-                except (StageFactArtifactError, ValueError, SystemExit) as exc:
-                    # Strict replay is a reproducibility operation and must
-                    # fail closed. Resume is local recovery: a missing or
-                    # stale Stage1-A artifact may be regenerated by the
-                    # provider, while still preserving the failure in the new
-                    # run's artifact ledger if that call also fails.
-                    if not _provider_fallback_allowed:
-                        if isinstance(exc, StageFactArtifactError):
-                            raise
-                        raise StageFactArtifactError(
-                            f"Stage1-A replay content contract invalid: {exc}"
-                        ) from exc
-                    parsed_response = None
-                    fact_result = None
-                    response_meta = {}
-                    execution_source = "provider"
-            if parsed_response is None:
-                write_json(request_path, payload)
-                result_text = fetch_json_completion(
-                    args,
-                    api_key,
-                    request_path,
-                    response_path,
-                    request_max_time_seconds=STAGE1_A_REQUEST_TIMEOUT_SECONDS,
-                    request_retries=STAGE1_A_REQUEST_RETRIES,
-                    response_meta=response_meta,
-                )
-                parsed_response = parse_json_text(result_text)
-            if not isinstance(parsed_response, dict):
-                raise ValueError("Stage1-A provider response must be a JSON object")
-            if fact_result is None:
-                fact_result = normalize_video_fact_result(role, parsed_response, analysis)
-            artifact = completed_stage_fact_artifact(
+        fact_result, artifact, response_meta, execution_source, artifact_path = (
+            _run_stage1_a_extraction(
+                args=args,
+                analysis=analysis,
+                run_dir=run_dir,
+                api_key=api_key,
                 role=role,
-                phase="A",
                 payload=payload,
-                response=parsed_response,
-                model=vision_model(args),
-                api_url=args.llm_api_url,
-                response_meta=response_meta,
-                artifact_name=artifact_path.name,
+                replay_source=stage1_replay_source,
+                provider_fallback_allowed=provider_fallback_allowed,
             )
-            write_json(artifact_path, artifact)
-            resume_failure_path.unlink(missing_ok=True)
-        except (OSError, ValueError, RuntimeError, SystemExit) as exc:
-            safe_error = str(exc).replace(api_key, "[REDACTED]")[:1000]
-            failure_artifact = failed_stage_fact_artifact(
-                    role=role,
-                    phase="A",
-                    payload=payload,
-                    model=vision_model(args),
-                    api_url=args.llm_api_url,
-                    error=safe_error or type(exc).__name__,
-                    artifact_name=artifact_path.name,
-                    response_meta=response_meta,
-                    response=parsed_response,
-                )
-            failure_path = resume_failure_path if preserve_resume_source else artifact_path
-            write_json(failure_path, failure_artifact)
-            raise
-        if fact_result is None:  # pragma: no cover - guarded by validation above
-            raise RuntimeError("Stage1-A normalized result is unavailable")
-        fact_result["evidence_budget_exceeded"] = response_meta.get("finish_reason") == "length"
-        stage1_a_direct_audio = payload_has_direct_audio(
-            payload,
-            api_url=args.llm_api_url,
-            model=vision_model(args),
         )
-        sanitize_audio_observations(
-            {"video_understanding": {role: fact_result}, "stage_analysis": []},
-            stage1_a_direct_audio,
+        fact_result = _finalize_extracted_video_facts(
+            args=args,
+            analysis=analysis,
+            run_dir=run_dir,
+            api_key=api_key,
+            role=role,
+            fact_result=fact_result,
+            payload=payload,
+            visual_inputs=visual_inputs,
+            artifact=artifact,
+            artifact_path=artifact_path,
+            response_meta=response_meta,
+            execution_source=execution_source,
         )
-        # Stage1-A is deliberately static even when the provider could accept
-        # a full video; focused temporal capability is earned only by Stage1-C.
-        fact_result["temporal_evidence_mode"] = "static_only"
-        fact_result["stage1_acquisition"] = build_stage1_acquisition_manifest(
-            analysis,
-            role,
-            native_video=payload_has_video(payload),
-            visual_input_count=len(visual_inputs),
-            visual_input_timestamps=_visual_input_timestamps(visual_inputs),
-            audio_input_available=stage1_a_direct_audio,
-        )
-        fact_result["stage1_acquisition"]["provider_artifacts"] = [{
-            "phase": "A",
-            "artifact": artifact_path.name,
-            "status": "completed",
-            "execution_source": execution_source,
-            "request_identity_sha256": artifact["request_identity"]["sha256"],
-            "response_sha256": artifact["response_sha256"],
-            "completion_attempts": response_meta.get("completion_attempts", 0),
-        }]
-        fact_result = _run_stage1_qualification(
-            args,
-            analysis,
-            run_dir,
-            api_key,
-            role,
-            fact_result,
-        )
-        fact_result = _maybe_recover_video_facts(
-            args,
-            analysis,
-            run_dir,
-            api_key,
-            role,
-            fact_result,
-        )
-        recovery_meta = fact_result.get("stage1_recovery") if isinstance(fact_result.get("stage1_recovery"), dict) else {}
-        recovery_media_mode = str(recovery_meta.get("media_mode") or "")
-        recovery_direct_audio = (
-            recovery_media_mode in {"focused_native_video", "focused_audio"}
-            and can_analyze_native_audio(args.llm_api_url, vision_model(args))
-        )
-        sanitize_audio_observations(
-            {"video_understanding": {role: fact_result}, "stage_analysis": []},
-            stage1_a_direct_audio or recovery_direct_audio,
-        )
-        if recovery_media_mode == "focused_native_video":
-            fact_result["temporal_evidence_mode"] = "focused_temporal"
-        existing_provider_artifacts = [{
-            "phase": "A",
-            "artifact": artifact_path.name,
-            "status": "completed",
-            "execution_source": execution_source,
-            "request_identity_sha256": artifact["request_identity"]["sha256"],
-            "response_sha256": artifact["response_sha256"],
-            "completion_attempts": response_meta.get("completion_attempts", 0),
-        }]
-        qualification_records = [
-            item
-            for item in (
-                fact_result.get("stage1_qualification", {}).get("group_records", [])
-                if isinstance(fact_result.get("stage1_qualification"), dict)
-                else []
-            )
-            if isinstance(item, dict) and item.get("provider_artifact")
-        ]
-        for item in qualification_records:
-            if str(item.get("phase") or "B").strip().upper() != "B":
-                continue
-            existing_provider_artifacts.append({
-                "phase": "B",
-                "artifact": item.get("provider_artifact"),
-                "status": item.get("status", "completed"),
-                "execution_source": item.get("execution_source", "provider"),
-                "request_identity_sha256": item.get("request_identity_sha256", ""),
-                "response_sha256": item.get("response_sha256", ""),
-                "completion_attempts": item.get("completion_attempts", 0),
-                "failure_kind": item.get("failure_kind", ""),
-                "cause_type": item.get("cause_type", ""),
-                "failure_reason": item.get("failure_reason", ""),
-            })
-        recovery_meta = fact_result.get("stage1_recovery")
-        if isinstance(recovery_meta, dict) and recovery_meta.get("provider_artifact"):
-            existing_provider_artifacts.append({
-                "phase": "C",
-                "artifact": recovery_meta.get("provider_artifact"),
-                "status": recovery_meta.get("provider_status", "completed"),
-                "execution_source": recovery_meta.get("execution_source", "provider"),
-                "request_identity_sha256": recovery_meta.get("request_identity_sha256", ""),
-                "response_sha256": recovery_meta.get("response_sha256", ""),
-                "completion_attempts": recovery_meta.get("completion_attempts", 0),
-                "failure_reason": recovery_meta.get("failure_reason", ""),
-            })
-        for item in qualification_records:
-            if str(item.get("phase") or "B").strip().upper() != "D":
-                continue
-            existing_provider_artifacts.append({
-                "phase": "D",
-                "artifact": item.get("provider_artifact"),
-                "status": item.get("status", "completed"),
-                "execution_source": item.get("execution_source", "provider"),
-                "request_identity_sha256": item.get("request_identity_sha256", ""),
-                "response_sha256": item.get("response_sha256", ""),
-                "completion_attempts": item.get("completion_attempts", 0),
-                "failure_kind": item.get("failure_kind", ""),
-                "cause_type": item.get("cause_type", ""),
-                "failure_reason": item.get("failure_reason", ""),
-            })
-        fact_result["stage1_acquisition"]["provider_artifacts"] = existing_provider_artifacts
-        if fact_result.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
-            freeze_stage_evidence(fact_result)
         facts[role] = fact_result
         write_json(result_path, fact_result)
         _write_cache_result(
@@ -5914,6 +5562,505 @@ def _extend_stage1_acquisition_for_recovery(
     return manifest
 
 
+def _stage1_recovery_plan(facts: dict[str, Any]) -> dict[str, Any]:
+    """Derive the one-pass Stage1-C target set without performing any I/O."""
+    budget_flag = facts.get("evidence_budget_exceeded") is True
+    contract_issues = stage_evidence_contract_issues(facts, require_version=True)
+    primary_targets = stage_evidence_recovery_targets(
+        facts,
+        include_budget=False,
+        include_coverage_audit=False,
+    )
+    check_map = stage_evidence_check_map(facts)
+    s6_check = check_map.get("S6")
+    s6_status = str(s6_check.get("status") or "").strip().lower() if isinstance(s6_check, dict) else ""
+    s6_coverage = str(s6_check.get("coverage") or "").strip().lower() if isinstance(s6_check, dict) else ""
+    s6_explicitly_absent = s6_status == "absent"
+    s6_tail_review_required = (
+        "S6" in set(primary_targets)
+        and not (s6_status == "present" and s6_coverage == "complete")
+    )
+    if s6_explicitly_absent and "S6" not in primary_targets:
+        primary_targets.append("S6")
+
+    known_stages = set(stage_codes())
+    issue_targets = [
+        issue.split(":", 1)[0]
+        for issue in contract_issues
+        if issue.split(":", 1)[0] in known_stages
+    ]
+    if budget_flag:
+        targets = list(stage_codes())
+    else:
+        targets = list(dict.fromkeys([*primary_targets, *issue_targets]))
+        if contract_issues and not targets:
+            # A global contract defect has no safe stage-local target.
+            targets = list(stage_codes())
+
+    trigger_reasons: list[str] = []
+    if budget_flag:
+        trigger_reasons.append("evidence_budget_exceeded")
+    if primary_targets:
+        trigger_reasons.append("stage_coverage_incomplete")
+    if any(
+        isinstance(check_map.get(code), dict)
+        and str(check_map[code].get("status") or "").strip().lower() == "conflict"
+        for code in targets
+    ) or contract_issues:
+        trigger_reasons.append("evidence_qualification_conflict")
+    if any(code in {"S3", "S4"} for code in targets):
+        manifest = facts.get("stage1_acquisition") if isinstance(facts.get("stage1_acquisition"), dict) else {}
+        if manifest.get("input_mode") == "canonical_frames":
+            trigger_reasons.append("temporal_continuity_uncertain")
+    if s6_explicitly_absent or s6_tail_review_required:
+        trigger_reasons.append("s6_tail_unclosed")
+    return {
+        "budget_flag": budget_flag,
+        "contract_issues": contract_issues,
+        "targets": targets,
+        "trigger_reasons": list(dict.fromkeys(trigger_reasons)),
+        "s6_explicitly_absent": s6_explicitly_absent,
+        "s6_tail_review_required": s6_tail_review_required,
+    }
+
+
+def _validate_stage1_recovery_response(
+    value: Any,
+    targets: list[str],
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("Stage1 focused recovery 必须返回 JSON object。")
+    forbidden = stage1_forbidden_field_issues(value)
+    pipeline_owned = stage1_pipeline_owned_field_issues(value)
+    if forbidden:
+        raise ValueError("Stage1 focused recovery returned downstream fields: " + ", ".join(forbidden))
+    if pipeline_owned:
+        raise ValueError(
+            "Stage1 focused recovery returned pipeline-owned fields: "
+            + ", ".join(pipeline_owned)
+        )
+    if value.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+        raise ValueError("Stage1 focused recovery 缺少匹配的 evidence contract version。")
+    if not isinstance(value.get("candidate_evidence_units"), list):
+        raise ValueError("Stage1 focused recovery 的 candidate_evidence_units 必须是数组。")
+    target_set = set(targets)
+    stage_order = list(stage_codes())
+    for candidate in value["candidate_evidence_units"]:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_stages = {
+            code
+            for raw in candidate.get("functions") or []
+            if (code := normalize_stage_code(str(raw).split("_", 1)[0])) is not None
+        }
+        out_of_scope = sorted(candidate_stages - target_set, key=stage_order.index)
+        if out_of_scope:
+            raise ValueError("Stage1-C candidate escaped target stages: " + ",".join(out_of_scope))
+    allowed_keys = {"candidate_evidence_units", "stage_evidence_contract_version"}
+    out_of_contract = sorted(set(value) - allowed_keys)
+    if out_of_contract:
+        raise ValueError(
+            "Stage1-C observation returned fields owned by another phase: "
+            + ", ".join(out_of_contract)
+        )
+    return value
+
+
+def _finalize_recovered_stage1_contract(
+    merged: dict[str, Any],
+    original_facts: dict[str, Any],
+    targets: list[str],
+    trigger_reasons: list[str],
+    contract_issues_before: list[str],
+    budget_flag: bool,
+    api_key: str,
+) -> dict[str, Any]:
+    """Close the recovered ledger or return the typed recovery failure."""
+    final_issues = stage_evidence_contract_issues(merged, require_version=True)
+    if not final_issues:
+        _mark_stage1_qualification_recovered(merged, targets)
+        return merged
+
+    known_stages = set(stage_codes())
+    affected_stages = sorted({
+        issue.split(":", 1)[0]
+        for issue in final_issues
+        if issue.split(":", 1)[0] in known_stages
+    })
+    unscoped_issues = [
+        issue
+        for issue in final_issues
+        if issue.split(":", 1)[0] not in known_stages
+    ]
+    if affected_stages and not unscoped_issues:
+        _block_stage_qualifications(
+            merged,
+            affected_stages,
+            reason="该阶段资格在定向补观察后仍不满足结构合同，保持未知；原子观察仍保留。",
+        )
+        merged["stage1_coverage_audit"] = _materialize_stage_recovery_audit(
+            merged,
+            targets,
+            errors=["focused_recovery_contract_invalid"],
+        )
+        recovery = merged.get("stage1_recovery") if isinstance(merged.get("stage1_recovery"), dict) else {}
+        unresolved = list(dict.fromkeys([
+            *[str(stage) for stage in recovery.get("unresolved_stages") or []],
+            *affected_stages,
+        ]))
+        recovery.update(
+            {
+                "status": "focused_recovery_with_unresolved",
+                "recovery_mode": "stage1_c_observe_stage1_d_qualify_once",
+                "unresolved_stages": unresolved,
+                "contract_issues_after_recovery": final_issues,
+            }
+        )
+        merged["stage1_recovery"] = recovery
+        remaining_issues = stage_evidence_contract_issues(merged, require_version=True)
+        if not remaining_issues:
+            _mark_stage1_qualification_recovered(merged, targets)
+            return merged
+        final_issues = remaining_issues
+    return _mark_video_fact_recovery_failed(
+        original_facts,
+        target_stages=targets,
+        trigger_reasons=trigger_reasons,
+        contract_issues=[*contract_issues_before, *final_issues],
+        budget_flag=budget_flag,
+        error=ValueError("Stage1 evidence contract remains invalid after bounded recovery."),
+        api_key=api_key,
+    )
+
+
+def _prepare_stage1_recovery_request(
+    *,
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    role: str,
+    facts: dict[str, Any],
+    targets: list[str],
+    review_s6_tail: bool,
+) -> tuple[dict[str, Any], list[dict[str, Any]], str, list[dict[str, Any]], int]:
+    videos = analysis.get("videos")
+    video_info = videos.get(role, {}) if isinstance(videos, dict) else {}
+    visual_inputs = select_stage_recovery_visual_inputs(
+        video_info if isinstance(video_info, dict) else {},
+        role,
+        targets,
+        image_limit=max(4, int(getattr(args, "llm_image_limit", 0) or 0)),
+    )
+    payload = build_video_fact_recovery_payload(
+        vision_model(args),
+        role,
+        analysis,
+        visual_inputs,
+        stage_analysis_evidence_view(facts, targets),
+        targets,
+        api_url=args.llm_api_url,
+        budget=getattr(args, "_resource_budget", None),
+    )
+    media_mode = (
+        "focused_native_video"
+        if payload_has_video(payload)
+        else "focused_audio"
+        if payload_has_audio(payload)
+        else "canonical_frames"
+    )
+    media_windows = stage1_recovery_media_windows(
+        analysis,
+        role,
+        targets,
+        s6_tail_review=review_s6_tail,
+    )
+    return payload, visual_inputs, media_mode, media_windows, _payload_size_bytes(payload)
+
+
+def _obtain_stage1_recovery_response(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    api_key: str,
+    role: str,
+    targets: list[str],
+    payload: dict[str, Any],
+    replay_source: Path | None,
+    provider_fallback_allowed: bool,
+    artifact_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
+    response_meta: dict[str, Any] = {}
+    recovery: dict[str, Any] | None = None
+    execution_source = "provider"
+    if replay_source is not None:
+        try:
+            recovery, response_meta, _source_artifact = _read_replayable_stage_fact(
+                replay_source,
+                role=role,
+                phase="C",
+                group=targets,
+                payload=payload,
+                args=args,
+            )
+            execution_source = "replay"
+            _validate_stage1_recovery_response(recovery, targets)
+        except (StageFactArtifactError, ValueError) as exc:
+            if not provider_fallback_allowed:
+                if isinstance(exc, StageFactArtifactError):
+                    raise
+                raise StageFactArtifactError(
+                    f"Stage1-C replay content contract invalid: {exc}"
+                ) from exc
+            recovery = None
+            response_meta = {}
+            execution_source = "provider"
+    if recovery is None:
+        request_path = run_dir / f"llm_facts_{role}_stage_recovery_request.json"
+        response_path = run_dir / f"llm_facts_{role}_stage_recovery_response.json"
+        write_json(request_path, payload)
+        recovery_text = fetch_json_completion(
+            args,
+            api_key,
+            request_path,
+            response_path,
+            response_meta=response_meta,
+        )
+        recovery = parse_json_text(recovery_text)
+    recovery = _validate_stage1_recovery_response(recovery, targets)
+    artifact = completed_stage_fact_artifact(
+        role=role,
+        phase="C",
+        group=targets,
+        payload=payload,
+        response=recovery,
+        model=vision_model(args),
+        api_url=args.llm_api_url,
+        response_meta=response_meta,
+        artifact_name=artifact_path.name,
+    )
+    write_json(artifact_path, artifact)
+    _resume_failure_artifact_path(artifact_path).unlink(missing_ok=True)
+    return recovery, artifact, response_meta, execution_source
+
+
+def _mark_stage1_recovery_execution_failed(
+    *,
+    args: argparse.Namespace,
+    api_key: str,
+    role: str,
+    facts: dict[str, Any],
+    targets: list[str],
+    trigger_reasons: list[str],
+    contract_issues: list[str],
+    budget_flag: bool,
+    error: BaseException,
+    payload: dict[str, Any],
+    response_meta: dict[str, Any],
+    recovery: dict[str, Any] | None,
+    artifact_path: Path,
+    preserve_resume_source: bool,
+    execution_source: str,
+    media_mode: str,
+    media_windows: list[dict[str, Any]],
+    request_bytes: int,
+    request_started_at: float,
+) -> dict[str, Any]:
+    failure_artifact: dict[str, Any] | None = None
+    recorded_artifact_path = artifact_path
+    if payload:
+        failure_artifact = failed_stage_fact_artifact(
+            role=role,
+            phase="C",
+            group=targets,
+            payload=payload,
+            model=vision_model(args),
+            api_url=args.llm_api_url,
+            error=str(error) or type(error).__name__,
+            artifact_name=artifact_path.name,
+            response_meta=response_meta,
+            response=recovery,
+        )
+        recorded_artifact_path = (
+            _resume_failure_artifact_path(artifact_path)
+            if preserve_resume_source
+            else artifact_path
+        )
+        write_json(recorded_artifact_path, failure_artifact)
+    failed = _mark_video_fact_recovery_failed(
+        facts,
+        target_stages=targets,
+        trigger_reasons=trigger_reasons,
+        contract_issues=contract_issues,
+        budget_flag=budget_flag,
+        error=error,
+        api_key=api_key,
+    )
+    failure_meta = (
+        failed.get("stage1_recovery")
+        if isinstance(failed.get("stage1_recovery"), dict)
+        else {}
+    )
+    failure_meta.update(
+        {
+            "media_mode": media_mode,
+            "media_windows": media_windows,
+            "request_bytes": request_bytes,
+            "elapsed_seconds": round(max(0.0, time.monotonic() - request_started_at), 3),
+            "effective_patch": {
+                "candidate_units_added": 0,
+                "resolved_stages": [],
+                "unresolved_stages": targets,
+            },
+        }
+    )
+    if failure_artifact is not None:
+        failure_meta.update(
+            {
+                "provider_status": "failed",
+                "execution_source": execution_source,
+                "provider_artifact": recorded_artifact_path.name,
+                "request_identity_sha256": failure_artifact["request_identity"]["sha256"],
+                "response_sha256": failure_artifact.get("response_sha256", ""),
+                "completion_attempts": response_meta.get("completion_attempts", 0),
+            }
+        )
+    failed["stage1_recovery"] = failure_meta
+    return failed
+
+
+def _merge_stage1_recovery_observations(
+    *,
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    run_dir: Path,
+    api_key: str,
+    role: str,
+    facts: dict[str, Any],
+    recovery: dict[str, Any],
+    payload: dict[str, Any],
+    recovery_visual_inputs: list[dict[str, Any]],
+    response_meta: dict[str, Any],
+    execution_source: str,
+    artifact: dict[str, Any],
+    artifact_path: Path,
+    targets: list[str],
+    trigger_reasons: list[str],
+    contract_issues: list[str],
+    budget_flag: bool,
+    media_mode: str,
+    media_windows: list[dict[str, Any]],
+    request_bytes: int,
+    request_started_at: float,
+) -> dict[str, Any]:
+    recovery_for_merge = copy.deepcopy(recovery)
+    direct_audio = payload_has_direct_audio(
+        payload,
+        api_url=args.llm_api_url,
+        model=vision_model(args),
+    )
+    recovery_base = copy.deepcopy(facts)
+    recovery_base["stage1_acquisition"] = _extend_stage1_acquisition_for_recovery(
+        analysis,
+        role,
+        facts,
+        payload,
+        recovery_visual_inputs,
+        direct_audio=direct_audio,
+    )
+    candidate_id_map: list[dict[str, Any]] = []
+    sanitize_audio_observations(
+        {
+            "video_understanding": {
+                role: {
+                    "evidence_units": recovery_for_merge.get("candidate_evidence_units") or [],
+                }
+            },
+            "stage_analysis": [],
+        },
+        direct_audio,
+    )
+    merged = _merge_video_fact_recovery(
+        role,
+        recovery_base,
+        recovery_for_merge,
+        analysis,
+        targets,
+        budget_exceeded=response_meta.get("finish_reason") == "length",
+        candidate_id_map=candidate_id_map,
+    )
+    merged = _run_stage1_qualification(
+        args,
+        analysis,
+        run_dir,
+        api_key,
+        role,
+        merged,
+        target_stages=targets,
+    )
+    merged["stage1_coverage_audit"] = _materialize_stage_recovery_audit(merged, targets)
+    unresolved_stages = [
+        stage
+        for stage in targets
+        if stage
+        in stage_evidence_recovery_targets(
+            merged,
+            include_budget=False,
+            include_coverage_audit=True,
+        )
+    ]
+    accepted_count = sum(item.get("status") == "accepted" for item in candidate_id_map)
+    qualification = merged.get("stage1_qualification")
+    qualification_records = (
+        qualification.get("group_records", []) if isinstance(qualification, dict) else []
+    )
+    merged["stage1_recovery"] = {
+        "source": "pipeline",
+        "status": "focused_recovery_with_unresolved" if unresolved_stages else "focused_recovery",
+        "recovery_mode": "stage1_c_observe_stage1_d_qualify_once",
+        "target_stages": targets,
+        "unresolved_stages": unresolved_stages,
+        "candidate_unit_count": accepted_count,
+        "contract_issues_before_recovery": contract_issues,
+        "trigger_reasons": trigger_reasons,
+        "budget_flag_before_recovery": budget_flag,
+        "budget_status": "resolved_for_stage_qualification" if budget_flag and not unresolved_stages else (
+            "unresolved" if budget_flag else "not_flagged"
+        ),
+        "audit_independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
+        "provider_status": "completed",
+        "execution_source": execution_source,
+        "provider_artifact": artifact_path.name,
+        "request_identity_sha256": artifact["request_identity"]["sha256"],
+        "response_sha256": artifact["response_sha256"],
+        "completion_attempts": response_meta.get("completion_attempts", 0),
+        "candidate_id_map": candidate_id_map,
+        "qualification_provider_artifacts": [
+            str(item.get("provider_artifact"))
+            for item in qualification_records
+            if isinstance(item, dict)
+            and str(item.get("phase") or "").strip().upper() == "D"
+            and item.get("provider_artifact")
+        ],
+        "media_mode": media_mode,
+        "media_windows": media_windows,
+        "request_bytes": request_bytes,
+        "elapsed_seconds": round(max(0.0, time.monotonic() - request_started_at), 3),
+        "effective_patch": {
+            "candidate_units_added": accepted_count,
+            "resolved_stages": [stage for stage in targets if stage not in unresolved_stages],
+            "unresolved_stages": unresolved_stages,
+        },
+    }
+    return _finalize_recovered_stage1_contract(
+        merged,
+        facts,
+        targets,
+        trigger_reasons,
+        contract_issues,
+        budget_flag,
+        api_key,
+    )
+
+
 def _maybe_recover_video_facts(
     args: argparse.Namespace,
     analysis: dict[str, Any],
@@ -5944,62 +6091,13 @@ def _maybe_recover_video_facts(
         }
     ):
         return facts
-    budget_flag = facts.get("evidence_budget_exceeded") is True
-    contract_issues = stage_evidence_contract_issues(facts, require_version=True)
-    primary_targets = stage_evidence_recovery_targets(
-        facts,
-        include_budget=False,
-        include_coverage_audit=False,
-    )
-    # A missed tail CTA is costly and common in noisy/local-language speech.
-    # Open one bounded S6 tail review whenever S6 is unresolved and already
-    # belongs to this single recovery pass; the prompt still requires semantic
-    # confirmation and may keep the result unknown/absent.
-    s6_check = stage_evidence_check_map(facts).get("S6")
-    s6_explicitly_absent = (
-        isinstance(s6_check, dict)
-        and str(s6_check.get("status") or "").strip().lower() == "absent"
-    )
-    s6_status = str(s6_check.get("status") or "").strip().lower() if isinstance(s6_check, dict) else ""
-    s6_coverage = str(s6_check.get("coverage") or "").strip().lower() if isinstance(s6_check, dict) else ""
-    s6_tail_review_required = (
-        "S6" in set(primary_targets)
-        and not (s6_status == "present" and s6_coverage == "complete")
-    )
-    if s6_explicitly_absent and "S6" not in primary_targets:
-        primary_targets.append("S6")
-    issue_targets = [
-        issue.split(":", 1)[0]
-        for issue in contract_issues
-        if issue.split(":", 1)[0] in set(stage_codes())
-    ]
-    if budget_flag:
-        targets = list(stage_codes())
-    else:
-        targets = list(dict.fromkeys([*primary_targets, *issue_targets]))
-        if contract_issues and not targets:
-            # A global contract defect (for example an old contract version or
-            # duplicate IDs) has no safe stage-local target. One bounded pass
-            # is the narrowest honest recovery in that case.
-            targets = list(stage_codes())
-    trigger_reasons: list[str] = []
-    if budget_flag:
-        trigger_reasons.append("evidence_budget_exceeded")
-    if primary_targets:
-        trigger_reasons.append("stage_coverage_incomplete")
-    if any(
-        isinstance(stage_evidence_check_map(facts).get(code), dict)
-        and str(stage_evidence_check_map(facts)[code].get("status") or "").strip().lower() == "conflict"
-        for code in targets
-    ) or contract_issues:
-        trigger_reasons.append("evidence_qualification_conflict")
-    if any(code in {"S3", "S4"} for code in targets):
-        manifest = facts.get("stage1_acquisition") if isinstance(facts.get("stage1_acquisition"), dict) else {}
-        if manifest.get("input_mode") == "canonical_frames":
-            trigger_reasons.append("temporal_continuity_uncertain")
-    if s6_explicitly_absent or s6_tail_review_required:
-        trigger_reasons.append("s6_tail_unclosed")
-    trigger_reasons = list(dict.fromkeys(trigger_reasons))
+    plan = _stage1_recovery_plan(facts)
+    budget_flag = plan["budget_flag"]
+    contract_issues = plan["contract_issues"]
+    targets = plan["targets"]
+    trigger_reasons = plan["trigger_reasons"]
+    s6_explicitly_absent = plan["s6_explicitly_absent"]
+    s6_tail_review_required = plan["s6_tail_review_required"]
     if not targets and not trigger_reasons:
         facts["stage1_recovery"] = {
             "source": "pipeline",
@@ -6020,8 +6118,6 @@ def _maybe_recover_video_facts(
         }
         return facts
 
-    request_path = run_dir / f"llm_facts_{role}_stage_recovery_request.json"
-    response_path = run_dir / f"llm_facts_{role}_stage_recovery_response.json"
     artifact_path = stage_fact_artifact_path(run_dir, role, "C", targets)
     replay_source, provider_fallback_allowed = _stage1_replay_source(args)
     payload: dict[str, Any] = {}
@@ -6033,48 +6129,6 @@ def _maybe_recover_video_facts(
     request_bytes = 0
     recovery: dict[str, Any] | None = None
     recovery_visual_inputs: list[dict[str, Any]] = []
-    recorded_artifact_path = artifact_path
-
-    def validate_recovery_response(value: Any) -> dict[str, Any]:
-        if not isinstance(value, dict):
-            raise ValueError("Stage1 focused recovery 必须返回 JSON object。")
-        forbidden = stage1_forbidden_field_issues(value)
-        pipeline_owned = stage1_pipeline_owned_field_issues(value)
-        if forbidden:
-            raise ValueError(
-                "Stage1 focused recovery returned downstream fields: " + ", ".join(forbidden)
-            )
-        if pipeline_owned:
-            raise ValueError(
-                "Stage1 focused recovery returned pipeline-owned fields: "
-                + ", ".join(pipeline_owned)
-            )
-        if value.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
-            raise ValueError("Stage1 focused recovery 缺少匹配的 evidence contract version。")
-        if not isinstance(value.get("candidate_evidence_units"), list):
-            raise ValueError("Stage1 focused recovery 的 candidate_evidence_units 必须是数组。")
-        target_set = set(targets)
-        for candidate in value["candidate_evidence_units"]:
-            if not isinstance(candidate, dict):
-                continue
-            candidate_stages = {
-                code
-                for raw in candidate.get("functions") or []
-                if (code := normalize_stage_code(str(raw).split("_", 1)[0])) is not None
-            }
-            out_of_scope = sorted(candidate_stages - target_set, key=list(stage_codes()).index)
-            if out_of_scope:
-                raise ValueError(
-                    "Stage1-C candidate escaped target stages: " + ",".join(out_of_scope)
-                )
-        allowed_keys = {"candidate_evidence_units", "stage_evidence_contract_version"}
-        out_of_contract = sorted(set(value) - allowed_keys)
-        if out_of_contract:
-            raise ValueError(
-                "Stage1-C observation returned fields owned by another phase: "
-                + ", ".join(out_of_contract)
-            )
-        return value
 
     replay_artifact_path = (
         stage_fact_artifact_path(replay_source, role, "C", targets)
@@ -6085,294 +6139,78 @@ def _maybe_recover_video_facts(
         provider_fallback_allowed
         and _same_existing_artifact(replay_artifact_path, artifact_path)
     )
-    resume_failure_path = _resume_failure_artifact_path(artifact_path)
     try:
-        video_info = analysis.get("videos", {}).get(role, {}) if isinstance(analysis.get("videos"), dict) else {}
-        recovery_visual_inputs = select_stage_recovery_visual_inputs(
-            video_info if isinstance(video_info, dict) else {},
-            role,
-            targets,
-            image_limit=max(4, int(getattr(args, "llm_image_limit", 0) or 0)),
-        )
-        payload = build_video_fact_recovery_payload(
-            vision_model(args),
-            role,
-            analysis,
-            recovery_visual_inputs,
-            stage_analysis_evidence_view(facts, targets),
-            targets,
-            api_url=args.llm_api_url,
-            budget=getattr(args, "_resource_budget", None),
-        )
-        media_mode = (
-            "focused_native_video"
-            if payload_has_video(payload)
-            else "focused_audio"
-            if payload_has_audio(payload)
-            else "canonical_frames"
-        )
-        media_windows = stage1_recovery_media_windows(
-            analysis,
-            role,
-            targets,
-            s6_tail_review=s6_tail_review_required or s6_explicitly_absent,
-        )
-        request_bytes = _payload_size_bytes(payload)
-        if replay_source is not None:
-            try:
-                recovery, response_meta, _source_artifact = _read_replayable_stage_fact(
-                    replay_source,
-                    role=role,
-                    phase="C",
-                    group=targets,
-                    payload=payload,
-                    args=args,
-                )
-                execution_source = "replay"
-                validate_recovery_response(recovery)
-            except (StageFactArtifactError, ValueError) as exc:
-                if not provider_fallback_allowed:
-                    if isinstance(exc, StageFactArtifactError):
-                        raise
-                    raise StageFactArtifactError(
-                        f"Stage1-C replay content contract invalid: {exc}"
-                    ) from exc
-                recovery = None
-                response_meta = {}
-                execution_source = "provider"
-        if recovery is None:
-            write_json(request_path, payload)
-            recovery_text = fetch_json_completion(
-                args, api_key, request_path, response_path, response_meta=response_meta
+        payload, recovery_visual_inputs, media_mode, media_windows, request_bytes = (
+            _prepare_stage1_recovery_request(
+                args=args,
+                analysis=analysis,
+                role=role,
+                facts=facts,
+                targets=targets,
+                review_s6_tail=s6_tail_review_required or s6_explicitly_absent,
             )
-            recovery = parse_json_text(recovery_text)
-        recovery = validate_recovery_response(recovery)
-        artifact = completed_stage_fact_artifact(
-            role=role,
-            phase="C",
-            group=targets,
-            payload=payload,
-            response=recovery,
-            model=vision_model(args),
-            api_url=args.llm_api_url,
-            response_meta=response_meta,
-            artifact_name=artifact_path.name,
         )
-        write_json(artifact_path, artifact)
-        resume_failure_path.unlink(missing_ok=True)
+        recovery, artifact, response_meta, execution_source = (
+            _obtain_stage1_recovery_response(
+                args=args,
+                run_dir=run_dir,
+                api_key=api_key,
+                role=role,
+                targets=targets,
+                payload=payload,
+                replay_source=replay_source,
+                provider_fallback_allowed=provider_fallback_allowed,
+                artifact_path=artifact_path,
+            )
+        )
     except (OSError, ValueError, RuntimeError, SystemExit) as exc:
         if _is_strict_replay_failure(args, exc):
             raise
-        failure_artifact: dict[str, Any] | None = None
-        if payload:
-            failure_artifact = failed_stage_fact_artifact(
-                role=role,
-                phase="C",
-                group=targets,
-                payload=payload,
-                model=vision_model(args),
-                api_url=args.llm_api_url,
-                error=str(exc) or type(exc).__name__,
-                artifact_name=artifact_path.name,
-                response_meta=response_meta,
-                response=recovery,
-            )
-            failure_path = resume_failure_path if preserve_resume_source else artifact_path
-            write_json(failure_path, failure_artifact)
-            recorded_artifact_path = failure_path
-        failed = _mark_video_fact_recovery_failed(
-            facts,
-            target_stages=targets,
+        return _mark_stage1_recovery_execution_failed(
+            args=args,
+            api_key=api_key,
+            role=role,
+            facts=facts,
+            targets=targets,
             trigger_reasons=trigger_reasons,
             contract_issues=contract_issues,
             budget_flag=budget_flag,
             error=exc,
-            api_key=api_key,
+            payload=payload,
+            response_meta=response_meta,
+            recovery=recovery,
+            artifact_path=artifact_path,
+            preserve_resume_source=preserve_resume_source,
+            execution_source=execution_source,
+            media_mode=media_mode,
+            media_windows=media_windows,
+            request_bytes=request_bytes,
+            request_started_at=request_started_at,
         )
-        failure_meta = failed.get("stage1_recovery") if isinstance(failed.get("stage1_recovery"), dict) else {}
-        failure_meta.update(
-            {
-                "media_mode": media_mode,
-                "media_windows": media_windows,
-                "request_bytes": request_bytes,
-                "elapsed_seconds": round(max(0.0, time.monotonic() - request_started_at), 3),
-                "effective_patch": {
-                    "candidate_units_added": 0,
-                    "resolved_stages": [],
-                    "unresolved_stages": targets,
-                },
-            }
-        )
-        if failure_artifact is not None:
-            failure_meta.update(
-                {
-                    "provider_status": "failed",
-                    "execution_source": execution_source,
-                    "provider_artifact": recorded_artifact_path.name,
-                    "request_identity_sha256": failure_artifact["request_identity"]["sha256"],
-                    "response_sha256": failure_artifact.get("response_sha256", ""),
-                    "completion_attempts": response_meta.get("completion_attempts", 0),
-                }
-            )
-        failed["stage1_recovery"] = failure_meta
-        return failed
 
-    recovery_for_merge = copy.deepcopy(recovery)
-    recovery_direct_audio = payload_has_direct_audio(
-        payload,
-        api_url=args.llm_api_url,
-        model=vision_model(args),
+    return _merge_stage1_recovery_observations(
+        args=args,
+        analysis=analysis,
+        run_dir=run_dir,
+        api_key=api_key,
+        role=role,
+        facts=facts,
+        recovery=recovery,
+        payload=payload,
+        recovery_visual_inputs=recovery_visual_inputs,
+        response_meta=response_meta,
+        execution_source=execution_source,
+        artifact=artifact,
+        artifact_path=artifact_path,
+        targets=targets,
+        trigger_reasons=trigger_reasons,
+        contract_issues=contract_issues,
+        budget_flag=budget_flag,
+        media_mode=media_mode,
+        media_windows=media_windows,
+        request_bytes=request_bytes,
+        request_started_at=request_started_at,
     )
-    recovery_base = copy.deepcopy(facts)
-    recovery_base["stage1_acquisition"] = _extend_stage1_acquisition_for_recovery(
-        analysis,
-        role,
-        facts,
-        payload,
-        recovery_visual_inputs,
-        direct_audio=recovery_direct_audio,
-    )
-    candidate_id_map: list[dict[str, Any]] = []
-    sanitize_audio_observations(
-        {
-            "video_understanding": {
-                role: {
-                    "evidence_units": recovery_for_merge.get("candidate_evidence_units") or [],
-                }
-            },
-            "stage_analysis": [],
-        },
-        recovery_direct_audio,
-    )
-    merged = _merge_video_fact_recovery(
-        role,
-        recovery_base,
-        recovery_for_merge,
-        analysis,
-        targets,
-        budget_exceeded=response_meta.get("finish_reason") == "length",
-        candidate_id_map=candidate_id_map,
-    )
-    merged = _run_stage1_qualification(
-        args,
-        analysis,
-        run_dir,
-        api_key,
-        role,
-        merged,
-        target_stages=targets,
-    )
-    merged["stage1_coverage_audit"] = _materialize_stage_recovery_audit(
-        merged,
-        targets,
-    )
-    unresolved_stages = [
-        stage for stage in targets
-        if stage in stage_evidence_recovery_targets(
-            merged,
-            include_budget=False,
-            include_coverage_audit=True,
-        )
-    ]
-    merged["stage1_recovery"] = {
-        "source": "pipeline",
-        "status": "focused_recovery_with_unresolved" if unresolved_stages else "focused_recovery",
-        "recovery_mode": "stage1_c_observe_stage1_d_qualify_once",
-        "target_stages": targets,
-        "unresolved_stages": unresolved_stages,
-        "candidate_unit_count": sum(
-            item.get("status") == "accepted" for item in candidate_id_map
-        ),
-        "contract_issues_before_recovery": contract_issues,
-        "trigger_reasons": trigger_reasons,
-        "budget_flag_before_recovery": budget_flag,
-        "budget_status": "resolved_for_stage_qualification" if budget_flag and not unresolved_stages else (
-            "unresolved" if budget_flag else "not_flagged"
-        ),
-        "audit_independence": STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
-        "provider_status": "completed",
-        "execution_source": execution_source,
-        "provider_artifact": artifact_path.name,
-        "request_identity_sha256": artifact["request_identity"]["sha256"],
-        "response_sha256": artifact["response_sha256"],
-        "completion_attempts": response_meta.get("completion_attempts", 0),
-        "candidate_id_map": candidate_id_map,
-        "qualification_provider_artifacts": [
-            str(item.get("provider_artifact"))
-            for item in (
-                merged.get("stage1_qualification", {}).get("group_records", [])
-                if isinstance(merged.get("stage1_qualification"), dict)
-                else []
-            )
-            if isinstance(item, dict)
-            and str(item.get("phase") or "").strip().upper() == "D"
-            and item.get("provider_artifact")
-        ],
-        "media_mode": media_mode,
-        "media_windows": media_windows,
-        "request_bytes": request_bytes,
-        "elapsed_seconds": round(max(0.0, time.monotonic() - request_started_at), 3),
-        "effective_patch": {
-            "candidate_units_added": sum(
-                item.get("status") == "accepted" for item in candidate_id_map
-            ),
-            "resolved_stages": [stage for stage in targets if stage not in unresolved_stages],
-            "unresolved_stages": unresolved_stages,
-        },
-    }
-    final_issues = stage_evidence_contract_issues(merged, require_version=True)
-    if final_issues:
-        affected_stages = sorted({
-            issue.split(":", 1)[0]
-            for issue in final_issues
-            if issue.split(":", 1)[0] in set(stage_codes())
-        })
-        unscoped_issues = [
-            issue
-            for issue in final_issues
-            if issue.split(":", 1)[0] not in set(stage_codes())
-        ]
-        if affected_stages and not unscoped_issues:
-            _block_stage_qualifications(
-                merged,
-                affected_stages,
-                reason="该阶段资格在定向补观察后仍不满足结构合同，保持未知；原子观察仍保留。",
-            )
-            merged["stage1_coverage_audit"] = _materialize_stage_recovery_audit(
-                merged,
-                targets,
-                errors=["focused_recovery_contract_invalid"],
-            )
-            recovery = merged.get("stage1_recovery") if isinstance(merged.get("stage1_recovery"), dict) else {}
-            unresolved = list(dict.fromkeys([
-                *[str(stage) for stage in recovery.get("unresolved_stages") or []],
-                *affected_stages,
-            ]))
-            recovery.update(
-                {
-                    "status": "focused_recovery_with_unresolved",
-                    "recovery_mode": "stage1_c_observe_stage1_d_qualify_once",
-                    "unresolved_stages": unresolved,
-                    "contract_issues_after_recovery": final_issues,
-                }
-            )
-            merged["stage1_recovery"] = recovery
-            remaining_issues = stage_evidence_contract_issues(merged, require_version=True)
-            if not remaining_issues:
-                _mark_stage1_qualification_recovered(merged, targets)
-                return merged
-            final_issues = remaining_issues
-        return _mark_video_fact_recovery_failed(
-            facts,
-            target_stages=targets,
-            trigger_reasons=trigger_reasons,
-            contract_issues=[*contract_issues, *final_issues],
-            budget_flag=budget_flag,
-            error=ValueError("Stage1 evidence contract remains invalid after bounded recovery."),
-            api_key=api_key,
-        )
-    _mark_stage1_qualification_recovered(merged, targets)
-    return merged
 
 
 def _merge_video_fact_recovery(

@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "decision_scope": "seen_expert_calibration_only",
+  "promotion_eligible": false,
+  "source": "2026-08-15 domain expert review recorded in references/s4-expert-review.md",
+  "shared_gap_semantics": {
+    "not_applicable": "双方覆盖完整且都没有执行该阶段功能；不设置方向，不进入差距分母",
+    "none": "双方都执行了该阶段功能，且实际表现基本相同",
+    "small": "双方都执行了该阶段功能，存在可见但较小的差距",
+    "one_sided_execution": "仍然可比；方向指向执行侧，幅度为 small、medium 或 large",
+    "uncertain": "事实不完整、冲突或无法稳定判断；不能代替 none 或 not_applicable"
+  },
+  "samples": {
+    "niumo-nose-hair-trimmer": {
+      "human_gap": {"S4": "not_applicable"},
+      "stage_relations": {"S4": null},
+      "stage_label_statuses": {
+        "S4": {
+          "status": "not_applicable",
+          "reason": "双方都没有展示可见的使用后效果；benchmark 的使用动作和说明不构成 S4 效果证明。"
+        }
+      }
+    },
+    "carslan-b0": {
+      "human_gap": {"S4": "medium"},
+      "stage_relations": {"S4": "benchmark_better"},
+      "stage_label_statuses": {"S4": {"status": "labeled", "reason": "creator 已做 before/after，但效果不够明显；benchmark 的效果呈现更直观、执行更到位。"}}
+    },
+    "frosty-pearl-mineral-mix-cassava-litter": {
+      "human_gap": {"S4": "medium"},
+      "stage_relations": {"S4": "benchmark_better"},
+      "stage_label_statuses": {"S4": {"status": "labeled", "reason": "creator 已完成基本水和结块实验，benchmark 的直接比较更清楚、更有说服力；做得弱不能等同于没有做。"}}
+    },
+    "pet-chews-pet-healer": {
+      "human_gap": {"S4": "not_applicable"},
+      "stage_relations": {"S4": null},
+      "stage_label_statuses": {
+        "S4": {
+          "status": "not_applicable",
+          "reason": "双方都没有展示使用后的真实结果；产品形态、机制口播和功效主张不构成 S4 效果证明。"
+        }
+      }
+    },
+    "papa-feel-5d-peptide-eye-cream-c1": {
+      "human_gap": {"S4": "large"},
+      "stage_relations": {"S4": "benchmark_better"},
+      "stage_label_statuses": {"S4": {"status": "labeled", "reason": "benchmark 持续提供眼袋前后视觉对比，creator 主要依赖口播声称，效果证明存在质变级差距。"}}
+    },
+    "aavini-foot-care": {
+      "human_gap": {"S4": "large"},
+      "stage_relations": {"S4": "benchmark_better"},
+      "stage_label_statuses": {"S4": {"status": "labeled", "reason": "benchmark 持续以脚部特写为画面中心，creator 的脚部偏离焦点、效果接近未被观众接收到。"}}
+    },
+    "kakwanreview": {
+      "human_gap": {"S4": "none"},
+      "stage_relations": {"S4": "tie"},
+      "stage_label_statuses": {"S4": {"status": "labeled", "reason": "双方都展示了刷洗后的清洁结果且差距不明显；主要差距属于 S3 使用过程。"}}
+    }
+  },
+  "excluded_samples": {
+    "simplus": {
+      "reason": "creator 与 benchmark 疑似分别为挂烫机和熨斗，产品形态与任务前提不一致，不进入本轮验证。"
+    }
+  }
+}

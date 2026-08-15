@@ -552,13 +552,18 @@ class CompactEvalContractTests(unittest.TestCase):
             invalid.update({"relation": "benchmark_better", "gap_magnitude": "small"})
             self.assertTrue(
                 any(
-                    "claim_only cannot create" in error
+                    "pair-level not_applicable" in error
                     for error in validate_s4_judgment_result(invalid, locked)
                 )
             )
-            valid = _s4_judgment_result()
-            valid.update({"relation": "tie", "gap_magnitude": "none"})
-            self.assertEqual(validate_s4_judgment_result(valid, locked), [])
+            invalid_tie = _s4_judgment_result()
+            invalid_tie.update({"relation": "tie", "gap_magnitude": "none"})
+            self.assertTrue(
+                any(
+                    "pair-level not_applicable" in error
+                    for error in validate_s4_judgment_result(invalid_tie, locked)
+                )
+            )
 
             invalid_calibrated = _s4_calibrated_judgment_result()
             invalid_calibrated.update(
@@ -573,7 +578,7 @@ class CompactEvalContractTests(unittest.TestCase):
             )
             self.assertTrue(
                 any(
-                    "claim_only cannot create" in error
+                    "pair-level not_applicable" in error
                     for error in validate_s4_calibrated_judgment_result(invalid_calibrated, locked)
                 )
             )

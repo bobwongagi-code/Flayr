@@ -25,7 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from flayr_core.llm.payload import (  # noqa: E402
-    build_llm_comparison_payload,
+    STAGE_JUDGMENT_GROUPS,
+    build_stage_group_judgment_payload,
     build_video_fact_payload,
 )
 
@@ -52,9 +53,13 @@ def stage1_text() -> str:
 
 
 def stage2_text() -> str:
-    """阶段2 对比判断 payload 的可达面。"""
-    return _payload_text(
-        build_llm_comparison_payload("m", "## 产品信息\n占位", {}, {"product": {"name": "占位"}})
+    """真实分段 Stage2 的完整可达面，不再检查退役的整对象合同。"""
+    analysis = {"product_foundation": {}, "comparison_contract": {}, "videos": {}}
+    return " ".join(
+        _payload_text(
+            build_stage_group_judgment_payload("m", "", {}, analysis, list(group))
+        )
+        for group in STAGE_JUDGMENT_GROUPS
     )
 
 
@@ -89,21 +94,6 @@ REGISTRY: list[dict] = [
             "适配条件": ["适配品类", "适配购买动机"],
         },
     },
-    {
-        "doc": "references/commercial-judgement-framework.md",
-        "stage": "stage2",
-        "items": {"商业评判框架(整份)": ["核心标尺"]},
-    },
-    {
-        "doc": "references/market-knowledge-my.md",
-        "stage": "stage2",
-        "items": {"目标市场知识(整份)": ["东南亚"]},
-    },
-    {
-        "doc": "QA-RULES.md",
-        "stage": "stage2",
-        "items": {"输出自检契约(整份)": ["自检"]},
-    },
 ]
 
 # 已决定本轮不修、显式 waive 的漂移项（doc::item → 原因）。waive 的降级为告警、不 block。
@@ -114,6 +104,8 @@ BULK_OR_INTENTIONAL: set[str] = {
     "references/commerce-translation-guidelines.md",  # 翻译步专用，非分析链
     "references/analysis-output-schema.json",          # 输出契约，字段经阶段2 指令转述
     "references/brand_propositions.json",              # 冻结品牌命题结构化数据，阶段2 运行时注入，不做 prompt 文档 item 级检查
+    "references/commercial-judgement-framework.md",    # 人工/兼容分析参考；分段 Stage2 使用结构库统一 gap 语义与代码 resolver
+    "references/market-knowledge-my.md",               # Step-0/市场上下文使用，不在每个 Stage2 小调用重复注入
     # 下列已在 REGISTRY 做 item 级检查，列此仅为登记可见：
     "QA-RULES.md",
     "structure_library_full.md",

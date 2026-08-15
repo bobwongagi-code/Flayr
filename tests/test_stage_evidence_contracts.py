@@ -34,6 +34,7 @@ from flayr_core.llm.pipeline import (
     _stage1_to_stage2_handoff_issues,
     _video_fact_cache_stage1_coverage_issues,
     _run_stage1_qualification,
+    _validated_stage_group_response,
     detect_low_confidence_stages,
 )
 from flayr_core.llm.stage_fact_artifacts import (
@@ -46,7 +47,6 @@ from flayr_core.llm.payload import (
     _compact_stage_group_facts,
     _recovery_stage_windows,
     _replace_recovery_full_media,
-    build_s1_boundary_hint_block,
     build_video_fact_recovery_payload,
 )
 from flayr_core.postprocess.derive import _derive_one, derive_severity_from_facts
@@ -1017,8 +1017,8 @@ class StageEvidenceContractTests(unittest.TestCase):
         unmarked = self._s5_comparison_result("absent", "absent")
         unmarked["stage_analysis"][4]["comparison_status"] = "not_applicable"
         unmarked_gate = stage_evidence_gate(unmarked, "S5", comparison_status="not_applicable")
-        self.assertEqual(unmarked_gate["status"], "blocked")
-        self.assertEqual(unmarked_gate["reason_code"], "s5_scope_not_closed")
+        self.assertEqual(unmarked_gate["status"], "not_applicable")
+        self.assertEqual(unmarked_gate["reason_code"], "bilateral_stage_absent")
 
         result = self._s5_comparison_result("absent", "absent")
         result["stage_analysis"][4]["comparison_contract"] = {
@@ -1200,7 +1200,38 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(projected["benchmark_evidence_ids"], [])
         self.assertEqual(projected["creator_evidence_ids"], ["C6"])
 
-    def test_segmented_projection_allows_bilateral_closed_negative_equivalence(self) -> None:
+    def test_stage_group_rejects_tie_when_only_one_side_executes(self) -> None:
+        facts = {
+            "benchmark": self._closed_negative_side("B", "S6"),
+            "creator": self._active_side("C", "present"),
+        }
+        response = {
+            "stages": [
+                {
+                    "stage": "S6 CTA",
+                    "stage_state": "completed",
+                    "relation": "equivalent",
+                    "model_gap_magnitude": "none",
+                    "benchmark_evidence_ids": [],
+                    "creator_evidence_ids": ["C6"],
+                    "judgment_reason": "benchmark 未执行，creator 由 C6 支持",
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(ValueError, "单侧执行"):
+            _validated_stage_group_response(response, ["S6"], label="S6", facts=facts)
+
+        response["stages"][0].update(
+            {
+                "relation": "creator_better",
+                "model_gap_magnitude": "medium",
+            }
+        )
+        validated = _validated_stage_group_response(response, ["S6"], label="S6", facts=facts)
+        self.assertEqual(validated["S6"]["relation"], "creator_better")
+
+    def test_segmented_projection_maps_bilateral_closed_negative_to_not_applicable(self) -> None:
         facts = {
             "benchmark": self._closed_negative_side("B", "S6"),
             "creator": self._closed_negative_side("C", "S6"),
@@ -1222,10 +1253,27 @@ class StageEvidenceContractTests(unittest.TestCase):
             facts,
         )
 
-        self.assertEqual(projected["stage_handoff_status"], "grounded")
-        self.assertEqual(projected["stage_state"], "completed")
-        self.assertEqual(projected["relation"], "equivalent")
-        self.assertEqual(projected["model_gap_magnitude"], "none")
+        self.assertEqual(projected["stage_handoff_status"], "not_applicable")
+        self.assertEqual(projected["comparison_status"], "not_applicable")
+        self.assertEqual(projected["stage_state"], "unknown")
+        self.assertEqual(projected["relation"], "uncertain")
+        self.assertEqual(projected["model_gap_magnitude"], "uncertain")
+
+    def test_bilateral_closed_negative_is_not_applicable_for_every_stage(self) -> None:
+        for stage in stage_codes():
+            with self.subTest(stage=stage):
+                result = {
+                    "video_understanding": {
+                        "benchmark": self._closed_negative_side("B", stage),
+                        "creator": self._closed_negative_side("C", stage),
+                    }
+                }
+
+                gate = stage_evidence_gate(result, stage)
+
+                self.assertEqual(gate["status"], "not_applicable")
+                self.assertEqual(gate["reason_code"], "bilateral_stage_absent")
+                self.assertFalse(gate["analysis_allowed"])
 
     def test_segmented_projection_still_blocks_unknown_or_conflict(self) -> None:
         for status in ("unknown", "conflict"):
@@ -4936,21 +4984,6 @@ class StageEvidenceContractTests(unittest.TestCase):
             stage_evidence_snapshot_issues(renormalized, expected_sha256=expected),
             [],
         )
-
-    def test_active_boundary_hint_does_not_bypass_stage_gate_with_raw_transcript(self) -> None:
-        side = self._active_side("C", "present")
-        block = build_s1_boundary_hint_block(
-            {
-                "videos": {
-                    "creator": {
-                        "transcript_windowed": "秘密口播不能作为第二事实源",
-                    }
-                }
-            },
-            {"creator": side},
-        )
-        self.assertNotIn("秘密口播不能作为第二事实源", block)
-        self.assertIn("不附带原始/未资格化转写", block)
 
     def test_absent_stage_requires_closed_acquisition_spine(self) -> None:
         side = self._active_side("C", "unknown")

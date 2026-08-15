@@ -945,394 +945,464 @@ def _s4_credible_effect_state(flag: dict[str, Any]) -> str:
     return _required_bool_state(flag, keys)
 
 
-def _derive_one(
-    stage_id: str,
-    stage: dict[str, Any],
-    weights: dict[str, float] | None = None,
-    painpoints: list[str] | None = None,
-    shake: dict[str, bool] | None = None,
-    endorsement: dict[str, _Endorsement] | None = None,
-    allow_legacy_text_fallback: bool = False,
-    facts: dict[str, Any] | None = None,
-    activation_evidence: TrustedS4ActivationEvidence | None = None,
-) -> dict[str, Any]:
-    """根据离散事实收集约束，再交给 resolver；旧参数仅保留调用兼容性。"""
-    del weights, painpoints, shake, allow_legacy_text_fallback
-    model = _normalize_model_severity(stage.get("model_severity") or stage.get("severity"))
-    facts = facts if isinstance(facts, dict) else {}
-    floors: list[SeverityConstraint] = []
-    ceilings: list[SeverityConstraint] = []
-    evaluations: list[dict[str, Any]] = []
+class _ConstraintCollector:
+    """Collect deterministic resolver inputs without hiding stage-rule control flow."""
 
-    def skip(rule: str, status: str, reason: str, **extra: Any) -> None:
-        evaluations.append(_constraint_evaluation(rule, status, reason, **extra))
+    def __init__(self) -> None:
+        self.floors: list[SeverityConstraint] = []
+        self.ceilings: list[SeverityConstraint] = []
+        self.evaluations: list[dict[str, Any]] = []
 
-    def add(kind: str, level: str, rule: str, reason: str, evidence_ids: tuple[str, ...] | list[str] = ()) -> None:
+    def skip(self, rule: str, status: str, reason: str, **extra: Any) -> None:
+        self.evaluations.append(_constraint_evaluation(rule, status, reason, **extra))
+
+    def add(
+        self,
+        kind: str,
+        level: str,
+        rule: str,
+        reason: str,
+        evidence_ids: tuple[str, ...] | list[str] = (),
+    ) -> None:
         constraint = SeverityConstraint(kind, level, rule, reason, tuple(sorted(set(evidence_ids))))
-        (floors if kind == "floor" else ceilings).append(constraint)
-        evaluations.append(_constraint_evaluation(rule, "triggered", reason, kind=kind, level=level, evidence_ids=list(constraint.evidence_ids)))
+        (self.floors if kind == "floor" else self.ceilings).append(constraint)
+        self.evaluations.append(
+            _constraint_evaluation(
+                rule,
+                "triggered",
+                reason,
+                kind=kind,
+                level=level,
+                evidence_ids=list(constraint.evidence_ids),
+            )
+        )
 
+
+def _collect_s1_constraints(
+    collector: _ConstraintCollector,
+    stage: dict[str, Any],
+    facts: dict[str, Any],
+) -> None:
     s1_ready = _s1_repair_ready(stage)
+    rule = "S1_hook_exists_floor"
+    creator, benchmark = _pair_flags(stage, "hook")
+    if not s1_ready:
+        collector.skip(rule, "precondition_missing", "S1 hook facts 未经过 repair_s1_hook_boundaries。")
+    elif creator is None or benchmark is None:
+        collector.skip(rule, "missing_field", "S1 hook flag 缺失。")
+    elif _required_bool_state(creator, ("exists",)) != "explicit" or _required_bool_state(benchmark, ("exists",)) != "explicit":
+        collector.skip(rule, "uncertain_fact", "S1 Hook exists 不是明确 true/false。")
+    elif not _has_required_evidence(creator, benchmark):
+        collector.skip(rule, "missing_field", "S1 Hook 缺少双方 evidence_ids。")
+    elif benchmark.get("exists") is True and creator.get("exists") is False:
+        status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, "S1")
+        if status == "eligible":
+            collector.add("floor", "large", rule, "标杆有 Hook、达人明确没有 Hook。", ids)
+        else:
+            collector.skip(rule, status, "S1 Hook 大下限需要 direct/explicit evidence_strength。", evidence=detail)
+    else:
+        collector.skip(rule, "predicate_not_met", "双方 Hook 存在性未形成结构性缺口。")
 
-    if stage_id == "S1":
-        rule = "S1_hook_exists_floor"
+    for rule, key, predicate, reason in (
+        (
+            "S1_landing_floor",
+            "landing_met",
+            lambda c, b: c.get("landing_met") is False and b.get("landing_met") is True,
+            "标杆 landing 成立、达人 landing 明确不成立。",
+        ),
+        (
+            "S1_proposition_anchor_floor",
+            "anchors_proposition",
+            lambda c, b: c.get("anchors_proposition") is False and b.get("anchors_proposition") is True,
+            "标杆 Hook 锚定本品命题、达人明确未锚定。",
+        ),
+    ):
         creator, benchmark = _pair_flags(stage, "hook")
         if not s1_ready:
-            skip(rule, "precondition_missing", "S1 hook facts 未经过 repair_s1_hook_boundaries。")
-        elif creator is None or benchmark is None:
-            skip(rule, "missing_field", "S1 hook flag 缺失。")
-        elif _required_bool_state(creator, ("exists",)) != "explicit" or _required_bool_state(benchmark, ("exists",)) != "explicit":
-            skip(rule, "uncertain_fact", "S1 Hook exists 不是明确 true/false。")
-        elif not _has_required_evidence(creator, benchmark):
-            skip(rule, "missing_field", "S1 Hook 缺少双方 evidence_ids。")
-        elif benchmark.get("exists") is True and creator.get("exists") is False:
-            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, stage_id)
-            if status == "eligible":
-                add("floor", "large", rule, "标杆有 Hook、达人明确没有 Hook。", ids)
-            else:
-                skip(rule, status, "S1 Hook 大下限需要 direct/explicit evidence_strength。", evidence=detail)
-        else:
-            skip(rule, "predicate_not_met", "双方 Hook 存在性未形成结构性缺口。")
-
-        for rule, predicate, reason in (
-            (
-                "S1_landing_floor",
-                lambda c, b: c.get("landing_met") is False and b.get("landing_met") is True,
-                "标杆 landing 成立、达人 landing 明确不成立。",
-            ),
-            (
-                "S1_proposition_anchor_floor",
-                lambda c, b: c.get("anchors_proposition") is False and b.get("anchors_proposition") is True,
-                "标杆 Hook 锚定本品命题、达人明确未锚定。",
-            ),
-        ):
-            creator, benchmark = _pair_flags(stage, "hook")
-            if not s1_ready:
-                skip(rule, "precondition_missing", "S1 hook facts 未经过 repair_s1_hook_boundaries。")
-                continue
-            if creator is None or benchmark is None:
-                skip(rule, "missing_field", "S1 hook flag 缺失。")
-                continue
-            key = "landing_met" if rule == "S1_landing_floor" else "anchors_proposition"
-            if _required_bool_state(creator, (key,)) != "explicit" or _required_bool_state(benchmark, (key,)) != "explicit":
-                skip(rule, "uncertain_fact", f"S1 {key} 不是明确事实。")
-                continue
-            if not predicate(creator, benchmark):
-                skip(rule, "predicate_not_met", "S1 比较型下限条件未满足。")
-                continue
-            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, stage_id)
-            if status != "eligible":
-                skip(rule, status, "S1 比较型下限需要 direct/explicit evidence_strength。", evidence=detail)
-                continue
-            add("floor", "medium", rule, reason, ids)
-
-    if stage_id == "S2":
-        rule = "S2_contract_floor"
-        creator, benchmark = _pair_flags(stage, "s2")
-        keys = ("handoff_met", "product_identity_clear", "product_role_clear")
+            collector.skip(rule, "precondition_missing", "S1 hook facts 未经过 repair_s1_hook_boundaries。")
+            continue
         if creator is None or benchmark is None:
-            skip(rule, "missing_field", "S2 contract flag 缺失。")
-        elif creator.get("merged_with_s3") is True:
-            skip(rule, "predicate_not_met", "S2 已与 S3 合并，不重复处罚独立 S2。")
-        elif _required_bool_state(creator, (*keys, "merged_with_s3")) != "explicit" or _required_bool_state(benchmark, (*keys,)) != "explicit":
-            skip(rule, "uncertain_fact", "S2 契约字段未全部明确。")
-        elif not _has_required_evidence(creator, benchmark):
-            skip(rule, "missing_field", "S2 契约缺少双方 evidence_ids。")
-        elif (hard_fact_failure := _hard_fact_gate_failure(stage, "creator_s2", "benchmark_s2")) is not None:
-            skip(
-                rule,
-                hard_fact_failure["status"],
-                hard_fact_failure["reason"],
-                reason_code=hard_fact_failure["reason_code"],
-                evidence=hard_fact_failure["evidence"],
-            )
-        elif all(benchmark.get(key) is True for key in keys) and any(creator.get(key) is False for key in keys):
-            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, stage_id)
-            if status == "eligible":
-                add("floor", "medium", rule, "标杆完成 S2 承接契约、达人明确缺少关键契约。", ids)
-            else:
-                skip(rule, status, "S2 比较型下限需要 direct/explicit evidence_strength。", evidence=detail)
-        else:
-            skip(rule, "predicate_not_met", "S2 未形成标杆完整、达人缺失的契约断层。")
+            collector.skip(rule, "missing_field", "S1 hook flag 缺失。")
+            continue
+        if _required_bool_state(creator, (key,)) != "explicit" or _required_bool_state(benchmark, (key,)) != "explicit":
+            collector.skip(rule, "uncertain_fact", f"S1 {key} 不是明确事实。")
+            continue
+        if not predicate(creator, benchmark):
+            collector.skip(rule, "predicate_not_met", "S1 比较型下限条件未满足。")
+            continue
+        status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, "S1")
+        if status != "eligible":
+            collector.skip(rule, status, "S1 比较型下限需要 direct/explicit evidence_strength。", evidence=detail)
+            continue
+        collector.add("floor", "medium", rule, reason, ids)
 
-    if stage_id == "S3":
-        creator, benchmark = _pair_flags(stage, "s3")
-        rule = "S3_real_usage_floor"
-        creator_state = creator.get("usage_evidence_state") if isinstance(creator, dict) else None
-        benchmark_state = benchmark.get("usage_evidence_state") if isinstance(benchmark, dict) else None
-        if creator is None or benchmark is None:
-            skip(rule, "missing_field", "S3 usage flag 缺失。")
-        elif creator_state not in S3_USAGE_EVIDENCE_STATES or benchmark_state not in S3_USAGE_EVIDENCE_STATES:
-            skip(rule, "uncertain_fact", "S3 usage_evidence_state 缺失或非法。", reason_code="evidence_state_missing")
-        elif not _has_required_evidence(creator, benchmark):
-            skip(rule, "missing_field", "S3 核心使用断层缺少双方 evidence_ids。")
-        else:
-            creator_check = _hard_fact_check(stage, "creator_s3")
-            benchmark_check = _hard_fact_check(stage, "benchmark_s3")
-            if not isinstance(creator_check, dict) or not isinstance(benchmark_check, dict):
-                skip(rule, "precondition_missing", "S3 使用事实尚未经过只读 hard-fact 校验。", reason_code="repair_incomplete")
-            elif creator_check.get("status") != "consistent" or benchmark_check.get("status") != "consistent":
-                skip(
-                    rule,
-                    "uncertain_fact",
-                    "S3 使用状态存在硬事实冲突或校验不完整，保留模型 severity。",
-                    reason_code="state_hard_fact_conflict" if "state_conflict" in {
-                        creator_check.get("status"), benchmark_check.get("status")
-                    } else "repair_incomplete",
-                    evidence={"creator": creator_check, "benchmark": benchmark_check},
-                )
-            elif "uncertain" in {creator_state, benchmark_state}:
-                uncertain_role = "creator" if creator_state == "uncertain" else "benchmark"
-                skip(
-                    rule,
-                    "uncertain_fact",
-                    "S3 使用完成度存在 uncertain，不能把它解释为明确缺失或明确完成。",
-                    reason_code=f"{uncertain_role}_usage_uncertain",
-                )
-            elif creator_state == "partial" or benchmark_state == "partial":
-                partial_role = "creator" if creator_state == "partial" else "benchmark"
-                skip(
-                    rule,
-                    "predicate_not_met",
-                    "S3 存在 partial 使用过程，不能把 partial 压成 none 触发大下限。",
-                    reason_code=f"{partial_role}_usage_partial",
-                )
-            elif creator_state == "none" and benchmark_state == "complete":
-                status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, stage_id)
-                if status == "eligible":
-                    add("floor", "large", rule, "标杆完成可复核真实使用、达人明确没有真实使用过程。", ids)
-                else:
-                    skip(rule, status, "S3 结构性大下限需要双方 direct/explicit evidence_strength。", evidence=detail)
-            else:
-                skip(rule, "predicate_not_met", "S3 未形成 none 对 complete 的明确使用过程断层。")
 
-        rule = "S3_thin_presentation_floor"
-        if creator is None or benchmark is None:
-            skip(rule, "missing_field", "S3 usage flag 缺失。")
-        elif creator_state not in S3_USAGE_EVIDENCE_STATES or benchmark_state not in S3_USAGE_EVIDENCE_STATES:
-            skip(rule, "uncertain_fact", "S3 薄呈现规则的使用状态缺失或非法。", reason_code="evidence_state_missing")
-        elif "uncertain" in {creator_state, benchmark_state}:
-            uncertain_role = "creator" if creator_state == "uncertain" else "benchmark"
-            skip(
+def _collect_s2_constraints(
+    collector: _ConstraintCollector,
+    stage: dict[str, Any],
+    facts: dict[str, Any],
+) -> None:
+    rule = "S2_contract_floor"
+    creator, benchmark = _pair_flags(stage, "s2")
+    keys = ("handoff_met", "product_identity_clear", "product_role_clear")
+    if creator is None or benchmark is None:
+        collector.skip(rule, "missing_field", "S2 contract flag 缺失。")
+    elif creator.get("merged_with_s3") is True:
+        collector.skip(rule, "predicate_not_met", "S2 已与 S3 合并，不重复处罚独立 S2。")
+    elif _required_bool_state(creator, (*keys, "merged_with_s3")) != "explicit" or _required_bool_state(benchmark, (*keys,)) != "explicit":
+        collector.skip(rule, "uncertain_fact", "S2 契约字段未全部明确。")
+    elif not _has_required_evidence(creator, benchmark):
+        collector.skip(rule, "missing_field", "S2 契约缺少双方 evidence_ids。")
+    elif (hard_fact_failure := _hard_fact_gate_failure(stage, "creator_s2", "benchmark_s2")) is not None:
+        collector.skip(
+            rule,
+            hard_fact_failure["status"],
+            hard_fact_failure["reason"],
+            reason_code=hard_fact_failure["reason_code"],
+            evidence=hard_fact_failure["evidence"],
+        )
+    elif all(benchmark.get(key) is True for key in keys) and any(creator.get(key) is False for key in keys):
+        status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, "S2")
+        if status == "eligible":
+            collector.add("floor", "medium", rule, "标杆完成 S2 承接契约、达人明确缺少关键契约。", ids)
+        else:
+            collector.skip(rule, status, "S2 比较型下限需要 direct/explicit evidence_strength。", evidence=detail)
+    else:
+        collector.skip(rule, "predicate_not_met", "S2 未形成标杆完整、达人缺失的契约断层。")
+
+
+def _collect_s3_constraints(
+    collector: _ConstraintCollector,
+    stage: dict[str, Any],
+    facts: dict[str, Any],
+) -> None:
+    creator, benchmark = _pair_flags(stage, "s3")
+    creator_state = creator.get("usage_evidence_state") if isinstance(creator, dict) else None
+    benchmark_state = benchmark.get("usage_evidence_state") if isinstance(benchmark, dict) else None
+
+    rule = "S3_real_usage_floor"
+    if creator is None or benchmark is None:
+        collector.skip(rule, "missing_field", "S3 usage flag 缺失。")
+    elif creator_state not in S3_USAGE_EVIDENCE_STATES or benchmark_state not in S3_USAGE_EVIDENCE_STATES:
+        collector.skip(rule, "uncertain_fact", "S3 usage_evidence_state 缺失或非法。", reason_code="evidence_state_missing")
+    elif not _has_required_evidence(creator, benchmark):
+        collector.skip(rule, "missing_field", "S3 核心使用断层缺少双方 evidence_ids。")
+    else:
+        creator_check = _hard_fact_check(stage, "creator_s3")
+        benchmark_check = _hard_fact_check(stage, "benchmark_s3")
+        if not isinstance(creator_check, dict) or not isinstance(benchmark_check, dict):
+            collector.skip(rule, "precondition_missing", "S3 使用事实尚未经过只读 hard-fact 校验。", reason_code="repair_incomplete")
+        elif creator_check.get("status") != "consistent" or benchmark_check.get("status") != "consistent":
+            collector.skip(
                 rule,
                 "uncertain_fact",
-                "S3 薄呈现规则遇到 uncertain 使用状态，不能继续比较。",
+                "S3 使用状态存在硬事实冲突或校验不完整，保留模型 severity。",
+                reason_code="state_hard_fact_conflict" if "state_conflict" in {
+                    creator_check.get("status"), benchmark_check.get("status")
+                } else "repair_incomplete",
+                evidence={"creator": creator_check, "benchmark": benchmark_check},
+            )
+        elif "uncertain" in {creator_state, benchmark_state}:
+            uncertain_role = "creator" if creator_state == "uncertain" else "benchmark"
+            collector.skip(
+                rule,
+                "uncertain_fact",
+                "S3 使用完成度存在 uncertain，不能把它解释为明确缺失或明确完成。",
                 reason_code=f"{uncertain_role}_usage_uncertain",
             )
-        elif creator_state not in {"partial", "complete"} or benchmark_state not in {"partial", "complete"}:
-            skip(rule, "predicate_not_met", "S3 薄呈现规则不适用于 none 使用状态。")
-        elif (hard_fact_failure := _hard_fact_gate_failure(stage, "creator_s3", "benchmark_s3")) is not None:
-            skip(
-                rule,
-                hard_fact_failure["status"],
-                hard_fact_failure["reason"],
-                reason_code=hard_fact_failure["reason_code"],
-                evidence=hard_fact_failure["evidence"],
-            )
-        elif _s3_basic_process_state(creator) != "explicit" or _s3_basic_process_state(benchmark) != "explicit":
-            skip(rule, "uncertain_fact", "S3 薄呈现规则的核心事实不完整。", reason_code="hard_fact_missing")
-        elif creator.get("process_framing_met") not in {True, False} or benchmark.get("process_framing_met") not in {True, False}:
-            skip(rule, "uncertain_fact", "S3 薄呈现规则的 process_framing_met 不明确。", reason_code="hard_fact_missing")
-        elif benchmark.get("process_framing_met") is not True or creator.get("process_framing_met") is not False:
-            skip(rule, "predicate_not_met", "S3 未形成标杆做厚、达人单薄的明确差异。")
-        else:
-            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, stage_id)
-            if status == "eligible":
-                add("floor", "medium", rule, "双方都有基础使用过程，但标杆明确做厚、达人呈现单薄。", ids)
-            else:
-                skip(rule, status, "S3 薄呈现下限需要 direct/explicit evidence_strength。", evidence=detail)
-
-    if stage_id == "S4":
-        creator, benchmark = _pair_flags(stage, "s4")
-        rule = "S4_visible_effect_floor"
-        creator_state = creator.get("effect_evidence_state") if isinstance(creator, dict) else None
-        benchmark_state = benchmark.get("effect_evidence_state") if isinstance(benchmark, dict) else None
-        if creator is None or benchmark is None:
-            skip(rule, "missing_field", "S4 effect flag 缺失。")
-        elif creator_state not in S4_EFFECT_EVIDENCE_STATES or benchmark_state not in S4_EFFECT_EVIDENCE_STATES:
-            skip(rule, "uncertain_fact", "S4 effect_evidence_state 缺失或非法。", reason_code="evidence_state_missing")
-        elif not _has_required_evidence(creator, benchmark):
-            skip(rule, "missing_field", "S4 效果断层缺少双方 evidence_ids。")
-        else:
-            creator_check = _hard_fact_check(stage, "creator_s4")
-            benchmark_check = _hard_fact_check(stage, "benchmark_s4")
-            if not isinstance(creator_check, dict) or not isinstance(benchmark_check, dict):
-                skip(rule, "precondition_missing", "S4 效果事实尚未经过只读 hard-fact 校验。", reason_code="repair_incomplete")
-            elif creator_check.get("status") != "consistent" or benchmark_check.get("status") != "consistent":
-                skip(
-                    rule,
-                    "uncertain_fact",
-                    "S4 效果状态存在硬事实冲突或校验不完整，保留模型 severity。",
-                    reason_code="state_hard_fact_conflict" if "state_conflict" in {
-                        creator_check.get("status"), benchmark_check.get("status")
-                    } else "repair_incomplete",
-                    evidence={"creator": creator_check, "benchmark": benchmark_check},
-                )
-            elif "uncertain" in {creator_state, benchmark_state}:
-                uncertain_role = "creator" if creator_state == "uncertain" else "benchmark"
-                skip(
-                    rule,
-                    "uncertain_fact",
-                    "S4 效果完成度存在 uncertain，不能把它解释为明确缺失或明确验证。",
-                    reason_code=f"{uncertain_role}_effect_uncertain",
-                )
-            elif creator_state == "result_only" or benchmark_state == "result_only":
-                result_only_role = "creator" if creator_state == "result_only" else "benchmark"
-                skip(
-                    rule,
-                    "predicate_not_met",
-                    "S4 存在 result_only 效果证据，不能把结果图当作 verified。",
-                    reason_code=f"{result_only_role}_effect_result_only",
-                )
-            elif creator_state == "none" and benchmark_state == "verified":
-                status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, stage_id)
-                if status != "eligible":
-                    skip(rule, status, "S4 结构性大下限需要双方 direct/explicit evidence_strength。", evidence=detail)
-                elif not validate_s4_large_floor_activation_evidence(activation_evidence):
-                    add("floor", "large", rule, "标杆完成可验证效果、达人明确没有效果证据。", ids)
-                else:
-                    skip(
-                        rule,
-                        "audit_only",
-                        "S4 大下限候选已满足事实条件，但仍等待 S4 边界校准与新鲜盲测门禁。",
-                        reason_code="activation_gate_closed",
-                        candidate={"kind": "floor", "level": "large", "evidence_ids": ids},
-                    )
-            else:
-                skip(rule, "predicate_not_met", "S4 未形成 none 对 verified 的明确效果证明断层。")
-
-        rule = "S4_thin_effect_floor"
-        if creator is None or benchmark is None:
-            skip(rule, "missing_field", "S4 effect flag 缺失。")
-        elif creator_state not in S4_EFFECT_EVIDENCE_STATES or benchmark_state not in S4_EFFECT_EVIDENCE_STATES:
-            skip(rule, "uncertain_fact", "S4 薄效果规则的效果状态缺失或非法。", reason_code="evidence_state_missing")
-        elif "uncertain" in {creator_state, benchmark_state}:
-            uncertain_role = "creator" if creator_state == "uncertain" else "benchmark"
-            skip(
-                rule,
-                "uncertain_fact",
-                "S4 薄效果规则遇到 uncertain 效果状态，不能继续比较。",
-                reason_code=f"{uncertain_role}_effect_uncertain",
-            )
-        elif creator_state not in {"result_only", "verified"} or benchmark_state != "verified":
-            skip(rule, "predicate_not_met", "S4 薄效果规则不适用于 none 效果状态。")
-        elif (hard_fact_failure := _hard_fact_gate_failure(stage, "creator_s4", "benchmark_s4")) is not None:
-            skip(
-                rule,
-                hard_fact_failure["status"],
-                hard_fact_failure["reason"],
-                reason_code=hard_fact_failure["reason_code"],
-                evidence=hard_fact_failure["evidence"],
-            )
-        elif _s4_credible_effect_state(benchmark) != "explicit" or _s4_credible_effect_state(creator) != "explicit":
-            skip(rule, "uncertain_fact", "S4 薄效果规则的事实不完整。", reason_code="hard_fact_missing")
-        elif not _s4_credible_effect(creator) or not _s4_credible_effect(benchmark):
-            skip(rule, "predicate_not_met", "双方没有同时形成可信效果，薄效果规则不触发。")
-        elif not (str(benchmark.get("effect_salience") or "") == "strong" and benchmark.get("effect_maximized") is True):
-            skip(rule, "predicate_not_met", "标杆没有明确做强和最大化效果。")
-        elif str(creator.get("effect_salience") or "") == "strong" and creator.get("effect_maximized") is True:
-            skip(rule, "predicate_not_met", "达人效果同样做强，不构成薄效果差距。")
-        else:
-            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, stage_id)
-            if status == "eligible":
-                add("floor", "medium", rule, "双方都有可信效果，但标杆效果更显著、更聚焦。", ids)
-            else:
-                skip(rule, status, "S4 薄效果下限需要 direct/explicit evidence_strength。", evidence=detail)
-
-    if stage_id == "S5":
-        rule = "S5_no_trust_ceiling"
-        creator, benchmark = _pair_flags(stage, "s5")
-        active_readiness = _active_stage_readiness(facts, "S5")
-        unresolved_roles = [
-            role for role, status in active_readiness.items()
-            if status not in {"present", "absent"}
-        ]
-        b_endorsement = (endorsement or {}).get("benchmark") or _NO_ENDORSEMENT
-        c_endorsement = (endorsement or {}).get("creator") or _NO_ENDORSEMENT
-        if creator is None or benchmark is None:
-            skip(rule, "missing_field", "S5 trust flag 缺失。")
-        elif unresolved_roles:
-            skip(
-                rule,
-                "stage_evidence_unresolved",
-                f"S5证据资格未完成，不能把未采到或冲突的来源证据当作明确缺失：{','.join(unresolved_roles)}",
-                evidence_ids=[],
-            )
-        elif (
-            (not b_endorsement.available or not c_endorsement.available)
-            and not (
-                bool(active_readiness)
-                and all(status == "absent" for status in active_readiness.values())
-            )
-        ):
-            skip(rule, "missing_field", "S5 Stage1 背书观察字段缺失。")
-        elif _required_bool_state(creator, ("exists", "independent_trust_purpose", "duplicates_other_stage")) != "explicit" or _required_bool_state(benchmark, ("exists", "independent_trust_purpose", "duplicates_other_stage")) != "explicit":
-            skip(rule, "uncertain_fact", "S5 信任事实不完整，不能把 unknown 当作无背书。")
-        elif b_endorsement.verbal or b_endorsement.visual or c_endorsement.verbal or c_endorsement.visual:
-            skip(rule, "predicate_not_met", "至少一侧存在明确硬背书观察。")
-        elif "product_claim_or_offer" in {creator.get("_s5_source_status"), benchmark.get("_s5_source_status")}:
-            skip(
+        elif creator_state == "partial" or benchmark_state == "partial":
+            partial_role = "creator" if creator_state == "partial" else "benchmark"
+            collector.skip(
                 rule,
                 "predicate_not_met",
-                "S5 只有产品主张或优惠，不能等同于明确无独立来源。",
-                reason_code="s5_product_claim_or_offer",
-                evidence=(*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)),
+                "S3 存在 partial 使用过程，不能把 partial 压成 none 触发大下限。",
+                reason_code=f"{partial_role}_usage_partial",
             )
-        elif not _s5_absence_is_explicit(creator) or not _s5_absence_is_explicit(benchmark):
-            skip(rule, "uncertain_fact", "S5 来源 absence 未被明确确认，不能把 unknown 当作无背书。")
-        elif _s5_has_any_trust(stage):
-            skip(rule, "predicate_not_met", "至少一侧存在明确软/结构化信任材料。")
-        elif creator.get("exists") is False and benchmark.get("exists") is False:
-            # S5 has a high historical source-reconciliation warning rate. Until its
-            # source-state boundary has separate calibration evidence, preserve the
-            # model and retain this as an auditable candidate rather than a ceiling.
-            skip(
-                rule,
-                "audit_only",
-                "双方明确没有信任放大材料；S5 ceiling 在独立校准前只记录候选，不改写 severity。",
-                reason_code="activation_gate_closed",
-                evidence=(*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)),
-                candidate={"kind": "ceiling", "level": "medium"},
-            )
-        else:
-            skip(rule, "predicate_not_met", "双方没有同时明确声明 S5 不存在。")
-
-    if stage_id == "S6":
-        rule = "S6_creator_cta_ceiling"
-        creator, benchmark = _pair_flags(stage, "s6")
-        if creator is None or benchmark is None:
-            skip(rule, "missing_field", "S6 CTA flag 缺失。")
-        elif _required_bool_state(creator, ("direct_order_met", "action_path_clear")) != "explicit" or _required_bool_state(benchmark, ("exists",)) != "explicit":
-            skip(rule, "uncertain_fact", "S6 CTA 事实不完整。")
-        elif not _has_required_evidence(creator, benchmark):
-            skip(rule, "missing_field", "S6 CTA 安全封顶缺少双方 evidence_ids。")
-        elif benchmark.get("exists") is False and (creator.get("direct_order_met") is True or creator.get("action_path_clear") is True):
-            if _has_active_stage_evidence_contract(facts, ("creator", "benchmark")):
-                status, ids, detail = _stage_strength_gate(
-                    facts,
-                    "creator",
-                    creator,
-                    "benchmark",
-                    benchmark,
-                    stage_id,
-                )
-                if status == "eligible":
-                    add("ceiling", "small", rule, "达人有明确购买路径、标杆没有独立 CTA，不因缺少促销放大话术制造差距。", ids)
-                else:
-                    skip(rule, status, "S6 安全封顶需要双方 Stage1 阶段证据已资格化且为 direct/explicit。", evidence=detail)
+        elif creator_state == "none" and benchmark_state == "complete":
+            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, "S3")
+            if status == "eligible":
+                collector.add("floor", "large", rule, "标杆完成可复核真实使用、达人明确没有真实使用过程。", ids)
             else:
-                add(
-                    "ceiling",
-                    "small",
+                collector.skip(rule, status, "S3 结构性大下限需要双方 direct/explicit evidence_strength。", evidence=detail)
+        else:
+            collector.skip(rule, "predicate_not_met", "S3 未形成 none 对 complete 的明确使用过程断层。")
+
+    rule = "S3_thin_presentation_floor"
+    if creator is None or benchmark is None:
+        collector.skip(rule, "missing_field", "S3 usage flag 缺失。")
+    elif creator_state not in S3_USAGE_EVIDENCE_STATES or benchmark_state not in S3_USAGE_EVIDENCE_STATES:
+        collector.skip(rule, "uncertain_fact", "S3 薄呈现规则的使用状态缺失或非法。", reason_code="evidence_state_missing")
+    elif "uncertain" in {creator_state, benchmark_state}:
+        uncertain_role = "creator" if creator_state == "uncertain" else "benchmark"
+        collector.skip(
+            rule,
+            "uncertain_fact",
+            "S3 薄呈现规则遇到 uncertain 使用状态，不能继续比较。",
+            reason_code=f"{uncertain_role}_usage_uncertain",
+        )
+    elif creator_state not in {"partial", "complete"} or benchmark_state not in {"partial", "complete"}:
+        collector.skip(rule, "predicate_not_met", "S3 薄呈现规则不适用于 none 使用状态。")
+    elif (hard_fact_failure := _hard_fact_gate_failure(stage, "creator_s3", "benchmark_s3")) is not None:
+        collector.skip(
+            rule,
+            hard_fact_failure["status"],
+            hard_fact_failure["reason"],
+            reason_code=hard_fact_failure["reason_code"],
+            evidence=hard_fact_failure["evidence"],
+        )
+    elif _s3_basic_process_state(creator) != "explicit" or _s3_basic_process_state(benchmark) != "explicit":
+        collector.skip(rule, "uncertain_fact", "S3 薄呈现规则的核心事实不完整。", reason_code="hard_fact_missing")
+    elif creator.get("process_framing_met") not in {True, False} or benchmark.get("process_framing_met") not in {True, False}:
+        collector.skip(rule, "uncertain_fact", "S3 薄呈现规则的 process_framing_met 不明确。", reason_code="hard_fact_missing")
+    elif benchmark.get("process_framing_met") is not True or creator.get("process_framing_met") is not False:
+        collector.skip(rule, "predicate_not_met", "S3 未形成标杆做厚、达人单薄的明确差异。")
+    else:
+        status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, "S3")
+        if status == "eligible":
+            collector.add("floor", "medium", rule, "双方都有基础使用过程，但标杆明确做厚、达人呈现单薄。", ids)
+        else:
+            collector.skip(rule, status, "S3 薄呈现下限需要 direct/explicit evidence_strength。", evidence=detail)
+
+
+def _collect_s4_constraints(
+    collector: _ConstraintCollector,
+    stage: dict[str, Any],
+    facts: dict[str, Any],
+    activation_evidence: TrustedS4ActivationEvidence | None,
+) -> None:
+    creator, benchmark = _pair_flags(stage, "s4")
+    creator_state = creator.get("effect_evidence_state") if isinstance(creator, dict) else None
+    benchmark_state = benchmark.get("effect_evidence_state") if isinstance(benchmark, dict) else None
+
+    rule = "S4_visible_effect_floor"
+    if creator is None or benchmark is None:
+        collector.skip(rule, "missing_field", "S4 effect flag 缺失。")
+    elif creator_state not in S4_EFFECT_EVIDENCE_STATES or benchmark_state not in S4_EFFECT_EVIDENCE_STATES:
+        collector.skip(rule, "uncertain_fact", "S4 effect_evidence_state 缺失或非法。", reason_code="evidence_state_missing")
+    elif not _has_required_evidence(creator, benchmark):
+        collector.skip(rule, "missing_field", "S4 效果断层缺少双方 evidence_ids。")
+    else:
+        creator_check = _hard_fact_check(stage, "creator_s4")
+        benchmark_check = _hard_fact_check(stage, "benchmark_s4")
+        if not isinstance(creator_check, dict) or not isinstance(benchmark_check, dict):
+            collector.skip(rule, "precondition_missing", "S4 效果事实尚未经过只读 hard-fact 校验。", reason_code="repair_incomplete")
+        elif creator_check.get("status") != "consistent" or benchmark_check.get("status") != "consistent":
+            collector.skip(
+                rule,
+                "uncertain_fact",
+                "S4 效果状态存在硬事实冲突或校验不完整，保留模型 severity。",
+                reason_code="state_hard_fact_conflict" if "state_conflict" in {
+                    creator_check.get("status"), benchmark_check.get("status")
+                } else "repair_incomplete",
+                evidence={"creator": creator_check, "benchmark": benchmark_check},
+            )
+        elif "uncertain" in {creator_state, benchmark_state}:
+            uncertain_role = "creator" if creator_state == "uncertain" else "benchmark"
+            collector.skip(
+                rule,
+                "uncertain_fact",
+                "S4 效果完成度存在 uncertain，不能把它解释为明确缺失或明确验证。",
+                reason_code=f"{uncertain_role}_effect_uncertain",
+            )
+        elif creator_state == "result_only" or benchmark_state == "result_only":
+            result_only_role = "creator" if creator_state == "result_only" else "benchmark"
+            collector.skip(
+                rule,
+                "predicate_not_met",
+                "S4 存在 result_only 效果证据，不能把结果图当作 verified。",
+                reason_code=f"{result_only_role}_effect_result_only",
+            )
+        elif creator_state == "none" and benchmark_state == "verified":
+            status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, "S4")
+            if status != "eligible":
+                collector.skip(rule, status, "S4 结构性大下限需要双方 direct/explicit evidence_strength。", evidence=detail)
+            elif not validate_s4_large_floor_activation_evidence(activation_evidence):
+                collector.add("floor", "large", rule, "标杆完成可验证效果、达人明确没有效果证据。", ids)
+            else:
+                collector.skip(
                     rule,
-                    "达人有明确购买路径、标杆没有独立 CTA，不因缺少促销放大话术制造差距。",
-                    (*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)),
+                    "audit_only",
+                    "S4 大下限候选已满足事实条件，但仍等待 S4 边界校准与新鲜盲测门禁。",
+                    reason_code="activation_gate_closed",
+                    candidate={"kind": "floor", "level": "large", "evidence_ids": ids},
                 )
         else:
-            skip(rule, "predicate_not_met", "S6 未形成达人明确优于标杆 CTA 的安全封顶条件。")
+            collector.skip(rule, "predicate_not_met", "S4 未形成 none 对 verified 的明确效果证明断层。")
 
-    resolved = resolve_severity(model, tuple(floors), tuple(ceilings))
-    constraint_reason = "；".join(item.reason for item in resolved["constraints"]) if resolved["constraints"] else "无确定性约束，保留模型 severity。"
+    rule = "S4_thin_effect_floor"
+    if creator is None or benchmark is None:
+        collector.skip(rule, "missing_field", "S4 effect flag 缺失。")
+    elif creator_state not in S4_EFFECT_EVIDENCE_STATES or benchmark_state not in S4_EFFECT_EVIDENCE_STATES:
+        collector.skip(rule, "uncertain_fact", "S4 薄效果规则的效果状态缺失或非法。", reason_code="evidence_state_missing")
+    elif "uncertain" in {creator_state, benchmark_state}:
+        uncertain_role = "creator" if creator_state == "uncertain" else "benchmark"
+        collector.skip(
+            rule,
+            "uncertain_fact",
+            "S4 薄效果规则遇到 uncertain 效果状态，不能继续比较。",
+            reason_code=f"{uncertain_role}_effect_uncertain",
+        )
+    elif creator_state not in {"result_only", "verified"} or benchmark_state != "verified":
+        collector.skip(rule, "predicate_not_met", "S4 薄效果规则不适用于 none 效果状态。")
+    elif (hard_fact_failure := _hard_fact_gate_failure(stage, "creator_s4", "benchmark_s4")) is not None:
+        collector.skip(
+            rule,
+            hard_fact_failure["status"],
+            hard_fact_failure["reason"],
+            reason_code=hard_fact_failure["reason_code"],
+            evidence=hard_fact_failure["evidence"],
+        )
+    elif _s4_credible_effect_state(benchmark) != "explicit" or _s4_credible_effect_state(creator) != "explicit":
+        collector.skip(rule, "uncertain_fact", "S4 薄效果规则的事实不完整。", reason_code="hard_fact_missing")
+    elif not _s4_credible_effect(creator) or not _s4_credible_effect(benchmark):
+        collector.skip(rule, "predicate_not_met", "双方没有同时形成可信效果，薄效果规则不触发。")
+    elif not (str(benchmark.get("effect_salience") or "") == "strong" and benchmark.get("effect_maximized") is True):
+        collector.skip(rule, "predicate_not_met", "标杆没有明确做强和最大化效果。")
+    elif str(creator.get("effect_salience") or "") == "strong" and creator.get("effect_maximized") is True:
+        collector.skip(rule, "predicate_not_met", "达人效果同样做强，不构成薄效果差距。")
+    else:
+        status, ids, detail = _stage_strength_gate(facts, "creator", creator, "benchmark", benchmark, "S4")
+        if status == "eligible":
+            collector.add("floor", "medium", rule, "双方都有可信效果，但标杆效果更显著、更聚焦。", ids)
+        else:
+            collector.skip(rule, status, "S4 薄效果下限需要 direct/explicit evidence_strength。", evidence=detail)
+
+
+def _collect_s5_constraints(
+    collector: _ConstraintCollector,
+    stage: dict[str, Any],
+    facts: dict[str, Any],
+    endorsement: dict[str, _Endorsement] | None,
+) -> None:
+    rule = "S5_no_trust_ceiling"
+    creator, benchmark = _pair_flags(stage, "s5")
+    active_readiness = _active_stage_readiness(facts, "S5")
+    unresolved_roles = [
+        role for role, status in active_readiness.items()
+        if status not in {"present", "absent"}
+    ]
+    b_endorsement = (endorsement or {}).get("benchmark") or _NO_ENDORSEMENT
+    c_endorsement = (endorsement or {}).get("creator") or _NO_ENDORSEMENT
+    if creator is None or benchmark is None:
+        collector.skip(rule, "missing_field", "S5 trust flag 缺失。")
+    elif unresolved_roles:
+        collector.skip(
+            rule,
+            "stage_evidence_unresolved",
+            f"S5证据资格未完成，不能把未采到或冲突的来源证据当作明确缺失：{','.join(unresolved_roles)}",
+            evidence_ids=[],
+        )
+    elif (
+        (not b_endorsement.available or not c_endorsement.available)
+        and not (
+            bool(active_readiness)
+            and all(status == "absent" for status in active_readiness.values())
+        )
+    ):
+        collector.skip(rule, "missing_field", "S5 Stage1 背书观察字段缺失。")
+    elif _required_bool_state(creator, ("exists", "independent_trust_purpose", "duplicates_other_stage")) != "explicit" or _required_bool_state(benchmark, ("exists", "independent_trust_purpose", "duplicates_other_stage")) != "explicit":
+        collector.skip(rule, "uncertain_fact", "S5 信任事实不完整，不能把 unknown 当作无背书。")
+    elif b_endorsement.verbal or b_endorsement.visual or c_endorsement.verbal or c_endorsement.visual:
+        collector.skip(rule, "predicate_not_met", "至少一侧存在明确硬背书观察。")
+    elif "product_claim_or_offer" in {creator.get("_s5_source_status"), benchmark.get("_s5_source_status")}:
+        collector.skip(
+            rule,
+            "predicate_not_met",
+            "S5 只有产品主张或优惠，不能等同于明确无独立来源。",
+            reason_code="s5_product_claim_or_offer",
+            evidence=(*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)),
+        )
+    elif not _s5_absence_is_explicit(creator) or not _s5_absence_is_explicit(benchmark):
+        collector.skip(rule, "uncertain_fact", "S5 来源 absence 未被明确确认，不能把 unknown 当作无背书。")
+    elif _s5_has_any_trust(stage):
+        collector.skip(rule, "predicate_not_met", "至少一侧存在明确软/结构化信任材料。")
+    elif creator.get("exists") is False and benchmark.get("exists") is False:
+        # S5 has a high historical source-reconciliation warning rate. Until its
+        # source-state boundary has separate calibration evidence, preserve the
+        # model and retain this as an auditable candidate rather than a ceiling.
+        collector.skip(
+            rule,
+            "audit_only",
+            "双方明确没有信任放大材料；S5 ceiling 在独立校准前只记录候选，不改写 severity。",
+            reason_code="activation_gate_closed",
+            evidence=(*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)),
+            candidate={"kind": "ceiling", "level": "medium"},
+        )
+    else:
+        collector.skip(rule, "predicate_not_met", "双方没有同时明确声明 S5 不存在。")
+
+
+def _collect_s6_constraints(
+    collector: _ConstraintCollector,
+    stage: dict[str, Any],
+    facts: dict[str, Any],
+) -> None:
+    rule = "S6_creator_cta_ceiling"
+    creator, benchmark = _pair_flags(stage, "s6")
+    if creator is None or benchmark is None:
+        collector.skip(rule, "missing_field", "S6 CTA flag 缺失。")
+    elif _required_bool_state(creator, ("direct_order_met", "action_path_clear")) != "explicit" or _required_bool_state(benchmark, ("exists",)) != "explicit":
+        collector.skip(rule, "uncertain_fact", "S6 CTA 事实不完整。")
+    elif not _has_required_evidence(creator, benchmark):
+        collector.skip(rule, "missing_field", "S6 CTA 安全封顶缺少双方 evidence_ids。")
+    elif benchmark.get("exists") is False and (creator.get("direct_order_met") is True or creator.get("action_path_clear") is True):
+        if _has_active_stage_evidence_contract(facts, ("creator", "benchmark")):
+            status, ids, detail = _stage_strength_gate(
+                facts,
+                "creator",
+                creator,
+                "benchmark",
+                benchmark,
+                "S6",
+            )
+            if status == "eligible":
+                collector.add("ceiling", "small", rule, "达人有明确购买路径、标杆没有独立 CTA，不因缺少促销放大话术制造差距。", ids)
+            else:
+                collector.skip(rule, status, "S6 安全封顶需要双方 Stage1 阶段证据已资格化且为 direct/explicit。", evidence=detail)
+        else:
+            collector.add(
+                "ceiling",
+                "small",
+                rule,
+                "达人有明确购买路径、标杆没有独立 CTA，不因缺少促销放大话术制造差距。",
+                (*_flag_evidence_ids(creator), *_flag_evidence_ids(benchmark)),
+            )
+    else:
+        collector.skip(rule, "predicate_not_met", "S6 未形成达人明确优于标杆 CTA 的安全封顶条件。")
+
+
+def _collect_stage_constraints(
+    collector: _ConstraintCollector,
+    stage_id: str,
+    stage: dict[str, Any],
+    facts: dict[str, Any],
+    endorsement: dict[str, _Endorsement] | None,
+    activation_evidence: TrustedS4ActivationEvidence | None,
+) -> None:
+    if stage_id == "S1":
+        _collect_s1_constraints(collector, stage, facts)
+    elif stage_id == "S2":
+        _collect_s2_constraints(collector, stage, facts)
+    elif stage_id == "S3":
+        _collect_s3_constraints(collector, stage, facts)
+    elif stage_id == "S4":
+        _collect_s4_constraints(collector, stage, facts, activation_evidence)
+    elif stage_id == "S5":
+        _collect_s5_constraints(collector, stage, facts, endorsement)
+    elif stage_id == "S6":
+        _collect_s6_constraints(collector, stage, facts)
+
+
+def _build_resolver_trace(
+    model: str,
+    resolved: dict[str, Any],
+    evaluations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    constraint_reason = (
+        "；".join(item.reason for item in resolved["constraints"])
+        if resolved["constraints"]
+        else "无确定性约束，保留模型 severity。"
+    )
     trace: dict[str, Any] = {
         "status": resolved["status"],
         "severity": resolved["severity"],
@@ -1348,10 +1418,16 @@ def _derive_one(
     if resolved["status"] == "conflict":
         trace["reason"] = "floor 与 ceiling 冲突，保留模型 severity，交 Phase C 复核。"
         trace["conflict"] = {"floor": resolved["floor"], "ceiling": resolved["ceiling"]}
+    return trace
 
-    # 执行分仍可作为离线审计信息，但明确不再进入 severity resolver。
-    # active Stage1 合同下，资格未知/冲突意味着输入事实未闭合；不能把
-    # Stage2 的旧 flag 或模型自报 execution 当成确定数字继续展示。
+
+def _attach_execution_observation(
+    trace: dict[str, Any],
+    stage_id: str,
+    stage: dict[str, Any],
+    facts: dict[str, Any],
+) -> None:
+    """Attach diagnostic execution values without feeding them back into severity."""
     active_readiness = _active_stage_readiness(facts, stage_id)
     unresolved_readiness = {
         role: status
@@ -1368,53 +1444,100 @@ def _derive_one(
         }
         trace["derived_creator_execution"] = None
         trace["derived_benchmark_execution"] = None
-    else:
-        observed = None
-        helper = {
-            "S1": _s1_hook_exec,
-            "S2": _s2_contract_exec,
-            "S3": _s3_usage_exec,
-            "S4": _s4_effect_exec,
-            "S5": _s5_trust_exec,
-            "S6": _s6_cta_exec,
-        }.get(stage_id)
-        if helper is not None:
-            try:
-                observed = helper(stage)
-            except Exception:
-                observed = None
-        if not isinstance(observed, dict):
-            creator_exec = stage.get("creator_execution")
-            benchmark_exec = stage.get("benchmark_execution")
-            if isinstance(creator_exec, (int, float)) and not isinstance(creator_exec, bool) and isinstance(benchmark_exec, (int, float)) and not isinstance(benchmark_exec, bool):
-                observed = {"creator_exec": float(creator_exec), "bench_exec": float(benchmark_exec)}
-        if isinstance(observed, dict):
-            creator_observed = observed.get("creator_exec")
-            benchmark_observed = observed.get("bench_exec")
-            if has_multimodal_assessment(stage):
-                creator_observed = multimodal_execution(stage_id, stage, "creator", creator_observed)
-                benchmark_observed = multimodal_execution(stage_id, stage, "benchmark", benchmark_observed)
-            trace["execution_observation"] = {
-                "creator": creator_observed,
-                "benchmark": benchmark_observed,
-                "source": "diagnostic_only",
-            }
-            trace["derived_creator_execution"] = creator_observed
-            trace["derived_benchmark_execution"] = benchmark_observed
+        return
+
+    observed = None
+    helper = {
+        "S1": _s1_hook_exec,
+        "S2": _s2_contract_exec,
+        "S3": _s3_usage_exec,
+        "S4": _s4_effect_exec,
+        "S5": _s5_trust_exec,
+        "S6": _s6_cta_exec,
+    }.get(stage_id)
+    if helper is not None:
+        try:
+            observed = helper(stage)
+        except Exception:
+            observed = None
+    if not isinstance(observed, dict):
+        creator_exec = stage.get("creator_execution")
+        benchmark_exec = stage.get("benchmark_execution")
+        if (
+            isinstance(creator_exec, (int, float))
+            and not isinstance(creator_exec, bool)
+            and isinstance(benchmark_exec, (int, float))
+            and not isinstance(benchmark_exec, bool)
+        ):
+            observed = {"creator_exec": float(creator_exec), "bench_exec": float(benchmark_exec)}
+    if not isinstance(observed, dict):
+        return
+
+    creator_observed = observed.get("creator_exec")
+    benchmark_observed = observed.get("bench_exec")
     if has_multimodal_assessment(stage):
-        trace["multimodal_integration"] = {
-            "channel_requirement": channel_requirement_for(stage_id),
-            "sides": {
-                role: {
-                    "dominant_channel": (stage.get(f"{role}_multimodal") or {}).get("dominant_channel"),
-                    "cross_channel_relation": (stage.get(f"{role}_multimodal") or {}).get("cross_channel_relation"),
-                    "integrated_effect": (stage.get(f"{role}_multimodal") or {}).get("integrated_effect"),
-                    "compensation_applied": (stage.get(f"{role}_multimodal") or {}).get("compensation_applied"),
-                }
-                for role in ("creator", "benchmark")
-                if isinstance(stage.get(f"{role}_multimodal"), dict)
-            },
-        }
+        creator_observed = multimodal_execution(stage_id, stage, "creator", creator_observed)
+        benchmark_observed = multimodal_execution(stage_id, stage, "benchmark", benchmark_observed)
+    trace["execution_observation"] = {
+        "creator": creator_observed,
+        "benchmark": benchmark_observed,
+        "source": "diagnostic_only",
+    }
+    trace["derived_creator_execution"] = creator_observed
+    trace["derived_benchmark_execution"] = benchmark_observed
+
+
+def _attach_multimodal_integration(
+    trace: dict[str, Any],
+    stage_id: str,
+    stage: dict[str, Any],
+) -> None:
+    if not has_multimodal_assessment(stage):
+        return
+    trace["multimodal_integration"] = {
+        "channel_requirement": channel_requirement_for(stage_id),
+        "sides": {
+            role: {
+                "dominant_channel": (stage.get(f"{role}_multimodal") or {}).get("dominant_channel"),
+                "cross_channel_relation": (stage.get(f"{role}_multimodal") or {}).get("cross_channel_relation"),
+                "integrated_effect": (stage.get(f"{role}_multimodal") or {}).get("integrated_effect"),
+                "compensation_applied": (stage.get(f"{role}_multimodal") or {}).get("compensation_applied"),
+            }
+            for role in ("creator", "benchmark")
+            if isinstance(stage.get(f"{role}_multimodal"), dict)
+        },
+    }
+
+
+def _derive_one(
+    stage_id: str,
+    stage: dict[str, Any],
+    weights: dict[str, float] | None = None,
+    painpoints: list[str] | None = None,
+    shake: dict[str, bool] | None = None,
+    endorsement: dict[str, _Endorsement] | None = None,
+    allow_legacy_text_fallback: bool = False,
+    facts: dict[str, Any] | None = None,
+    activation_evidence: TrustedS4ActivationEvidence | None = None,
+) -> dict[str, Any]:
+    """根据离散事实收集约束，再交给 resolver；旧参数仅保留调用兼容性。"""
+    del weights, painpoints, shake, allow_legacy_text_fallback
+    model = _normalize_model_severity(stage.get("model_severity") or stage.get("severity"))
+    facts = facts if isinstance(facts, dict) else {}
+    collector = _ConstraintCollector()
+    _collect_stage_constraints(
+        collector,
+        stage_id,
+        stage,
+        facts,
+        endorsement,
+        activation_evidence,
+    )
+
+    resolved = resolve_severity(model, tuple(collector.floors), tuple(collector.ceilings))
+    trace = _build_resolver_trace(model, resolved, collector.evaluations)
+    _attach_execution_observation(trace, stage_id, stage, facts)
+    _attach_multimodal_integration(trace, stage_id, stage)
     return _attach_pending_flag_trace(stage_id, stage, trace)
 
 

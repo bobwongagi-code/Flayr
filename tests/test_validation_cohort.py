@@ -118,6 +118,9 @@ class ValidationCohortTest(unittest.TestCase):
         label["stage_label_statuses"] = {
             "S5": {"status": "not_applicable", "reason": "此视频不涉及独立信任放大。"}
         }
+        errors = validate_blind_sample_contract("sample", label, {"group": "blind"})
+        self.assertTrue(any("不得设置 stage_relations" in error for error in errors))
+        label["stage_relations"]["S5"] = None
         self.assertEqual(validate_blind_sample_contract("sample", label, {"group": "blind"}), [])
         self.assertEqual(stage_label_status(label, "S5"), ("not_applicable", "此视频不涉及独立信任放大。"))
 

@@ -262,7 +262,9 @@ def validate_blind_sample_contract(
             errors.append(f"{sample_id}: {stage} 有可评分 human_gap 时 stage_label_status 必须为 labeled")
         relation = str(relations.get(stage) or "").strip().lower()
         if normalized_gap == "not_applicable":
-            if relation and not _valid_relation(relation, allow_legacy=legacy_contract):
+            if require_canonical and relation:
+                errors.append(f"{sample_id}: {stage}=not_applicable 不得设置 stage_relations")
+            elif relation and not _valid_relation(relation, allow_legacy=legacy_contract):
                 errors.append(f"{sample_id}: {stage}.stage_relations 非法")
             continue
         if require_canonical and not _valid_relation(relation, allow_legacy=False):

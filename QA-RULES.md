@@ -176,7 +176,7 @@ python3 -m unittest tests.test_analysis_model
 实现位置：
 
 - `scripts/flayr_core/llm/pipeline.py::_process_llm_result`
-- `scripts/flayr_core/llm/payload.py::build_llm_comparison_payload`
+- `scripts/flayr_core/llm/payload.py::build_stage_group_judgment_payload`
 - `scripts/flayr_core/llm/payload.py::build_stage_review_payload`
 
 ### Q05 每个阶段必须引用存在的 evidence_id
@@ -423,7 +423,7 @@ python3 -m unittest tests.test_analysis_model
 
 实现位置：
 
-- `scripts/flayr_core/llm/payload.py::build_llm_comparison_payload`
+- `scripts/flayr_core/llm/payload.py::build_stage_group_judgment_payload`
 - `scripts/flayr_core/llm/pipeline.py::extract_low_confidence_stages`
 
 ### Q18 Phase C 只回看一次

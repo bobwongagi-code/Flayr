@@ -1331,11 +1331,12 @@ def stage_evidence_gate(
 ) -> dict[str, Any]:
     """Return the code-owned handoff state from Stage1 into stage judgment.
 
-    This is deliberately a policy boundary, not another model judgment.  A
-    stage may be judged only when both sides have a closed Stage1 state
-    (``present`` or a complete, explicit ``absent``).  ``unknown`` and
+    This is deliberately a policy boundary, not another model judgment. A
+    mixed pair of closed Stage1 states (``present``/``absent``) remains
+    comparable. Two complete ``absent`` states close the pair as
+    ``not_applicable`` instead of inventing a ``none`` gap. ``unknown`` and
     ``conflict`` always block a grounded comparison; they must never be
-    reinterpreted as absence.  Legacy facts remain visible for compatibility
+    reinterpreted as absence. Legacy facts remain visible for compatibility
     but are marked separately so evaluations cannot silently mix generations.
     """
     code = normalize_stage_code(stage) or str(stage or "").strip().upper()[:2]
@@ -1428,13 +1429,15 @@ def stage_evidence_gate(
         gate_status = "blocked"
         reason_code = "s5_scope_not_closed"
         reason = "S5 单侧或模型侧标记为未涉及，尚未形成双侧 Stage1 事实闭合，不能关闭本轮比较。"
-    elif code == "S5" and statuses == {"absent"}:
-        # Even bilateral absence needs the code-owned comparison decision. A
-        # raw stage gate call must not silently turn an unfinalized fact pair
-        # into a successful grounded result.
-        gate_status = "blocked"
-        reason_code = "s5_scope_not_closed"
-        reason = "S5 双侧事实均为 absent，但尚未由比较合同确认本轮不涉及，不能直接发布结果。"
+    elif statuses == {"absent"}:
+        # Pair-level gap semantics are shared by S1-S6: two closed negative
+        # sides mean neither video executes this stage, so there is no stage
+        # difference to score. Side-level absence remains auditable and must
+        # not be confused with unknown or incomplete collection.
+        gate_status = "not_applicable"
+        reason_code = "bilateral_stage_absent"
+        reason = "双方 Stage1 均完整确认未执行本阶段功能；本轮不涉及，不生成阶段差距。"
+        normalized_comparison = "not_applicable"
     elif "unknown" in statuses:
         blocked_roles = [role for role, item in role_states.items() if item["status"] == "unknown"]
         budget_roles = [
@@ -1525,6 +1528,9 @@ def materialize_stage_evidence_gates(result: Any) -> None:
             stage["analysis_reason"] = gate["reason"]
         elif gate["status"] in {"not_applicable", "not_comparable"}:
             stage["analysis_status"] = gate["status"]
+            if gate.get("reason_code") == "bilateral_stage_absent":
+                stage["comparison_status"] = "not_applicable"
+                stage["comparison_reason"] = gate["reason"]
         else:
             stage["analysis_status"] = "grounded"
             stage.pop("analysis_reason", None)

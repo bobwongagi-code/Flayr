@@ -188,13 +188,21 @@ def stage_skipped(stage: dict[str, Any]) -> tuple[bool, str]:
     stage_name = str(stage.get("stage", "") or "")
     is_s5 = "S5" in stage_name.upper() or "信任" in stage_name or "trust" in stage_name.lower()
     comparison_contract = stage.get("comparison_contract") if isinstance(stage, dict) else None
-    s5_scope_is_code_owned = (
+    s5_contract_scope_is_code_owned = (
         is_s5
         and isinstance(comparison_contract, dict)
         and comparison_contract.get("status") == "not_applicable"
         and comparison_contract.get("status_source") == "bilateral_stage1_facts"
     )
     gate = stage.get("stage_evidence_gate") if isinstance(stage, dict) else None
+    s5_gate_scope_is_code_owned = (
+        is_s5
+        and isinstance(gate, dict)
+        and gate.get("status") == "not_applicable"
+        and gate.get("reason_code") == "bilateral_stage_absent"
+        and gate.get("source") == "code"
+    )
+    s5_scope_is_code_owned = s5_contract_scope_is_code_owned or s5_gate_scope_is_code_owned
     if isinstance(gate, dict) and gate.get("status") in {
         "blocked",
         "not_applicable",

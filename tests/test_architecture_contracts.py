@@ -59,7 +59,6 @@ from flayr_core.llm.s4_visual_verifier import (
 from flayr_core.llm.payload import (
     build_comparison_eligibility_payload,
     build_improvement_reconciliation_payload,
-    build_llm_comparison_payload,
     build_llm_payload,
     build_llm_repair_payload,
     build_product_foundation_payload,
@@ -2641,20 +2640,20 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertNotIn("trust.1", first["stages"]["S5"]["allowed_ids"])
         self.assertIn("trust.1", first["stages"]["S5"]["trust_evidence_ids"])
 
-    def test_product_proposition_contract_reaches_comparison_and_repair(self) -> None:
+    def test_product_foundation_reaches_segmented_stage2_and_legacy_repair(self) -> None:
         analysis = {
             "product_foundation": self._proposition_foundation(),
             "brand_proposition": {"propositions": ["出油后快速哑光"], "painpoints": ["油光"]},
             "videos": {},
         }
-        comparison = build_llm_comparison_payload("test", "input", {}, analysis)
+        comparison = build_stage_group_judgment_payload("test", "", {}, analysis, ["S1", "S4"])
         comparison_content = comparison["messages"][1]["content"]
         comparison_text = comparison_content[0]["text"] if isinstance(comparison_content, list) else comparison_content
         repair = build_llm_repair_payload("test", "{}", "error", "input", analysis=analysis)
         repair_text = repair["messages"][1]["content"]
 
-        self.assertIn("本品命题引用合同", comparison_text)
-        self.assertIn('"hook.1"', comparison_text)
+        self.assertIn("商品与比较合同", comparison_text)
+        self.assertIn("控油定妆", comparison_text)
         self.assertIn("本品命题引用合同", repair_text)
         self.assertIn('"proof.1"', repair_text)
         self.assertIn("具体未解问题", comparison_text)
@@ -3082,11 +3081,11 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(result["comparison_eligibility"]["scope"], "cross_product")
 
     def test_stage2_prompt_prioritizes_bilateral_s5_scope_over_category_prior(self) -> None:
-        payload = build_llm_comparison_payload("test", "input", {}, {"videos": {}})
-        prompt = payload["messages"][1]["content"]
-        self.assertIn("S5 范围优先级（代码合同，优先于商业框架中的品类判例）", prompt)
-        self.assertIn("只有双方覆盖完整且均为 absent 才由代码标记 not_applicable", prompt)
-        self.assertIn("品类和购买动机只能影响差距权重与解释", prompt)
+        payload = build_stage_group_judgment_payload("test", "", {}, {"videos": {}}, ["S5"])
+        prompt = payload["messages"][1]["content"][0]["text"]
+        self.assertIn("双侧负向事实都经过完整观察确认", prompt)
+        self.assertIn("双侧均 absent 时由代码收口为 not_applicable", prompt)
+        self.assertIn("不代表达人必须完成背书", prompt)
 
         structure_library = (ROOT / "structure_library_full.md").read_text(encoding="utf-8")
         self.assertIn("编排模块与既有视频评估解耦", structure_library)
@@ -3201,6 +3200,17 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertFalse(skipped)
         self.assertEqual(reason, "")
 
+        stage["stage_evidence_gate"] = {
+            "status": "not_applicable",
+            "reason_code": "bilateral_stage_absent",
+            "source": "code",
+            "reason": "双方 Stage1 均完整确认未执行本阶段功能。",
+        }
+        skipped, reason = stage_skipped(stage)
+        self.assertTrue(skipped)
+        self.assertIn("absent", reason)
+
+        stage["stage_evidence_gate"] = {"status": "not_applicable"}
         stage["comparison_contract"] = {
             "status": "not_applicable",
             "status_source": "bilateral_stage1_facts",
@@ -4934,7 +4944,7 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(ranges[-1][2:], (15.0, 20.0))
 
     def test_certification_policy_reaches_all_analysis_prompts(self) -> None:
-        comparison = build_llm_comparison_payload("test", "input", {}, {"videos": {}})
+        comparison = build_stage_group_judgment_payload("test", "", {}, {"videos": {}}, ["S5"])
         comparison_content = comparison["messages"][1]["content"]
         comparison_text = comparison_content[0]["text"] if isinstance(comparison_content, list) else comparison_content
         repair_text = build_llm_repair_payload("test", "{}", "error", "input")["messages"][0]["content"]
@@ -4966,7 +4976,7 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertNotIn("产品名/卖点/认证", review_text)
 
     def test_analysis_prompts_do_not_impose_uncontracted_evidence_count_caps(self) -> None:
-        comparison = build_llm_comparison_payload("test", "input", {}, {"videos": {}})
+        comparison = build_stage_group_judgment_payload("test", "", {}, {"videos": {}}, ["S3", "S4"])
         comparison_text = json.dumps(comparison, ensure_ascii=False)
         repair_text = json.dumps(build_llm_repair_payload("test", "{}", "error", "input"), ensure_ascii=False)
         fallback_text = json.dumps(build_llm_payload("test", "input", []), ensure_ascii=False)
@@ -4974,7 +4984,7 @@ class ArchitectureContractTests(unittest.TestCase):
         for text in (comparison_text, repair_text, fallback_text):
             self.assertNotIn("3 到 6 个关键 evidence_units", text)
             self.assertNotIn("任何列表最多 3 条", text)
-        self.assertIn("不得用固定条数截断 Stage1 evidence_units", comparison_text)
+        self.assertIn("不得用固定条数截断 qualified_evidence", comparison_text)
 
     def test_comparison_input_excludes_raw_transcript_contents(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5031,7 +5041,7 @@ class ArchitectureContractTests(unittest.TestCase):
 
             text = write_analysis_input(root, analysis).read_text(encoding="utf-8")
             payload_text = json.dumps(
-                build_llm_comparison_payload("test", text, {}, {"videos": {}}),
+                build_stage_group_judgment_payload("test", text, {}, {"videos": {}}, ["S1", "S2"]),
                 ensure_ascii=False,
             )
 
@@ -5046,8 +5056,8 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertNotIn(marker, text)
             self.assertNotIn(marker, payload_text)
 
-    def test_multimodal_contract_reaches_all_analysis_prompts(self) -> None:
-        comparison = build_llm_comparison_payload("test", "input", {}, {"videos": {}})
+    def test_segmented_stage2_is_text_only_while_legacy_repair_keeps_multimodal_contract(self) -> None:
+        comparison = build_stage_group_judgment_payload("test", "", {}, {"videos": {}}, ["S3", "S4"])
         repair = build_llm_repair_payload("test", "{}", "error", "input")
         review = build_stage_review_payload(
             "test",
@@ -5056,12 +5066,16 @@ class ArchitectureContractTests(unittest.TestCase):
             {"stage_analysis": [{"stage": "S1 Hook", "creator_time_range": "0s - 3s", "benchmark_time_range": "0s - 3s"}]},
             ["S1"],
         )
-        for payload in (comparison, repair):
-            payload_text = json.dumps(payload, ensure_ascii=False)
-            self.assertIn("S1-S6 跨模态综合合同", payload_text)
-            self.assertIn("禁止按最弱渠道一票否决", payload_text)
-            self.assertIn("S3", payload_text)
-            self.assertIn("真实使用过程与关键动作可见是硬条件", payload_text)
+        comparison_text = json.dumps(comparison, ensure_ascii=False)
+        self.assertNotIn("S1-S6 跨模态综合合同", comparison_text)
+        self.assertIn("qualified_evidence", comparison_text)
+        self.assertEqual(
+            [item.get("type") for item in comparison["messages"][1]["content"]],
+            ["text"],
+        )
+        repair_text = json.dumps(repair, ensure_ascii=False)
+        self.assertIn("S1-S6 跨模态综合合同", repair_text)
+        self.assertIn("禁止按最弱渠道一票否决", repair_text)
         review_text = json.dumps(review, ensure_ascii=False)
         self.assertIn("不得输出或改写 severity", review_text)
         self.assertNotIn("creator_multimodal", review_text)
@@ -5174,7 +5188,7 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertNotIn("benchmark_multimodal", stage)
 
     def test_pending_s3_s6_fields_reach_all_contract_surfaces(self) -> None:
-        comparison = build_llm_comparison_payload("test", "input", {}, {"videos": {}})
+        comparison = build_stage_group_judgment_payload("test", "", {}, {"videos": {}}, ["S3", "S6"])
         comparison_text = json.dumps(comparison, ensure_ascii=False)
         repair_text = json.dumps(build_llm_repair_payload("test", "{}", "error", "input"), ensure_ascii=False)
         review = build_stage_review_payload(

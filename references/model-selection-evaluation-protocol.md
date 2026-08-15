@@ -105,10 +105,11 @@ scripts/evaluate_compact_model.py --variant s5_audit ...
 
 `effect_evidence_state` 由资格层负责，`relation` 和 `gap_magnitude` 由判断层负责。资格层输出
 `none` 表示已经确定该侧没有合格效果证据；证据是否存在仍未确定时，资格层必须输出
-`uncertain`，不能用 `none` 代替。判断层不得把资格层已经确定的状态重新解释：双方均为
-`none` 时只能输出 `tie/none`，不能把 `claim_only`、产品形态或操作过程重新升级成一侧优势，
-也不能把上游的确定状态降回 `uncertain/uncertain`。这不是全局禁止不确定性；任一侧资格状态为
-`uncertain` 时，判断层仍可输出不确定结论。
+`uncertain`，不能用 `none` 代替。按 2026-08-14 冻结的 S1-S6 通用 GT 语义，双方覆盖完整且
+资格状态均为 `none/absent` 时，pair-level 状态应收口为 `not_applicable`，不再输出 `tie/none`；
+旧实验中“双侧 none 强制 tie/none”的结果属于 legacy 口径。单侧 `none/absent`、另一侧存在
+合格事实时仍须比较，不能借 `not_applicable` 隐藏差距。任一侧为 `uncertain` 时继续输出不确定，
+不能把采集缺失伪装成双侧未执行。
 
 人工复核的 S4 梯度只允许在 `seen_mechanism_calibration_only` 实验中通过显式开关传入。允许字段
 仅为 `effect_basis`、`salience`、`focus`、`coverage` 和已锁定 `evidence_ids`；人工理由、结论文本
@@ -136,10 +137,66 @@ S4 梯度传递 A/B 必须在调用前冻结以下规则：
 
 历史 v1 artifact 可以用于诊断和兼容读取，但不能与 v2 artifact 静默合并成“当前模型表现”。需要重新运行的地方必须显式标记 schema、source commit、source identity 和协议 hash。
 
+### S4 large 低估审计边界
+
+2026-08-14 对新 `human_initial` 中 5 个 `S4=large` 样本做了零调用审计。结果不是单一的
+判断标定问题：2 例资格事实充分但判断层低估，2 例原视频存在决定性事实但 Stage1/Q 事实包
+未完整登记，1 例人工 GT 把出镜者静态皮肤状态当成产品效果，存在 S4 阶段归属冲突。
+
+因此，`gt_large_recall` 低不能直接触发更重的 rubric。任何 S4 large 标定实验必须先满足：
+
+1. 人工 GT 的 S4 阶段归属已经按 `structure_library_full.md` 复核；
+2. 双侧资格事实包完整，且区分视觉对比、使用后结果、第三方数据、口播主张；
+3. 至少 3 个独立样本、覆盖 2 个品类，在相同判断合同下稳定低估；
+4. 事实不足和 GT 边界样本从判断标定分母中排除并单独报告。
+
+对每个 undercall 还必须做“人工理由覆盖审计”：从人工 `stage_notes`/关键事实中提取决定该
+档位的核心依据，逐项检查它是否进入 Stage1 账本、是否通过 Q 资格投影、以及 R 的
+`decision_basis` 是否实际消费。只有“核心依据已到达 R，且 R 明确认出同一差异但仍低估”
+才能归为判断标定问题；核心依据未到达 R 时归为 Stage1/Q 覆盖问题；理由与阶段定义冲突时
+归为 GT 复核问题。人工理由只能用于离线审计，严禁写入模型 prompt 或事实包，避免答案泄漏。
+
+旧 `ground-truth-labels.json` 中的 S4 large 标签缺少同协议事实与关系字段，其中已观察到
+“双方均无结果但旧 GT=large”等冲突；它们不能与新协议样本合并扩大标定分母。
+
+理由覆盖审计后形成的三个干净 seen calibration 样本（Aavini、Frosty、Eye Cream C1）在
+相同 `qwen3.7-plus/s4_judgment` 协议哈希下均输出正确 relation、但均把人工 `large` 判为
+`medium`。三份 `decision_basis` 都明确复述了人工认为关键的相对差异，因此该结果允许进入
+“同 schema、只增加相对 gap 定义”的单变量 A/B；它仍不构成 production promotion 证据。
+Retinol 和 Eye Cream C2 分别因 GT 阶段边界、事实覆盖与 S4/S5 重复计权风险退出该分母。
+
+这次 A/B 不得切换到字段更多的 calibrated 合同，不得同时修改 Q，不得加入人工 gap 或
+`stage_notes`。baseline 与 candidate 必须保持事实包、输出 schema、模型、预算和采样一致；
+candidate 只能补充 gap 的相对语义。预先冻结的最低通过线是 relation 不回归、至少 2/3
+精确命中且不新增两档错误。Aavini 的 `medium/large` 仍允许第二标注者盲复核，不作为单例
+写死规则的依据。
+
 当前 9 组重评分中的 `carslan-b0`、`tashadiyana` 仍来自旧 calibration severity 标签，缺少
 完整 `human_initial` 和 `stage_relations`；它们只能用于兼容性/差距大小诊断，不能被误写成
 完全同协议的 blind GT。`youkoubo-c0/S3` 与 `are_xie/S5` 的永久回归 fixture 仍需在
 `clean_current` 输入上完成明确的重新核验；本次评分合同修复不会替代那项 fixture 复核。
+
+#### S4 专家审核 GT
+
+当前阶段不做多人一致性预测试，也不要求业务专家填写为模型设计的资格字段。工程侧先根据已有
+人工原话整理 `references/s4-expert-review.md`，专家只审核“谁更好、差多少、为什么、哪些
+画面形成判断”四件事。审核后的自然语言判断是权威层；relation、gap 和诊断标签只能在其后派生，
+不能反过来覆盖专家原话。
+
+当前 S1-S6 统一专家口径明确区分：`small` 表示双方都执行且存在可见的小差距；`none` 表示双方都
+执行但表现基本相同；`not_applicable/NA` 表示双方都未执行或该阶段不涉及。单侧执行、另一侧未执行
+时仍需判断方向与差距，不能记为 `NA`。旧 16 组合同没有 `none`，当时
+“无差距”被并入 `small`；迁移旧标签时必须回看人工理由，不能机械地把旧 `small` 解释成存在差距。
+
+这批数据属于 expert-reviewed seen calibration，只能用于根因分析和机制 A/B，不能声称为多人
+一致性 GT、blind validation 或 production promotion 证据。若未来进入生产晋级，再另行冻结小规模
+双人盲标协议；不得把当前审核过程伪装成那类证据。
+
+专家审核完成后，Candidate 仍只能修改 R 层 gap 语义，不得同时改 Q、事实包、relation、输出
+schema、模型、预算或重试策略。`uncertain` 已是现有合法值；事实充分样本输出它时记作
+`false_uncertain`，不得进入 `within_one_band`。档位距离只定义为
+`none < small < medium < large`。A/B 必须同时报告 exact gap、within-one-band、large recall/
+precision、medium recall/precision、false large、false uncertain、方向回归和两档错误。
 
 ## 冻结链路
 
@@ -168,7 +225,10 @@ stage_relations = benchmark_better | creator_better | tie | uncertain
 如果同时保留兼容字段 `stages` 或 `relations`，它们必须分别与 `human_gap` 和
 `stage_relations` 一致；`stage_oracles.relation` 也必须与阶段方向一致。每个
 `top_root_causes` 必须至少引用一条 `key_event`。
-可评分的 `none` 只能与 `tie/uncertain` 组合；非 `none` 的差距不能与 `tie` 组合。
+可评分的 `none` 只表示双方都执行且表现相当，只能与 `tie` 组合；`not_applicable` 不设置方向，
+不进入差距分母；非 `none` 的有效差距不能与 `tie` 组合。双方都未执行时必须使用
+`not_applicable`，不能为了得到一个可评分格子而写成 `tie/none`。单侧未执行、另一侧执行时仍是
+有效比较，必须给出方向和 `small/medium/large` 档位。
 每个有效阶段还必须有单侧执行 oracle、决策事件引用和理由。事件时间范围必须是有限、
 非负且 `start < end` 的秒数区间；`expected_state=absent` 的事件必须带有 `terms_any`，
 用于统计模型是否错误地声称该事实存在。

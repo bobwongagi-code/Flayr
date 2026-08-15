@@ -269,7 +269,8 @@ scripts/
     │   ├── product_profile.py        # 产品地基与 S4 证明合同归一化
     │   ├── parse.py                  # 阶段 Flag、结果 schema normalize + 兼容导出
     │   ├── payload.py                # build_*_payload 系列请求构造
-    │   ├── pipeline.py               # Stage1、分段 Stage2、Stage3、Phase C 与 finalizer
+    │   ├── pipeline.py               # Stage1、分段 Stage2、Stage3、Phase C 与 finalizer 编排
+    │   ├── stage2_projection.py      # Stage2 判断到代码所有字段的确定性投影
     │   ├── s4_visual_verifier.py     # 旧 S4 复核产物与离线 fixture 兼容；不含 provider 调用
     │   └── stage_review_contract.py  # 阶段 patch 合同
     ├── postprocess/                  # 分析结果投影、校验、局部修复与专项规则
@@ -433,8 +434,8 @@ scripts/
 
 ### 3.6 `llm/` 包 — 大模型分析
 
-按职责拆分请求、解析、Stage1、分段 Stage2、Stage3 和 Phase C。依赖单向：`api → media / payload /
-json_codec / product_profile / parse → pipeline`。下游（translation）只 import `llm.api`，不被动加载整套业务规则。
+按职责拆分请求、解析、Stage1、分段 Stage2、Stage3 和 Phase C。请求与解析依赖单向流入 `pipeline`；
+`stage2_projection` 只依赖 artifacts 和 Stage1 证据合同，再由 `pipeline` 调用。下游（translation）只 import `llm.api`，不被动加载整套业务规则。
 
 | 子模块 | 职责 |
 |------|------|
@@ -445,7 +446,8 @@ json_codec / product_profile / parse → pipeline`。下游（translation）只 
 | `llm/product_profile.py` | Step-0 产品地基、短视频证明计划与 S4 证明合同的归一化；不反向依赖 `parse.py`。 |
 | `llm/parse.py` | 阶段 Flag 和最终结果 schema normalize；保留 `parse_json_text`、产品地基函数等兼容导出。含 `STAGES`、`is_effective_voiceover` 等被 `postprocess` 复用的基础接口。 |
 | `llm/payload.py` | `build_*_payload` 系列。阶段一 `build_video_fact_payload`（固定 canonical 帧/窗口转写）和 `build_video_fact_recovery_payload`（一次定向原生片段）；阶段二 `build_stage_group_judgment_payload`（四个边界明确的纯文本小组请求）和只读 `build_stage_synthesis_payload`；Phase C `build_stage_review_payload`（结构信号触发的原生视频切片）。 |
-| `llm/pipeline.py` | 主入口：`run_video_fact_extraction`、`run_segmented_stage_pipeline`、`run_large_model_analysis`、`finalize_analysis_result`。分段 Stage2 依次收口四个阶段组，再执行只读 Stage3 综合；所有外部结果经过同一个 finalizer 和唯一投影写回 analysis。Phase C 只应用受限阶段 patch。运行目录保留 raw/validated/final/postprocess 产物，用于区分模型原文、规范化结果和确定性后处理。 |
+| `llm/stage2_projection.py` | 将锁定 Stage1 事实与 Stage2 小组语义结果投影为 `stage_handoff_status`、证据摘要、时间范围和报告兼容字段；不发模型请求，不负责主流程编排。 |
+| `llm/pipeline.py` | 主入口：`run_video_fact_extraction`、`run_segmented_stage_pipeline`、`run_large_model_analysis`、`finalize_analysis_result`。分段 Stage2 依次收口四个阶段组并调用 `stage2_projection`，再执行只读 Stage3 综合；所有外部结果经过同一个 finalizer 写回 analysis。Phase C 只应用受限阶段 patch。运行目录保留 raw/validated/final/postprocess 产物，用于区分模型原文、规范化结果和确定性后处理。 |
 | `llm/s4_visual_verifier.py` | 只保留历史 S4 verifier 产物和离线 fixture 的合同/结果兼容；模块不再包含 provider 调用。S3/S4 原生视频连续性复核统一走 Phase C。 |
 
 **事实采集、分段判断与只读综合架构**：

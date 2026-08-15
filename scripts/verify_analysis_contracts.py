@@ -2071,12 +2071,11 @@ check("prompt.render_stage_frame_markdown 已删", not hasattr(prompt_module, "r
 # 6. speech_mode 四分支：有口播、字幕驱动、音乐驱动、纯视觉驱动
 from flayr_core.speech_mode import classify_speech_mode  # noqa: E402
 from flayr_core.llm.payload import (  # noqa: E402
-    build_llm_comparison_payload,
     build_llm_repair_payload,
     build_product_foundation_payload,
     build_product_foundation_repair_payload,
+    build_stage_group_judgment_payload,
     build_stage_review_payload,
-    hook_anchor_terms,
     load_brand_proposition,
 )
 from flayr_core.llm.pipeline import (  # noqa: E402
@@ -2146,17 +2145,19 @@ _foundation = {
     "product_profile": {"hook_proposition": "清洁更卫生", "physical_task": "避免手碰脏刷头"},
     "category_profile": {"painpoints": ["异味", "细菌滋生"]},
 }
-_props, _pains, _source = hook_anchor_terms({}, _foundation)
-check("S1 hook anchors 回退 Step-0", _props[:2] == ["清洁更卫生", "避免手碰脏刷头"] and "异味" in _pains)
-_payload = build_llm_comparison_payload(
+_payload = build_stage_group_judgment_payload(
     "test-model",
-    "analysis input",
+    "",
     {},
     {"product_foundation": _foundation, "videos": {}},
+    ["S1"],
 )
 _content = _payload["messages"][1]["content"]
 _user_text = _content[0]["text"] if isinstance(_content, list) else str(_content)
-check("S1 hook flags 无冻结品库仍强制输出", "S1 强制" in _user_text and "creator_hook" in _user_text)
+check(
+    "S1 分段判断消费 Step-0 地基并强制 hook flags",
+    "清洁更卫生" in _user_text and "异味" in _user_text and "creator_hook" in _user_text,
+)
 _fallback_ranges = fallback_artifact_ranges(20.0)
 check(
     "阶段目录：解析与预处理回退共用唯一来源",
@@ -2359,9 +2360,11 @@ _repair_payload = build_llm_repair_payload(
 )
 _repair_user = _repair_payload["messages"][1]["content"]
 check("repair payload 携带 locked facts", "已锁定单视频事实清单" in _repair_user and '"B1"' in _repair_user)
+_s5_payload = build_stage_group_judgment_payload("test-model", "", {}, {"videos": {}}, ["S5"])
+_s5_user_text = _s5_payload["messages"][1]["content"][0]["text"]
 check(
     "认证归属策略同时注入对比与修复 prompt",
-    CERTIFICATION_OWNERSHIP_PROMPT in _user_text
+    CERTIFICATION_OWNERSHIP_PROMPT in _s5_user_text
     and CERTIFICATION_OWNERSHIP_PROMPT in _repair_payload["messages"][0]["content"],
 )
 with tempfile.TemporaryDirectory() as tmp:

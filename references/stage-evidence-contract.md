@@ -107,9 +107,9 @@ Stage2 只消费冻结 facts 的纯文本投影，不接收视频或音频。Pha
 
 | gate status | 含义 | 后续行为 |
 |---|---|---|
-| `grounded` | 两侧均为 `present` 或完整 `absent` | 可以形成有证据支撑的阶段比较 |
+| `grounded` | 两侧均已闭合，且不是双侧 `absent`；包括 `present/present` 与 `present/absent` | 可以形成有证据支撑的阶段比较 |
 | `blocked` | 任一侧 `unknown`、`conflict`、预算未闭合、采集不完整、采集通道不可用或冻结摘要无效 | 阶段标记 `evidence_blocked`；模型 severity 只保留在审计字段，不作为有证据结论展示 |
-| `not_applicable` | 比较合同确认双方均未涉及该功能；单侧 `not_applicable` 与另一侧有证据时仍为 `blocked` | 双方均不适用时不生成阶段差距 |
+| `not_applicable` | 双方完整确认均为 `absent`，或比较合同确认双方均未涉及该功能；单侧 `not_applicable` 与另一侧有证据时仍为 `blocked` | 双方均未执行时不生成阶段差距 |
 | `not_comparable` | 商品关系或共同任务不允许比较 | 不生成阶段差距 |
 | `legacy` | 至少一侧没有 active Stage1 合同 | 仅保留历史审计读取；报告不显示为当前阶段结论，不能与新合同的 grounded 结果混为同一统计口径 |
 

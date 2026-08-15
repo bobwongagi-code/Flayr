@@ -1748,8 +1748,8 @@ def build_s4_judgment_payload(
         "再输出 relation 和 gap_magnitude。relation 只能是 benchmark_better、creator_better、tie、uncertain；"
         "gap_magnitude 只能是 none、small、medium、large、uncertain。"
         "relation=tie 时 gap_magnitude 只能是 none 或 uncertain；gap_magnitude=none 时 relation 只能是 tie 或 uncertain。"
-        "如果双方effect_evidence_state都为none，则proof=claim_only只能解释为何证据不合格，不能形成S4优势；"
-        "此时必须输出relation=tie且gap_magnitude=none。"
+        "双方effect_evidence_state都为none时，pair-level状态应为not_applicable，调用方不得把该样本送入S4差距判断；"
+        "若错误送入，proof=claim_only也不能形成S4优势。"
         + gradient_instruction
         + f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
     )
@@ -1782,12 +1782,10 @@ def _validate_s4_no_effect_advantage(result: dict[str, Any], bundle: FrozenCompa
     ]
     if states != ["none", "none"]:
         return []
-    if result.get("relation") != "tie" or result.get("gap_magnitude") != "none":
-        return [
-            "bilateral effect_evidence_state=none requires relation=tie and gap_magnitude=none; "
-            "claim_only cannot create an S4 advantage"
-        ]
-    return []
+    return [
+        "bilateral effect_evidence_state=none is pair-level not_applicable; "
+        "exclude this sample from S4 gap judgment instead of emitting tie/none or a claim_only advantage"
+    ]
 
 
 def validate_s4_judgment_result(
@@ -1875,7 +1873,8 @@ def build_s4_calibrated_judgment_payload(
         "同一事实不得重复计入多个决定性轴；同一对象的近义描述也只算一个轴。"
         "tie 时 decisive_axes 必须为空，且 floor、ceiling、magnitude 都必须为 none。"
         "不要把 result_only 当作 verified，也不要因字段数量多就自动判 large。"
-        "如果双方effect_evidence_state都为none，claim_only不能形成S4优势，必须输出tie和none。"
+        "双方effect_evidence_state都为none时，pair-level状态应为not_applicable，调用方不得把该样本送入S4差距判断；"
+        "若错误送入，claim_only也不能形成S4优势。"
         + gradient_instruction
         + f"严格输出形状示例：{json.dumps(response_shape, ensure_ascii=False, separators=(',', ':'))}"
     )
@@ -3135,101 +3134,88 @@ def score_compact_result(result: dict[str, Any], gt_stages: dict[str, str]) -> d
     }
 
 
-def _run_isolated_evaluation(
+_ISOLATED_EVALUATION_STALE_FILES = (
+    "compact_evaluation.json",
+    "compact_failure.json",
+    "severity_only_evaluation.json",
+    "severity_only_failure.json",
+    "severity_scaffold_evaluation.json",
+    "severity_scaffold_failure.json",
+    "visual_extraction_evaluation.json",
+    "visual_extraction_failure.json",
+    "s4_fact_state_evaluation.json",
+    "s4_fact_state_failure.json",
+    "s4_judgment_evaluation.json",
+    "s4_judgment_failure.json",
+    "s4_single_pass_evaluation.json",
+    "s4_single_pass_failure.json",
+    "s4_free_text_steps_evaluation.json",
+    "s4_free_text_steps_failure.json",
+    "s4_calibrated_judgment_evaluation.json",
+    "s4_calibrated_judgment_failure.json",
+    "s5_audit_evaluation.json",
+    "s5_audit_failure.json",
+    "raw_model_response.json",
+    "provider_compact_eval.json",
+    ".compact-request.json",
+)
+
+
+def _isolated_schema_version(variant: str) -> int:
+    return {
+        "model_independent": MODEL_INDEPENDENT_SCHEMA_VERSION,
+        "visual_extraction": VISUAL_EXTRACTION_SCHEMA_VERSION,
+        "visual_extraction_on_raw_video": VISUAL_EXTRACTION_SCHEMA_VERSION,
+        "s4_fact_state": S4_FACT_STATE_SCHEMA_VERSION,
+        "s4_judgment": S4_JUDGMENT_SCHEMA_VERSION,
+        "s4_calibrated_judgment": S4_CALIBRATED_JUDGMENT_SCHEMA_VERSION,
+        "s4_single_pass": S4_SINGLE_PASS_SCHEMA_VERSION,
+        "s4_free_text_steps": S4_FREE_TEXT_STEPS_SCHEMA_VERSION,
+        "s5_audit": S5_AUDIT_SCHEMA_VERSION,
+    }.get(variant, COMPACT_EVAL_SCHEMA_VERSION)
+
+
+def _prepare_isolated_output_dir(
+    output_dir: Path,
+    provider_replay_from: Path | None,
+) -> Path:
+    resolved = output_dir.expanduser().resolve()
+    if provider_replay_from is not None and resolved == provider_replay_from.expanduser().resolve():
+        raise CompactEvaluationError(
+            "provider replay output must differ from the replay source; "
+            "in-place evaluation could delete or overwrite replay artifacts"
+        )
+    resolved.mkdir(parents=True, exist_ok=True)
+    for stale_name in _ISOLATED_EVALUATION_STALE_FILES:
+        (resolved / stale_name).unlink(missing_ok=True)
+    return resolved
+
+
+def _build_isolated_evaluation_metadata(
     *,
     model: str,
     bundle: FrozenCompactBundle,
-    output_dir: Path,
-    api_url: str,
-    api_key_args: Any,
     payload: dict[str, Any],
-    validator: Any,
     task_role: str,
     evaluation_role: str,
     variant: str,
-    success_filename: str,
-    failure_filename: str,
-    call_kind: str,
     output_budget: int,
     output_budget_field: str,
     request_timeout_seconds: int,
-    provider_replay_from: Path | None = None,
-    gt_stages: dict[str, str] | None = None,
-    diagnostics: Any = None,
-    max_stage_evidence_ids: int | None = None,
-    experiment_metadata: dict[str, Any] | None = None,
+    max_stage_evidence_ids: int | None,
+    experiment_metadata: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    if evaluation_role not in EVALUATION_ROLES:
-        raise CompactEvaluationError(f"unsupported evaluation_role: {evaluation_role}")
-    if evaluation_role == "blind_validation" and "s4_effect_gradients" in bundle.context:
-        raise CompactEvaluationError(
-            "human-reviewed S4 gradients cannot be consumed by blind validation"
-        )
-    output_dir = output_dir.expanduser().resolve()
-    if provider_replay_from is not None:
-        replay_root = provider_replay_from.expanduser().resolve()
-        if output_dir == replay_root:
-            raise CompactEvaluationError(
-                "provider replay output must differ from the replay source; "
-                "in-place evaluation could delete or overwrite replay artifacts"
-            )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for stale_name in (
-        "compact_evaluation.json",
-        "compact_failure.json",
-        "severity_only_evaluation.json",
-        "severity_only_failure.json",
-        "severity_scaffold_evaluation.json",
-        "severity_scaffold_failure.json",
-        "visual_extraction_evaluation.json",
-        "visual_extraction_failure.json",
-        "s4_fact_state_evaluation.json",
-        "s4_fact_state_failure.json",
-        "s4_judgment_evaluation.json",
-        "s4_judgment_failure.json",
-        "s4_single_pass_evaluation.json",
-        "s4_single_pass_failure.json",
-        "s4_free_text_steps_evaluation.json",
-        "s4_free_text_steps_failure.json",
-        "s4_calibrated_judgment_evaluation.json",
-        "s4_calibrated_judgment_failure.json",
-        "s5_audit_evaluation.json",
-        "s5_audit_failure.json",
-        "raw_model_response.json",
-        "provider_compact_eval.json",
-        ".compact-request.json",
-    ):
-        (output_dir / stale_name).unlink(missing_ok=True)
-    decision_scope = DECISION_SCOPE_BY_ROLE[evaluation_role]
     contract_limits = contract_limits_for_variant(variant)
     if max_stage_evidence_ids is not None and variant in {"evidence_grounded", "model_independent"}:
         contract_limits["max_stage_evidence_ids"] = _stage_evidence_id_limit(max_stage_evidence_ids)
-    metadata = {
+    metadata: dict[str, Any] = {
         "evaluation_role": evaluation_role,
-        "decision_scope": decision_scope,
+        "decision_scope": DECISION_SCOPE_BY_ROLE[evaluation_role],
         "promotion_eligible": False,
         "promotion_note": "isolated model evaluation is not a production-model selection decision",
         "task_role": task_role,
         "variant": variant,
-        "schema_version": (
-            MODEL_INDEPENDENT_SCHEMA_VERSION
-            if variant == "model_independent"
-            else VISUAL_EXTRACTION_SCHEMA_VERSION
-            if variant in {"visual_extraction", "visual_extraction_on_raw_video"}
-            else S4_FACT_STATE_SCHEMA_VERSION
-            if variant == "s4_fact_state"
-            else S4_JUDGMENT_SCHEMA_VERSION
-            if variant == "s4_judgment"
-            else S4_CALIBRATED_JUDGMENT_SCHEMA_VERSION
-            if variant == "s4_calibrated_judgment"
-            else S4_SINGLE_PASS_SCHEMA_VERSION
-            if variant == "s4_single_pass"
-            else S4_FREE_TEXT_STEPS_SCHEMA_VERSION
-            if variant == "s4_free_text_steps"
-            else S5_AUDIT_SCHEMA_VERSION
-            if variant == "s5_audit"
-            else COMPACT_EVAL_SCHEMA_VERSION
-        ),
+        "schema_version": _isolated_schema_version(variant),
         "model": model,
         "source_commit": current_code_commit(),
         "source_run": bundle.source_run or bundle.run_dir.name,
@@ -3262,20 +3248,133 @@ def _run_isolated_evaluation(
             "system_prompt": payload.get("messages", [{}])[0].get("content"),
         }
     )
+    return metadata
+
+
+def _write_isolated_failure(
+    output_dir: Path,
+    failure_filename: str,
+    metadata: dict[str, Any],
+    *,
+    failure_class: str,
+    status: str = "request_failed",
+    error: str | None = None,
+    **details: Any,
+) -> dict[str, Any]:
+    failure: dict[str, Any] = {
+        "status": status,
+        **metadata,
+        "failure_class": failure_class,
+        **details,
+    }
+    if error is not None:
+        failure["error"] = error[:1000]
+    write_json(output_dir / failure_filename, failure)
+    return failure
+
+
+def _write_isolated_request_failure(
+    output_dir: Path,
+    failure_filename: str,
+    metadata: dict[str, Any],
+    *,
+    failure_class: str,
+    error: BaseException,
+    response_meta: dict[str, Any],
+    provider_artifact: str,
+    execution_source: str | None,
+    resource_budget: dict[str, Any],
+) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "provider_meta": response_meta,
+        "provider_artifact": provider_artifact,
+        "resource_budget": resource_budget,
+    }
+    if execution_source is not None:
+        details["execution_source"] = execution_source
+    return _write_isolated_failure(
+        output_dir,
+        failure_filename,
+        metadata,
+        failure_class=failure_class,
+        error=str(error),
+        **details,
+    )
+
+
+def _isolated_failure_class(error: BaseException) -> str:
+    if isinstance(error, ResourceBudgetExceeded):
+        return "resource_limit"
+    if isinstance(error, json.JSONDecodeError):
+        return "response_parse"
+    if isinstance(error, CompactEvaluationError):
+        return "input_or_contract_setup"
+    if isinstance(error, ValueError):
+        return "provider_replay_or_contract"
+    if isinstance(error, SystemExit):
+        return "provider_or_transport"
+    if isinstance(error, OSError):
+        return "io_or_transport"
+    return "unexpected_provider_or_validator_error"
+
+
+def _run_isolated_evaluation(
+    *,
+    model: str,
+    bundle: FrozenCompactBundle,
+    output_dir: Path,
+    api_url: str,
+    api_key_args: Any,
+    payload: dict[str, Any],
+    validator: Any,
+    task_role: str,
+    evaluation_role: str,
+    variant: str,
+    success_filename: str,
+    failure_filename: str,
+    call_kind: str,
+    output_budget: int,
+    output_budget_field: str,
+    request_timeout_seconds: int,
+    provider_replay_from: Path | None = None,
+    gt_stages: dict[str, str] | None = None,
+    diagnostics: Any = None,
+    max_stage_evidence_ids: int | None = None,
+    experiment_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if evaluation_role not in EVALUATION_ROLES:
+        raise CompactEvaluationError(f"unsupported evaluation_role: {evaluation_role}")
+    if evaluation_role == "blind_validation" and "s4_effect_gradients" in bundle.context:
+        raise CompactEvaluationError(
+            "human-reviewed S4 gradients cannot be consumed by blind validation"
+        )
+    output_dir = _prepare_isolated_output_dir(output_dir, provider_replay_from)
+    metadata = _build_isolated_evaluation_metadata(
+        model=model,
+        bundle=bundle,
+        payload=payload,
+        task_role=task_role,
+        evaluation_role=evaluation_role,
+        variant=variant,
+        output_budget=output_budget,
+        output_budget_field=output_budget_field,
+        request_timeout_seconds=request_timeout_seconds,
+        max_stage_evidence_ids=max_stage_evidence_ids,
+        experiment_metadata=experiment_metadata,
+    )
     write_json(output_dir / "compact_request_metadata.json", metadata)
     replay_requested = provider_replay_from is not None
     api_key = "" if replay_requested else read_llm_api_key(api_key_args)
     if not api_key and not replay_requested:
-        failure = {
-            "status": "request_failed",
-            **metadata,
-            "failure_class": "credential_unavailable",
-            "error": "LLM API key is unavailable",
-            "provider_artifact": None,
-            "execution_source": "not_started",
-        }
-        write_json(output_dir / failure_filename, failure)
-        return failure
+        return _write_isolated_failure(
+            output_dir,
+            failure_filename,
+            metadata,
+            failure_class="credential_unavailable",
+            error="LLM API key is unavailable",
+            provider_artifact=None,
+            execution_source="not_started",
+        )
     limits = ResourceLimits(
         max_total_wall_time=max(
             float(request_timeout_seconds) + LLM_RUN_OVERHEAD_RESERVE_SECONDS,
@@ -3331,11 +3430,8 @@ def _run_isolated_evaluation(
         parsed = parse_json_text(content)
         errors = validator(parsed)
         if errors:
-            failure = {
-                "status": "contract_failed",
-                **metadata,
+            details: dict[str, Any] = {
                 "errors": errors,
-                "failure_class": "contract_validation",
                 "contract_error_codes": _contract_error_codes(errors),
                 "candidate_result": parsed,
                 "provider_meta": response_meta,
@@ -3344,9 +3440,15 @@ def _run_isolated_evaluation(
                 "resource_budget": budget.snapshot(),
             }
             if diagnostics is not None:
-                failure["evidence_diagnostics"] = diagnostics(parsed, bundle)
-            write_json(output_dir / failure_filename, failure)
-            return failure
+                details["evidence_diagnostics"] = diagnostics(parsed, bundle)
+            return _write_isolated_failure(
+                output_dir,
+                failure_filename,
+                metadata,
+                status="contract_failed",
+                failure_class="contract_validation",
+                **details,
+            )
         result: dict[str, Any] = {
             "status": "completed",
             **metadata,
@@ -3364,96 +3466,37 @@ def _run_isolated_evaluation(
             result["evidence_diagnostics"] = diagnostics(parsed, bundle)
         write_json(output_dir / success_filename, result)
         return result
-    except ResourceBudgetExceeded as exc:
-        failure = {
-            "status": "request_failed",
-            **metadata,
-            "failure_class": "resource_limit",
-            "error": str(exc)[:1000],
-            "provider_meta": response_meta,
-            "provider_artifact": provider_artifact_path.name,
-            "execution_source": execution_source,
-            "resource_budget": budget.snapshot(),
-        }
-        write_json(output_dir / failure_filename, failure)
-        return failure
-    except json.JSONDecodeError as exc:
-        failure = {
-            "status": "request_failed",
-            **metadata,
-            "failure_class": "response_parse",
-            "error": str(exc)[:1000],
-            "provider_meta": response_meta,
-            "provider_artifact": provider_artifact_path.name,
-            "execution_source": execution_source,
-            "resource_budget": budget.snapshot(),
-        }
-        write_json(output_dir / failure_filename, failure)
-        return failure
-    except CompactEvaluationError as exc:
-        failure = {
-            "status": "request_failed",
-            **metadata,
-            "failure_class": "input_or_contract_setup",
-            "error": str(exc)[:1000],
-            "provider_meta": response_meta,
-            "provider_artifact": provider_artifact_path.name,
-            "execution_source": execution_source,
-            "resource_budget": budget.snapshot(),
-        }
-        write_json(output_dir / failure_filename, failure)
-        return failure
-    except ValueError as exc:
-        failure = {
-            "status": "request_failed",
-            **metadata,
-            "failure_class": "provider_replay_or_contract",
-            "error": str(exc)[:1000],
-            "provider_meta": response_meta,
-            "provider_artifact": provider_artifact_path.name,
-            "execution_source": execution_source,
-            "resource_budget": budget.snapshot(),
-        }
-        write_json(output_dir / failure_filename, failure)
-        return failure
-    except SystemExit as exc:
-        failure = {
-            "status": "request_failed",
-            **metadata,
-            "failure_class": "provider_or_transport",
-            "error": str(exc)[:1000],
-            "provider_meta": response_meta,
-            "provider_artifact": provider_artifact_path.name,
-            "execution_source": execution_source,
-            "resource_budget": budget.snapshot(),
-        }
-        write_json(output_dir / failure_filename, failure)
-        return failure
-    except OSError as exc:
-        failure = {
-            "status": "request_failed",
-            **metadata,
-            "failure_class": "io_or_transport",
-            "error": str(exc)[:1000],
-            "provider_meta": response_meta,
-            "provider_artifact": provider_artifact_path.name,
-            "execution_source": execution_source,
-            "resource_budget": budget.snapshot(),
-        }
-        write_json(output_dir / failure_filename, failure)
-        return failure
+    except (
+        ResourceBudgetExceeded,
+        json.JSONDecodeError,
+        CompactEvaluationError,
+        ValueError,
+        SystemExit,
+        OSError,
+    ) as exc:
+        return _write_isolated_request_failure(
+            output_dir,
+            failure_filename,
+            metadata,
+            failure_class=_isolated_failure_class(exc),
+            error=exc,
+            response_meta=response_meta,
+            provider_artifact=provider_artifact_path.name,
+            execution_source=execution_source,
+            resource_budget=budget.snapshot(),
+        )
     except Exception as exc:  # noqa: BLE001 — isolated evaluation must leave a durable failure artifact.
-        failure = {
-            "status": "request_failed",
-            **metadata,
-            "failure_class": "unexpected_provider_or_validator_error",
-            "error": str(exc)[:1000],
-            "provider_meta": response_meta,
-            "provider_artifact": provider_artifact_path.name,
-            "resource_budget": budget.snapshot(),
-        }
-        write_json(output_dir / failure_filename, failure)
-        return failure
+        return _write_isolated_request_failure(
+            output_dir,
+            failure_filename,
+            metadata,
+            failure_class=_isolated_failure_class(exc),
+            error=exc,
+            response_meta=response_meta,
+            provider_artifact=provider_artifact_path.name,
+            execution_source=None,
+            resource_budget=budget.snapshot(),
+        )
     finally:
         budget.deactivate(token)
 

@@ -49,17 +49,23 @@ PRODUCTION_WRITE_POLICY = {
         "scripts/flayr_core/postprocess/utils.py",
     },
     "comparison_status": {
-        "scripts/flayr_core/llm/pipeline.py",
+        "scripts/flayr_core/llm/stage2_projection.py",
         "scripts/flayr_core/postprocess/repair_stages.py",
+        "scripts/flayr_core/stage_evidence_contracts.py",
     },
-    "model_gap_magnitude": {"scripts/flayr_core/llm/pipeline.py"},
+    "model_gap_magnitude": {
+        "scripts/flayr_core/llm/pipeline.py",
+        "scripts/flayr_core/llm/stage2_projection.py",
+    },
     "model_severity": {
         "scripts/flayr_core/llm/pipeline.py",
+        "scripts/flayr_core/llm/stage2_projection.py",
         "scripts/flayr_core/postprocess/derive.py",
     },
     "severity": {
         "scripts/flayr_core/llm/compact_eval.py",
         "scripts/flayr_core/llm/pipeline.py",
+        "scripts/flayr_core/llm/stage2_projection.py",
         "scripts/flayr_core/postprocess/derive.py",
     },
     "severity_derivation": {
@@ -79,7 +85,7 @@ PRODUCTION_WRITE_POLICY = {
         "scripts/flayr_core/stage_evidence_contracts.py",
     },
     "stage_evidence_links": {"scripts/flayr_core/stage_evidence_contracts.py"},
-    "stage_handoff_status": {"scripts/flayr_core/llm/pipeline.py"},
+    "stage_handoff_status": {"scripts/flayr_core/llm/stage2_projection.py"},
     "video_understanding": {
         "scripts/flayr_core/llm/pipeline.py",
         "scripts/flayr_core/postprocess/repair_claims.py",
