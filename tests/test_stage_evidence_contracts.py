@@ -2826,6 +2826,52 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(len(normalized["evidence_units"]), 10)
         self.assertFalse(normalized["evidence_budget_exceeded"])
 
+    def test_completed_sparse_variant_scan_materializes_no_variant_defaults(self) -> None:
+        normalized = normalize_video_fact_result(
+            "creator",
+            {
+                "gate_observation_status": {"variant_focus": "complete"},
+                "variant_decision_rule": {
+                    "speech_explains_choice": False,
+                    "visual_comparison_present": False,
+                    "reason": "只观察到一个产品形态。",
+                    "evidence_ids": ["C1"],
+                },
+                "evidence_units": [
+                    {
+                        "id": "C1",
+                        "time_range": "0.0s - 2.0s",
+                        "visual_fact": "画面只展示一个产品形态。",
+                    }
+                ],
+            },
+            self._analysis(),
+        )
+        unit = normalized["evidence_units"][0]
+        self.assertTrue(unit["variant_data_valid"])
+        self.assertEqual(unit["variant_relation_mode"], "none")
+        self.assertEqual(normalized["gate_observation_status"]["variant_focus"], "complete")
+
+    def test_partly_populated_sparse_variant_shape_remains_invalid(self) -> None:
+        normalized = normalize_video_fact_result(
+            "creator",
+            {
+                "gate_observation_status": {"variant_focus": "complete"},
+                "variant_decision_rule": {},
+                "evidence_units": [
+                    {
+                        "id": "C1",
+                        "time_range": "0.0s - 2.0s",
+                        "visual_fact": "画面展示一个产品形态。",
+                        "variant_ids": ["only"],
+                    }
+                ],
+            },
+            self._analysis(),
+        )
+        self.assertFalse(normalized["evidence_units"][0]["variant_data_valid"])
+        self.assertEqual(normalized["gate_observation_status"]["variant_focus"], "unknown")
+
     def test_stage1_observation_contract_migrates_without_reextracting_media(self) -> None:
         normalized = normalize_video_fact_result(
             "creator",
@@ -3100,7 +3146,7 @@ class StageEvidenceContractTests(unittest.TestCase):
         )
         self.assertEqual(normalized["evidence_units"][1]["time_range"], "47.0s - 54.0s")
 
-    def test_stage1_fact_voiceover_is_clipped_to_its_word_timed_window(self) -> None:
+    def test_stage1_fact_voiceover_is_bound_from_its_word_timed_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             transcript = root / "transcript.txt"
@@ -3138,8 +3184,6 @@ class StageEvidenceContractTests(unittest.TestCase):
                             "id": "C1",
                             "time_range": "0.0s - 2.0s",
                             "information": "开场事实",
-                            "voiceover": "hook problem later cta",
-                            "voiceover_zh": "包含整片后续内容的翻译",
                         }
                     ]
                 },

@@ -580,6 +580,9 @@ def build_video_fact_payload(
             "functions 只能作为原子事实的功能标签，不能替代 Stage1-B 资格。"
             "每个 evidence_unit 必须填写 fact_quality 的六个观察轴：subject、visibility、composition、completion、proof、causal_link。"
             "这些字段只描述这条事实看得是否清楚、是否是直接对比/结果/主张以及是否有因果连接，不是阶段资格或 severity；"
+            "evidence_unit 采用稀疏合同：只输出当前单元真实适用的可选字段，不得为每条事实重复展开空数组、空对象或空字符串；"
+            "voiceover 和 voiceover_zh 由代码根据词级 ASR 时间窗生成，模型不得抄写或输出；"
+            "information 只用一句简短摘要记录该单元传递的信息及声画同步/提前/滞后关系，不得复述口播全文；"
             "字段职责必须分开：completion 只记录关键动作过程是否完整可见（complete=关键动作从开始到结束可见，partial=只见部分动作，none=没有可见动作过程）；"
             "proof 只记录结果证明形态（direct_comparison=画面直接呈现对照/控制与差异，result_only=只看到结果但没看到产品如何造成结果，"
             "claim_only=只有口播或字幕声称且没有可见结果，none=没有结果证明）；"
@@ -672,12 +675,9 @@ def build_video_fact_payload(
                         {
                             "id": f"{code}1",
                             "time_range": "0.0s - 3.0s",
-                            "information": "该变化点实际传递的信息，不做 S1-S6 阶段推断。",
-                            "voiceover": "只能摘录本视频提供的窗口安全口播时间线中真实出现的原句；没有或时间粒度不足则留空。",
-                            "voiceover_zh": "中文翻译；没有则留空。",
+                            "information": "一句话概括该单元传递的信息及可见的声画关系，不复述口播。",
                             "visual_fact": "该时刻画面中实际可见的事实：主体、动作、表情变化、字幕叠字、特效。",
                             "subtitle_fact": "可读字幕；没有则留空。",
-                            "audio_fact": "该时刻的 BGM（有/无、风格情绪）、口播语气（热情/平淡/亲和）、特殊音效；无则写无。",
                             "evidence_strength": "direct|explicit|inferred|absent；只描述该证据单元自身的事实强度，不确定或缺失留空。",
                             "fact_quality": {
                                 "subject": "correct|incorrect|uncertain|not_applicable",
@@ -691,14 +691,6 @@ def build_video_fact_payload(
                             "product_coverage": "该时段产品在画面里的视觉占比：none｜low｜medium｜high。看不到产品写 none。",
                             "endorsement_verbal": False,
                             "endorsement_visual": False,
-                            "trust_source_signals": ["authority|traceable_data|independent_user|social_consensus|process_transparency"],
-                            "trust_source_reference": "实际看见/听见的机构名、报告号、评论原话、群体及共识原话或工厂/质检出处；没有则留空。",
-                            "variant_ids": ["画面或口播可区分的 SKU/色号/包装变体 id；只有一个也可填。"],
-                            "variant_visual_shares": {"variant_a": 0.8, "variant_b": 0.2},
-                            "variant_speech_shares": {"variant_a": 0.5, "variant_b": 0.5},
-                            "variant_relation_mode": "single_focus|explicit_comparison|sequence|ambiguous|none",
-                            "comparison_purpose_explicit": False,
-                            "attention_competitor_ids": ["AC1"],
                             "functions": ["S3_usage", "S4_effect"],
                         }
                     ],
@@ -743,16 +735,17 @@ def build_video_fact_payload(
         "（含镜头语言/取景完整性、遮挡与 UI 危险区、画中画小窗、拍摄视角、口播与画面对齐、四轨对齐），"
         "必须先读取用户消息中的 speech_mode/证据组织模式，并按其证据优先级组织事实："
         "spoken 以口播时间线为骨架；subtitle_driven 以 OCR 字幕轨为文案骨架；visual_driven 以画面变化和镜头轨为骨架；"
-        "music_driven 在可直接感知音轨时以画面变化、BGM/节奏/音效为骨架；否则只按画面变化组织。无有效口播时 voiceover 与 voiceover_zh 必须留空，"
-        "不得把屏幕字幕、画面文案或你对画面的理解伪装成口播。"
+        "music_driven 在可直接感知音轨时以画面变化、BGM/节奏/音效为骨架；否则只按画面变化组织。"
+        "不得输出 voiceover 或 voiceover_zh，也不得把屏幕字幕、画面文案或你对画面的理解伪装成口播；"
+        "代码会按 time_range 从词级 ASR 确定性绑定窗口安全口播。"
         "按带货短视频的天然结构（钩子→产品引出→使用过程→效果呈现→信任放大→促单）找证据切分 evidence_units，"
         "目标是完整抽出对分析带货视频有价值的原子事实，而非随意找转折点或为凑数量合并事实；"
         "不设固定条数上限，沿时间线排列，id 必须使用指定前缀；代码会根据实际响应是否被输出预算截断记录预算状态，不能用模型字段伪造或掩盖采集不完整，"
         "time_range 用真实时间（如 2.5s - 4.0s）。"
         "product_identity 必须只记录当前视频里实际看见、听见或读到的产品身份；声明产品名只作核对线索，"
         "不得因为输入声明是某品就把视频中看不出的品牌、品类或形态填成该品。"
-        "把各维度观察到的画面事实记入 visual_fact、声音事实记入 audio_fact（BGM 在场与类型/语气/音效）、"
-        "口播与画面的对齐关系（同步/提前/滞后/无关）记入 information；按实记录，不做评价；"
+        "把各维度观察到的画面事实记入 visual_fact；只有当前模型确实收到可感知音轨时，才输出 audio_fact。"
+        "information 只写一句简短关系摘要；不得复制口播、字幕或 visual_fact 的全文。按实记录，不做评价；"
         "凡 functions 含 S3_usage 的证据，visual_fact 必须记录证据接收质量：使用对象/场景上下文是否足以理解产品作用对象、"
         "关键动作是否连续可追踪、核心卖点发生区域是否清楚可见、是否只有局部特写且缺少必要上下文。"
         "局部特写本身不是问题；只有当局部镜头让用户看不清产品作用对象、关键动作或证明区域时，才写证据接收不足。"
@@ -763,11 +756,13 @@ def build_video_fact_payload(
         "再标 endorsement_verbal 与 endorsement_visual（各 true/false，纯观察、不判断算不算有效背书——有效性归后续打分）："
         "endorsement_verbal＝该时段口播/字幕里有没有【出现】halal/KKM/认证/证书/检测/临床/医生/皮肤科/专家/机构/FDA/GMP/SIRIM/BPOM/GMP/certified 等硬来源词（只看词出没出现，不判断是否构成援引背书）；"
         "endorsement_visual＝该时段画面里有没有【出现】独立的硬背书视觉证据（证书/检测报告文件/机构认证标识被画面清晰呈现）——产品瓶身上的印刷小标不算，口播说了但画面没出现也不算（口播归 endorsement_verbal，别把听到的脑补成画面）；"
-        "再标 trust_source_signals（数组，只记录实际看见/听见的独立信任来源，允许 authority/traceable_data/independent_user/social_consensus/process_transparency；没有则空数组）和 trust_source_reference（逐字或概括写出实际出处；无出处必须留空）。authority/traceable_data 必须有机构名、报告号、官方/平台页面或可辨识认证；independent_user 必须有评论/用户原话；social_consensus 必须同时有明确群体/社区和该群体共同看法；process_transparency 必须有工厂、原料、生产或质检过程。产品数量、价格、参数、时长、赠品、达人自述均不得填。"
+        "再标 trust_source_signals（数组，只记录实际看见/听见的独立信任来源，允许 authority/traceable_data/independent_user/social_consensus/process_transparency；没有则省略）和 trust_source_reference（逐字或概括写出实际出处；无出处必须省略）。authority/traceable_data 必须有机构名、报告号、官方/平台页面或可辨识认证；independent_user 必须有评论/用户原话；social_consensus 必须同时有明确群体/社区和该群体共同看法；process_transparency 必须有工厂、原料、生产或质检过程。产品数量、价格、参数、时长、赠品、达人自述均不得填。"
+        "trust_source_*、variant_*、comparison_purpose_explicit 与 attention_competitor_ids 只在当前单元确有对应事实时输出；"
+        "没有时直接省略，禁止逐条复制空数组、空映射、空字符串或默认 none。"
         "每条还要标 functions（list，多选）：这段画面支撑哪些带货功能，枚举 S1_hook/S2_intro/S3_usage/S4_effect/S5_trust/S6_cta，"
         "按信息功能判断、信道无关（口播/字幕/画面/特效综合看，无口播也能判），一段可同时支撑多个"
         "（手在操作+效果出来 → [S3_usage,S4_effect]）；这是描述这段在带货结构里干什么、不是评价好坏，没有对应功能就不标；"
-        "voiceover 必须逐字来自当前视频提供的窗口安全口播时间线；time_range 必须与对应窗口一致，不能用跨窗口整段转写冒充局部口播。画面看不清的时段在 visual_fact 写画面证据不足待复核；"
+        "time_range 必须对应实际观察窗口；画面看不清的时段在 visual_fact 写画面证据不足待复核；"
         "视频级商业门控只需要你补充纯观察事实，不做优劣结论："
         "selling_point_observations 列出实际占据主要画面或口播的卖点，visual_share 与 speech_share 分开估算且各自在 0-1；"
         "variant_* 只区分同品 SKU/色号/包装变体，不把完全不同产品硬并成变体。single_focus 表示一个变体主导，"

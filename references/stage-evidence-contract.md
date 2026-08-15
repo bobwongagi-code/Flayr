@@ -24,7 +24,7 @@ Flayr 的阶段判断不是从视频摘要直接生成的。正确的数据关�
 
 - 稳定唯一 `id`；
 - 原始 `time_range` 和可解析的时间边界；
-- `visual_fact`、`voiceover`、`subtitle_fact`、`audio_fact` 等实际观察；
+- `visual_fact`、`voiceover`、`subtitle_fact`、`audio_fact` 等实际观察；其中 Stage1-A provider 只拥有视觉观察、时间窗和简短的跨模态关系摘要，`voiceover` 由代码从词级 ASR 按该时间窗绑定，`information` 漏填时才由代码从锁定字段兜底生成；
 - `evidence_strength`：`direct / explicit / inferred / absent`；
 - 需要时保留 `uncertain`、来源角色、产品和变体信息。
 
@@ -52,7 +52,7 @@ Stage1 还必须带一份代码生成的 `stage1_acquisition`。它只记录本�
 
 Stage1 不能输出或推导 `severity`、双方比较、差距、商业优先级、建议、报告结论或 `stage_evidence_links`。这些字段即使嵌套在别的对象中，也必须在 active contract 下拒绝，而不是静默丢弃。
 
-当前生产实现把观察和资格分开：Stage1-A 固定使用 canonical 帧/时间线、窗口安全 ASR 与 OCR，只产生原子观察；Stage1-B 是无媒体的首次只读资格投影。B 按 `S1+S2 / S3+S4 / S5 / S6` 四组执行，失败组单独置为 `unknown`。一次有边界的 Stage1-C 只能追加目标阶段候选观察；代码完成 canonical ID 映射并把 C 的真实媒体输入并入 acquisition manifest 后，Stage1-D 使用判断模型只读 A/C 账本重投影目标资格。C 不能输出资格，D 不能补写事实。
+当前生产实现把观察和资格分开：Stage1-A 固定使用 canonical 帧/时间线、窗口安全 ASR 与 OCR，只产生稀疏原子观察；可选字段没有事实时必须省略，不逐单元复制空值。Stage1-B 是无媒体的首次只读资格投影。B 按 `S1+S2 / S3+S4 / S5 / S6` 四组执行，失败组单独置为 `unknown`。一次有边界的 Stage1-C 只能追加目标阶段候选观察；代码完成 canonical ID 映射并把 C 的真实媒体输入并入 acquisition manifest 后，Stage1-D 使用判断模型只读 A/C 账本重投影目标资格。C 不能输出资格，D 不能补写事实。
 
 ### C. 定向缺口补观察
 

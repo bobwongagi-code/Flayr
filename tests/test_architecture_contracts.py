@@ -6192,6 +6192,10 @@ class ArchitectureContractTests(unittest.TestCase):
             f'"stage_evidence_contract_version": {STAGE1_OBSERVATION_CONTRACT_VERSION}',
             primary_contract,
         )
+        self.assertIn("voiceover 和 voiceover_zh 由代码", primary_contract)
+        self.assertNotIn('"voiceover":', primary_contract)
+        self.assertNotIn('"voiceover_zh":', primary_contract)
+        self.assertIn('"information":', primary_contract)
 
         vl_primary = build_video_fact_payload(
             "qwen3-vl-plus",

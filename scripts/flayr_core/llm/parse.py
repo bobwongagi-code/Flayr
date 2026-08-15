@@ -1097,6 +1097,40 @@ def normalize_variant_unit_fields(unit: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _materialize_sparse_variant_unit(
+    unit: dict[str, Any],
+    gate_observation_status: Any,
+) -> dict[str, Any]:
+    """Expand an explicitly completed sparse no-variant observation.
+
+    The provider may omit all per-unit variant fields to avoid repeating five
+    empty values. That omission is equivalent to a checked ``none`` only when
+    the same response explicitly declares the variant scan complete. A partly
+    populated shape remains invalid and visible to the gate.
+    """
+    gate = gate_observation_status if isinstance(gate_observation_status, dict) else {}
+    fields = (
+        "variant_ids",
+        "variant_visual_shares",
+        "variant_speech_shares",
+        "variant_relation_mode",
+        "comparison_purpose_explicit",
+    )
+    if gate.get("variant_focus") != "complete" or any(field in unit for field in fields):
+        return unit
+    expanded = copy.deepcopy(unit)
+    expanded.update(
+        {
+            "variant_ids": [],
+            "variant_visual_shares": {},
+            "variant_speech_shares": {},
+            "variant_relation_mode": "none",
+            "comparison_purpose_explicit": False,
+        }
+    )
+    return expanded
+
+
 def normalize_video_understanding(
     value: Any,
     *,
@@ -2003,10 +2037,12 @@ def normalize_video_fact_result(
         "stage1_recovery": {},
     }
     duration = analysis.get("videos", {}).get(role, {}).get("duration_seconds")
+    raw_gate_status = result.get("gate_observation_status")
     used_ids: set[str] = set()
     for index, unit in enumerate(units, start=1):
         if not isinstance(unit, dict):
             continue
+        normalized_unit_source = _materialize_sparse_variant_unit(unit, raw_gate_status)
         information = str(unit.get("information") or "").strip()
         if not information:
             # information 只作检索摘要；模型漏填时从同一锁定事实单元回填，不能因此丢掉完整感官证据。
@@ -2044,10 +2080,11 @@ def normalize_video_fact_result(
             # 这段支撑哪些带货功能（多选，描述性）；nullable，老 facts 缺失为 None
             "functions": normalize_functions(unit.get("functions")),
         }
-        normalized_unit.update(normalize_variant_unit_fields(unit))
+        normalized_unit.update(normalize_variant_unit_fields(normalized_unit_source))
         normalized["evidence_units"].append(normalized_unit)
     if not normalized["evidence_units"]:
         raise SystemExit(f"{role} fact extraction returned no valid evidence units.")
+    _bind_authoritative_stage1_voiceover(role, normalized, analysis)
     validate_single_video_facts(role, normalized, analysis)
     valid_ids = {unit["id"] for unit in normalized["evidence_units"]}
     normalized["selling_point_observations"] = normalize_selling_point_observations(
@@ -2068,6 +2105,55 @@ def normalize_video_fact_result(
     # This field is pipeline-owned and is restored by the extraction pipeline
     # after model-shaped normalization.  Never trust an LLM echo of it here.
     return normalized
+
+
+def _bind_authoritative_stage1_voiceover(
+    role: str,
+    facts: dict[str, Any],
+    analysis: dict[str, Any],
+) -> None:
+    """Bind speech from word timing instead of trusting repeated model copies.
+
+    Stage1-A receives the full window-safe transcript as context. Requiring it
+    to repeat that text in every evidence unit inflated responses and allowed
+    a long ASR segment to leak across fact boundaries. The canonical ledger
+    therefore derives each quote from the unit time range when word timing is
+    available. Legacy responses without word timing retain their model quote,
+    but cannot gain word-level acquisition precision downstream.
+    """
+    videos = analysis.get("videos") if isinstance(analysis, dict) else {}
+    info = (
+        videos.get(role)
+        if isinstance(videos, dict) and isinstance(videos.get(role), dict)
+        else {}
+    )
+    words = load_transcript_words(info)
+    duration = info.get("duration_seconds")
+    for unit in facts.get("evidence_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        unit_range = parse_time_range_seconds(unit.get("time_range"), duration)
+        if words and unit_range is not None:
+            unit["voiceover"] = transcript_text_for_range(words, *unit_range)
+            # There is no word-timed translation artifact. Keeping a free-form
+            # model translation would recreate the same cross-window leak.
+            unit["voiceover_zh"] = ""
+        elif words:
+            unit["voiceover"] = ""
+            unit["voiceover_zh"] = ""
+        canonical_parts = [
+            str(unit.get(field) or "").strip()
+            for field in (
+                "visual_fact",
+                "voiceover_zh",
+                "voiceover",
+                "subtitle_fact",
+                "audio_fact",
+            )
+        ]
+        canonical_information = "；".join(part for part in canonical_parts if part)
+        if canonical_information and not str(unit.get("information") or "").strip():
+            unit["information"] = canonical_information
 
 
 def normalize_fact_time_range(value: Any, duration: Any) -> str:

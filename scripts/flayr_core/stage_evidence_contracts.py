@@ -23,10 +23,10 @@ from .transcript import current_transcript_segments_path, current_transcript_wor
 
 
 STAGE_EVIDENCE_CONTRACT_VERSION = 6
-# Stage1-A only records atomic observations. Its provider contract did not
-# change when the downstream S5/S6 qualification semantics moved to v6, so
-# keep that request identity stable and re-project the saved observations.
-STAGE1_OBSERVATION_CONTRACT_VERSION = 5
+# Stage1-A only records atomic observations. Version 6 moves time-windowed
+# speech binding to deterministic code and makes optional unit fields sparse;
+# old provider responses must not be replayed under the new ownership rules.
+STAGE1_OBSERVATION_CONTRACT_VERSION = 6
 STAGE_EVIDENCE_SNAPSHOT_VERSION = 1
 STAGE_EVIDENCE_GATE_VERSION = 1
 STAGE1_ACQUISITION_VERSION = 4
