@@ -1487,6 +1487,35 @@ class ArchitectureContractTests(unittest.TestCase):
         validate_recommendation_safety(result, analysis_input)
         self.assertNotIn("period", result["improvements"][0]["creator_script"].lower())
 
+    def test_health_rules_ignore_examples_outside_non_health_product_context(self) -> None:
+        analysis_input = (
+            "## 产品信息\n"
+            "- 产品名：Frosty Pearl Mineral Mix Cassava Litter\n"
+            "- 品类：猫砂\n"
+            "- 目标市场：my\n"
+            "\n"
+            "## 视频观察指引\n"
+            "- 维生素、营养补充品等健康品类不得虚构优惠。\n"
+            "## 达人视频\n"
+            "- 检测语言：ms\n"
+        )
+        result = {
+            "improvements": [
+                {
+                    "title": "补清促单信息",
+                    "suggestion": "明确真实可见的折扣和活动截止日期。",
+                    "creator_script": "Semak diskaun yang dipaparkan.",
+                    "creator_script_zh": "查看画面中展示的折扣。",
+                }
+            ]
+        }
+
+        sanitize_health_recommendations(result, analysis_input)
+        validate_recommendation_safety(result, analysis_input)
+
+        self.assertEqual(result["improvements"][0]["title"], "补清促单信息")
+        self.assertIn("折扣", result["improvements"][0]["suggestion"])
+
     def test_commerce_evidence_alignment_does_not_split_s4_stage_and_flag(self) -> None:
         result = {
             "video_understanding": {

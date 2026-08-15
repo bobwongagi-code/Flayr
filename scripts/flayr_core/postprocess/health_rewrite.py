@@ -32,6 +32,13 @@ def is_child_toothpaste_context(analysis_input: str) -> bool:
     return "儿童牙膏" in context or "toothpaste" in context
 
 
+def is_health_product_context(analysis_input: str) -> bool:
+    """Return whether the current product, rather than prompt examples, is a supplement."""
+    context = product_context(analysis_input).lower()
+    health_product_markers = ("维生素", "营养补充", "supplement", "vitamin")
+    return any(marker.lower() in context for marker in health_product_markers)
+
+
 def is_malaysia_market_context(analysis_input: str) -> bool:
     """Return whether the runtime product context targets Malaysia.
 
@@ -51,8 +58,7 @@ def validate_recommendation_safety(result: dict[str, Any], analysis_input: str) 
 
     ⚠️ 触发条件命中时抛 SystemExit，调用方需感知。
     """
-    health_product_markers = ("维生素", "营养补充", "supplement", "vitamin")
-    if not any(marker.lower() in analysis_input.lower() for marker in health_product_markers):
+    if not is_health_product_context(analysis_input):
         return
     prohibited_patterns = [
         r"激素",
@@ -251,8 +257,7 @@ def sanitize_health_recommendations(result: dict[str, Any], analysis_input: str)
     违规判定与 validate_recommendation_safety 的 prohibited_patterns 一致；
     未命中违规的 improvement 保留 LLM 原文。
     """
-    health_product_markers = ("维生素", "营养补充", "supplement", "vitamin")
-    if not any(marker.lower() in analysis_input.lower() for marker in health_product_markers):
+    if not is_health_product_context(analysis_input):
         return
     target_language = "ms" if "检测语言：ms" in analysis_input else ""
     if target_language != "ms" and not is_malaysia_market_context(analysis_input):
