@@ -4,7 +4,7 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-08-15",
-  "production_behavior_commit": "d1384df3e995c6a8604e3f257969de486edde72b",
+  "production_behavior_commit": "27c13d0d9748027f5909a83aaf72305f08292b1c",
   "evaluation_report_schema_version": 7,
   "gt_snapshot": {
     "labels_path": "references/semantic-baseline-gt.json",
