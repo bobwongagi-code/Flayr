@@ -49,7 +49,7 @@ from flayr_core.llm.payload import (
     _replace_recovery_full_media,
     build_video_fact_recovery_payload,
 )
-from flayr_core.postprocess.derive import _derive_one, derive_severity_from_facts
+from flayr_core.postprocess.derive import _derive_one, _stage_strength_gate, derive_severity_from_facts
 from flayr_core.postprocess.claims_my import reconcile_certification_ownership
 from flayr_core.postprocess.repair_evidence import (
     align_stage_flag_evidence,
@@ -169,11 +169,16 @@ class StageEvidenceContractTests(unittest.TestCase):
             status = str(check.get("status") or "unknown").strip().lower()
             audit_status = {
                 "present": "found",
+                "partial": "found",
                 "absent": "clear",
             }.get(status, "unknown")
             stages[stage] = {
                 "status": audit_status,
-                "coverage": "complete" if audit_status in {"found", "clear"} else "unknown",
+                "coverage": (
+                    str(check.get("coverage") or "partial")
+                    if status == "partial"
+                    else "complete" if audit_status in {"found", "clear"} else "unknown"
+                ),
                 "evidence_ids": list(check.get("evidence_ids") or []),
                 "observed_signals": list(check.get("observed_signals") or []),
                 "missing_signals": list(check.get("missing_signals") or []),
@@ -834,6 +839,85 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(stage_evidence_readiness(side, "S3"), "present")
         self.assertEqual(qualified_stage_evidence_ids(side, "S3"), {"C1"})
         self.assertNotIn("S3", stage_evidence_recovery_targets(side))
+
+    def test_direct_stage_participation_is_preserved_as_partial(self) -> None:
+        side = self._partial_side("C", "S3")
+
+        self.assertEqual(stage_evidence_readiness(side, "S3"), "partial")
+        self.assertEqual(qualified_stage_evidence_ids(side, "S3"), {"C3"})
+        self.assertNotIn("S3", stage_evidence_recovery_targets(side))
+        projection = stage1_qualification_projection(side, ["S3"])["stages"]["S3"]
+        self.assertEqual(projection["stage_readiness"], "partial")
+        self.assertEqual(projection["qualified_evidence_ids"], ["C3"])
+        self.assertEqual(projection["projection_reason_code"], "partially_qualified")
+
+    def test_partial_cannot_hide_unbound_or_disqualified_observation(self) -> None:
+        for mutation in ("unbound", "disqualified", "complete_contract"):
+            with self.subTest(mutation=mutation):
+                side = self._partial_side("C", "S3")
+                check = next(item for item in side["stage_evidence_checks"] if item["stage"] == "S3")
+                if mutation == "unbound":
+                    check["signal_bindings"] = {}
+                elif mutation == "disqualified":
+                    check["observed_disqualifiers"] = ["mouth_only_or_static"]
+                else:
+                    check["observed_signals"] = list(stage_evidence_contract("S3").required_signals)
+                    check["signal_bindings"] = self._signal_bindings("S3", "C3")
+                freeze_stage_evidence(side)
+                self.assertEqual(stage_evidence_readiness(side, "S3"), "unknown")
+                self.assertEqual(qualified_stage_evidence_ids(side, "S3"), set())
+
+    def test_s4_result_presentation_is_partial_but_claim_only_is_not(self) -> None:
+        side = self._partial_side("C", "S4")
+        check = next(item for item in side["stage_evidence_checks"] if item["stage"] == "S4")
+        check["observed_disqualifiers"] = ["result_only_without_process"]
+        freeze_stage_evidence(side)
+        self.assertEqual(stage_evidence_readiness(side, "S4"), "partial")
+        self.assertEqual(qualified_stage_evidence_ids(side, "S4"), {"C4"})
+
+        check["observed_disqualifiers"].append("claim_only_without_result")
+        freeze_stage_evidence(side)
+        self.assertEqual(stage_evidence_readiness(side, "S4"), "unknown")
+        self.assertEqual(qualified_stage_evidence_ids(side, "S4"), set())
+
+    def test_stage2_handoff_keeps_partial_role_evidence_comparable(self) -> None:
+        creator = self._partial_side("C", "S3")
+        benchmark = self._active_side("B")
+        check = next(item for item in benchmark["stage_evidence_checks"] if item["stage"] == "S3")
+        check.update(
+            {
+                "status": "present",
+                "coverage": "complete",
+                "evidence_ids": ["B3"],
+                "observed_signals": list(stage_evidence_contract("S3").required_signals),
+                "missing_signals": [],
+                "signal_bindings": self._signal_bindings("S3", "B3"),
+                "evidence_strength": "direct",
+            }
+        )
+        freeze_stage_evidence(benchmark)
+        facts = {"creator": creator, "benchmark": benchmark}
+        output = _normalize_segmented_stage(
+            {
+                "stage": "S3",
+                "stage_state": "completed",
+                "relation": "benchmark_better",
+                "model_gap_magnitude": "medium",
+                "benchmark_evidence_ids": ["B3"],
+                "creator_evidence_ids": ["C3"],
+                "judgment_reason": "标杆完整展示使用过程，达人只展示了真实接触和动作。",
+            },
+            "S3",
+            facts,
+        )
+
+        self.assertEqual(output["stage_handoff_status"], "grounded")
+        self.assertEqual(output["benchmark_evidence_ids"], ["B3"])
+        self.assertEqual(output["creator_evidence_ids"], ["C3"])
+        self.assertEqual(output["relation"], "benchmark_better")
+        gate = stage_evidence_gate({"video_understanding": facts}, "S3")
+        self.assertEqual(gate["status"], "grounded")
+        self.assertEqual(gate["creator"]["status"], "partial")
 
     def test_model_cannot_author_stage1_coverage_audit(self) -> None:
         with self.assertRaises(SystemExit):
@@ -1859,7 +1943,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             }
         }
         windows = _recovery_stage_windows(analysis, "creator", ["S2", "S3", "S6"])
-        self.assertEqual([item[0] for item in windows], ["S2", "S6"])
+        self.assertEqual([item[0] for item in windows], ["S2+S3", "S6"])
         self.assertLessEqual(windows[0][1], 3.0)
         self.assertGreaterEqual(windows[0][2], 15.0)
         self.assertEqual(windows[1][2], 60.0)
@@ -1875,6 +1959,9 @@ class StageEvidenceContractTests(unittest.TestCase):
         # tail window; the bounded review therefore starts at 49.5s here.
         self.assertGreaterEqual(tail_windows[-1][1], 49.5)
         self.assertEqual(tail_windows[-1][2], 60.0)
+
+        adjacent = _recovery_stage_windows(analysis, "creator", ["S3", "S4"])
+        self.assertEqual([item[0] for item in adjacent], ["S3+S4"])
 
     def test_native_stage1_c_observation_extends_acquisition_before_stage1_d_gate(self) -> None:
         facts = self._active_side("C", "present")
@@ -3971,6 +4058,58 @@ class StageEvidenceContractTests(unittest.TestCase):
         return side
 
     @staticmethod
+    def _partial_side(role_code: str, stage: str) -> dict[str, object]:
+        """Build a locked side with direct participation but incomplete proof."""
+        side = StageEvidenceContractTests._active_side(role_code)
+        evidence_id = f"{role_code}{stage[1:]}"
+        contract = stage_evidence_contract(stage)
+        participation = list(contract.participation_signals)
+        observed = [participation[0]] if stage == "S4" else participation
+        check = next(item for item in side["stage_evidence_checks"] if item["stage"] == stage)
+        check.update(
+            {
+                "status": "partial",
+                "coverage": "partial",
+                "evidence_ids": [evidence_id],
+                "observed_signals": observed,
+                "missing_signals": [
+                    signal for signal in contract.required_signals if signal not in observed
+                ],
+                "signal_bindings": {
+                    signal: {
+                        "status": "supported",
+                        "evidence_ids": [evidence_id],
+                        "invalid_evidence_ids": [],
+                        "reason": "fixture participation binding",
+                    }
+                    for signal in observed
+                },
+                "observed_disqualifiers": [],
+                "evidence_strength": "direct",
+                "reason": "直接观察到阶段参与，但完整证明合同尚未闭合。",
+            }
+        )
+        audit_stage = side["stage1_coverage_audit"]["stages"][stage]
+        audit_stage.update(
+            {
+                "status": "found",
+                "coverage": "partial",
+                "evidence_ids": [evidence_id],
+                "observed_signals": observed,
+                "missing_signals": list(check["missing_signals"]),
+                "signal_bindings": copy.deepcopy(check["signal_bindings"]),
+            }
+        )
+        unit = next(item for item in side["evidence_units"] if item["id"] == evidence_id)
+        unit["visual_fact"] = (
+            "把使用后的目标区域作为结果展示，但差异不清楚。"
+            if stage == "S4"
+            else "产品与目标对象发生真实接触并执行动作。"
+        )
+        freeze_stage_evidence(side)
+        return side
+
+    @staticmethod
     def _set_s5_state(side: dict[str, object], status: str) -> dict[str, object]:
         """Set one side's S5 fact state and re-freeze the fixture snapshot."""
         first_unit = next(iter(side.get("evidence_units") or []), {})
@@ -4174,8 +4313,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                 self.assertEqual(check["observed_disqualifiers"], [disqualifier])
                 self.assertEqual(check["missing_signals"], list(contract.required_signals))
 
-    def test_complete_unknown_with_disqualifier_closes_as_absent(self) -> None:
-        contract = stage_evidence_contract("S2")
+    def test_complete_s2_product_exposure_without_bridge_is_partial(self) -> None:
         raw = {
             "stage": "S2",
             "status": "unknown",
@@ -4203,11 +4341,11 @@ class StageEvidenceContractTests(unittest.TestCase):
             for item in normalize_stage_evidence_checks([raw], {"B2"})
             if item["stage"] == "S2"
         )
-        self.assertEqual(check["status"], "absent")
-        self.assertEqual(check["evidence_ids"], [])
-        self.assertEqual(check["observed_signals"], [])
-        self.assertEqual(check["signal_bindings"], {})
-        self.assertEqual(check["missing_signals"], list(contract.required_signals))
+        self.assertEqual(check["status"], "partial")
+        self.assertEqual(check["evidence_ids"], ["B2"])
+        self.assertEqual(check["observed_signals"], ["product_identity"])
+        self.assertEqual(check["signal_bindings"]["product_identity"]["status"], "supported")
+        self.assertEqual(check["missing_signals"], ["problem_to_product_bridge"])
 
     def test_complete_unknown_without_disqualifier_stays_unknown(self) -> None:
         raw = {
@@ -4513,6 +4651,38 @@ class StageEvidenceContractTests(unittest.TestCase):
         applied = _derive_one("S6", stage, facts=facts)
         self.assertEqual(applied["severity"], "small")
         self.assertTrue(any(item.get("rule") == "S6_creator_cta_ceiling" and item.get("status") == "triggered" for item in applied["constraint_evaluations"]))
+
+    def test_partial_stage_evidence_cannot_trigger_deterministic_floor_or_ceiling(self) -> None:
+        creator = self._partial_side("C", "S4")
+        benchmark = self._active_side("B")
+        benchmark_check = next(
+            item for item in benchmark["stage_evidence_checks"] if item["stage"] == "S4"
+        )
+        benchmark_check.update(
+            {
+                "status": "present",
+                "coverage": "complete",
+                "evidence_ids": ["B4"],
+                "observed_signals": list(stage_evidence_contract("S4").required_signals),
+                "missing_signals": [],
+                "signal_bindings": self._signal_bindings("S4", "B4"),
+            }
+        )
+        freeze_stage_evidence(benchmark)
+        creator_flag = {"evidence_ids": ["C4"]}
+        benchmark_flag = {"evidence_ids": ["B4"]}
+
+        status, _, detail = _stage_strength_gate(
+            {"video_understanding": {"creator": creator, "benchmark": benchmark}},
+            "creator",
+            creator_flag,
+            "benchmark",
+            benchmark_flag,
+            "S4",
+        )
+
+        self.assertEqual(status, "stage_evidence_partial")
+        self.assertEqual(detail["role"], "creator")
 
     def test_active_repair_paths_do_not_append_post_lock_facts(self) -> None:
         result = {

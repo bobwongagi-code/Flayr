@@ -903,8 +903,10 @@ def build_stage_evidence_qualification_payload(
         [
             f"# Stage1 阶段资格投影：{role}（{target_text}）",
             f"你只负责把已锁定的原子观察投影到目标阶段 {target_text}。不要看视频、不要补写事实、不要比较 benchmark 与 creator。",
-            "只能引用输入中实际存在的 evidence_units。没有满足 required signal、渠道不可用、时间边界不精确或 coverage 不完整时，必须返回 unknown/conflict；不能把缺失当 absent。",
+            "只能引用输入中实际存在的 evidence_units。渠道不可用、时间边界不精确或观察范围不足以确认任何阶段参与时，必须返回 unknown/conflict；不能把缺失当 absent。",
             "present 只能由 direct 或 explicit 的真实 evidence_ids 支撑；inferred、unknown、冲突或缺字段不得触发正式资格。",
+            "partial 表示已用 direct/explicit 证据确认该阶段确实被执行或尝试，但尚未满足全部 required signals。partial 必须引用证据、coverage 只能是 complete 或 partial，且至少一个 participation_signal 有 supported binding；不得用 partial 包装未绑定事实、歧义、排除项或采集失败。",
+            "‘做了但较弱/不完整’不得压成 unknown；unknown 只表示观察本身不充分、边界不清、引用未绑定或相互冲突。partial 也不等于完整证明，缺失的 required signals 必须保留在 missing_signals。",
             "absent 只有在相关观察范围已完整覆盖、且合同要求的信号明确未出现时才允许。离散采样、粗粒度口播或未完成覆盖不能证明 absent。",
             "not_applicable 只有在比较合同明确说明该阶段不适用时才允许，并必须在 reason 中写明依据；不能用它掩盖采集缺失。",
             "每个 signal_binding 必须引用当前输入中真实存在的 evidence_id；不得跨角色、跨视频或跨阶段创造引用。",
@@ -1084,6 +1086,8 @@ def build_video_fact_recovery_payload(
                     "如果没有可直接观察且与目标阶段相关的新内容，返回空 candidate_evidence_units，不得输出拒绝理由或资格字段。",
                     "你只记录观察，不判断 present/absent/unknown，也不得输出 coverage 或 stage_evidence_checks；"
                     "资格与覆盖由 Stage1-D 根据代码拥有的媒体范围投影。",
+                    "即使目标阶段的完整证明链没有闭合，也要记录直接看到的真实执行子集；不要因为动作、结果呈现或阶段参与较弱就省略观察。"
+                    "S4 中把使用后的目标对象或结果状态当作结果展示，可记录为 result_presentation 候选；静态产品展示或只有口播功效声称不属于 result_presentation。",
                     "S5 是可选的信任放大阶段，不得根据品类先验强行要求或关闭；品牌/logo/产品身份本身不等于 source_basis，"
                     "只有实际来源、报告、认证、用户原话或过程信息才可作为合格背书依据。",
                     "若候选观察可能承担 S6_cta，必须原样保留完整窗口口播、字幕、画面和时间范围，"
@@ -1163,9 +1167,15 @@ def _stage_evidence_signal_codebook(stages: list[str] | tuple[str, ...] | None =
                 "stage": contract.code,
                 "required_signals": list(contract.required_signals),
                 "required_signal_mode": contract.required_signal_mode,
+                "participation_signals": list(
+                    contract.participation_signals or contract.required_signals
+                ),
                 "optional_signals": list(contract.optional_signals),
                 "allowed_signal_names": list(contract.allowed_signals),
                 "disqualifiers": list(contract.disqualifiers),
+                "partial_compatible_disqualifiers": list(
+                    contract.partial_compatible_disqualifiers
+                ),
                 "channel_policy": contract.channel_policy,
                 "non_substitutable_channels": list(contract.non_substitutable_channels),
             }
@@ -1188,7 +1198,7 @@ def _stage_evidence_qualification_examples(
         examples.append(
             {
                 "stage": code,
-                "status": "present|absent|unknown|conflict|not_applicable",
+                "status": "present|partial|absent|unknown|conflict|not_applicable",
                 "coverage": "complete|partial|unknown",
                 "evidence_ids": [],
                 "observed_signals": [],
@@ -1199,7 +1209,9 @@ def _stage_evidence_qualification_examples(
                         "evidence_ids": [],
                         "reason": "只说明该 signal 是否被当前证据支持。",
                     }
-                    for signal in contract.required_signals
+                    for signal in dict.fromkeys(
+                        (*contract.required_signals, *(contract.participation_signals or ()))
+                    )
                 },
                 "invalid_signal_bindings": [],
                 "observed_disqualifiers": [],
@@ -1249,20 +1261,21 @@ def _recovery_stage_windows(
         for index, item in enumerate(all_ranges)
     }
     windows: list[tuple[str, float, float]] = []
-    current_label = _recovery_stage_code(ranges[0][0])
+    current_labels = [_recovery_stage_code(ranges[0][0])]
     current_start, current_end = ranges[0][2], ranges[0][3]
-    current_index = index_by_stage.get(current_label, -2)
+    current_index = index_by_stage.get(current_labels[-1], -2)
     for stage, _label, start, end in ranges[1:]:
         stage_code = _recovery_stage_code(stage)
         index = index_by_stage.get(stage_code, -2)
-        keep_s6_separate = s6_tail_review and (current_label == "S6" or stage_code == "S6")
+        keep_s6_separate = s6_tail_review and ("S6" in current_labels or stage_code == "S6")
         if index == current_index + 1 and not keep_s6_separate:
             current_end = end
+            current_labels.append(stage_code)
         else:
-            windows.append((current_label, current_start, current_end))
-            current_label, current_start, current_end = stage_code, start, end
+            windows.append(("+".join(current_labels), current_start, current_end))
+            current_labels, current_start, current_end = [stage_code], start, end
         current_index = index
-    windows.append((current_label, current_start, current_end))
+    windows.append(("+".join(current_labels), current_start, current_end))
     return [
         (
             label,
@@ -1584,7 +1597,7 @@ def build_stage_group_judgment_payload(
             "relation 只能是 creator_better|benchmark_better|equivalent|uncertain；model_gap_magnitude 只能是 none|small|medium|large|uncertain。",
             "model_gap_magnitude 不是最终 severity；最终 severity 由代码 resolver 处理。不得输出 stage_evidence_links、improvements、commercial_priority、完整报告或其他阶段字段。",
             "每个阶段必须先完成 stage_state，再给 relation、model_gap_magnitude 和 judgment_reason；stage_state 只能是 completed|unknown|conflict|blocked；reason 只能引用该阶段实际 qualified evidence IDs 和代码已闭合的 readiness=absent 状态。",
-            "readiness=absent 是已闭合的负向事实，不是采集缺失；单侧 absent、另一侧 present 时仍要完成判断，relation 必须指向 present 一侧，model_gap_magnitude 必须是 small、medium 或 large。双侧均 absent 时由代码收口为 not_applicable，不进入本阶段判断。只有 unknown/conflict，或比较合同未闭合的 not_applicable，才必须返回 uncertain。",
+            "readiness=partial 是可引用的真实阶段执行/尝试，不等于完整证明；必须结合其缺失信号与另一侧事实完成比较，不能把 partial 当 unknown，也不能把它写成 present/verified。readiness=absent 是已闭合的负向事实，不是采集缺失；单侧 absent、另一侧 present/partial 时仍要完成判断，relation 必须指向有证据的一侧，model_gap_magnitude 必须是 small、medium 或 large。双侧均 absent 时由代码收口为 not_applicable，不进入本阶段判断。只有 unknown/conflict，或比较合同未闭合的 not_applicable，才必须返回 uncertain。",
             "## 全阶段统一差距语义（结构库单一来源）",
             structure_library_gap_semantics(),
             "## 目标阶段模块判断视图（结构库单一来源）",
@@ -1595,7 +1608,7 @@ def build_stage_group_judgment_payload(
             json.dumps({"product_foundation": foundation, "comparison_contract": eligibility}, ensure_ascii=False, indent=2),
             "## 目标阶段证据交接（只读）",
             json.dumps(scoped_facts, ensure_ascii=False, indent=2),
-            "每个阶段的正式引用必须从该阶段 qualified_evidence 的 id 中选择；如果 readiness=present，至少引用能支撑该阶段判断的一个 ID。readiness=absent 的一侧必须保持 evidence_ids 为空，并在理由中明确它是代码已闭合的负向事实；不得把 candidate_summary 的 ID 当成正式引用，也不得只在理由文字中提到 ID。",
+            "每个阶段的正式引用必须从该阶段 qualified_evidence 的 id 中选择；如果 readiness=present/partial，至少引用能支撑该阶段判断的一个 ID。readiness=absent 的一侧必须保持 evidence_ids 为空，并在理由中明确它是代码已闭合的负向事实；不得把 candidate_summary 的 ID 当成正式引用，也不得只在理由文字中提到 ID。",
             "不得用固定条数截断 qualified_evidence、阶段引用或能证明因果链的事实；不得为凑数重复拆分。",
             "## 阶段字段合同",
             "每个 stage 对象只负责：stage、stage_state、relation、model_gap_magnitude、benchmark_evidence_ids、creator_evidence_ids、judgment_reason，以及该阶段专属结构化字段。不得输出 benchmark_summary、creator_summary、quote、time_range、gap、improvements、commercial_priority 或其他报告字段；这些字段由代码从锁定证据和阶段结果机械生成。stage_state 是必填语义字段；无法完成该阶段判断时填 unknown/conflict/blocked，不得省略后让代码猜测。",

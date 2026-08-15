@@ -1930,11 +1930,15 @@ def _validated_stage_group_response(
                     )
                     for role in ("benchmark", "creator")
                 }
-                if set(readiness.values()) == {"present", "absent"}:
+                if (
+                    "absent" in readiness.values()
+                    and len(set(readiness.values())) == 2
+                    and all(status in {"present", "partial", "absent"} for status in readiness.values())
+                ):
                     expected_relation = next(
                         f"{role}_better"
                         for role, status in readiness.items()
-                        if status == "present"
+                        if status in {"present", "partial"}
                     )
                     if relation != expected_relation:
                         raise ValueError(
@@ -4324,7 +4328,7 @@ def _validated_stage1_qualification_response(
         "signal_bindings",
         "reason",
     }
-    valid_statuses = {"present", "absent", "unknown", "conflict", "not_applicable"}
+    valid_statuses = {"present", "partial", "absent", "unknown", "conflict", "not_applicable"}
     valid_coverages = {"complete", "partial", "unknown"}
     for item in raw_checks:
         if not isinstance(item, dict):
@@ -5351,7 +5355,7 @@ def _materialize_stage_recovery_audit(
         ]
         stage_issues.extend(stage1_acquisition_issues(facts, code))
         status = str(check.get("status") or "unknown").strip().lower()
-        if global_issues or stage_issues or status not in {"present", "absent", "not_applicable"}:
+        if global_issues or stage_issues or status not in {"present", "partial", "absent", "not_applicable"}:
             audit_status = "conflict" if status == "conflict" else "unknown"
             coverage = "unknown"
             unresolved.append(code)
@@ -5359,8 +5363,12 @@ def _materialize_stage_recovery_audit(
             # The legacy audit field has no not_applicable enum. Preserve the
             # closed primary state while using its historical non-positive
             # projection; stage_evidence_readiness remains authoritative.
-            audit_status = "found" if status == "present" else "clear"
-            coverage = "complete"
+            audit_status = "found" if status in {"present", "partial"} else "clear"
+            coverage = (
+                str(check.get("coverage") or "partial").strip().lower()
+                if status == "partial"
+                else "complete"
+            )
         stage_ids = [
             str(value).strip()
             for value in check.get("evidence_ids") or []
@@ -6367,7 +6375,7 @@ def _mark_stage1_qualification_recovered(
         return facts
     recovered = copy.deepcopy(metadata)
     initial_failure_reason = str(recovered.get("failure_reason") or "").strip()
-    resolved_statuses = {"present", "absent", "not_applicable"}
+    resolved_statuses = {"present", "partial", "absent", "not_applicable"}
     recovered_codes = [
         code
         for code in normalized_targets

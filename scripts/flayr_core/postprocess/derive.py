@@ -749,6 +749,19 @@ def _stage_strength_gate(
             side = understanding.get(role) if isinstance(understanding, dict) else None
             if not isinstance(side, dict) or side.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
                 continue
+            readiness = stage_evidence_readiness(side, stage_code)
+            if readiness == "partial":
+                return (
+                    "stage_evidence_partial",
+                    evidence_ids,
+                    {
+                        "creator": creator_state,
+                        "benchmark": benchmark_state,
+                        "role": role,
+                        "stage": stage_code,
+                        "stage_evidence_readiness": readiness,
+                    },
+                )
             qualified = qualified_stage_evidence_ids(side, stage_code)
             flag_ids = set(_flag_evidence_ids(flag))
             if not flag_ids or not flag_ids.issubset(qualified):
@@ -806,6 +819,7 @@ def _constraint_evaluation(rule: str, status: str, reason: str, **extra: Any) ->
         "insufficient_strength": "insufficient_strength",
         "uncertain_fact": "uncertain_fact",
         "stage_evidence_unresolved": "stage_evidence_unresolved",
+        "stage_evidence_partial": "stage_evidence_partial",
         "precondition_missing": "precondition_missing",
         "audit_only": "activation_gate_closed",
         "model_preserved": "model_preserved",

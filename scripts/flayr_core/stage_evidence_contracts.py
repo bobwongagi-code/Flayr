@@ -28,11 +28,19 @@ STAGE_EVIDENCE_CONTRACT_VERSION = 6
 # old provider responses must not be replayed under the new ownership rules.
 STAGE1_OBSERVATION_CONTRACT_VERSION = 6
 STAGE_EVIDENCE_SNAPSHOT_VERSION = 1
-STAGE_EVIDENCE_GATE_VERSION = 1
+STAGE_EVIDENCE_GATE_VERSION = 2
 STAGE1_ACQUISITION_VERSION = 4
 STAGE1_COVERAGE_AUDIT_VERSION = 2
-STAGE1_PROJECTION_VERSION = "stage1_qualification_projection_v1"
-STAGE_EVIDENCE_STATES = ("present", "absent", "unknown", "conflict", "not_applicable")
+STAGE1_PROJECTION_VERSION = "stage1_qualification_projection_v2"
+STAGE_EVIDENCE_STATES = (
+    "present",
+    "partial",
+    "absent",
+    "unknown",
+    "conflict",
+    "not_applicable",
+)
+STAGE_EVIDENCE_ACTIONABLE_STATES = frozenset({"present", "partial", "absent"})
 STAGE_EVIDENCE_COVERAGE_STATES = ("complete", "partial", "unknown")
 STAGE_EVIDENCE_STRENGTHS = ("direct", "explicit", "inferred", "absent")
 STAGE1_ACQUISITION_STATUSES = ("complete", "partial", "failed", "unknown")
@@ -170,6 +178,7 @@ STAGE_SIGNAL_DEFINITIONS: dict[str, str] = {
     "usage_context": "使用对象、场景或限制条件可被直接定位",
     "multi_scene_logic": "多个使用场景之间有可观察的关系，而非随意拼接",
     "result_difference": "操作前后、控制对象或结果状态的可见差异",
+    "result_presentation": "把使用后的目标对象或结果状态作为效果结果展示，即使差异本身不够明显",
     "effect_attribution": "结果与本产品操作之间存在可追踪的事实连接",
     "before_after_or_control": "前后状态或对照对象被实际呈现",
     "proof_salience": "效果证明区域足够清晰、占据可观察画面",
@@ -262,6 +271,8 @@ class StageEvidenceContract:
     disqualifiers: tuple[str, ...]
     scan_instruction: str
     required_signal_mode: str = "all"
+    participation_signals: tuple[str, ...] = ()
+    partial_compatible_disqualifiers: tuple[str, ...] = ()
 
     @property
     def allowed_signals(self) -> tuple[str, ...]:
@@ -273,6 +284,7 @@ class StageEvidenceContract:
             "label": self.label,
             "required_signals": list(self.required_signals),
             "required_signal_mode": self.required_signal_mode,
+            "participation_signals": list(self.participation_signals or self.required_signals),
             "optional_signals": list(self.optional_signals),
             "signal_definitions": {
                 signal: STAGE_SIGNAL_DEFINITIONS.get(signal, "只记录该信号的直接观察，不做强弱评价。")
@@ -281,6 +293,7 @@ class StageEvidenceContract:
             "channel_policy": self.channel_policy,
             "non_substitutable_channels": list(self.non_substitutable_channels),
             "disqualifiers": list(self.disqualifiers),
+            "partial_compatible_disqualifiers": list(self.partial_compatible_disqualifiers),
             "disqualifier_definitions": {
                 disqualifier: STAGE_DISQUALIFIER_DEFINITIONS.get(disqualifier, "只记录直接观察到的排除条件。")
                 for disqualifier in self.disqualifiers
@@ -300,6 +313,7 @@ STAGE_EVIDENCE_CONTRACTS: tuple[StageEvidenceContract, ...] = (
         (),
         ("generic_greeting_only", "late_context_only"),
         "检查开头是否给陌生观众一个可理解、值得继续看的触发点，不用完整看完视频倒推。",
+        participation_signals=("stop_trigger", "cold_audience_relevance"),
     ),
     StageEvidenceContract(
         "S2",
@@ -310,6 +324,8 @@ STAGE_EVIDENCE_CONTRACTS: tuple[StageEvidenceContract, ...] = (
         (),
         ("product_only_without_bridge",),
         "检查产品身份和它为什么能回应前面问题之间是否有事实上的承接。",
+        participation_signals=("product_identity", "problem_to_product_bridge"),
+        partial_compatible_disqualifiers=("product_only_without_bridge",),
     ),
     StageEvidenceContract(
         "S3",
@@ -320,16 +336,26 @@ STAGE_EVIDENCE_CONTRACTS: tuple[StageEvidenceContract, ...] = (
         ("visual",),
         ("mouth_only_or_static", "product_only_without_target_contact", "staged_or_fake_action"),
         "检查产品是否真实作用于目标对象、动作是否发生、应用前后或状态变化是否可追踪；口播不能替代视觉使用证明。",
+        participation_signals=("target_contact", "real_action"),
     ),
     StageEvidenceContract(
         "S4",
         "效果呈现",
         ("result_difference", "effect_attribution"),
-        ("before_after_or_control", "proof_salience", "process_link", "close_detail", "reference_measure"),
+        (
+            "result_presentation",
+            "before_after_or_control",
+            "proof_salience",
+            "process_link",
+            "close_detail",
+            "reference_measure",
+        ),
         "visual_required",
         ("visual",),
         ("claim_only_without_result", "unrelated_risk_or_warning", "result_only_without_process"),
         "检查结果或差异是否真的可见、是否与本品动作有可追踪关系；风险提示或泛泛卖点不能替代效果证据。",
+        participation_signals=("result_presentation", "result_difference"),
+        partial_compatible_disqualifiers=("result_only_without_process",),
     ),
     StageEvidenceContract(
         "S5",
@@ -340,6 +366,7 @@ STAGE_EVIDENCE_CONTRACTS: tuple[StageEvidenceContract, ...] = (
         (),
         ("product_claim_only", "offer_only", "unattributed_social_claim"),
         "检查是否有可识别、与产品相关且独立于品牌和当前达人的信任来源；达人自己的使用经历、演示、旧工具对比、价格和优惠都不能单独构成独立信任来源。",
+        participation_signals=("source_identity", "source_basis", "product_relevance", "independent_origin"),
     ),
     StageEvidenceContract(
         "S6",
@@ -351,6 +378,7 @@ STAGE_EVIDENCE_CONTRACTS: tuple[StageEvidenceContract, ...] = (
         ("generic_praise_only", "benefit_only_without_action"),
         "检查是否至少存在面向观众的行动指令或可执行购买路径；只有推荐或产品价值回顾不算 CTA。",
         "any",
+        ("explicit_action", "purchase_path"),
     ),
 )
 
@@ -1332,8 +1360,10 @@ def stage_evidence_gate(
     """Return the code-owned handoff state from Stage1 into stage judgment.
 
     This is deliberately a policy boundary, not another model judgment. A
-    mixed pair of closed Stage1 states (``present``/``absent``) remains
-    comparable. Two complete ``absent`` states close the pair as
+    mixed pair of actionable Stage1 states (``present``/``partial``/``absent``)
+    remains comparable. ``partial`` carries directly observed participation
+    without claiming that the full proof contract is satisfied. Two complete
+    ``absent`` states close the pair as
     ``not_applicable`` instead of inventing a ``none`` gap. ``unknown`` and
     ``conflict`` always block a grounded comparison; they must never be
     reinterpreted as absence. Legacy facts remain visible for compatibility
@@ -1349,7 +1379,7 @@ def stage_evidence_gate(
         role_states[role] = {
             "status": readiness,
             "evidence_ids": sorted(qualified_stage_evidence_ids(side, code))
-            if readiness == "present"
+            if readiness in {"present", "partial"}
             else [],
             "evidence_set_sha256": str(side.get("evidence_set_sha256") or "").strip(),
             "diagnostics": stage_evidence_diagnostics(side, code),
@@ -1623,6 +1653,32 @@ def normalize_stage_evidence_checks(value: Any, valid_ids: set[str]) -> list[dic
         raw_coverage = str(raw.get("coverage") or "").strip().lower()
         coverage = raw_coverage if raw_coverage in STAGE_EVIDENCE_COVERAGE_STATES else "unknown"
         status = normalize_stage_evidence_state(raw.get("status") or raw.get("state"))
+        blocking_partial_disqualifiers = set(observed_disqualifiers) - set(
+            contract.partial_compatible_disqualifiers
+        )
+        supported_signals = {
+            signal
+            for signal, binding in signal_bindings.items()
+            if isinstance(binding, dict)
+            and binding.get("status") == "supported"
+            and binding.get("evidence_ids")
+        }
+        participation_signals = set(contract.participation_signals or contract.required_signals)
+        if (
+            status == "unknown"
+            and coverage in {"complete", "partial"}
+            and evidence_ids
+            and supported_signals.intersection(participation_signals)
+            and not required_stage_signals_satisfied(contract, observed)
+            and not blocking_partial_disqualifiers
+            and strength in {"direct", "explicit"}
+        ):
+            # A model may correctly report that the full stage contract is not
+            # complete while still binding direct evidence for a real stage
+            # attempt. Preserve that gradient instead of erasing it as
+            # unknown. Unknown remains reserved for incomplete observation or
+            # an unbound/ambiguous claim.
+            status = "partial"
         closes_negative = (
             status in {"absent", "unknown"}
             and coverage == "complete"
@@ -1971,16 +2027,33 @@ def _stage_check_issues(
         if not isinstance(binding, dict) or binding.get("status") != "supported":
             issues.append(f"{contract.code}:observed_signal_without_supported_binding:{signal}")
 
-    if status == "present":
-        if coverage != "complete":
+    if status in {"present", "partial"}:
+        if status == "present" and coverage != "complete":
             issues.append(f"{contract.code}:present_without_complete_coverage")
+        if status == "partial" and coverage not in {"complete", "partial"}:
+            issues.append(f"{contract.code}:partial_without_observed_coverage")
         if not evidence_ids:
-            issues.append(f"{contract.code}:present_without_evidence")
+            issues.append(f"{contract.code}:{status}_without_evidence")
         missing_required = sorted(required - observed)
-        if not required_stage_signals_satisfied(contract, observed):
+        requirements_satisfied = required_stage_signals_satisfied(contract, observed)
+        if status == "present" and not requirements_satisfied:
             issues.append(f"{contract.code}:present_missing_required_signals:{','.join(missing_required)}")
+        participation_signals = set(contract.participation_signals or contract.required_signals)
+        supported_signals = {
+            signal
+            for signal, binding in signal_bindings.items()
+            if isinstance(binding, dict)
+            and binding.get("status") == "supported"
+            and binding.get("evidence_ids")
+        }
+        if status == "partial" and requirements_satisfied:
+            issues.append(f"{contract.code}:partial_with_complete_required_signals")
+        if status == "partial" and not supported_signals.intersection(participation_signals):
+            issues.append(f"{contract.code}:partial_without_participation_signal")
+        if status == "partial" and not (required - observed).issubset(missing):
+            issues.append(f"{contract.code}:partial_without_explicit_missing_signals")
         missing_bindings: list[str] = []
-        if contract.required_signal_mode == "any":
+        if status == "present" and contract.required_signal_mode == "any":
             supported_required = {
                 signal
                 for signal in required
@@ -1989,7 +2062,7 @@ def _stage_check_issues(
             }
             if not supported_required:
                 missing_bindings = sorted(required)
-        else:
+        elif status == "present":
             for signal in sorted(required):
                 binding = signal_bindings.get(signal)
                 if not isinstance(binding, dict) or binding.get("status") != "supported":
@@ -1998,20 +2071,25 @@ def _stage_check_issues(
             issues.append(
                 f"{contract.code}:present_missing_required_signal_bindings:{','.join(missing_bindings)}"
             )
-        if observed_disqualifiers:
+        blocking_disqualifiers = (
+            observed_disqualifiers
+            if status == "present"
+            else observed_disqualifiers - set(contract.partial_compatible_disqualifiers)
+        )
+        if blocking_disqualifiers:
             issues.append(
-                f"{contract.code}:present_with_disqualifiers:{','.join(sorted(observed_disqualifiers))}"
+                f"{contract.code}:{status}_with_disqualifiers:{','.join(sorted(blocking_disqualifiers))}"
             )
         strengths = _unit_strengths(units_by_id, evidence_ids)
         if any(strength is None for strength in strengths):
-            issues.append(f"{contract.code}:present_without_evidence_strength")
+            issues.append(f"{contract.code}:{status}_without_evidence_strength")
         elif any(strength not in {"direct", "explicit"} for strength in strengths):
-            issues.append(f"{contract.code}:present_without_explicit_strength")
+            issues.append(f"{contract.code}:{status}_without_explicit_strength")
         referenced_units = [units_by_id[evidence_id] for evidence_id in evidence_ids if evidence_id in units_by_id]
         if contract.code == "S5" and not any(
             _unit_has_typed_s5_trust_source(unit) for unit in referenced_units
         ):
-            issues.append("S5:present_without_typed_trust_source")
+            issues.append(f"S5:{status}_without_typed_trust_source")
         if contract.channel_policy == "visual_required":
             if not any(_unit_has_channel(unit, "visual") for unit in referenced_units):
                 issues.append(f"{contract.code}:required_visual_channel_missing")
@@ -2068,7 +2146,7 @@ def stage1_acquisition_issues(side: Any, stage: Any) -> list[str]:
         return [f"{code}:acquisition_side_missing"]
     checks = stage_evidence_check_map(side)
     check = checks.get(code or "")
-    if not isinstance(check, dict) or check.get("status") not in {"present", "absent"}:
+    if not isinstance(check, dict) or check.get("status") not in STAGE_EVIDENCE_ACTIONABLE_STATES:
         return []
     manifest = normalize_stage1_acquisition(side.get("stage1_acquisition"))
     if manifest.get("version") != STAGE1_ACQUISITION_VERSION:
@@ -2200,12 +2278,19 @@ def stage1_coverage_audit_issues(side: Any, stage: Any | None = None) -> list[st
         if status not in STAGE1_COVERAGE_AUDIT_STATUSES:
             issues.append(f"{code}:coverage_audit_invalid_status")
             continue
-        if status in {"unknown", "conflict"} or coverage != "complete":
+        check = checks.get(code)
+        primary_status = check.get("status") if isinstance(check, dict) else "unknown"
+        if primary_status == "partial":
+            if status != "found":
+                issues.append(f"{code}:coverage_audit_disagrees_with_partial")
+            if coverage not in {"complete", "partial"}:
+                issues.append(f"{code}:coverage_audit_scope_incomplete")
+            if audit.get("status") != "completed":
+                issues.append(f"{code}:coverage_audit_not_completed")
+        elif status in {"unknown", "conflict"} or coverage != "complete":
             issues.append(f"{code}:coverage_audit_scope_incomplete")
             if audit.get("status") != "completed":
                 issues.append(f"{code}:coverage_audit_not_completed")
-        check = checks.get(code)
-        primary_status = check.get("status") if isinstance(check, dict) else "unknown"
         if primary_status == "present" and status != "found":
             issues.append(f"{code}:coverage_audit_disagrees_with_present")
         elif primary_status == "absent" and status != "clear":
@@ -2306,7 +2391,7 @@ def qualified_stage_evidence_ids(side: Any, stage: Any, *, allow_inferred: bool 
     if not _budget_recovery_allows_qualification(side, stage_code):
         return set()
     check = stage_evidence_check_map(side).get(stage_code)
-    if not isinstance(check, dict) or check.get("status") != "present":
+    if not isinstance(check, dict) or check.get("status") not in {"present", "partial"}:
         return set()
     # Qualification is the only input boundary for Stage2/derive.  Do not
     # expose a syntactically valid model claim when the code-owned acquisition
@@ -2356,8 +2441,10 @@ def qualified_stage_evidence_units(side: Any, stages: list[Any] | set[Any] | Non
 def stage_evidence_readiness(side: Any, stage: Any) -> str:
     """Return whether a stage may feed deterministic downstream relations.
 
-    ``present`` requires the same locked qualification used by the resolver;
-    ``absent`` is a valid complete negative observation. ``unknown`` and
+    ``present`` requires the full locked qualification used by the resolver;
+    ``partial`` preserves directly observed participation and remains citable
+    without pretending that the full proof contract is satisfied. ``absent``
+    is a valid complete negative observation. ``unknown`` and
     ``conflict`` remain non-actionable instead of being collapsed into absent.
     Legacy results return ``legacy`` so callers can retain their compatibility
     path without weakening the active contract.
@@ -2383,8 +2470,8 @@ def stage_evidence_readiness(side: Any, stage: Any) -> str:
         return "unknown"
     status = check.get("status")
     issues = _stage_check_issues(contract, check, _evidence_units_by_id(side))
-    if status == "present":
-        return "present" if not issues and qualified_stage_evidence_ids(side, stage_code) else "unknown"
+    if status in {"present", "partial"}:
+        return status if not issues and qualified_stage_evidence_ids(side, stage_code) else "unknown"
     if status == "absent":
         return "absent" if not issues else "unknown"
     if status == "not_applicable":
@@ -2402,7 +2489,7 @@ def _projection_evidence_strength(
     """Derive stage strength from locked units, never from the model summary."""
     if readiness == "absent":
         return "absent"
-    if readiness != "present":
+    if readiness not in {"present", "partial"}:
         return "unknown"
     units = _evidence_units_by_id(side)
     strengths = [
@@ -2425,7 +2512,7 @@ def _projection_coverage_state(side: dict[str, Any], stage: str, readiness: str)
     """Map runtime/qualification state to the frozen five-state coverage vocabulary."""
     if not _budget_recovery_allows_qualification(side, stage):
         return "budget_exhausted"
-    if readiness == "present":
+    if readiness in {"present", "partial"}:
         return "captured"
     if readiness == "absent":
         return "explicit_absence"
@@ -2541,6 +2628,8 @@ def stage1_qualification_projection(
                 missing_requirements.append("budget_exhausted")
         elif readiness == "present" and qualified_ids:
             reason_code = "qualified"
+        elif readiness == "partial" and qualified_ids:
+            reason_code = "partially_qualified"
         elif readiness == "absent":
             reason_code = "explicit_absence"
         elif readiness == "not_applicable":
@@ -2642,7 +2731,11 @@ def stage_analysis_stage_context(
     for role in ("creator", "benchmark"):
         side = sides.get(role) if isinstance(sides.get(role), dict) else {}
         readiness = stage_evidence_readiness(side, code)
-        allowed = sorted(qualified_stage_evidence_ids(side, code)) if readiness == "present" else []
+        allowed = (
+            sorted(qualified_stage_evidence_ids(side, code))
+            if readiness in {"present", "partial"}
+            else []
+        )
         context[f"{role}_stage_evidence_readiness"] = readiness
         context[f"{role}_evidence_ids"] = allowed
     return context

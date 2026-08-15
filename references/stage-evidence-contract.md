@@ -60,13 +60,13 @@ Stage1 不能输出或推导 `severity`、双方比较、差距、商业优先�
 不再代表第二次全片 coverage audit。补观察只接收目标阶段、目标时间窗口和目标渠道的聚焦素材，并可看到
 只读的当前阶段摘要，不能修改或删除 primary `evidence_units`，也不能比较双方或输出下游判断。
 
-只有以下情况才允许进入 Stage1-C：必需槽位为 `unknown`、阶段覆盖未闭合、候选事实的时间/渠道无法确认、S3/S4 连续动作或效果链无法由离散帧确认、S6 尾段仍未闭合，或硬事实之间出现机械冲突。触发原因使用稳定代码 `stage_coverage_incomplete`、`temporal_continuity_uncertain`、`evidence_qualification_conflict`、`s6_tail_unclosed`。每个角色最多一次，多个目标阶段合并进同一请求；补观察仍不足时保持
-`unknown` 或 `conflict`，不递归重试。
+只有以下情况才允许进入 Stage1-C：必需槽位为 `unknown`、阶段覆盖未闭合、候选事实的时间/渠道无法确认、S3/S4 连续动作或效果链无法由离散帧确认、S6 尾段仍未闭合，或硬事实之间出现机械冲突。触发原因使用稳定代码 `stage_coverage_incomplete`、`temporal_continuity_uncertain`、`evidence_qualification_conflict`、`s6_tail_unclosed`。每个角色最多一次，多个相邻目标阶段合并进同一请求时，窗口标签必须保留全部阶段（例如 `S3+S4`）；不能只保留第一个阶段名。补观察确认了真实阶段参与但完整证明仍不足时可闭合为 `partial`；观察本身仍不充分时保持 `unknown` 或 `conflict`，不递归重试。
 
 Stage1-C 只返回候选原子观察，代码追加 Evidence Ledger；Stage1-D 才返回目标阶段资格。代码随后生成
 `stage1_coverage_audit` 兼容投影：
 
 - `status=found` / `coverage=complete`：目标阶段已形成合格的 `present` 投影；
+- `status=found` / `coverage=partial|complete`：目标阶段已形成可引用但不完整的 `partial` 投影；
 - `status=clear` / `coverage=complete`：目标阶段已形成合格的 `absent` 投影；
 - `status=unknown` 或 `conflict`：补观察仍不能闭合，阶段保持阻断；
 - 未被本次补观察请求的阶段不属于该 projection 的适用范围，不得被当作 negative observation。
@@ -81,7 +81,7 @@ Stage1-C 只返回候选原子观察，代码追加 Evidence Ledger；Stage1-D �
 
 `stage_evidence_checks[]` 不是第二份事实库，而是把原子观察投影到功能阶段的资格结果。每个阶段必须有一条记录：
 
-- `status`：`present / absent / unknown / conflict / not_applicable`；
+- `status`：`present / partial / absent / unknown / conflict / not_applicable`；
 - `coverage`：`complete / partial / unknown`；
 - `evidence_ids`：只能引用本侧真实原子事实；
 - `observed_signals`、`missing_signals`、`observed_disqualifiers`；
@@ -89,7 +89,7 @@ Stage1-C 只返回候选原子观察，代码追加 Evidence Ledger；Stage1-D �
 - `signal_bindings`：每个已观察信号分别绑定到本阶段的原子 `evidence_ids`；阶段总证据列表不能替代逐信号绑定；
 - `reason` 和必要的 `evidence_strength` 自检摘要。
 
-`present` 必须有完整覆盖、全部 required signals、每个 required signal 的有效 `signal_bindings`、真实证据 ID、`direct/explicit` 原子强度和所需渠道。`absent` 必须有完整覆盖，并明确缺少 required signals，且不能存在支持性 signal binding。`not_applicable` 必须有完整覆盖和明确的适用性依据，并且不能携带证据或支持性绑定。`partial`、`unknown`、冲突、预算超限或渠道缺失只能进入 `unknown/conflict`，不能降格成 `absent` 或 `not_applicable`。
+`present` 必须有完整覆盖、全部 required signals、每个 required signal 的有效 `signal_bindings`、真实证据 ID、`direct/explicit` 原子强度和所需渠道。`partial` 必须有 `partial/complete` 覆盖、真实证据 ID、`direct/explicit` 原子强度，并至少绑定一个注册表中的 `participation_signal`，同时保留尚未满足的 required signals；它表示“做了或尝试了，但完整证明未闭合”，不是 `present/verified`。未绑定观察、排除项、渠道不可用、时间边界不精确或采集失败不能写成 `partial`。`absent` 必须有完整覆盖，并明确缺少 required signals，且不能存在支持性 signal binding。`not_applicable` 必须有完整覆盖和明确的适用性依据，并且不能携带证据或支持性绑定。`unknown`、冲突、预算超限或渠道缺失不能降格成 `partial`、`absent` 或 `not_applicable`。
 
 完整覆盖中用于确认排除项或缺失信号的原子观察仍保留在 Evidence Ledger 和 candidate lane，不能作为该阶段的正向 `evidence_ids`。当资格响应已经给出完整覆盖、明确的注册表排除项且 required signals 未满足时，代码统一将 S1-S6 投影为同一份空索引 `absent` 结构；没有排除项、覆盖不完整或存在硬冲突时仍保持 `unknown/conflict`，不得由代码猜测负向结论。
 
@@ -107,7 +107,7 @@ Stage2 只消费冻结 facts 的纯文本投影，不接收视频或音频。Pha
 
 | gate status | 含义 | 后续行为 |
 |---|---|---|
-| `grounded` | 两侧均已闭合，且不是双侧 `absent`；包括 `present/present` 与 `present/absent` | 可以形成有证据支撑的阶段比较 |
+| `grounded` | 两侧均为可行动状态，且不是双侧 `absent`；包括 `present/partial/absent` 的非双侧缺失组合 | 可以形成有证据支撑的阶段比较；`partial` 的缺失项必须随证据一起交接 |
 | `blocked` | 任一侧 `unknown`、`conflict`、预算未闭合、采集不完整、采集通道不可用或冻结摘要无效 | 阶段标记 `evidence_blocked`；模型 severity 只保留在审计字段，不作为有证据结论展示 |
 | `not_applicable` | 双方完整确认均为 `absent`，或比较合同确认双方均未涉及该功能；单侧 `not_applicable` 与另一侧有证据时仍为 `blocked` | 双方均未执行时不生成阶段差距 |
 | `not_comparable` | 商品关系或共同任务不允许比较 | 不生成阶段差距 |
@@ -161,7 +161,7 @@ stage_id + role + evidence_id + relation + linking_reason + confidence
 
 1. **采集层**：每种能力是否成功、覆盖了哪些时间段、是否超预算、是否有词级/帧级边界。
 2. **事实层**：人工关键事实的召回率、模型事实精确率、时间误差、角色/阶段归属错误率。
-3. **资格层**：每个阶段两侧的 `present/absent/unknown/conflict` 分布、`blocked` 比例、补观察成功率。
+3. **资格层**：每个阶段两侧的 `present/partial/absent/unknown/conflict` 分布、`blocked` 比例、补观察成功率。
 4. **判断层**：只在 `grounded` 且比较合同允许的格子中比较 severity；方向错误、档位错误和口径差异分开统计。
 5. **解析层**：floor/ceiling 只对显式硬事实生效，记录触发、跳过、冲突和顺序无关性。
 

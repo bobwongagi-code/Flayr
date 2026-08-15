@@ -124,7 +124,7 @@ def _visual_verifier_skip_reason(result: dict[str, Any]) -> str:
             continue
         for stage_code in ("S3", "S4"):
             readiness = stage_evidence_readiness(side, stage_code)
-            if readiness not in {"present", "absent"}:
+            if readiness not in {"present", "partial", "absent"}:
                 return f"{role} {stage_code} 的 Stage1 证据资格为 {readiness}，不能启动独立视觉复核。"
     if _stage_is_structural(result, "S4"):
         return ""
@@ -170,7 +170,10 @@ def apply_s4_visual_verifier_result(
     for role in ("creator", "benchmark"):
         side = (result.get("video_understanding") or {}).get(role, {})
         active_contract = isinstance(side, dict) and side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
-        if active_contract and any(stage_evidence_readiness(side, code) != "present" for code in ("S3", "S4")):
+        if active_contract and any(
+            stage_evidence_readiness(side, code) not in {"present", "partial"}
+            for code in ("S3", "S4")
+        ):
             continue
         patch = verifier_result.get(role)
         s4_flag = s4.get(f"{role}_s4")

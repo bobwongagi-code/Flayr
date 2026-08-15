@@ -738,7 +738,7 @@ def apply_comparison_eligibility(result: dict[str, Any]) -> None:
                 facts = understanding.get(role)
                 if isinstance(facts, dict) and facts.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
                     readiness[role] = stage_evidence_readiness(facts, code)
-                    if readiness[role] not in {"present", "absent"}:
+                    if readiness[role] not in {"present", "partial", "absent"}:
                         unresolved.append(f"{role}:{readiness[role]}")
             if code == "S5":
                 s5_readiness, s5_closes_scope = _s5_bilateral_scope_state(understanding)
@@ -815,7 +815,7 @@ def apply_comparison_eligibility(result: dict[str, Any]) -> None:
             facts = result.get("video_understanding", {}).get(role, {})
             if isinstance(facts, dict) and facts.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
                 readiness[role] = stage_evidence_readiness(facts, code)
-                if readiness[role] not in {"present", "absent"}:
+                if readiness[role] not in {"present", "partial", "absent"}:
                     unresolved.append(f"{role}:{readiness[role]}")
             else:
                 readiness[role] = "legacy"

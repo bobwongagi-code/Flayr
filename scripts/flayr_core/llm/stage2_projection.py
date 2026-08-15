@@ -198,7 +198,7 @@ def _project_segmented_role_evidence(
     qualified = qualified_stage_evidence_ids(side, stage)
     ids = [item for item in _segmented_model_evidence_ids(raw, role) if item in qualified]
     readiness = stage_evidence_readiness(side, stage)
-    if readiness != "present":
+    if readiness not in {"present", "partial"}:
         ids = []
     elif scope_closed:
         # Closed scopes still expose the locked ledger for audit without
@@ -245,7 +245,7 @@ def _apply_segmented_handoff_state(
     comparison_status: str,
 ) -> None:
     missing_model_references = not scope_closed and any(
-        readiness[role] == "present" and not role_ids[role]
+        readiness[role] in {"present", "partial"} and not role_ids[role]
         for role in ("benchmark", "creator")
     )
     if not scope_closed and set(readiness.values()) == {"absent"}:
@@ -272,7 +272,7 @@ def _apply_segmented_handoff_state(
         )
         output["stage_handoff_status"] = "handoff_loss"
         return
-    if any(value not in {"present", "absent"} for value in readiness.values()):
+    if any(value not in {"present", "partial", "absent"} for value in readiness.values()):
         output["relation"] = "uncertain"
         output["model_gap_magnitude"] = "uncertain"
         output["stage_state"] = "unknown" if "conflict" not in readiness.values() else "conflict"

@@ -251,7 +251,7 @@ def validate_evidence_alignment(result: dict[str, Any]) -> None:
                 # case is blocked and is intentionally allowed to retain no
                 # publishable evidence references.
                 handoff_loss = str(stage.get("analysis_status") or "").strip().lower() == "handoff_loss"
-                references_required = readiness == "present" and not handoff_loss
+                references_required = readiness in {"present", "partial"} and not handoff_loss
             else:
                 references_required = contract_status not in {"absent", "unknown", "conflict", "not_applicable"}
             if not references and references_required:
@@ -310,12 +310,14 @@ def validate_stage_evidence_qualification(result: dict[str, Any]) -> None:
             references = [str(value) for value in stage.get(f"{role}_evidence_ids") or [] if str(value).strip()]
             qualified = qualified_stage_evidence_ids(side, stage_code)
             handoff_loss = str(stage.get("analysis_status") or "").strip().lower() == "handoff_loss"
-            if readiness == "present" and not handoff_loss and (not references or set(references) - qualified):
+            if readiness in {"present", "partial"} and not handoff_loss and (
+                not references or set(references) - qualified
+            ):
                 raise SystemExit(
                     f"{stage_code} {role} 阶段引用没有命中 Stage1 已资格化证据，"
                     "不能用 functions 或自由文本补回。"
                 )
-            if readiness == "present" and handoff_loss and (set(references) - qualified):
+            if readiness in {"present", "partial"} and handoff_loss and (set(references) - qualified):
                 raise SystemExit(
                     f"{stage_code} {role} handoff_loss 仍包含未资格化证据，不能保留。"
                 )
@@ -329,7 +331,7 @@ def validate_stage_evidence_qualification(result: dict[str, Any]) -> None:
             for key, value in stage.items():
                 if key.startswith(f"{role}_") and isinstance(value, dict):
                     nested_references.update(_nested_stage_evidence_ids(value))
-            if readiness != "present" and nested_references:
+            if readiness not in {"present", "partial"} and nested_references:
                 nested_errors.append(
                     f"{stage_code} {role} 的嵌套阶段证据资格为 {readiness}，不得继续引用："
                     + ", ".join(sorted(nested_references))

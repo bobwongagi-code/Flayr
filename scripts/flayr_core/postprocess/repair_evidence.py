@@ -94,7 +94,7 @@ def bind_timed_transcript_quotes(result: dict[str, Any], analysis: dict[str, Any
             side = understanding.get(role) if isinstance(understanding, dict) else None
             if isinstance(side, dict) and side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
                 readiness = stage_evidence_readiness(side, f"S{index}")
-                if readiness != "present":
+                if readiness not in {"present", "partial"}:
                     stage[f"{role}_quote"] = ""
                     stage[f"{role}_quote_zh"] = ""
                     continue
@@ -157,7 +157,10 @@ def align_stage_flag_evidence(result: dict[str, Any]) -> None:
             allowed_stage_ids = _stage_contract_allowed_ids(result, role, f"S{index}")
             if allowed_stage_ids is not None:
                 stage_ids = [value for value in stage_ids if value in allowed_stage_ids]
-                if not stage_ids and _stage_contract_readiness(result, role, f"S{index}") == "present":
+                if (
+                    not stage_ids
+                    and _stage_contract_readiness(result, role, f"S{index}") in {"present", "partial"}
+                ):
                     # Stage1 is the authority for evidence qualification.  A
                     # Stage2 response may omit citation IDs even though its
                     # positive fact is otherwise complete; restore only the
@@ -718,7 +721,7 @@ def validate_s3_s4_hard_fact_consistency(result: dict[str, Any]) -> None:
     for role in ("creator", "benchmark"):
         for stage_code in ("S3", "S4"):
             readiness = _stage_contract_readiness(result, role, stage_code)
-            if readiness not in {"legacy", "present", "absent"}:
+            if readiness not in {"legacy", "present", "partial", "absent"}:
                 state_checks[f"{role}_{stage_code.lower()}"] = {
                     "status": "stage_evidence_unresolved",
                     "reason_code": "stage_evidence_unresolved",
