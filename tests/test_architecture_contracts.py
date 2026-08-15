@@ -7,6 +7,7 @@ import inspect
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -5408,6 +5409,22 @@ class ArchitectureContractTests(unittest.TestCase):
                 vision_fingerprint,
                 flayr.build_preprocess_fingerprint(video, deps, args),
             )
+
+    def test_preprocess_artifact_manifest_accepts_content_identical_directory_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            (source / "frames").mkdir(parents=True)
+            (source / "frames" / "frame_0001.jpg").write_bytes(b"frame")
+            (source / "transcript.txt").write_text("transcript", encoding="utf-8")
+            manifest = flayr._build_preprocess_artifact_manifest(source)
+            copied = root / "copied"
+
+            shutil.copytree(source, copied)
+
+            self.assertTrue(flayr._preprocess_artifacts_match(copied, manifest))
+            (copied / "transcript.txt").write_text("tampered", encoding="utf-8")
+            self.assertFalse(flayr._preprocess_artifacts_match(copied, manifest))
 
     def test_preprocess_fingerprint_tracks_semantic_implementation_not_git_commit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

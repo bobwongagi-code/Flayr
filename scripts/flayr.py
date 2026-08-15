@@ -1341,15 +1341,25 @@ def _preprocess_artifacts_match(role_dir: Path, value: Any) -> bool:
         if current_probe == recorded_probe:
             return True
     current = _build_preprocess_artifact_manifest(root).get("files")
-    if current != recorded:
+    if not isinstance(current, dict) or set(current) != set(recorded):
         return False
     for relative, metadata in recorded.items():
+        current_metadata = current.get(relative)
+        if (
+            not isinstance(metadata, dict)
+            or not isinstance(current_metadata, dict)
+            or any(
+                current_metadata.get(key) != metadata.get(key)
+                for key in ("size_bytes", "sha256")
+            )
+        ):
+            return False
         candidate = (root / str(relative)).resolve()
         try:
             candidate.relative_to(root)
         except ValueError:
             return False
-        if not isinstance(metadata, dict) or not candidate.is_file() or candidate.is_symlink():
+        if not candidate.is_file() or candidate.is_symlink():
             return False
     return True
 
