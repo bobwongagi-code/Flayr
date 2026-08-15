@@ -33,6 +33,11 @@
 执行时不是 `NA`，仍需记录更强一侧和实际差距。旧 16 组没有 `none`，历史 `small` 可能只是
 “没有区别”的兼容写法，迁移时必须结合人工原始理由复核，不能机械换值。
 
+当前迁移盘点由 `references/legacy-gt-migration-inventory.json` 保存。它不改写本文件或 JSON 权威
+标签：旧 `small` 默认保持 `legacy_ambiguous`，旧 `medium/large` 只允许做 magnitude-only 诊断，
+没有独立方向复核时不得计算 relation。疑似 `small -> none` 必须由专家确认；其余迁移至少抽查 5 格，
+任一解释偏差都会暂停整批迁移。完整规则见 `references/semantic-baseline-freeze.md`。
+
 ### are_xie（女性生理期保健品 Pentavite，ms）
 
 | 阶段 | 标签 | 当时系统输出 | 判定要点 |

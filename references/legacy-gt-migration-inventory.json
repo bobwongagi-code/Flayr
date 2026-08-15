@@ -1,0 +1,727 @@
+{
+  "schema_version": 1,
+  "decision_scope": "legacy_gt_migration_inventory_only",
+  "promotion_eligible": false,
+  "source": "references/ground-truth-labels.json",
+  "source_sha256": "d885f9b000d350786f1657407bdf148c79f1fe65a4bd98b83bc44e2f65f9b272",
+  "policy": {
+    "does_not_modify_source_gt": true,
+    "legacy_small_default": "legacy_ambiguous",
+    "automatic_small_to_none_migration": false,
+    "legacy_medium_large_use": "magnitude_only_until_direction_review",
+    "unresolved_cells_are_excluded": true,
+    "minimum_other_migration_spot_checks": 5,
+    "on_any_interpretation_mismatch": "halt_entire_legacy_migration_batch"
+  },
+  "summary": {
+    "samples": 16,
+    "cells": 96,
+    "status_counts": {
+      "legacy_ambiguous": 36,
+      "legacy_magnitude_only": 50,
+      "legacy_missing": 6,
+      "legacy_not_applicable_documented": 4
+    },
+    "requires_expert_confirmation": 36
+  },
+  "confirmation_cells": [
+    "are_xie/S3",
+    "are_xie/S6",
+    "kakwanreview/S4",
+    "kakwanreview/S5",
+    "tashadiyana/S2",
+    "tashadiyana/S5",
+    "tashadiyana/S6",
+    "carslan-b0/S5",
+    "carslan-b0/S6",
+    "simplus/S5",
+    "simplus/S6",
+    "wukoubo-c0/S2",
+    "wukoubo-c0/S5",
+    "wukoubo-c0/S6",
+    "wukoubo-c1/S5",
+    "wukoubo-c1/S6",
+    "youkoubo-c0/S5",
+    "youkoubo-c0/S6",
+    "carslan-b1/S5",
+    "carslan-b1/S6",
+    "colorkey-b1/S5",
+    "colorkey-b1/S6",
+    "colorblu-c0/S1",
+    "colorblu-c0/S2",
+    "colorblu-c0/S6",
+    "colorblu-c1/S2",
+    "colorblu-c1/S6",
+    "carslan-powder-c0/S2",
+    "carslan-powder-c0/S3",
+    "carslan-powder-c0/S5",
+    "carslan-powder-c0/S6",
+    "carslan-powder-c1/S2",
+    "carslan-powder-c1/S5",
+    "colorkey-lip-c0/S1",
+    "colorkey-lip-c0/S2",
+    "colorkey-lip-c0/S6"
+  ],
+  "samples": {
+    "are_xie": {
+      "partition": "calibration",
+      "cells": {
+        "S1": {
+          "legacy_gap": "large",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S2": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S3": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S4": {
+          "legacy_gap": "large",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S5": {
+          "legacy_gap": "large",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S6": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        }
+      }
+    },
+    "kakwanreview": {
+      "partition": "calibration",
+      "cells": {
+        "S1": {
+          "legacy_gap": "large",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S2": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S3": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S4": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S5": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S6": {
+          "legacy_gap": "large",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        }
+      }
+    },
+    "tashadiyana": {
+      "partition": "calibration",
+      "cells": {
+        "S1": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S2": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S3": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S4": {
+          "legacy_gap": "large",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S5": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S6": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        }
+      }
+    },
+    "carslan-b0": {
+      "partition": "calibration",
+      "cells": {
+        "S1": {
+          "legacy_gap": "large",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S2": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S3": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S4": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S5": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S6": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        }
+      }
+    },
+    "simplus": {
+      "partition": "calibration",
+      "cells": {
+        "S1": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S2": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S3": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S4": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S5": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S6": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        }
+      }
+    },
+    "wukoubo-c0": {
+      "partition": "calibration",
+      "cells": {
+        "S1": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S2": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S3": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S4": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S5": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S6": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        }
+      }
+    },
+    "wukoubo-c1": {
+      "partition": "seen_validation",
+      "cells": {
+        "S1": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S2": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S3": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S4": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S5": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S6": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        }
+      }
+    },
+    "youkoubo-c0": {
+      "partition": "seen_validation",
+      "cells": {
+        "S1": {
+          "legacy_gap": "large",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S2": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S3": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S4": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S5": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S6": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        }
+      }
+    },
+    "carslan-b1": {
+      "partition": "seen_validation",
+      "cells": {
+        "S1": {
+          "legacy_gap": "large",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S2": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S3": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S4": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S5": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S6": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        }
+      }
+    },
+    "colorkey-b1": {
+      "partition": "seen_validation",
+      "cells": {
+        "S1": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S2": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S3": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S4": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S5": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S6": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        }
+      }
+    },
+    "colorblu-c0": {
+      "partition": "seen_validation",
+      "cells": {
+        "S1": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S2": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S3": {
+          "legacy_gap": "large",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S4": {
+          "legacy_gap": "large",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S5": {
+          "legacy_gap": "na",
+          "migration_status": "legacy_not_applicable_documented",
+          "requires_expert_confirmation": false,
+          "legacy_stage_status": "not_applicable",
+          "legacy_stage_reason": "该样本未设置独立信任放大环节；这是标注协议下的不适用，不是 GT 缺失。"
+        },
+        "S6": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        }
+      }
+    },
+    "colorblu-c1": {
+      "partition": "seen_validation",
+      "cells": {
+        "S1": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S2": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S3": {
+          "legacy_gap": "large",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S4": {
+          "legacy_gap": "large",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S5": {
+          "legacy_gap": "na",
+          "migration_status": "legacy_not_applicable_documented",
+          "requires_expert_confirmation": false,
+          "legacy_stage_status": "not_applicable",
+          "legacy_stage_reason": "该样本未设置独立信任放大环节；这是标注协议下的不适用，不是 GT 缺失。"
+        },
+        "S6": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        }
+      }
+    },
+    "carslan-powder-c0": {
+      "partition": "seen_validation",
+      "cells": {
+        "S1": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S2": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S3": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S4": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S5": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S6": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        }
+      }
+    },
+    "carslan-powder-c1": {
+      "partition": "seen_validation",
+      "cells": {
+        "S1": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S2": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S3": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S4": {
+          "legacy_gap": "large",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S5": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S6": {
+          "legacy_gap": "na",
+          "migration_status": "legacy_not_applicable_documented",
+          "requires_expert_confirmation": false,
+          "legacy_stage_status": "not_applicable",
+          "legacy_stage_reason": "双方均没有可比较的独立 CTA 环节，按标注协议不对 S6 给 severity；这不是 GT 缺失。"
+        }
+      }
+    },
+    "colorkey-lip-c0": {
+      "partition": "seen_validation",
+      "cells": {
+        "S1": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S2": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        },
+        "S3": {
+          "legacy_gap": "medium",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S4": {
+          "legacy_gap": "large",
+          "migration_status": "legacy_magnitude_only",
+          "requires_expert_confirmation": false,
+          "limitation": "usable only for gap magnitude until direction is independently reviewed"
+        },
+        "S5": {
+          "legacy_gap": "na",
+          "migration_status": "legacy_not_applicable_documented",
+          "requires_expert_confirmation": false,
+          "legacy_stage_status": "not_applicable",
+          "legacy_stage_reason": "该样本未设置独立信任放大环节；这是标注协议下的不适用，不是 GT 缺失。"
+        },
+        "S6": {
+          "legacy_gap": "small",
+          "migration_status": "legacy_ambiguous",
+          "requires_expert_confirmation": true,
+          "ambiguity": "old small may mean current none or a real small gap"
+        }
+      }
+    },
+    "colorkey-lip-c1": {
+      "partition": "seen_validation",
+      "cells": {
+        "S1": {
+          "legacy_gap": null,
+          "migration_status": "legacy_missing",
+          "requires_expert_confirmation": false,
+          "limitation": "no stage-level legacy label; exclude rather than request a synthetic migration"
+        },
+        "S2": {
+          "legacy_gap": null,
+          "migration_status": "legacy_missing",
+          "requires_expert_confirmation": false,
+          "limitation": "no stage-level legacy label; exclude rather than request a synthetic migration"
+        },
+        "S3": {
+          "legacy_gap": null,
+          "migration_status": "legacy_missing",
+          "requires_expert_confirmation": false,
+          "limitation": "no stage-level legacy label; exclude rather than request a synthetic migration"
+        },
+        "S4": {
+          "legacy_gap": null,
+          "migration_status": "legacy_missing",
+          "requires_expert_confirmation": false,
+          "limitation": "no stage-level legacy label; exclude rather than request a synthetic migration"
+        },
+        "S5": {
+          "legacy_gap": null,
+          "migration_status": "legacy_missing",
+          "requires_expert_confirmation": false,
+          "limitation": "no stage-level legacy label; exclude rather than request a synthetic migration"
+        },
+        "S6": {
+          "legacy_gap": null,
+          "migration_status": "legacy_missing",
+          "requires_expert_confirmation": false,
+          "limitation": "no stage-level legacy label; exclude rather than request a synthetic migration"
+        }
+      }
+    }
+  }
+}

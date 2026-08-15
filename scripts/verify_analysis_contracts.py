@@ -2498,6 +2498,15 @@ check("LLM length 重试提高输出预算并封顶",
       and (_generic_old, _generic_new, _generic_length_payload["max_tokens"]) == (16384, 32768, 32768))
 check("LLM TLS 瞬断进入重试", is_retryable_error("LibreSSL SSL_connect: SSL_ERROR_SYSCALL"))
 
+from verify_semantic_baseline_freeze import verify_freeze  # noqa: E402
+
+_semantic_freeze_errors = verify_freeze()
+check(
+    "离线语义基线冻结合同未漂移",
+    not _semantic_freeze_errors,
+    "; ".join(_semantic_freeze_errors)[:240],
+)
+
 print()
 print("RESULT:", "PASS" if not failures else f"FAIL ({len(failures)}): {failures}")
 sys.exit(1 if failures else 0)

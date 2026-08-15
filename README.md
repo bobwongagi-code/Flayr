@@ -58,7 +58,9 @@ Flayr/
 │   ├── flayr.py                  # CLI 主入口
 │   ├── batch_analyze.py          # 批量作业、断点续跑与限并发
 │   ├── evaluate_analysis.py      # 分析结果与人工 GT 对照
+│   ├── build_legacy_gt_migration_inventory.py # 旧 GT 非破坏性迁移盘点
 │   ├── manage_validation_cohort.py # 冻结/校验/消费 blind cohort（不调模型）
+│   ├── verify_semantic_baseline_freeze.py # 离线语义基线冻结门
 │   ├── verify_analysis_contracts.py # S1-S6 与跨模块契约门
 │   └── flayr_core/               # 核心模块包
 │       ├── video.py asr.py       # 在线转写 + 抽帧 + 抽音频
@@ -230,6 +232,19 @@ python3 scripts/manage_validation_cohort.py freeze \
 `evaluate_analysis.py --cohort-lock ...` 会分别报告预处理可用性、Stage1 事实召回、Stage2
 证据使用/判断、derive oracle 回放、Phase C 净收益和 Top-N 商业根因。cohort 结果一旦打开或用于
 修改规则，须执行 `manage_validation_cohort.py spend`，该批样本以后只作 `seen_validation` 回归。
+
+当前先执行不具备 promotion 资格的离线语义基线。它绑定生产行为提交、模型路由、GT 迁移规则、
+严重错误门槛和冻结期变更分类；先复用现有 artifact，不调用视频模型：
+
+```bash
+python3 scripts/build_legacy_gt_migration_inventory.py --check
+python3 scripts/verify_semantic_baseline_freeze.py
+python3 scripts/evaluate_analysis.py --semantic-baseline-freeze --output <baseline.json>
+```
+
+冻结协议见 [`references/semantic-baseline-freeze.md`](references/semantic-baseline-freeze.md)。旧 16 组的
+`small` 不会自动解释成当前 `small` 或 `none`，未确认格子不进入语义分母。人工原话与工程迁移建议
+集中在 [`references/legacy-gt-migration-review.md`](references/legacy-gt-migration-review.md)，它不是权威 GT。
 
 验证清单中的视频路径使用 `${FLAYR_VALIDATION_ROOT}` 占位符。运行冻结或评测前，需在本地环境设置该变量；真实视频目录不应写入仓库或作业清单。
 

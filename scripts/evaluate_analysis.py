@@ -12,6 +12,7 @@ import argparse
 import copy
 import json
 import re
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -32,6 +33,7 @@ from flayr_core.stage_evidence_contracts import (
 )
 from flayr_core.artifacts import parse_time_range_seconds
 from flayr_core.postprocess.chain import finalize_severity_after_repairs
+from flayr_core.run_manifest import validate_success_manifest
 from flayr_core.validation_cohort import (
     stage_label_status,
     validate_blind_sample_contract,
@@ -43,7 +45,12 @@ SEVERITIES = ("small", "medium", "large")
 SEVERITY_RANK = {value: index for index, value in enumerate(SEVERITIES)}
 GAP_MAGNITUDES = ("none", *SEVERITIES)
 GAP_RANK = {value: index for index, value in enumerate(GAP_MAGNITUDES)}
-EVALUATION_REPORT_SCHEMA_VERSION = 5
+SCORABLE_MIGRATION_STATUSES = frozenset({
+    "canonical_existing",
+    "legacy_magnitude_only",
+    "legacy_not_applicable_documented",
+})
+EVALUATION_REPORT_SCHEMA_VERSION = 6
 NOT_APPLICABLE = "na"
 HUMAN_GAP_VALUES = frozenset({"none", "small", "medium", "large", "uncertain", NOT_APPLICABLE})
 STAGE_SEVERITY_SCOPE = "stage_severity"
@@ -125,6 +132,78 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def _current_code_commit() -> str:
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _commit_matches(recorded: Any, expected: str) -> bool:
+    value = str(recorded or "").strip().lower()
+    target = str(expected or "").strip().lower()
+    if len(value) < 7 or len(target) < 7:
+        return False
+    try:
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{value}^{{commit}}"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip().lower()
+    except subprocess.CalledProcessError:
+        return False
+    return resolved == target
+
+
+def frozen_artifact_identity_issues(
+    path: Path,
+    result: dict[str, Any],
+    freeze_contract: dict[str, Any],
+) -> list[str]:
+    """Verify that an offline result belongs to the frozen execution identity."""
+    issues: list[str] = []
+    if path.name != "analysis.json":
+        return ["frozen baseline requires the published analysis.json artifact"]
+    manifest_path = path.parent / "_SUCCESS.json"
+    if not manifest_path.is_file():
+        return ["missing _SUCCESS.json"]
+    try:
+        manifest = read_json(manifest_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return [f"invalid _SUCCESS.json: {exc}"]
+    if manifest.get("status") != "completed" or manifest.get("analysis_run_state") != "completed":
+        issues.append("success manifest is not completed")
+    if not validate_success_manifest(path.parent):
+        issues.append("success manifest or published artifact set failed validation")
+    provenance = manifest.get("provenance") if isinstance(manifest.get("provenance"), dict) else {}
+    route = freeze_contract.get("model_route") if isinstance(freeze_contract.get("model_route"), dict) else {}
+    for field in ("judgment_model", "vision_model"):
+        if str(provenance.get(field) or "").strip() != str(route.get(field) or "").strip():
+            issues.append(f"{field} does not match frozen route")
+    recorded_commit = provenance.get("code_commit")
+    production_commit = str(freeze_contract.get("production_behavior_commit") or "")
+    if not (
+        _commit_matches(recorded_commit, production_commit)
+        or _commit_matches(recorded_commit, _current_code_commit())
+    ):
+        issues.append("code_commit is neither the frozen behavior commit nor current verified source")
+    identity = freeze_contract.get("artifact_identity") if isinstance(freeze_contract.get("artifact_identity"), dict) else {}
+    contract = result.get("analysis_result_contract") if isinstance(result.get("analysis_result_contract"), dict) else {}
+    if str(contract.get("schema_sha256") or "") != str(identity.get("analysis_schema_sha256") or ""):
+        issues.append("analysis schema does not match frozen artifact identity")
+    if str(result.get("stage2_pipeline_version") or "") != str(identity.get("stage2_pipeline_version") or ""):
+        issues.append("stage2 pipeline version does not match frozen artifact identity")
+    if str(result.get("analysis_run_state") or "") != "completed":
+        issues.append("analysis run is not completed")
+    return issues
+
+
 def stage_id(value: Any) -> str | None:
     match = STAGE_RE.match(str(value or "").strip())
     return match.group(1) if match else None
@@ -193,6 +272,20 @@ def ground_truth_gap_values(label: dict[str, Any]) -> dict[str, Any]:
         return human_gap
     stages = label.get("stages")
     return stages if isinstance(stages, dict) else {}
+
+
+def migration_cell_status(
+    inventory: dict[str, Any] | None,
+    sample_id: str,
+    current_stage: str,
+) -> str | None:
+    if not isinstance(inventory, dict):
+        return None
+    samples = inventory.get("samples")
+    sample = samples.get(sample_id) if isinstance(samples, dict) else None
+    cells = sample.get("cells") if isinstance(sample, dict) else None
+    cell = cells.get(current_stage) if isinstance(cells, dict) else None
+    return str(cell.get("migration_status") or "").strip() if isinstance(cell, dict) else None
 
 
 def severity_diagnostics(expected: str, final: str, stage: dict[str, Any]) -> dict[str, Any]:
@@ -277,7 +370,8 @@ def eligible_stages(
     eligible = {
         stage
         for stage, severity in labels.items()
-        if stage_id(stage) is not None and normalize_gap_magnitude(severity) in GAP_RANK
+        if stage_id(stage) is not None
+        and normalize_human_gap(severity) in {*GAP_RANK, NOT_APPLICABLE}
     }
     sources = ["ground_truth"]
 
@@ -1369,6 +1463,7 @@ def semantic_acceptance(
     prediction_unavailable: list[dict[str, Any]],
     stage_oracles: dict[str, Any],
     human_key_event_audit: dict[str, Any],
+    applicability_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Report business acceptance independently from engineering verification.
 
@@ -1386,7 +1481,10 @@ def semantic_acceptance(
     gap_accuracy = round(gap_matches / valid_gap_cells, 4) if valid_gap_cells else None
     gap_coverage = round(len(rows) / valid_gap_cells, 4) if valid_gap_cells else None
     two_band_errors = sum(1 for row in rows if int(row.get("ordinal_distance") or 0) >= 2)
-    if len(sample_ids) < SEMANTIC_ACCEPTANCE_MIN_SAMPLE_PAIRS or not valid_gap_cells:
+    if two_band_errors:
+        gap_status = "failed"
+        gap_reason = "observed a gap error of two or more bands"
+    elif len(sample_ids) < SEMANTIC_ACCEPTANCE_MIN_SAMPLE_PAIRS or not valid_gap_cells:
         gap_status = "unavailable"
         gap_reason = (
             f"requires at least {SEMANTIC_ACCEPTANCE_MIN_SAMPLE_PAIRS} labeled sample pairs; "
@@ -1407,7 +1505,19 @@ def semantic_acceptance(
     relation_rows = [row for row in relation_records or [] if row.get("expected_relation") is not None]
     relation_matches = sum(1 for row in relation_rows if row.get("relation_match") is True)
     relation_accuracy = round(relation_matches / len(relation_rows), 4) if relation_rows else None
-    if len(relation_rows) < SEMANTIC_ACCEPTANCE_MIN_RELATION_CELLS:
+    direction_reversals = sum(
+        1
+        for row in relation_rows
+        if (row.get("expected_relation"), row.get("actual_relation"))
+        in {
+            ("creator_better", "benchmark_better"),
+            ("benchmark_better", "creator_better"),
+        }
+    )
+    if direction_reversals:
+        relation_status = "failed"
+        relation_reason = "observed creator_better/benchmark_better direction reversal"
+    elif len(relation_rows) < SEMANTIC_ACCEPTANCE_MIN_RELATION_CELLS:
         relation_status = "unavailable"
         relation_reason = (
             f"requires at least {SEMANTIC_ACCEPTANCE_MIN_RELATION_CELLS} human relation cells; "
@@ -1416,10 +1526,22 @@ def semantic_acceptance(
     else:
         relation_status = (
             "passed"
-            if relation_accuracy is not None and relation_accuracy >= PROMOTION_MIN_OVERALL_ACCURACY
+            if relation_accuracy is not None
+            and relation_accuracy >= PROMOTION_MIN_OVERALL_ACCURACY
+            and direction_reversals == 0
             else "failed"
         )
         relation_reason = "measured against stage_oracles.relation"
+
+    applicability_rows = applicability_records or []
+    applicability_errors = sum(1 for row in applicability_rows if row.get("matched") is not True)
+    applicability_status = (
+        "not_exercised"
+        if not applicability_rows
+        else "passed"
+        if applicability_errors == 0
+        else "failed"
+    )
 
     event_summary = (
         human_key_event_audit.get("summary")
@@ -1441,7 +1563,7 @@ def semantic_acceptance(
     component_statuses = (gap_status, relation_status, fact_status)
     overall = (
         "failed"
-        if "failed" in component_statuses
+        if "failed" in component_statuses or applicability_status == "failed"
         else "passed"
         if all(status == "passed" for status in component_statuses)
         else "incomplete"
@@ -1457,8 +1579,10 @@ def semantic_acceptance(
             "max_two_band_errors": 0,
             "min_relation_cells": SEMANTIC_ACCEPTANCE_MIN_RELATION_CELLS,
             "min_relation_accuracy": PROMOTION_MIN_OVERALL_ACCURACY,
+            "max_direction_reversals": 0,
             "min_fact_events": SEMANTIC_ACCEPTANCE_MIN_FACT_EVENTS,
             "min_fact_recall": PROMOTION_MIN_EVENT_RECALL,
+            "max_applicability_errors": 0,
         },
         "gap_magnitude": {
             "status": gap_status,
@@ -1475,6 +1599,13 @@ def semantic_acceptance(
             "reason": relation_reason,
             "cells": len(relation_rows),
             "accuracy": relation_accuracy,
+            "direction_reversals": direction_reversals,
+        },
+        "applicability": {
+            "status": applicability_status,
+            "cells": len(applicability_rows),
+            "errors": applicability_errors,
+            "records": applicability_rows,
         },
         "fact_recall": {
             "status": fact_status,
@@ -1554,11 +1685,17 @@ def evaluate(
     manifest: dict[str, Any],
     run_paths: dict[str, Path],
     cohort_lock: dict[str, Any] | None = None,
+    migration_inventory: dict[str, Any] | None = None,
+    freeze_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     label_samples = labels.get("samples") if isinstance(labels.get("samples"), dict) else {}
     input_samples = manifest_samples(manifest)
     rows: list[dict[str, Any]] = []
     prediction_unavailable: list[dict[str, Any]] = []
+    applicability_records: list[dict[str, Any]] = []
+    migration_unavailable: list[dict[str, Any]] = []
+    artifact_identity_unavailable: list[dict[str, Any]] = []
+    eligible_run_paths: dict[str, Path] = {}
     missing_runs: list[dict[str, str]] = []
     missing_labels: list[str] = []
     whole_video_observations: list[dict[str, Any]] = []
@@ -1574,6 +1711,16 @@ def evaluate(
             missing_labels.append(sample_id)
             continue
         result = read_json(path)
+        if freeze_contract is not None:
+            identity_issues = frozen_artifact_identity_issues(path, result, freeze_contract)
+            if identity_issues:
+                artifact_identity_unavailable.append({
+                    "sample_id": sample_id,
+                    "path": str(path),
+                    "reasons": identity_issues,
+                })
+                continue
+        eligible_run_paths[sample_id] = path
         allowed, scope_source = eligible_stages(sample_id, label, input_samples.get(sample_id), result)
         if scope_source == WHOLE_VIDEO_OBSERVATION_SCOPE:
             whole_video_observations.append(whole_video_model_observation(sample_id, label, result))
@@ -1586,6 +1733,33 @@ def evaluate(
         expected_stages = ground_truth_gap_values(label)
         for current_stage in sorted(allowed):
             stage = by_id.get(current_stage)
+            migration_status = migration_cell_status(migration_inventory, sample_id, current_stage)
+            if migration_inventory is not None and migration_status not in SCORABLE_MIGRATION_STATUSES:
+                migration_unavailable.append({
+                    "sample_id": sample_id,
+                    "partition": str(label.get("partition") or "unknown"),
+                    "stage": current_stage,
+                    "legacy_gap": ground_truth_gap_values(label).get(current_stage),
+                    "migration_status": migration_status or "migration_inventory_missing",
+                    "reason": "excluded by the frozen legacy GT migration policy",
+                })
+                continue
+            expected_axis = normalize_human_gap(expected_stages.get(current_stage))
+            if expected_axis == NOT_APPLICABLE:
+                actual_status = (
+                    str(stage.get("analysis_status") or "").strip().lower()
+                    if isinstance(stage, dict)
+                    else "missing_stage_result"
+                )
+                applicability_records.append({
+                    "sample_id": sample_id,
+                    "partition": str(label.get("partition") or "unknown"),
+                    "stage": current_stage,
+                    "expected": "not_applicable",
+                    "actual_analysis_status": actual_status,
+                    "matched": actual_status == "not_applicable",
+                })
+                continue
             expected = normalize_gap_magnitude(expected_stages.get(current_stage))
             if expected is None:
                 continue
@@ -1716,10 +1890,10 @@ def evaluate(
         for (role, path, stage), values in sorted(shadow_invariance.items())
         if len(values) > 1
     ]
-    chain = chain_audit(run_paths, labels)
-    stage_oracles = _stage_oracle_audit(labels, run_paths)
-    phase_c = _phase_c_audit(labels, run_paths)
-    decision = _decision_gt_audit(labels, run_paths)
+    chain = chain_audit(eligible_run_paths, labels)
+    stage_oracles = _stage_oracle_audit(labels, eligible_run_paths)
+    phase_c = _phase_c_audit(labels, eligible_run_paths)
+    decision = _decision_gt_audit(labels, eligible_run_paths)
     layered = _layer_attribution(
         mismatches,
         chain.get("human_key_event_audit") or {},
@@ -1736,6 +1910,14 @@ def evaluate(
         phase_c,
         prediction_unavailable,
     )
+    if freeze_contract is not None:
+        readiness = copy.deepcopy(readiness)
+        readiness["eligible"] = False
+        readiness["decision_scope"] = "offline_semantic_baseline"
+        readiness["reasons"] = list(dict.fromkeys([
+            *(readiness.get("reasons") or []),
+            "offline semantic baseline is never promotion eligible",
+        ]))
     valid_gt_cells = len(rows) + len(prediction_unavailable)
     matched_cells = sum(1 for row in rows if row["matched"])
     semantic_gate = semantic_acceptance(
@@ -1743,13 +1925,20 @@ def evaluate(
         prediction_unavailable,
         stage_oracles,
         chain.get("human_key_event_audit") or {},
+        applicability_records,
     )
     return {
         "schema_version": EVALUATION_REPORT_SCHEMA_VERSION,
+        "decision_scope": (
+            "offline_semantic_baseline" if freeze_contract is not None else "standard_evaluation"
+        ),
+        "promotion_eligible": False if freeze_contract is not None else readiness["eligible"],
         "sources": {
             "ground_truth": labels.get("source"),
             "ground_truth_policy": labels.get("policy"),
             "uses_final_analysis_json": True,
+            "legacy_migration_policy_applied": migration_inventory is not None,
+            "artifact_identity_policy_applied": freeze_contract is not None,
         },
         "summary": {
             "valid_gt_cells": valid_gt_cells,
@@ -1770,6 +1959,8 @@ def evaluate(
             "by_partition": {key: dict(value) for key, value in sorted(partition_counts.items())},
             "whole_video_observations": len(whole_video_observations),
             "ground_truth_label_inventory": ground_truth_label_inventory(labels),
+            "legacy_migration_unavailable": len(migration_unavailable),
+            "artifact_identity_unavailable": len(artifact_identity_unavailable),
         },
         "by_stage": {key: dict(value) for key, value in sorted(stage_counts.items())},
         "confusion_matrix": {
@@ -1807,6 +1998,12 @@ def evaluate(
         "layer_attribution": layered,
         "mismatches": mismatches,
         "prediction_unavailable": prediction_unavailable,
+        "legacy_migration_unavailable": migration_unavailable,
+        "artifact_identity_unavailable": artifact_identity_unavailable,
+        "applicability_evaluation": {
+            "records": applicability_records,
+            "errors": [row for row in applicability_records if row["matched"] is not True],
+        },
         "execution_invariance_violations": unstable,
         "shadow_execution_invariance_violations": shadow_unstable,
         "whole_video_observations": whole_video_observations,
@@ -1824,6 +2021,11 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, default=Path("references/validation-inputs.json"))
     parser.add_argument("--runs-root", type=Path, default=Path("runs"))
     parser.add_argument("--cohort-lock", type=Path, help="可选：本次 blind cohort 的冻结锁")
+    parser.add_argument(
+        "--semantic-baseline-freeze",
+        action="store_true",
+        help="应用 references/semantic-baseline-freeze.json；旧GT歧义格不得进入分母",
+    )
     parser.add_argument("--run-prefix", default="contract-", help="默认以此前缀查找 <sample>/analysis.json")
     parser.add_argument("--sample", action="append", default=[], help="只评测指定 sample id，可重复传入")
     parser.add_argument(
@@ -1839,6 +2041,19 @@ def main() -> int:
     labels = read_json(args.labels)
     manifest = read_json(args.manifest)
     cohort_lock = read_json(args.cohort_lock) if args.cohort_lock else None
+    migration_inventory = None
+    freeze_contract = None
+    if args.semantic_baseline_freeze:
+        from verify_semantic_baseline_freeze import verify_freeze
+
+        frozen_labels_path = (ROOT / "references/ground-truth-labels.json").resolve()
+        if args.labels.resolve() != frozen_labels_path:
+            parser.error(f"semantic baseline freeze requires labels={frozen_labels_path}")
+        freeze_errors = verify_freeze()
+        if freeze_errors:
+            parser.error("semantic baseline freeze invalid: " + "; ".join(freeze_errors))
+        migration_inventory = read_json(ROOT / "references/legacy-gt-migration-inventory.json")
+        freeze_contract = read_json(ROOT / "references/semantic-baseline-freeze.json")
     samples = labels.get("samples") if isinstance(labels.get("samples"), dict) else {}
     try:
         explicit_paths = parse_explicit_run_paths(args.run_path)
@@ -1847,7 +2062,14 @@ def main() -> int:
     selected = args.sample or sorted(explicit_paths) or sorted(samples)
     run_paths = {sample_id: sample_run_path(args.runs_root, sample_id, args.run_prefix) for sample_id in selected}
     run_paths.update(explicit_paths)
-    report = evaluate(labels, manifest, run_paths, cohort_lock)
+    report = evaluate(
+        labels,
+        manifest,
+        run_paths,
+        cohort_lock,
+        migration_inventory,
+        freeze_contract,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     summary = report["summary"]

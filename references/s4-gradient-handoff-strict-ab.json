@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "decision_scope": "seen_mechanism_calibration_only",
+  "promotion_eligible": false,
+  "execution": {
+    "status": "completed",
+    "source_commit": "d83026b",
+    "judgment_model": "qwen3.7-plus",
+    "protocol_hash": "391ed538fe247bc1cdfa6cdc3d171310691e010738da2ded45a8e01927c5ea98",
+    "live_responses": 8,
+    "unique_request_ids": 8,
+    "unique_response_hashes": 8,
+    "completed_per_arm": 4,
+    "pilot_excluded": true,
+    "pilot_exclusion_reason": "conditional gradient instruction produced different protocol hashes between arms"
+  },
+  "arm_results": {
+    "no_gradient": {
+      "outputs": {
+        "aavini-foot-care": "medium",
+        "frosty-pearl-mineral-mix-cassava-litter": "medium",
+        "niumo-nose-hair-trimmer": "none",
+        "pet-chews-pet-healer": "none"
+      },
+      "mean_prompt_tokens": 876.5,
+      "mean_completion_tokens": 574.0,
+      "mean_reasoning_tokens": 477.0,
+      "mean_latency_seconds": 10.50875
+    },
+    "with_gradient": {
+      "outputs": {
+        "aavini-foot-care": "medium",
+        "frosty-pearl-mineral-mix-cassava-litter": "medium",
+        "niumo-nose-hair-trimmer": "none",
+        "pet-chews-pet-healer": "none"
+      },
+      "mean_prompt_tokens": 1080.0,
+      "mean_completion_tokens": 563.25,
+      "mean_reasoning_tokens": 458.75,
+      "mean_latency_seconds": 10.2845
+    }
+  },
+  "gt_revision": {
+    "labels_used_during_experiment": {
+      "aavini-foot-care": "large",
+      "frosty-pearl-mineral-mix-cassava-litter": "large",
+      "niumo-nose-hair-trimmer": "none",
+      "pet-chews-pet-healer": "none"
+    },
+    "current_expert_labels": {
+      "aavini-foot-care": "large",
+      "frosty-pearl-mineral-mix-cassava-litter": "medium",
+      "niumo-nose-hair-trimmer": "not_applicable",
+      "pet-chews-pet-healer": "not_applicable"
+    },
+    "old_two_of_four_exact_score_is_current": false,
+    "reason": "Frosty was revised to medium; Niumo and Pet Chews were revised from none to not_applicable after the shared S1-S6 semantics were frozen."
+  },
+  "interpretation": {
+    "observed_output_changes_between_arms": 0,
+    "supported_claim": "Adding the reviewed gradient fields did not change relation or gap output in these four seen samples.",
+    "unsupported_claims": [
+      "The old 2/4 score is current accuracy.",
+      "Gradient information is universally useless.",
+      "This experiment is promotion evidence."
+    ],
+    "decision": "Pause this route; do not expand the production Q schema or resolver from this experiment."
+  }
+}

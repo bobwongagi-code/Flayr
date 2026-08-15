@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "status": "frozen",
+  "decision_scope": "offline_semantic_baseline",
+  "promotion_eligible": false,
+  "frozen_at": "2026-08-15",
+  "production_behavior_commit": "d1384df3e995c6a8604e3f257969de486edde72b",
+  "evaluation_report_schema_version": 6,
+  "model_route": {
+    "vision_model": "qwen3-vl-plus",
+    "judgment_model": "qwen3.7-plus",
+    "explicit_judgment_backup": "qwen3.6-plus",
+    "automatic_fallback": false,
+    "retired_models": [
+      "qwen3-vl-flash"
+    ]
+  },
+  "artifact_identity": {
+    "success_manifest": "_SUCCESS.json",
+    "analysis_artifact": "analysis.json",
+    "analysis_schema_sha256": "4f29155e2c9b9aa7c7caf2e0b0873b141d7a7f1b942b66e5ea70d5a903ad7bd8",
+    "stage2_pipeline_version": "segmented_stage_v1",
+    "accepted_code_commit_policy": "production_behavior_commit_or_current_source_after_freeze_verification",
+    "on_mismatch": "exclude_and_inventory_without_scoring"
+  },
+  "execution_policy": {
+    "initial_mode": "offline_existing_artifacts_only",
+    "allow_new_video_calls_initially": false,
+    "missing_artifact_policy": "inventory_first_then_targeted_call_only",
+    "successful_artifact_policy": "freeze_and_never_rerun",
+    "allow_batch_rerun": false,
+    "allow_semantic_rule_change_during_cycle": false,
+    "targeted_call_preconditions": [
+      "clean_worktree",
+      "semantic_baseline_freeze_verifier_passed",
+      "explicit_missing_sample_list"
+    ]
+  },
+  "shared_gap_semantics": {
+    "not_applicable": "双方覆盖完整且都没有执行该阶段功能，或该阶段按专家协议不涉及；不设置方向，不进入gap分母",
+    "none": "双方都执行了该阶段功能，且实际表现基本相同",
+    "small": "双方都执行了该阶段功能，存在可见但较小的差距",
+    "one_sided_execution": "仍然可比；方向指向执行更强的一侧，幅度为small、medium或large",
+    "uncertain": "事实不完整、冲突或无法稳定判断；不能代替none或not_applicable"
+  },
+  "semantic_acceptance": {
+    "minimum_sample_pairs": 12,
+    "minimum_relation_cells": 12,
+    "minimum_present_key_events": 12,
+    "minimum_gap_accuracy": 0.8,
+    "minimum_relation_accuracy": 0.8,
+    "minimum_stage1_event_recall": 0.9,
+    "required_gap_coverage": 1.0,
+    "maximum_two_band_errors": 0,
+    "maximum_direction_reversals": 0,
+    "maximum_applicability_errors": 0
+  },
+  "severe_error_policy": {
+    "types": [
+      "gap_distance_at_least_two",
+      "creator_better_vs_benchmark_better_reversal",
+      "not_applicable_vs_comparable_mismatch"
+    ],
+    "release_effect": "任一严重错误都会阻断本轮全自动生产晋级",
+    "capability_interpretation": "单次严重错误不自动证明永久能力上限；先按冻结规则归因，再决定是否启动新的版本化验证周期",
+    "no_in_cycle_exception": true
+  },
+  "legacy_gt_migration": {
+    "source_sample_count": 16,
+    "initial_ambiguous_cells": 36,
+    "inventory_path": "references/legacy-gt-migration-inventory.json",
+    "human_review_path": "references/legacy-gt-migration-review.md",
+    "legacy_small_default": "legacy_ambiguous",
+    "legacy_medium_large_default": "legacy_magnitude_only",
+    "automatic_small_to_none_migration": false,
+    "small_to_none_requires_expert_confirmation": true,
+    "minimum_other_migration_spot_checks": 5,
+    "minimum_relation_review_candidates": 12,
+    "spot_check_must_cover_multiple_stages_and_gaps": true,
+    "on_any_interpretation_mismatch": "halt_entire_legacy_migration_batch",
+    "unresolved_cell_policy": "exclude_from_semantic_denominator"
+  },
+  "change_control": {
+    "transport_or_provider_incident": "record_or_technical_retry_without_semantic_change",
+    "deterministic_pipeline_bug": "fix_in_new_commit_then_repeat_technical_gates_and_start_a_new_semantic_cycle",
+    "prompt_schema_qualification_or_gap_rule": "forbidden_in_current_cycle; record_for_next_cycle",
+    "gt_or_evaluator_bug": "stop_scoring_version_the_fix_and_rescore_existing_outputs_without_model_rerun",
+    "result_driven_threshold_change": "forbidden"
+  },
+  "s4_gradient_handoff": {
+    "evidence_path": "references/s4-gradient-handoff-strict-ab.json",
+    "strict_live_calls": 8,
+    "same_protocol_hash": true,
+    "final_output_changes_between_arms": 0,
+    "legacy_exact_score_status": "obsolete_after_expert_gt_revision",
+    "current_conclusion": "no_demonstrated_output_gain_in_seen_four_sample_experiment",
+    "route_decision": "paused_not_production_ready"
+  },
+  "initial_offline_inventory": {
+    "completed_analysis_artifacts_found": 3,
+    "artifacts_with_frozen_gt": 1,
+    "identity_compatible_artifacts": 0,
+    "model_calls_made": 0,
+    "semantic_score_status": "not_computed",
+    "reason": "no existing artifact satisfies the frozen route, source and schema identity"
+  },
+  "workflow": [
+    "inventory_existing_gt_and_artifacts",
+    "review_legacy_migration_without_guessing",
+    "score_existing_identity-compatible_artifacts_offline",
+    "issue_only_missing_targeted_calls_after_inventory",
+    "report_stage1_recall_qualification_handoff_relation_gap_and_operational_failures_separately",
+    "if_failed_choose_one_dominant_root_cause_for_a_new_single-variable_cycle"
+  ]
+}

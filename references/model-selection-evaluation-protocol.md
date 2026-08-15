@@ -129,11 +129,15 @@ S4 梯度传递 A/B 必须在调用前冻结以下规则：
 合格效果证据、以及曾发生资格误投影的边界样本。样本类别用于解释结果，不改变事前通过标准。
 
 2026-08-14 的严格 A/B 使用 4 个 seen 样本、每臂 4 次全新调用，两臂的模型、资格状态、判断
-合同、预算、重试策略和 `protocol_hash` 完全一致。无梯度和有梯度两臂均为 2/4 精确命中、4/4
-复核方向正确、0 个两档错误；梯度臂没有改变任何最终 relation 或 gap，仅增加了模型理由对梯度
-字段的引用。该结果未达到“至少净增 1 格”的事前门槛，因此梯度传递路线停止扩大验证，不扩展
-生产 Q 层 schema，也不接入 resolver。更早一轮因条件式 prompt 导致两臂协议哈希不同的 pilot
-已经作废，不参与这一结论。
+合同、预算、重试策略和 `protocol_hash` 完全一致。8 次调用均完成且 request/response identity 唯一；
+梯度臂没有改变任何最终 relation 或 gap，只增加了模型理由对梯度字段的引用。实验完成后，专家把
+Frosty 从 `large` 修正为 `medium`，并把 Niumo、Pet Chews 从 `none` 修正为 `not_applicable`，
+所以实验原报告的“两臂均 2/4 精确命中”已是 legacy GT 口径，不能继续作为当前准确率引用。
+
+不依赖旧标签仍然成立的观察是：两臂 4 个样本的最终输出逐格相同，梯度传递没有产生任何输出净变化。
+因此该路线暂停扩大，不扩展生产 Q 层 schema，也不接入 resolver。这个 seen 实验没有证明梯度信息
+普遍无用。更早一轮因条件式 prompt 导致两臂协议哈希不同的 pilot 已经作废，不参与结论。可审计的
+冻结摘要见 `references/s4-gradient-handoff-strict-ab.json`。
 
 历史 v1 artifact 可以用于诊断和兼容读取，但不能与 v2 artifact 静默合并成“当前模型表现”。需要重新运行的地方必须显式标记 schema、source commit、source identity 和协议 hash。
 
@@ -191,6 +195,15 @@ candidate 只能补充 gap 的相对语义。预先冻结的最低通过线是 r
 这批数据属于 expert-reviewed seen calibration，只能用于根因分析和机制 A/B，不能声称为多人
 一致性 GT、blind validation 或 production promotion 证据。若未来进入生产晋级，再另行冻结小规模
 双人盲标协议；不得把当前审核过程伪装成那类证据。
+
+### 当前离线语义基线冻结
+
+2026-08-15 起，现有代码先按 `references/semantic-baseline-freeze.json` 执行不可变规则的离线语义
+基线。先盘点现有 GT 和 artifact，不发起视频调用；旧 16 组通过
+`references/legacy-gt-migration-inventory.json` 保留 `small`/`none` 歧义，不能机械迁移。冻结期允许
+修确定性工程故障，但修复后必须产生新 commit、重走技术门禁并开始新的语义周期；不得在同一周期
+修改 Prompt、schema、资格定义、gap 标尺、样本或阈值。完整人类可读规则见
+`references/semantic-baseline-freeze.md`。
 
 专家审核完成后，Candidate 仍只能修改 R 层 gap 语义，不得同时改 Q、事实包、relation、输出
 schema、模型、预算或重试策略。`uncertain` 已是现有合法值；事实充分样本输出它时记作

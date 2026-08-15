@@ -50,10 +50,19 @@ SCHEMA_CONTRACT_FILES = (
 )
 
 EVALUATOR_CONTRACT_FILES = (
+    "references/expert-gap-calibration.json",
+    "references/model-selection-evaluation-protocol.md",
+    "references/legacy-gt-migration-inventory.json",
+    "references/legacy-gt-migration-review.md",
+    "references/s4-gradient-handoff-strict-ab.json",
+    "references/semantic-baseline-freeze.json",
+    "references/semantic-baseline-freeze.md",
+    "scripts/build_legacy_gt_migration_inventory.py",
     "scripts/evaluate_analysis.py",
     "scripts/verify_analysis_contracts.py",
     "scripts/check_prompt_reachability.py",
     "scripts/manage_validation_cohort.py",
+    "scripts/verify_semantic_baseline_freeze.py",
     "scripts/flayr_core/validation_cohort.py",
     "scripts/flayr_core/freeze_contract.py",
     "scripts/flayr_core/model_execution.py",

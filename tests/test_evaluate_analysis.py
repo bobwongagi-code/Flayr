@@ -24,6 +24,81 @@ from scripts.evaluate_analysis import (
 
 
 class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
+    def test_frozen_evaluation_requires_verified_artifact_identity(self) -> None:
+        labels = {
+            "samples": {
+                "sample": {
+                    "partition": "seen",
+                    "human_gap": {"S1": "none"},
+                    "stage_oracles": {
+                        "S1": {
+                            "creator_execution": 0,
+                            "benchmark_execution": 0,
+                            "relation": "tie",
+                        }
+                    },
+                }
+            }
+        }
+        result = {
+            "analysis_run_state": "completed",
+            "analysis_result_contract": {"schema_sha256": "schema"},
+            "stage2_pipeline_version": "segmented_stage_v1",
+            "comparison_eligibility": {"direct_product_stages": ["S1"]},
+            "stage_analysis": [{
+                "stage": "S1 Hook",
+                "severity": None,
+                "model_gap_magnitude": "none",
+                "stage_state": "completed",
+                "analysis_status": "grounded",
+            }],
+        }
+        freeze = {
+            "production_behavior_commit": "d1384df3e995c6a8604e3f257969de486edde72b",
+            "model_route": {
+                "judgment_model": "qwen3.7-plus",
+                "vision_model": "qwen3-vl-plus",
+            },
+            "artifact_identity": {
+                "analysis_schema_sha256": "schema",
+                "stage2_pipeline_version": "segmented_stage_v1",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "analysis.json"
+            path.write_text(json.dumps(result), encoding="utf-8")
+            manifest = {
+                "status": "completed",
+                "analysis_run_state": "completed",
+                "provenance": {
+                    "code_commit": "d1384df",
+                    "judgment_model": "qwen3.7-plus",
+                    "vision_model": "qwen3-vl-plus",
+                },
+            }
+            (root / "_SUCCESS.json").write_text(json.dumps(manifest), encoding="utf-8")
+            with patch("scripts.evaluate_analysis.validate_success_manifest", return_value=True):
+                report = evaluate(labels, {}, {"sample": path}, freeze_contract=freeze)
+            self.assertEqual(report["summary"]["evaluated"], 1)
+            self.assertEqual(report["artifact_identity_unavailable"], [])
+            self.assertEqual(len(report["stage_oracle_evaluation"]["records"]), 1)
+            self.assertFalse(report["promotion_eligible"])
+            self.assertFalse(report["promotion_readiness"]["eligible"])
+            self.assertIn(
+                "offline semantic baseline is never promotion eligible",
+                report["promotion_readiness"]["reasons"],
+            )
+
+            manifest["provenance"]["vision_model"] = "other-vision"
+            (root / "_SUCCESS.json").write_text(json.dumps(manifest), encoding="utf-8")
+            with patch("scripts.evaluate_analysis.validate_success_manifest", return_value=True):
+                report = evaluate(labels, {}, {"sample": path}, freeze_contract=freeze)
+            self.assertEqual(report["summary"]["evaluated"], 0)
+            self.assertEqual(report["summary"]["artifact_identity_unavailable"], 1)
+            self.assertIn("vision_model does not match frozen route", report["artifact_identity_unavailable"][0]["reasons"])
+            self.assertEqual(report["stage_oracle_evaluation"]["records"], [])
+
     def test_evaluate_uses_semantic_gap_axis_and_tracks_unavailable_predictions(self) -> None:
         labels = {
             "samples": {
@@ -80,7 +155,7 @@ class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
         self.assertEqual(report["summary"]["accuracy"], 0.6667)
         self.assertEqual(report["summary"]["accuracy_on_available"], 1.0)
         self.assertEqual(report["summary"]["evaluation_coverage"], 0.6667)
-        self.assertEqual(report["schema_version"], 5)
+        self.assertEqual(report["schema_version"], 6)
         self.assertEqual(report["semantic_acceptance"]["overall"], "incomplete")
         self.assertEqual(report["confusion_matrix"]["values"]["none"]["none"], 1)
         self.assertEqual(report["prediction_unavailable"][0]["stage"], "S3")
@@ -167,6 +242,92 @@ class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
         })
         self.assertEqual(whole_video["counts"], {})
         self.assertEqual(whole_video["whole_video_observation_samples"], ["whole"])
+
+    def test_evaluate_audits_not_applicable_as_a_separate_axis(self) -> None:
+        labels = {
+            "samples": {
+                "sample": {
+                    "partition": "new",
+                    "human_gap": {"S5": "not_applicable"},
+                    "stage_label_statuses": {
+                        "S5": {"status": "not_applicable", "reason": "双方均未执行信任背书。"}
+                    },
+                }
+            }
+        }
+        result = {
+            "stage_analysis": [{
+                "stage": "S5 Trust",
+                "analysis_status": "grounded",
+                "stage_state": "completed",
+                "model_gap_magnitude": "none",
+            }]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "analysis.json"
+            path.write_text(json.dumps(result), encoding="utf-8")
+            report = evaluate(labels, {}, {"sample": path})
+        self.assertEqual(report["summary"]["valid_gt_cells"], 0)
+        self.assertEqual(report["applicability_evaluation"]["records"][0]["stage"], "S5")
+        self.assertFalse(report["applicability_evaluation"]["records"][0]["matched"])
+        self.assertEqual(report["semantic_acceptance"]["applicability"]["status"], "failed")
+        self.assertEqual(report["semantic_acceptance"]["overall"], "failed")
+
+    def test_frozen_semantic_baseline_excludes_legacy_ambiguous_cells(self) -> None:
+        labels = {
+            "samples": {
+                "sample": {
+                    "partition": "seen_validation",
+                    "stages": {"S1": "small", "S2": "medium"},
+                }
+            }
+        }
+        result = {
+            "stage_analysis": [
+                {
+                    "stage": "S1 Hook",
+                    "severity": "small",
+                    "model_gap_magnitude": "small",
+                    "stage_state": "completed",
+                    "analysis_status": "grounded",
+                },
+                {
+                    "stage": "S2 Product",
+                    "severity": "medium",
+                    "model_gap_magnitude": "medium",
+                    "stage_state": "completed",
+                    "analysis_status": "grounded",
+                },
+            ]
+        }
+        inventory = {
+            "samples": {
+                "sample": {
+                    "cells": {
+                        "S1": {"migration_status": "legacy_ambiguous"},
+                        "S2": {"migration_status": "legacy_magnitude_only"},
+                    }
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "analysis.json"
+            path.write_text(json.dumps(result), encoding="utf-8")
+            report = evaluate(labels, {}, {"sample": path}, migration_inventory=inventory)
+        self.assertEqual(report["summary"]["valid_gt_cells"], 1)
+        self.assertEqual(report["summary"]["evaluated"], 1)
+        self.assertEqual(report["summary"]["legacy_migration_unavailable"], 1)
+        self.assertEqual(report["legacy_migration_unavailable"][0]["stage"], "S1")
+        self.assertTrue(report["sources"]["legacy_migration_policy_applied"])
+
+        inventory["samples"]["sample"]["cells"]["S2"]["migration_status"] = "canonical_invalid"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "analysis.json"
+            path.write_text(json.dumps(result), encoding="utf-8")
+            report = evaluate(labels, {}, {"sample": path}, migration_inventory=inventory)
+        self.assertEqual(report["summary"]["evaluated"], 0)
+        self.assertEqual(report["summary"]["legacy_migration_unavailable"], 2)
+
     def test_gt_event_time_bounds_reject_reverse_and_nonfinite_values(self) -> None:
         self.assertEqual(_event_time_bounds([1.0, 3.0]), (1.0, 3.0))
         self.assertIsNone(_event_time_bounds([3.0, 1.0]))
@@ -276,6 +437,83 @@ class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
         )
         self.assertEqual(failed["gap_magnitude"]["status"], "failed")
         self.assertEqual(failed["overall"], "failed")
+
+    def test_semantic_acceptance_rejects_direction_reversal_even_above_accuracy_floor(self) -> None:
+        rows = [
+            {"sample_id": f"sample-{index}", "matched": True, "ordinal_distance": 0}
+            for index in range(12)
+        ]
+        relation_records = [
+            {
+                "expected_relation": "benchmark_better",
+                "actual_relation": "benchmark_better",
+                "relation_match": True,
+            }
+            for _ in range(11)
+        ] + [{
+            "expected_relation": "benchmark_better",
+            "actual_relation": "creator_better",
+            "relation_match": False,
+        }]
+        gate = semantic_acceptance(
+            rows,
+            [],
+            {"records": relation_records},
+            {"summary": {"present_events": 12, "stage1_recall": 1.0}},
+        )
+        self.assertGreater(gate["relation"]["accuracy"], 0.8)
+        self.assertEqual(gate["relation"]["direction_reversals"], 1)
+        self.assertEqual(gate["relation"]["status"], "failed")
+        self.assertEqual(gate["overall"], "failed")
+
+    def test_semantic_acceptance_rejects_not_applicable_mismatch(self) -> None:
+        rows = [
+            {"sample_id": f"sample-{index}", "matched": True, "ordinal_distance": 0}
+            for index in range(12)
+        ]
+        relation_records = [
+            {
+                "expected_relation": "benchmark_better",
+                "actual_relation": "benchmark_better",
+                "relation_match": True,
+            }
+            for _ in range(12)
+        ]
+        gate = semantic_acceptance(
+            rows,
+            [],
+            {"records": relation_records},
+            {"summary": {"present_events": 12, "stage1_recall": 1.0}},
+            [{"sample_id": "na-sample", "stage": "S5", "matched": False}],
+        )
+        self.assertEqual(gate["applicability"]["status"], "failed")
+        self.assertEqual(gate["applicability"]["errors"], 1)
+        self.assertEqual(gate["overall"], "failed")
+
+    def test_observed_severe_error_fails_even_before_minimum_sample_count(self) -> None:
+        gap_gate = semantic_acceptance(
+            [{"sample_id": "sample", "matched": False, "ordinal_distance": 2}],
+            [],
+            {"records": []},
+            {"summary": {}},
+        )
+        self.assertEqual(gap_gate["gap_magnitude"]["status"], "failed")
+        self.assertEqual(gap_gate["overall"], "failed")
+
+        relation_gate = semantic_acceptance(
+            [],
+            [],
+            {
+                "records": [{
+                    "expected_relation": "creator_better",
+                    "actual_relation": "benchmark_better",
+                    "relation_match": False,
+                }]
+            },
+            {"summary": {}},
+        )
+        self.assertEqual(relation_gate["relation"]["status"], "failed")
+        self.assertEqual(relation_gate["overall"], "failed")
 
 
 class LayeredEvaluationTest(unittest.TestCase):
