@@ -155,7 +155,7 @@ class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
         self.assertEqual(report["summary"]["accuracy"], 0.6667)
         self.assertEqual(report["summary"]["accuracy_on_available"], 1.0)
         self.assertEqual(report["summary"]["evaluation_coverage"], 0.6667)
-        self.assertEqual(report["schema_version"], 6)
+        self.assertEqual(report["schema_version"], 7)
         self.assertEqual(report["semantic_acceptance"]["overall"], "incomplete")
         self.assertEqual(report["confusion_matrix"]["values"]["none"]["none"], 1)
         self.assertEqual(report["prediction_unavailable"][0]["stage"], "S3")
@@ -396,12 +396,45 @@ class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
             }
             for index in range(12)
         ]
-        gate = semantic_acceptance(rows, [], {"records": []}, {"summary": {}})
+        gate = semantic_acceptance(rows, [], [], {"summary": {}})
         self.assertEqual(gate["gap_magnitude"]["status"], "passed")
         self.assertEqual(gate["relation"]["status"], "unavailable")
         self.assertEqual(gate["fact_recall"]["status"], "unavailable")
         self.assertEqual(gate["overall"], "incomplete")
         self.assertTrue(gate["independent_from_engineering_acceptance"])
+
+    def test_evaluate_reads_canonical_stage_relations_directly(self) -> None:
+        labels = {
+            "samples": {
+                "sample": {
+                    "partition": "mechanism_regression",
+                    "human_gap": {"S1": "medium"},
+                    "stage_relations": {"S1": "benchmark_better"},
+                }
+            }
+        }
+        result = {
+            "analysis_run_state": "completed",
+            "stage_analysis": [{
+                "stage": "S1 Hook",
+                "stage_state": "completed",
+                "analysis_status": "grounded",
+                "severity": "medium",
+                "model_gap_magnitude": "medium",
+                "relation": "creator_better",
+            }],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "analysis.json"
+            path.write_text(json.dumps(result), encoding="utf-8")
+            report = evaluate(labels, {}, {"sample": path})
+
+        relation = report["relation_evaluation"]
+        self.assertEqual(relation["status"], "measured")
+        self.assertEqual(relation["records"][0]["expected_relation"], "benchmark_better")
+        self.assertEqual(relation["records"][0]["actual_relation"], "creator_better")
+        self.assertFalse(relation["records"][0]["relation_match"])
+        self.assertEqual(report["semantic_acceptance"]["relation"]["direction_reversals"], 1)
 
     def test_semantic_acceptance_passes_only_when_all_components_pass(self) -> None:
         rows = [
@@ -419,7 +452,7 @@ class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
         gate = semantic_acceptance(
             rows,
             [],
-            {"records": relation_records},
+            relation_records,
             {"summary": {"present_events": 12, "stage1_recall": 1.0}},
         )
         self.assertEqual(gate["overall"], "passed")
@@ -432,7 +465,7 @@ class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
         failed = semantic_acceptance(
             rows,
             [],
-            {"records": relation_records},
+            relation_records,
             {"summary": {"present_events": 12, "stage1_recall": 1.0}},
         )
         self.assertEqual(failed["gap_magnitude"]["status"], "failed")
@@ -458,7 +491,7 @@ class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
         gate = semantic_acceptance(
             rows,
             [],
-            {"records": relation_records},
+            relation_records,
             {"summary": {"present_events": 12, "stage1_recall": 1.0}},
         )
         self.assertGreater(gate["relation"]["accuracy"], 0.8)
@@ -482,7 +515,7 @@ class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
         gate = semantic_acceptance(
             rows,
             [],
-            {"records": relation_records},
+            relation_records,
             {"summary": {"present_events": 12, "stage1_recall": 1.0}},
             [{"sample_id": "na-sample", "stage": "S5", "matched": False}],
         )
@@ -494,7 +527,7 @@ class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
         gap_gate = semantic_acceptance(
             [{"sample_id": "sample", "matched": False, "ordinal_distance": 2}],
             [],
-            {"records": []},
+            [],
             {"summary": {}},
         )
         self.assertEqual(gap_gate["gap_magnitude"]["status"], "failed")
@@ -503,13 +536,11 @@ class SeverityEvaluationDiagnosticsTest(unittest.TestCase):
         relation_gate = semantic_acceptance(
             [],
             [],
-            {
-                "records": [{
-                    "expected_relation": "creator_better",
-                    "actual_relation": "benchmark_better",
-                    "relation_match": False,
-                }]
-            },
+            [{
+                "expected_relation": "creator_better",
+                "actual_relation": "benchmark_better",
+                "relation_match": False,
+            }],
             {"summary": {}},
         )
         self.assertEqual(relation_gate["relation"]["status"], "failed")

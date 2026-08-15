@@ -32,6 +32,8 @@ FREEZE_PATH = ROOT / "references/semantic-baseline-freeze.json"
 AB_PATH = ROOT / "references/s4-gradient-handoff-strict-ab.json"
 EXPERT_PATH = ROOT / "references/expert-gap-calibration.json"
 LABELS_PATH = ROOT / "references/ground-truth-labels.json"
+BASELINE_GT_PATH = ROOT / "references/semantic-baseline-gt.json"
+BASELINE_MANIFEST_PATH = ROOT / "references/semantic-baseline-manifest.json"
 INVENTORY_PATH = ROOT / "references/legacy-gt-migration-inventory.json"
 REVIEW_PATH = ROOT / "references/legacy-gt-migration-review.md"
 
@@ -61,6 +63,8 @@ def verify_freeze() -> list[str]:
     ab = _read_json(AB_PATH)
     expert = _read_json(EXPERT_PATH)
     labels = _read_json(LABELS_PATH)
+    baseline_gt = _read_json(BASELINE_GT_PATH)
+    baseline_manifest = _read_json(BASELINE_MANIFEST_PATH)
     inventory = _read_json(INVENTORY_PATH)
 
     if freeze.get("schema_version") != 1 or freeze.get("status") != "frozen":
@@ -69,6 +73,60 @@ def verify_freeze() -> list[str]:
         errors.append("offline semantic baseline must never be promotion_eligible")
     if freeze.get("evaluation_report_schema_version") != EVALUATION_REPORT_SCHEMA_VERSION:
         errors.append("evaluation report schema version drifted from the frozen contract")
+
+    gt_snapshot = freeze.get("gt_snapshot") or {}
+    if gt_snapshot.get("labels_path") != "references/semantic-baseline-gt.json":
+        errors.append("frozen GT snapshot path drifted")
+    if gt_snapshot.get("manifest_path") != "references/semantic-baseline-manifest.json":
+        errors.append("frozen baseline manifest path drifted")
+    if gt_snapshot.get("labels_sha256") != _sha256_file(BASELINE_GT_PATH):
+        errors.append("frozen GT snapshot hash drifted")
+    if gt_snapshot.get("manifest_sha256") != _sha256_file(BASELINE_MANIFEST_PATH):
+        errors.append("frozen baseline manifest hash drifted")
+    baseline_samples = baseline_gt.get("samples") if isinstance(baseline_gt.get("samples"), dict) else {}
+    manifest_samples = baseline_manifest.get("samples") if isinstance(baseline_manifest.get("samples"), list) else []
+    manifest_ids = {
+        str(sample.get("id") or "")
+        for sample in manifest_samples
+        if isinstance(sample, dict) and str(sample.get("id") or "").strip()
+    }
+    if len(baseline_samples) != gt_snapshot.get("sample_pairs") or set(baseline_samples) != manifest_ids:
+        errors.append("frozen GT and manifest must contain the same declared sample pairs")
+    relation_cells = 0
+    present_key_events = 0
+    for sample_id, sample in baseline_samples.items():
+        if not isinstance(sample, dict):
+            errors.append(f"baseline GT sample is not an object: {sample_id}")
+            continue
+        gaps = sample.get("human_gap") if isinstance(sample.get("human_gap"), dict) else {}
+        relations = sample.get("stage_relations") if isinstance(sample.get("stage_relations"), dict) else {}
+        for stage, raw_gap in gaps.items():
+            gap = str(raw_gap or "").strip().lower()
+            relation = relations.get(stage)
+            if gap == "none" and relation != "tie":
+                errors.append(f"{sample_id}/{stage} none must use tie")
+            elif gap in {"small", "medium", "large"} and relation not in {"creator_better", "benchmark_better"}:
+                errors.append(f"{sample_id}/{stage} comparable gap must set a direction")
+            elif gap in {"na", "not_applicable"} and relation is not None:
+                errors.append(f"{sample_id}/{stage} not_applicable must not set a relation")
+            elif gap == "uncertain" and relation not in {None, "uncertain"}:
+                errors.append(f"{sample_id}/{stage} uncertain gap cannot set a hard relation")
+            elif gap not in {"none", "small", "medium", "large", "uncertain", "na", "not_applicable"}:
+                errors.append(f"{sample_id}/{stage} has invalid human_gap: {gap!r}")
+        relation_cells += sum(
+            1 for relation in relations.values()
+            if relation in {"creator_better", "benchmark_better", "tie"}
+        )
+        for event in sample.get("key_events") or []:
+            if not isinstance(event, dict):
+                errors.append(f"{sample_id} has a malformed key event")
+                continue
+            if event.get("expected_state", "present") == "present":
+                present_key_events += 1
+    if relation_cells != gt_snapshot.get("relation_cells"):
+        errors.append("frozen relation-cell count drifted")
+    if present_key_events != gt_snapshot.get("present_key_events"):
+        errors.append("frozen present-key-event count drifted")
 
     commit = str(freeze.get("production_behavior_commit") or "")
     try:

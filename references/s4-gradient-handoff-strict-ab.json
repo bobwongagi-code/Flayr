@@ -58,12 +58,21 @@
   },
   "interpretation": {
     "observed_output_changes_between_arms": 0,
+    "local_output_benefit": "not_observed",
+    "general_net_benefit": "unknown",
     "supported_claim": "Adding the reviewed gradient fields did not change relation or gap output in these four seen samples.",
     "unsupported_claims": [
       "The old 2/4 score is current accuracy.",
       "Gradient information is universally useless.",
       "This experiment is promotion evidence."
     ],
-    "decision": "Pause this route; do not expand the production Q schema or resolver from this experiment."
+    "decision": "Pause this route because the local evidence showed no output change and GT migration plus the semantic baseline have higher priority; this is not a general disproof.",
+    "future_scoring": [
+      "gap_floor_hit",
+      "gap_ceiling_hit",
+      "gap_interval_contains_gt",
+      "gap_interval_width",
+      "exact_gap_magnitude"
+    ]
   }
 }

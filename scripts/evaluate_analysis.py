@@ -50,7 +50,7 @@ SCORABLE_MIGRATION_STATUSES = frozenset({
     "legacy_magnitude_only",
     "legacy_not_applicable_documented",
 })
-EVALUATION_REPORT_SCHEMA_VERSION = 6
+EVALUATION_REPORT_SCHEMA_VERSION = 7
 NOT_APPLICABLE = "na"
 HUMAN_GAP_VALUES = frozenset({"none", "small", "medium", "large", "uncertain", NOT_APPLICABLE})
 STAGE_SEVERITY_SCOPE = "stage_severity"
@@ -272,6 +272,18 @@ def ground_truth_gap_values(label: dict[str, Any]) -> dict[str, Any]:
         return human_gap
     stages = label.get("stages")
     return stages if isinstance(stages, dict) else {}
+
+
+def normalize_relation(value: Any) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"equivalent", "matched"}:
+        normalized = "tie"
+    return normalized if normalized in {"creator_better", "benchmark_better", "tie", "uncertain"} else None
+
+
+def ground_truth_relation_values(label: dict[str, Any]) -> dict[str, Any]:
+    relations = label.get("stage_relations")
+    return relations if isinstance(relations, dict) else {}
 
 
 def migration_cell_status(
@@ -762,10 +774,7 @@ def _execution_relation(creator: Any, benchmark: Any) -> str | None:
 
 
 def _normalize_oracle_relation(value: Any) -> str | None:
-    normalized = str(value or "").strip().lower()
-    if normalized == "matched":
-        return "tie"
-    return normalized if normalized in {"creator_better", "benchmark_better", "tie", "uncertain"} else None
+    return normalize_relation(value)
 
 
 def _effective_execution(stage: dict[str, Any], role: str) -> Any:
@@ -1461,7 +1470,7 @@ def promotion_readiness(
 def semantic_acceptance(
     rows: list[dict[str, Any]],
     prediction_unavailable: list[dict[str, Any]],
-    stage_oracles: dict[str, Any],
+    relation_records: list[dict[str, Any]],
     human_key_event_audit: dict[str, Any],
     applicability_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -1501,8 +1510,7 @@ def semantic_acceptance(
         )
         gap_reason = "measured against canonical human_gap"
 
-    relation_records = stage_oracles.get("records") if isinstance(stage_oracles, dict) else None
-    relation_rows = [row for row in relation_records or [] if row.get("expected_relation") is not None]
+    relation_rows = [row for row in relation_records if row.get("expected_relation") is not None]
     relation_matches = sum(1 for row in relation_rows if row.get("relation_match") is True)
     relation_accuracy = round(relation_matches / len(relation_rows), 4) if relation_rows else None
     direction_reversals = sum(
@@ -1531,7 +1539,7 @@ def semantic_acceptance(
             and direction_reversals == 0
             else "failed"
         )
-        relation_reason = "measured against stage_oracles.relation"
+        relation_reason = "measured directly against canonical stage_relations"
 
     applicability_rows = applicability_records or []
     applicability_errors = sum(1 for row in applicability_rows if row.get("matched") is not True)
@@ -1599,6 +1607,7 @@ def semantic_acceptance(
             "reason": relation_reason,
             "cells": len(relation_rows),
             "accuracy": relation_accuracy,
+            "prediction_unavailable": sum(1 for row in relation_rows if row.get("actual_relation") is None),
             "direction_reversals": direction_reversals,
         },
         "applicability": {
@@ -1695,6 +1704,7 @@ def evaluate(
     applicability_records: list[dict[str, Any]] = []
     migration_unavailable: list[dict[str, Any]] = []
     artifact_identity_unavailable: list[dict[str, Any]] = []
+    relation_records: list[dict[str, Any]] = []
     eligible_run_paths: dict[str, Path] = {}
     missing_runs: list[dict[str, str]] = []
     missing_labels: list[str] = []
@@ -1731,6 +1741,7 @@ def evaluate(
             continue
         by_id = {stage_id(stage.get("stage")): stage for stage in stages if isinstance(stage, dict) and stage_id(stage.get("stage"))}
         expected_stages = ground_truth_gap_values(label)
+        expected_relations = ground_truth_relation_values(label)
         for current_stage in sorted(allowed):
             stage = by_id.get(current_stage)
             migration_status = migration_cell_status(migration_inventory, sample_id, current_stage)
@@ -1744,6 +1755,18 @@ def evaluate(
                     "reason": "excluded by the frozen legacy GT migration policy",
                 })
                 continue
+            expected_relation = normalize_relation(expected_relations.get(current_stage))
+            if expected_relation not in {None, "uncertain"}:
+                actual_relation = normalize_relation(stage.get("relation")) if isinstance(stage, dict) else None
+                relation_records.append({
+                    "sample_id": sample_id,
+                    "partition": str(label.get("partition") or "unknown"),
+                    "stage": current_stage,
+                    "expected_relation": expected_relation,
+                    "actual_relation": actual_relation,
+                    "relation_match": actual_relation == expected_relation,
+                    "run_path": str(path),
+                })
             expected_axis = normalize_human_gap(expected_stages.get(current_stage))
             if expected_axis == NOT_APPLICABLE:
                 actual_status = (
@@ -1923,7 +1946,7 @@ def evaluate(
     semantic_gate = semantic_acceptance(
         rows,
         prediction_unavailable,
-        stage_oracles,
+        relation_records,
         chain.get("human_key_event_audit") or {},
         applicability_records,
     )
@@ -1994,6 +2017,10 @@ def evaluate(
         },
         "decision_level_evaluation": decision,
         "stage_oracle_evaluation": stage_oracles,
+        "relation_evaluation": {
+            "status": "measured" if relation_records else "unavailable_without_stage_relations",
+            "records": relation_records,
+        },
         "phase_c_evaluation": phase_c,
         "layer_attribution": layered,
         "mismatches": mismatches,
@@ -2017,8 +2044,8 @@ def evaluate(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="评测 Flayr 最终 analysis.json 与人工 GT 的一致性")
-    parser.add_argument("--labels", type=Path, default=Path("references/ground-truth-labels.json"))
-    parser.add_argument("--manifest", type=Path, default=Path("references/validation-inputs.json"))
+    parser.add_argument("--labels", type=Path)
+    parser.add_argument("--manifest", type=Path)
     parser.add_argument("--runs-root", type=Path, default=Path("runs"))
     parser.add_argument("--cohort-lock", type=Path, help="可选：本次 blind cohort 的冻结锁")
     parser.add_argument(
@@ -2038,21 +2065,27 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True, help="评测结果 JSON 输出路径")
     args = parser.parse_args()
 
-    labels = read_json(args.labels)
-    manifest = read_json(args.manifest)
+    default_labels = ROOT / "references/ground-truth-labels.json"
+    default_manifest = ROOT / "references/validation-inputs.json"
+    frozen_labels_path = ROOT / "references/semantic-baseline-gt.json"
+    frozen_manifest_path = ROOT / "references/semantic-baseline-manifest.json"
+    labels_path = (args.labels or (frozen_labels_path if args.semantic_baseline_freeze else default_labels)).resolve()
+    manifest_path = (args.manifest or (frozen_manifest_path if args.semantic_baseline_freeze else default_manifest)).resolve()
+    labels = read_json(labels_path)
+    manifest = read_json(manifest_path)
     cohort_lock = read_json(args.cohort_lock) if args.cohort_lock else None
     migration_inventory = None
     freeze_contract = None
     if args.semantic_baseline_freeze:
         from verify_semantic_baseline_freeze import verify_freeze
 
-        frozen_labels_path = (ROOT / "references/ground-truth-labels.json").resolve()
-        if args.labels.resolve() != frozen_labels_path:
-            parser.error(f"semantic baseline freeze requires labels={frozen_labels_path}")
+        if labels_path != frozen_labels_path.resolve():
+            parser.error(f"semantic baseline freeze requires labels={frozen_labels_path.resolve()}")
+        if manifest_path != frozen_manifest_path.resolve():
+            parser.error(f"semantic baseline freeze requires manifest={frozen_manifest_path.resolve()}")
         freeze_errors = verify_freeze()
         if freeze_errors:
             parser.error("semantic baseline freeze invalid: " + "; ".join(freeze_errors))
-        migration_inventory = read_json(ROOT / "references/legacy-gt-migration-inventory.json")
         freeze_contract = read_json(ROOT / "references/semantic-baseline-freeze.json")
     samples = labels.get("samples") if isinstance(labels.get("samples"), dict) else {}
     try:

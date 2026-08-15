@@ -1,0 +1,215 @@
+{
+  "schema_version": 1,
+  "source": "frozen_existing_human_gt_snapshot",
+  "evaluation_role": "mechanism_regression",
+  "decision_scope": "offline_semantic_baseline",
+  "promotion_eligible": false,
+  "policy": {
+    "sample_count": 12,
+    "new12_human_initial_samples": 7,
+    "legacy_supplement_samples": 5,
+    "legacy_ambiguous_cells_are_excluded": true,
+    "expert_s4_overrides": "references/expert-gap-calibration.json",
+    "relation_source": "existing human stage notes and expert review; never inferred from model output",
+    "key_event_source": "existing human review windows and canonical legacy key events"
+  },
+  "samples": {
+    "aavini-foot-care": {
+      "partition": "new12_human_initial",
+      "human_gap": {"S1": "medium", "S2": "small", "S3": "medium", "S4": "large", "S5": "none", "S6": "none"},
+      "stage_relations": {"S1": "benchmark_better", "S2": "benchmark_better", "S3": "benchmark_better", "S4": "benchmark_better", "S5": "tie", "S6": "tie"},
+      "stage_notes": {
+        "S1": "benchmark 以脚部近景和涂抹动作直接抓住死皮/干裂痛点；creator 以关节暗沉和干裂口播切入，普通且视觉冲击弱。",
+        "S2": "creator 约 6 秒引出产品；benchmark 虽然品牌/包装明确露出较晚，但前段脚部特写仍然完成了承接。",
+        "S3": "benchmark 涂抹过程更充分且脚部位于画面中心；creator 使用时脚在左下角，细节不清楚。",
+        "S4": "benchmark 持续以脚部特写为画面中心，creator 的脚部偏离焦点、效果接近未被观众接收到。",
+        "S5": "双方都是销量/网红推荐类软背书，没有形成实质差距。",
+        "S6": "双方都有常规促单，没有形成实质差距。"
+      },
+      "key_events": [
+        {"id": "creator_s4_massage_result", "role": "creator", "stage": "S4", "time_range": [40.0, 50.0], "channels_any": ["visual_fact"], "expected_state": "present", "importance": "decision_critical"},
+        {"id": "benchmark_s4_foot_closeup_result", "role": "benchmark", "stage": "S4", "time_range": [15.0, 41.0], "channels_any": ["visual_fact"], "expected_state": "present", "importance": "decision_critical"}
+      ]
+    },
+    "papa-feel-retinol": {
+      "partition": "new12_human_initial",
+      "human_gap": {"S1": "medium", "S2": "none", "S3": "small", "S4": "uncertain", "S5": "not_applicable", "S6": "none"},
+      "stage_relations": {"S1": "benchmark_better", "S2": "tie", "S3": "benchmark_better", "S4": "uncertain", "S6": "tie"},
+      "stage_label_statuses": {
+        "S4": {"status": "uncertain", "reason": "原判断主要使用出镜者静态皮肤状态，存在产品效果归属冲突；本轮不评分。"},
+        "S5": {"status": "not_applicable", "reason": "双方均未涉及独立信任背书。"}
+      },
+      "stage_notes": {
+        "S1": "benchmark 的脸垮痛点与达人状态更匹配；creator 以皮肤好为钩子，但自身黑眼圈和法令纹削弱说服力。",
+        "S2": "双方都自然引出产品。",
+        "S3": "benchmark 产品介绍完整但未真正使用；creator 使用在手上，只体现质地，差距有限。",
+        "S6": "双方都有常规促单。"
+      }
+    },
+    "papa-feel-5d-peptide-eye-cream-c1": {
+      "partition": "new12_human_initial",
+      "human_gap": {"S1": "medium", "S2": "none", "S3": "large", "S4": "large", "S5": "none", "S6": "small"},
+      "stage_relations": {"S1": "benchmark_better", "S2": "tie", "S3": "benchmark_better", "S4": "benchmark_better", "S5": "tie", "S6": "benchmark_better"},
+      "stage_notes": {
+        "S1": "benchmark 直接用眼袋效果对比抓人；creator 只口播变化，没有前后对比。",
+        "S2": "双方都完成产品引出。",
+        "S3": "benchmark 反复在眼袋位置演示；creator 使用较少且位置不够准确。",
+        "S4": "benchmark 持续提供眼袋前后视觉对比，creator 主要依赖口播声称，效果证明存在质变级差距。",
+        "S5": "双方都提到销量，但没有具体来源，没有形成实质差距。",
+        "S6": "benchmark 的原价/现价促销更直接，差距较小。"
+      }
+    },
+    "papa-feel-5d-peptide-eye-cream-c2": {
+      "partition": "new12_human_initial",
+      "human_gap": {"S1": "small", "S2": "none", "S3": "large", "S4": "large", "S5": "small", "S6": "none"},
+      "stage_relations": {"S1": "benchmark_better", "S2": "tie", "S3": "benchmark_better", "S4": "benchmark_better", "S5": "benchmark_better", "S6": "tie"},
+      "stage_notes": {
+        "S1": "双方都是痛点型钩子，benchmark 指向更清晰，creator 有画面与口播不完全对应的问题。",
+        "S2": "双方都完成产品引出。",
+        "S3": "benchmark 反复在眼袋和额头演示；creator 更像在脸颊位置使用。",
+        "S4": "benchmark 用红圈、图片和重复对比强化效果；creator 口播有效但没有对应的前后效果。",
+        "S5": "benchmark 有 300 万销量图片，creator 没有背书，存在较小差距。",
+        "S6": "双方都是常规促单。"
+      },
+      "key_events": [
+        {"id": "creator_s4_pointing_without_comparison", "role": "creator", "stage": "S4", "time_range": [45.0, 47.0], "channels_any": ["visual_fact"], "expected_state": "present", "importance": "decision_critical"},
+        {"id": "benchmark_s4_visual_proof", "role": "benchmark", "stage": "S4", "time_range": [47.0, 54.0], "channels_any": ["visual_fact"], "expected_state": "present", "importance": "decision_critical"}
+      ]
+    },
+    "pet-chews-pet-healer": {
+      "partition": "new12_human_initial",
+      "human_gap": {"S1": "large", "S2": "none", "S3": "small", "S4": "not_applicable", "S5": "not_applicable", "S6": "none"},
+      "stage_relations": {"S1": "benchmark_better", "S2": "tie", "S3": "benchmark_better", "S6": "tie"},
+      "stage_label_statuses": {
+        "S4": {"status": "not_applicable", "reason": "双方都没有展示使用后的真实结果；产品形态、机制口播和功效主张不构成 S4 效果证明。"},
+        "S5": {"status": "not_applicable", "reason": "双方均未涉及独立信任背书。"}
+      },
+      "stage_notes": {
+        "S1": "benchmark 围绕马来家庭猫咪外出和寄生虫痛点展开；creator 的钩子与品类痛点关系弱。",
+        "S2": "双方都完成产品引出。",
+        "S3": "双方都有产品演示；benchmark 多了碾碎颗粒和孕猫可用等信息，差距有限。",
+        "S6": "双方都有常规促单。"
+      }
+    },
+    "frosty-pearl-mineral-mix-cassava-litter": {
+      "partition": "new12_human_initial",
+      "human_gap": {"S1": "large", "S2": "none", "S3": "small", "S4": "medium", "S5": "not_applicable", "S6": "medium"},
+      "stage_relations": {"S1": "benchmark_better", "S2": "tie", "S3": "benchmark_better", "S4": "benchmark_better", "S6": "benchmark_better"},
+      "stage_label_statuses": {
+        "S5": {"status": "not_applicable", "reason": "双方均未涉及独立信任背书。"}
+      },
+      "stage_notes": {
+        "S1": "benchmark 用猫砂结块对比形成强视觉钩子；creator 用异味口播但画面难以证明。",
+        "S2": "双方都能引出产品，没有确认有效差距。",
+        "S3": "benchmark 结块演示更完整；creator 水量少、猫砂未铺满，但仍完成基本实验。",
+        "S4": "creator 已完成基本水和结块实验，benchmark 的直接比较更清楚、更有说服力；做得弱不能等同于没有做。",
+        "S6": "benchmark 有明确价格、折扣、截止时间和卖点组合，creator 只说优惠。"
+      },
+      "key_events": [
+        {"id": "creator_s4_basic_clumping_result", "role": "creator", "stage": "S4", "time_range": [31.0, 48.0], "channels_any": ["visual_fact"], "expected_state": "present", "importance": "decision_critical"},
+        {"id": "benchmark_s4_direct_clump_comparison", "role": "benchmark", "stage": "S4", "time_range": [5.0, 10.0], "channels_any": ["visual_fact"], "expected_state": "present", "importance": "decision_critical"}
+      ]
+    },
+    "niumo-nose-hair-trimmer": {
+      "partition": "new12_human_initial",
+      "human_gap": {"S1": "large", "S2": "none", "S3": "large", "S4": "not_applicable", "S5": "not_applicable", "S6": "medium"},
+      "stage_relations": {"S1": "benchmark_better", "S2": "tie", "S3": "benchmark_better", "S6": "benchmark_better"},
+      "stage_label_statuses": {
+        "S4": {"status": "not_applicable", "reason": "双方都没有展示可见的使用后效果；benchmark 的使用动作和说明不构成 S4 效果证明。"},
+        "S5": {"status": "not_applicable", "reason": "双方均未涉及独立信任背书。"}
+      },
+      "stage_notes": {
+        "S1": "benchmark 直接展示剪鼻毛；creator 只是摸头发，钩子与产品无关。",
+        "S2": "双方都拿出产品进行承接。",
+        "S3": "benchmark 有明确功能演示并结合不要手拔的生活经验；creator 没有展示产品功能。",
+        "S6": "benchmark 提到价格促单；creator 没有明显促单。"
+      }
+    },
+    "kakwanreview": {
+      "partition": "legacy_expert_reviewed_supplement",
+      "human_gap": {"S1": "large", "S2": "medium", "S3": "medium", "S4": "none", "S5": "not_applicable", "S6": "large"},
+      "stage_relations": {"S1": "benchmark_better", "S2": "benchmark_better", "S3": "benchmark_better", "S4": "tie", "S6": "benchmark_better"},
+      "stage_label_statuses": {
+        "S5": {"status": "not_applicable", "reason": "双方均未出现合格的独立信任背书；不用品类先验否定任何实际事实。"}
+      },
+      "stage_notes": {
+        "S1": "标杆用脏图激发厌恶感，达人平铺直叙。",
+        "S2": "达人缺少传统刷子掉毛痛点对比。",
+        "S3": "达人取景不完整，标杆对使用过程和易用性的展示更完整。",
+        "S4": "双方都展示了刷洗后的清洁结果且差距不明显；主要差距属于 S3 使用过程。",
+        "S6": "标杆 CTA 干净明确，达人 CTA 极短且敷衍。"
+      }
+    },
+    "carslan-b0": {
+      "partition": "legacy_expert_reviewed_supplement",
+      "human_gap": {"S1": "uncertain", "S2": "medium", "S3": "medium", "S4": "medium"},
+      "stage_relations": {"S1": "uncertain", "S2": "benchmark_better", "S3": "benchmark_better", "S4": "benchmark_better"},
+      "stage_label_statuses": {
+        "S1": {"status": "uncertain", "reason": "旧复核只确认至少 medium、可能 large，无法在当前档位中安全落点。"},
+        "S5": {"status": "missing", "reason": "旧记录不足以区分 none、small 与 not_applicable。"},
+        "S6": {"status": "missing", "reason": "旧记录没有足够的阶段级人工理由。"}
+      },
+      "stage_notes": {
+        "S2": "达人过早强调省钱，标杆更完整地建立产品价值。",
+        "S3": "标杆使用讲解更完整、专业。",
+        "S4": "creator 已做 before/after，但效果不够明显；benchmark 的效果呈现更直观、执行更到位。"
+      }
+    },
+    "colorblu-c0": {
+      "partition": "legacy_reasoned_supplement",
+      "human_gap": {"S1": "small", "S2": "small", "S3": "large", "S4": "large", "S5": "not_applicable", "S6": "none"},
+      "stage_relations": {"S1": "benchmark_better", "S2": "benchmark_better", "S3": "benchmark_better", "S4": "benchmark_better", "S6": "tie"},
+      "stage_label_statuses": {
+        "S5": {"status": "not_applicable", "reason": "双方均未出现合格的独立信任背书。"}
+      },
+      "stage_notes": {
+        "S1": "达人钩子合格但弱于标杆胶水效果钩子。",
+        "S2": "达人自然引出产品，差距较小。",
+        "S3": "达人没有使用过程，标杆有真实瓷砖应用。",
+        "S4": "达人只有口播、没有效果展示；标杆展示承重结果。",
+        "S6": "双方均有价格实惠、配件齐全等促单，没有形成实质差距。"
+      },
+      "key_events": [
+        {"id": "benchmark_real_tile_application", "role": "benchmark", "stage": "S3", "time_range": [0.0, 5.3], "channels_any": ["visual_fact"], "expected_state": "present", "importance": "decision_critical"},
+        {"id": "benchmark_load_bearing_result", "role": "benchmark", "stage": "S4", "time_range": [10.7, 18.9], "channels_any": ["visual_fact"], "expected_state": "present", "importance": "decision_critical"}
+      ]
+    },
+    "carslan-powder-c0": {
+      "partition": "legacy_reasoned_supplement",
+      "human_gap": {"S1": "medium", "S2": "small", "S3": "small", "S4": "medium", "S5": "none", "S6": "small"},
+      "stage_relations": {"S1": "benchmark_better", "S2": "benchmark_better", "S3": "benchmark_better", "S4": "benchmark_better", "S5": "tie", "S6": "creator_better"},
+      "stage_notes": {
+        "S1": "达人黑银版本对陌生受众缺少可理解性，标杆以毛孔、油皮和补妆斑驳痛点切入。",
+        "S2": "双方都完成产品引出，差距不大。",
+        "S3": "达人有上脸过程，但不如标杆细致、专业。",
+        "S4": "达人有展示，但油光柔化和左右脸对照不如标杆直观。",
+        "S5": "双方仅是肤质自述的弱软背书，没有形成实质差距。",
+        "S6": "达人 CTA 明显，标杆口播不清，达人更强。"
+      },
+      "key_events": [
+        {"id": "benchmark_detailed_powder_application", "role": "benchmark", "stage": "S3", "time_range": [15.0, 31.0], "required_functions": ["S3_usage"], "channels_any": ["visual_fact"], "expected_state": "present", "importance": "decision_critical"},
+        {"id": "benchmark_oil_control_finish_closeup", "role": "benchmark", "stage": "S4", "time_range": [31.0, 40.7], "required_functions": ["S4_effect"], "channels_any": ["visual_fact"], "expected_state": "present", "importance": "decision_critical"}
+      ]
+    },
+    "colorkey-lip-c0": {
+      "partition": "legacy_reasoned_supplement",
+      "human_gap": {"S1": "none", "S2": "small", "S3": "medium", "S4": "large", "S5": "not_applicable", "S6": "none"},
+      "stage_relations": {"S1": "tie", "S2": "benchmark_better", "S3": "benchmark_better", "S4": "benchmark_better", "S6": "tie"},
+      "stage_label_statuses": {
+        "S5": {"status": "not_applicable", "reason": "双方均未出现合格的独立信任背书。"}
+      },
+      "stage_notes": {
+        "S1": "双方均以使用与效果切入，没有形成实质差距。",
+        "S2": "双方均展示产品，标杆色彩搭配更契合且差距有限。",
+        "S3": "达人完整展示上唇，标杆进一步细化边缘，更专业。",
+        "S4": "标杆通过显色、雾面色感和多色号效果共同创造向往，达人明显较弱。",
+        "S6": "双方促单都中规中矩，没有形成实质差距。"
+      },
+      "key_events": [
+        {"id": "benchmark_shade_swatch_against_skin", "role": "benchmark", "stage": "S2", "time_range": [4.0, 9.0], "required_functions": ["S2_intro"], "channels_any": ["visual_fact"], "expected_state": "present", "importance": "decision_critical"},
+        {"id": "benchmark_precise_lip_application", "role": "benchmark", "stage": "S3", "time_range": [13.0, 25.0], "required_functions": ["S3_usage"], "channels_any": ["visual_fact"], "expected_state": "present", "importance": "decision_critical"},
+        {"id": "benchmark_multi_shade_lip_finish", "role": "benchmark", "stage": "S4", "time_range": [25.0, 48.0], "required_functions": ["S4_effect"], "channels_any": ["visual_fact"], "expected_state": "present", "importance": "decision_critical"}
+      ]
+    }
+  }
+}

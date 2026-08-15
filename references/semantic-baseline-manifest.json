@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "decision_scope": "offline_semantic_baseline",
+  "promotion_eligible": false,
+  "samples": [
+    {"id": "aavini-foot-care", "evaluation_role": "mechanism_regression"},
+    {"id": "papa-feel-retinol", "evaluation_role": "mechanism_regression"},
+    {"id": "papa-feel-5d-peptide-eye-cream-c1", "evaluation_role": "mechanism_regression"},
+    {"id": "papa-feel-5d-peptide-eye-cream-c2", "evaluation_role": "mechanism_regression"},
+    {"id": "pet-chews-pet-healer", "evaluation_role": "mechanism_regression"},
+    {"id": "frosty-pearl-mineral-mix-cassava-litter", "evaluation_role": "mechanism_regression"},
+    {"id": "niumo-nose-hair-trimmer", "evaluation_role": "mechanism_regression"},
+    {"id": "kakwanreview", "evaluation_role": "mechanism_regression"},
+    {"id": "carslan-b0", "evaluation_role": "mechanism_regression"},
+    {"id": "colorblu-c0", "evaluation_role": "mechanism_regression"},
+    {"id": "carslan-powder-c0", "evaluation_role": "mechanism_regression"},
+    {"id": "colorkey-lip-c0", "evaluation_role": "mechanism_regression"}
+  ]
+}

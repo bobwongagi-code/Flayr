@@ -55,6 +55,8 @@ EVALUATOR_CONTRACT_FILES = (
     "references/legacy-gt-migration-inventory.json",
     "references/legacy-gt-migration-review.md",
     "references/s4-gradient-handoff-strict-ab.json",
+    "references/semantic-baseline-gt.json",
+    "references/semantic-baseline-manifest.json",
     "references/semantic-baseline-freeze.json",
     "references/semantic-baseline-freeze.md",
     "scripts/build_legacy_gt_migration_inventory.py",

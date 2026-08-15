@@ -134,10 +134,16 @@ S4 梯度传递 A/B 必须在调用前冻结以下规则：
 Frosty 从 `large` 修正为 `medium`，并把 Niumo、Pet Chews 从 `none` 修正为 `not_applicable`，
 所以实验原报告的“两臂均 2/4 精确命中”已是 legacy GT 口径，不能继续作为当前准确率引用。
 
-不依赖旧标签仍然成立的观察是：两臂 4 个样本的最终输出逐格相同，梯度传递没有产生任何输出净变化。
-因此该路线暂停扩大，不扩展生产 Q 层 schema，也不接入 resolver。这个 seen 实验没有证明梯度信息
-普遍无用。更早一轮因条件式 prompt 导致两臂协议哈希不同的 pilot 已经作废，不参与结论。可审计的
-冻结摘要见 `references/s4-gradient-handoff-strict-ab.json`。
+不依赖旧标签仍然成立的观察是：两臂 4 个样本的最终输出逐格相同，梯度传递没有产生局部输出变化。
+GT 修订使旧绝对准确率失效，但不使这一逐格对照失效。该路线暂停扩大，是因为当前局部证据没有显示
+收益、且 GT 迁移与语义基线优先级更高；跨样本、跨阶段的一般净收益仍然未知，不能表述成梯度信息
+已经被证伪。当前不扩展生产 Q 层 schema，也不接入 resolver。更早一轮因条件式 prompt 导致两臂
+协议哈希不同的 pilot 已经作废，不参与结论。可审计的冻结摘要见
+`references/s4-gradient-handoff-strict-ab.json`。
+
+若未来在稳定 GT 上重启校准 A/B，必须把区间质量和最终选择分开评分：分别报告 `gap_floor` 命中、
+`gap_ceiling` 命中、`[gap_floor, gap_ceiling]` 是否包含 GT、区间宽度和最终 exact gap。区间包含 GT 但
+最终选择错误属于区间内校准错误；区间排除 GT 属于判断框架错误。不能只用最终 exact gap 掩盖二者。
 
 历史 v1 artifact 可以用于诊断和兼容读取，但不能与 v2 artifact 静默合并成“当前模型表现”。需要重新运行的地方必须显式标记 schema、source commit、source identity 和协议 hash。
 

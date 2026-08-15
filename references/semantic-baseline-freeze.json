@@ -5,7 +5,17 @@
   "promotion_eligible": false,
   "frozen_at": "2026-08-15",
   "production_behavior_commit": "d1384df3e995c6a8604e3f257969de486edde72b",
-  "evaluation_report_schema_version": 6,
+  "evaluation_report_schema_version": 7,
+  "gt_snapshot": {
+    "labels_path": "references/semantic-baseline-gt.json",
+    "labels_sha256": "5b2e0cd231f8dc87d88513e5c94a6d1e8a29a5defeef78346059d5d146b2e355",
+    "manifest_path": "references/semantic-baseline-manifest.json",
+    "manifest_sha256": "a8b407fd45f2195e54697aab4c92f17b78f504abd83d010004b9511f8d2f721b",
+    "sample_pairs": 12,
+    "present_key_events": 13,
+    "relation_cells": 59,
+    "source_mix": "7 existing new12 human_initial plus 5 reasoned legacy supplements"
+  },
   "model_route": {
     "vision_model": "qwen3-vl-plus",
     "judgment_model": "qwen3.7-plus",
@@ -93,12 +103,12 @@
     "same_protocol_hash": true,
     "final_output_changes_between_arms": 0,
     "legacy_exact_score_status": "obsolete_after_expert_gt_revision",
-    "current_conclusion": "no_demonstrated_output_gain_in_seen_four_sample_experiment",
+    "current_conclusion": "no_local_output_change_in_seen_four_sample_experiment; general_net_benefit_unknown",
     "route_decision": "paused_not_production_ready"
   },
   "initial_offline_inventory": {
     "completed_analysis_artifacts_found": 3,
-    "artifacts_with_frozen_gt": 1,
+    "artifacts_with_frozen_gt": 3,
     "identity_compatible_artifacts": 0,
     "model_calls_made": 0,
     "semantic_score_status": "not_computed",
