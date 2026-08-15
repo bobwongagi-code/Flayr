@@ -5636,6 +5636,13 @@ def _validate_stage1_recovery_response(
     value: Any,
     targets: list[str],
 ) -> dict[str, Any]:
+    """Validate provider-owned shape without rewriting its audit response.
+
+    Target-stage admission is a pipeline-owned projection performed while
+    merging candidates.  Keeping it out of response validation preserves the
+    raw provider artifact and prevents one unrelated observation from failing
+    the complete focused recovery request.
+    """
     if not isinstance(value, dict):
         raise ValueError("Stage1 focused recovery 必须返回 JSON object。")
     forbidden = stage1_forbidden_field_issues(value)
@@ -5651,19 +5658,6 @@ def _validate_stage1_recovery_response(
         raise ValueError("Stage1 focused recovery 缺少匹配的 evidence contract version。")
     if not isinstance(value.get("candidate_evidence_units"), list):
         raise ValueError("Stage1 focused recovery 的 candidate_evidence_units 必须是数组。")
-    target_set = set(targets)
-    stage_order = list(stage_codes())
-    for candidate in value["candidate_evidence_units"]:
-        if not isinstance(candidate, dict):
-            continue
-        candidate_stages = {
-            code
-            for raw in candidate.get("functions") or []
-            if (code := normalize_stage_code(str(raw).split("_", 1)[0])) is not None
-        }
-        out_of_scope = sorted(candidate_stages - target_set, key=stage_order.index)
-        if out_of_scope:
-            raise ValueError("Stage1-C candidate escaped target stages: " + ",".join(out_of_scope))
     allowed_keys = {"candidate_evidence_units", "stage_evidence_contract_version"}
     out_of_contract = sorted(set(value) - allowed_keys)
     if out_of_contract:
@@ -6016,6 +6010,9 @@ def _merge_stage1_recovery_observations(
         )
     ]
     accepted_count = sum(item.get("status") == "accepted" for item in candidate_id_map)
+    rejected_count = sum(
+        item.get("status") == "rejected_out_of_scope" for item in candidate_id_map
+    )
     qualification = merged.get("stage1_qualification")
     qualification_records = (
         qualification.get("group_records", []) if isinstance(qualification, dict) else []
@@ -6027,6 +6024,7 @@ def _merge_stage1_recovery_observations(
         "target_stages": targets,
         "unresolved_stages": unresolved_stages,
         "candidate_unit_count": accepted_count,
+        "rejected_candidate_unit_count": rejected_count,
         "contract_issues_before_recovery": contract_issues,
         "trigger_reasons": trigger_reasons,
         "budget_flag_before_recovery": budget_flag,
@@ -6054,6 +6052,7 @@ def _merge_stage1_recovery_observations(
         "elapsed_seconds": round(max(0.0, time.monotonic() - request_started_at), 3),
         "effective_patch": {
             "candidate_units_added": accepted_count,
+            "candidate_units_rejected": rejected_count,
             "resolved_stages": [stage for stage in targets if stage not in unresolved_stages],
             "unresolved_stages": unresolved_stages,
         },
@@ -6267,9 +6266,19 @@ def _merge_video_fact_recovery(
         }
         out_of_scope = sorted(candidate_stages - target_set, key=list(stage_codes()).index)
         if out_of_scope:
-            raise ValueError(
-                "Stage1-C candidate escaped target stages: " + ",".join(out_of_scope)
+            mapping.append(
+                {
+                    "candidate_index": candidate_index,
+                    "raw_id": raw_candidate_id,
+                    "status": "rejected_out_of_scope",
+                    "candidate_stages": sorted(
+                        candidate_stages,
+                        key=list(stage_codes()).index,
+                    ),
+                    "out_of_scope_stages": out_of_scope,
+                }
             )
+            continue
         # Stage1-C candidate IDs are response-local handles. The code owns the
         # canonical ledger namespace and allocates the final ID. Stage1-C owns
         # no qualification references; Stage1-D sees only these canonical IDs.

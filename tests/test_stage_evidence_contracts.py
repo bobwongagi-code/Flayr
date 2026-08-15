@@ -32,6 +32,7 @@ from flayr_core.llm.pipeline import (
     _authoritative_segmented_comparison_contract,
     _build_stage1_to_stage2_handoff,
     _stage1_to_stage2_handoff_issues,
+    _validate_stage1_recovery_response,
     _video_fact_cache_stage1_coverage_issues,
     _run_stage1_qualification,
     _validated_stage_group_response,
@@ -3140,7 +3141,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             [("C2", "C2"), ("C2", "C3")],
         )
 
-    def test_stage1_c_rejects_candidate_for_non_target_stage(self) -> None:
+    def test_stage1_c_quarantines_candidate_for_non_target_stage(self) -> None:
         base = normalize_video_fact_result(
             "creator",
             {
@@ -3148,23 +3149,198 @@ class StageEvidenceContractTests(unittest.TestCase):
             },
             self._analysis(),
         )
-        with self.assertRaisesRegex(ValueError, "escaped target stages: S5"):
-            _merge_video_fact_recovery(
-                "creator",
-                base,
+        candidate_id_map: list[dict[str, object]] = []
+        merged = _merge_video_fact_recovery(
+            "creator",
+            base,
+            {
+                "candidate_evidence_units": [
+                    {
+                        "id": "C2",
+                        "time_range": "1s - 2s",
+                        "information": "越界候选",
+                        "functions": ["S5_trust"],
+                    }
+                ]
+            },
+            self._analysis(),
+            ["S4"],
+            candidate_id_map=candidate_id_map,
+        )
+
+        self.assertEqual([item["id"] for item in merged["evidence_units"]], ["C1"])
+        self.assertEqual(
+            candidate_id_map,
+            [
                 {
-                    "candidate_evidence_units": [
-                        {
-                            "id": "C2",
-                            "time_range": "1s - 2s",
-                            "information": "越界候选",
-                            "functions": ["S5_trust"],
-                        }
-                    ]
-                },
-                self._analysis(),
-                ["S4"],
+                    "candidate_index": 0,
+                    "raw_id": "C2",
+                    "status": "rejected_out_of_scope",
+                    "candidate_stages": ["S5"],
+                    "out_of_scope_stages": ["S5"],
+                }
+            ],
+        )
+
+    def test_stage1_c_response_validation_preserves_out_of_scope_candidate_for_audit(self) -> None:
+        response = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "candidate_evidence_units": [
+                {
+                    "id": "RECOVERY_S5",
+                    "time_range": "1s - 2s",
+                    "information": "原始越界候选仍需保留在 provider artifact",
+                    "functions": ["S5_trust"],
+                }
+            ],
+        }
+
+        validated = _validate_stage1_recovery_response(response, ["S4"])
+
+        self.assertEqual(validated, response)
+
+    def test_stage1_c_accepts_target_candidate_and_quarantines_sibling(self) -> None:
+        base = normalize_video_fact_result(
+            "creator",
+            {
+                "evidence_units": [{"id": "C1", "time_range": "0s - 1s", "information": "原始事实"}],
+            },
+            self._analysis(),
+        )
+        candidate_id_map: list[dict[str, object]] = []
+        merged = _merge_video_fact_recovery(
+            "creator",
+            base,
+            {
+                "candidate_evidence_units": [
+                    {
+                        "id": "RECOVERY_S4",
+                        "time_range": "1s - 2s",
+                        "information": "目标阶段候选",
+                        "functions": ["S4_effect"],
+                    },
+                    {
+                        "id": "RECOVERY_S5",
+                        "time_range": "2s - 3s",
+                        "information": "越界候选",
+                        "functions": ["S5_trust"],
+                    },
+                ]
+            },
+            self._analysis(),
+            ["S4"],
+            candidate_id_map=candidate_id_map,
+        )
+
+        self.assertEqual([item["id"] for item in merged["evidence_units"]], ["C1", "C2"])
+        self.assertEqual(merged["evidence_units"][1]["information"], "目标阶段候选")
+        self.assertEqual(
+            [item["status"] for item in candidate_id_map],
+            ["accepted", "rejected_out_of_scope"],
+        )
+        self.assertEqual(candidate_id_map[0]["canonical_id"], "C2")
+        self.assertNotIn("canonical_id", candidate_id_map[1])
+
+    def test_focused_recovery_quarantines_out_of_scope_candidate_before_stage1_d(self) -> None:
+        facts = self._active_side("C")
+        args = type(
+            "Args",
+            (),
+            {
+                "llm_dry_run": False,
+                "llm_model": "test-model",
+                "llm_api_url": "https://example.invalid/api",
+                "_resource_budget": None,
+            },
+        )()
+        recovery_response = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "candidate_evidence_units": [
+                {
+                    "id": "RECOVERY_S5",
+                    "time_range": "1s - 2s",
+                    "information": "S4 定向窗口中出现的 S5 候选",
+                    "functions": ["S5_trust"],
+                }
+            ],
+        }
+        qualification_response = {
+            "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage_evidence_checks": [
+                {
+                    "stage": "S4",
+                    "status": "absent",
+                    "coverage": "complete",
+                    "evidence_ids": [],
+                    "observed_signals": [],
+                    "missing_signals": list(stage_evidence_contract("S4").required_signals),
+                    "signal_bindings": {},
+                    "reason": "目标窗口完整，但没有合格的 S4 效果事实。",
+                }
+            ],
+        }
+        plan = {
+            "budget_flag": False,
+            "contract_issues": [],
+            "targets": ["S4"],
+            "trigger_reasons": ["stage_coverage_incomplete"],
+            "s6_explicitly_absent": False,
+            "s6_tail_review_required": False,
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir)
+            responses = iter((recovery_response, qualification_response))
+
+            def provider_call(*_args, **kwargs):
+                kwargs["response_meta"].update(
+                    {
+                        "logical_request_id": "out-of-scope-recovery",
+                        "transport_attempts": 1,
+                        "transport_retry_reasons": [],
+                        "usage": {},
+                    }
+                )
+                return json.dumps(next(responses))
+
+            with patch(
+                "flayr_core.llm.pipeline._stage1_recovery_plan",
+                return_value=plan,
+            ), patch(
+                "flayr_core.llm.pipeline.build_video_fact_recovery_payload",
+                return_value={"messages": []},
+            ), patch(
+                "flayr_core.llm.pipeline.fetch_json_completion",
+                side_effect=provider_call,
+            ):
+                result = _maybe_recover_video_facts(
+                    args,
+                    self._analysis(),
+                    run_dir,
+                    "secret",
+                    "creator",
+                    facts,
+                )
+
+            provider_artifact = json.loads(
+                next(run_dir.glob("stage1_provider_creator_C_*.json")).read_text()
             )
+
+        self.assertEqual(result["evidence_units"], facts["evidence_units"])
+        s4_check = next(
+            item for item in result["stage_evidence_checks"] if item["stage"] == "S4"
+        )
+        self.assertEqual(s4_check["status"], "absent")
+        self.assertEqual(result["stage1_recovery"]["status"], "focused_recovery")
+        self.assertEqual(result["stage1_recovery"]["candidate_unit_count"], 0)
+        self.assertEqual(result["stage1_recovery"]["rejected_candidate_unit_count"], 1)
+        self.assertEqual(
+            result["stage1_recovery"]["candidate_id_map"][0]["status"],
+            "rejected_out_of_scope",
+        )
+        self.assertEqual(
+            provider_artifact["provider_response"]["candidate_evidence_units"],
+            recovery_response["candidate_evidence_units"],
+        )
 
     def test_stage1_c_allocates_candidate_id_but_cannot_write_qualification(self) -> None:
         base = normalize_video_fact_result(
