@@ -143,15 +143,36 @@ from flayr_core.postprocess.validate import (
     validate_s3_usage_flags,
     validate_s6_cta_flags,
     validate_evidence_alignment,
+    validate_stage_ownership,
     validate_stage_time_coherence,
 )
 from flayr_core.prompt import write_analysis_input
 from flayr_core.proposition_contract import build_product_proposition_contract
 from flayr_core.stage_catalog import DEFAULT_STAGES, fallback_artifact_ranges, stage_tuples
-from flayr_core.stage_ownership import CERTIFICATION_OWNERSHIP_PROMPT
+from flayr_core.stage_ownership import (
+    CERTIFICATION_OWNERSHIP_PROMPT,
+    contains_certification,
+)
 
 
 class ArchitectureContractTests(unittest.TestCase):
+    def test_certification_ownership_ignores_negative_observations(self) -> None:
+        self.assertFalse(contains_certification("无认证/证书等视觉背书"))
+        self.assertFalse(contains_certification("无第三方来源标识或认证信息"))
+        self.assertFalse(contains_certification("tiada kelulusan KKM atau sijil"))
+        self.assertFalse(contains_certification("认证未出现"))
+        self.assertTrue(contains_certification("画面展示 KKM 认证标识"))
+        self.assertTrue(contains_certification("提供独立检测证书"))
+        self.assertTrue(contains_certification("无认证，但展示 KKM 标识"))
+
+        stages = [{"stage": f"S{i}"} for i in range(1, 7)]
+        stages[-1]["benchmark_visual_evidence"] = ["无认证/证书等视觉背书"]
+        validate_stage_ownership({"stage_analysis": stages})
+
+        stages[-1]["benchmark_visual_evidence"] = ["画面展示 KKM 认证标识"]
+        with self.assertRaises(SystemExit):
+            validate_stage_ownership({"stage_analysis": stages})
+
     def test_degraded_report_does_not_render_unknown_severity_as_medium(self) -> None:
         analysis = {
             "mode": "compare",

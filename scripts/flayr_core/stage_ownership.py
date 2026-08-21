@@ -7,7 +7,26 @@ from typing import Any
 
 
 CERTIFICATION_OWNER_STAGE = "S5"
-CERTIFICATION_PATTERN = re.compile(r"KKM|KKMA|认证|kelulusan|halal|sirim", flags=re.IGNORECASE)
+_CERTIFICATION_TERMS = r"(?:KKM|KKMA|认证|证书|kelulusan|halal|sirim|sijil|certificate(?:s)?)"
+CERTIFICATION_PATTERN = re.compile(_CERTIFICATION_TERMS, flags=re.IGNORECASE)
+# Stage1 facts deliberately record negative observations such as
+# "无认证/证书等视觉背书".  A lexical ownership check must not turn those
+# absence facts into positive certification claims.  Keep this bounded to the
+# same clause so a later positive claim in the sentence remains detectable.
+_NEGATED_CERTIFICATION_PATTERN = re.compile(
+    r"(?:无|沒有|没有|没|缺乏|缺少|未(?:见|有|出现|发现|显示|提供|验证)?|"
+    r"不具备|不含|tanpa|tiada|tidak\s*ada|bukan|without|\bno\b)"
+    r"\s*(?:[^。；;.!?，,\n]{0,20}?)"
+    + _CERTIFICATION_TERMS
+    + r"(?:[^。；;.!?，,\n]{0,12}?" + _CERTIFICATION_TERMS + r")*",
+    flags=re.IGNORECASE,
+)
+_POSTFIX_NEGATED_CERTIFICATION_PATTERN = re.compile(
+    _CERTIFICATION_TERMS
+    + r"\s*(?:未出现|不存在|未见|未显示|未验证|没有|没|无|缺少|"
+    r"not\s+(?:shown|present|seen)|absent)",
+    flags=re.IGNORECASE,
+)
 CERTIFICATION_OWNERSHIP_PROMPT = (
     "第三方认证/审批/权威机构背书（如 KKM、Halal、SIRIM、检测报告）按功能唯一归入 S5 信任放大，"
     "不归 S1 Hook 或 S2 产品引出；即使它与产品介绍同画面或出现在开头，也不得重复归因。"
@@ -33,7 +52,10 @@ def apply_certification_ownership_policy(text: str) -> str:
 
 def contains_certification(value: Any) -> bool:
     """判断文本或结构化值是否包含第三方认证主张。"""
-    return bool(CERTIFICATION_PATTERN.search(str(value or "")))
+    text = str(value or "")
+    text = _NEGATED_CERTIFICATION_PATTERN.sub("", text)
+    text = _POSTFIX_NEGATED_CERTIFICATION_PATTERN.sub("", text)
+    return bool(CERTIFICATION_PATTERN.search(text))
 
 
 def is_certification_owner_stage(stage: Any) -> bool:
