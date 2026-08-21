@@ -27,6 +27,27 @@ _POSTFIX_NEGATED_CERTIFICATION_PATTERN = re.compile(
     r"not\s+(?:shown|present|seen)|absent)",
     flags=re.IGNORECASE,
 )
+# A Stage1 observation may mention a badge or icon while explicitly saying it
+# is too blurry to identify. That is an unresolved visual candidate, not a
+# positive certification claim. Keep the match bounded to the same clause so
+# a later, clearly identified certification remains visible to the ownership
+# check.
+_UNCERTAIN_CERTIFICATION_PATTERN = re.compile(
+    r"(?:"
+    + _CERTIFICATION_TERMS
+    + r"(?:[^。；;.!?，,\n]{0,24}?)(?:模糊|无法辨识|无法识别|不可辨识|看不清|不清晰|"
+    r"难以辨识|无法确认|不确定|疑似|可能是|unreadable|unclear|indistinct|"
+    r"not\s+identifiable|cannot\s+identify)"
+    r"(?:[^。；;.!?，,\n]{0,48})(?:"
+    + _CERTIFICATION_TERMS
+    + r")?"
+    r"|(?:模糊|无法辨识|无法识别|不可辨识|看不清|不清晰|难以辨识|无法确认|不确定|"
+    r"疑似|可能是|unreadable|unclear|indistinct|not\s+identifiable|cannot\s+identify)"
+    r"(?:[^。；;.!?，,\n]{0,48}?)"
+    + _CERTIFICATION_TERMS
+    + r")",
+    flags=re.IGNORECASE,
+)
 CERTIFICATION_OWNERSHIP_PROMPT = (
     "第三方认证/审批/权威机构背书（如 KKM、Halal、SIRIM、检测报告）按功能唯一归入 S5 信任放大，"
     "不归 S1 Hook 或 S2 产品引出；即使它与产品介绍同画面或出现在开头，也不得重复归因。"
@@ -55,6 +76,7 @@ def contains_certification(value: Any) -> bool:
     text = str(value or "")
     text = _NEGATED_CERTIFICATION_PATTERN.sub("", text)
     text = _POSTFIX_NEGATED_CERTIFICATION_PATTERN.sub("", text)
+    text = _UNCERTAIN_CERTIFICATION_PATTERN.sub("", text)
     return bool(CERTIFICATION_PATTERN.search(text))
 
 
