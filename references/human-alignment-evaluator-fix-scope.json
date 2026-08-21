@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "name": "human-alignment-evaluator-equivalent-alias-2026-08-21",
+  "change_scope": {
+    "max_files": 3,
+    "max_added_lines": 150,
+    "max_deleted_lines": 20,
+    "allowed_globs": [
+      "references/human-alignment-evaluator-fix-scope.json",
+      "scripts/evaluate_human_model_alignment.py",
+      "tests/test_human_model_alignment.py"
+    ],
+    "forbidden_globs": [
+      "runs/**",
+      "outputs/**",
+      "jobs*.json",
+      "scripts/**/__pycache__/**"
+    ]
+  }
+}

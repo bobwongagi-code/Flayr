@@ -299,6 +299,15 @@ class HumanModelAlignmentTests(unittest.TestCase):
         self.assertEqual(score["metrics"]["relation_accuracy"], 1.0)
         self.assertEqual(score["metrics"]["error_class_counts"]["prediction_unavailable"], 1)
 
+    def test_equivalent_model_relation_is_scored_as_tie(self) -> None:
+        result = _judgment_result()
+        result["stage_judgments"][1]["relation"] = "equivalent"
+        score = score_judgment(result, _labels(), artifact_status="completed")
+        row = next(row for row in score["rows"] if row["stage"] == "S2")
+        self.assertEqual(row["predicted_relation"], "tie")
+        self.assertTrue(row["relation_correct"])
+        self.assertEqual(score["denominator"]["scored_relation_cells"], 3)
+
     def test_aggregate_recall_excludes_failed_sample_events(self) -> None:
         completed_result = {
             "creator_evidence_units": [],

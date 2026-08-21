@@ -500,9 +500,13 @@ def _stage_predictions(result: dict[str, Any] | None) -> dict[str, dict[str, Any
             # predictions. They cannot represent human ``none`` correctly.
             gap = row.get("severity")
         relation = row.get("relation")
+        if isinstance(relation, str):
+            relation = relation.strip().lower()
+            if relation in {"equivalent", "matched"}:
+                relation = "tie"
         predictions[stage_code] = {
             "gap_magnitude": str(gap).strip().lower() if isinstance(gap, str) else None,
-            "relation": str(relation).strip().lower() if isinstance(relation, str) else None,
+            "relation": relation if isinstance(relation, str) else None,
             "confidence": row.get("confidence"),
             "legacy_severity_only": "gap_magnitude" not in row,
         }
