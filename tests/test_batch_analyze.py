@@ -21,6 +21,7 @@ from scripts.flayr_core.run_manifest import command_digest
 from scripts.flayr_core.run_state import (
     ANALYSIS_COMPLETED,
     COMPLETED,
+    DEGRADED,
     PROCESSING,
     REPORT_GENERATING,
     initialize_run_state,
@@ -262,6 +263,43 @@ class BatchAnalyzeValidationTests(unittest.TestCase):
             self.assertEqual(result, 1)
             status = json.loads((root / "_batch" / "status.json").read_text(encoding="utf-8"))
             self.assertEqual(status["jobs"]["sample"]["state"], "failed")
+
+    def test_zero_exit_with_degraded_artifact_is_not_done(self) -> None:
+        """A CLI's successful exit must not promote a degraded freeze artifact."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = self._job()
+            out = root / "sample-sample"
+            out.mkdir()
+            (root / "_batch").mkdir()
+            initialize_run_state(out)
+            transition_run_state(out, PROCESSING)
+            transition_run_state(out, ANALYSIS_COMPLETED)
+            transition_run_state(out, REPORT_GENERATING)
+            transition_run_state(out, DEGRADED, reason="Stage2 未闭合阶段：S3")
+            (out / "analysis.json").write_text(
+                '{"analysis_run_state":"degraded","mode":"improve"}', encoding="utf-8"
+            )
+            (out / "degraded_manifest.json").write_text(
+                '{"analysis_run_state":"degraded"}', encoding="utf-8"
+            )
+
+            class ZeroExitProcess:
+                returncode = 0
+
+                def poll(self) -> int:
+                    return self.returncode
+
+            with (
+                mock.patch("scripts.batch_analyze.subprocess.Popen", return_value=ZeroExitProcess()),
+                mock.patch("scripts.batch_analyze.time.sleep"),
+            ):
+                result = _run_jobs([job], [], root, root / "_batch" / "status.json", 1)
+
+            self.assertEqual(result, 1)
+            status = json.loads((root / "_batch" / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["jobs"]["sample"]["state"], "failed")
+            self.assertIn("run_state=DEGRADED", status["jobs"]["sample"]["failure_reason"])
 
     def test_improve_success_manifest_requires_both_report_variants(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

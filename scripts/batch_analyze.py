@@ -50,9 +50,11 @@ from typing import Any
 
 try:  # works both as ``python scripts/batch_analyze.py`` and as a test module
     from flayr_core.run_manifest import SUCCESS_MANIFEST_NAME, command_digest, validate_success_manifest
+    from flayr_core.run_state import COMPLETED, read_run_state
     from flayr_core.utils import process_group_popen_kwargs
 except ModuleNotFoundError:  # pragma: no cover - package import path in test runners
     from scripts.flayr_core.run_manifest import SUCCESS_MANIFEST_NAME, command_digest, validate_success_manifest
+    from scripts.flayr_core.run_state import COMPLETED, read_run_state
     from scripts.flayr_core.utils import process_group_popen_kwargs
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -195,6 +197,42 @@ def _success_manifest_valid(
         expected_inputs,
         {"argv_sha256": command_digest(command[2:])},
     )
+
+
+def _completion_gate(
+    job: dict,
+    out_dir: Path,
+    common_args: list[str] | None = None,
+    trusted_args: list[str] | None = None,
+    *,
+    returncode: int | None = None,
+) -> tuple[bool, str]:
+    """Require an actually completed run before marking a batch job done.
+
+    The CLI intentionally exits 0 for a report that is explicitly marked
+    degraded so the web worker can present that state. A batch freeze runner
+    has a stricter contract: a zero exit code is never sufficient by itself.
+    """
+    if returncode is not None and returncode != 0:
+        return False, f"child process exited with code {returncode}"
+
+    lifecycle = read_run_state(out_dir)
+    if not lifecycle:
+        return False, "run_state.json is missing or invalid"
+    lifecycle_state = str(lifecycle.get("state") or "")
+    if lifecycle_state != COMPLETED:
+        return False, f"run_state={lifecycle_state or 'unknown'} (expected {COMPLETED})"
+
+    try:
+        analysis = json.loads((out_dir / "analysis.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, "analysis.json is missing or invalid"
+    if not isinstance(analysis, dict) or analysis.get("analysis_run_state") != "completed":
+        return False, "analysis_run_state is not completed"
+
+    if not _success_manifest_valid(job, out_dir, common_args, trusted_args):
+        return False, "missing or invalid _SUCCESS.json"
+    return True, ""
 
 
 def build_command(
@@ -493,7 +531,7 @@ def _run_jobs(
     }
     for job in jobs:
         out = job_output_dir(job, runs_dir)
-        done = _success_manifest_valid(job, out, common_args, trusted_args)
+        done, _ = _completion_gate(job, out, common_args, trusted_args)
         if not done:
             # Do not let a marker from an interrupted/changed run survive a
             # relaunch and become valid by accident later.
@@ -537,9 +575,20 @@ def _run_jobs(
                     continue
                 log_file.close()
                 out = job_output_dir(job, runs_dir)
-                ok = proc.returncode == 0 and _success_manifest_valid(job, out, common_args, trusted_args)
+                ok, reason = _completion_gate(
+                    job,
+                    out,
+                    common_args,
+                    trusted_args,
+                    returncode=proc.returncode,
+                )
                 status["jobs"][job["name"]].update(
-                    {"state": "done" if ok else "failed", "rc": proc.returncode, "ended": now()}
+                    {
+                        "state": "done" if ok else "failed",
+                        "rc": proc.returncode,
+                        "ended": now(),
+                        **({} if ok else {"failure_reason": reason}),
+                    }
                 )
                 write_status(status_path, status)
                 running.remove(entry)
