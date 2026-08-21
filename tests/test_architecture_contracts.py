@@ -164,9 +164,13 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertFalse(contains_certification("蓝色圆形认证图标（图案模糊无法辨识）"))
         self.assertFalse(contains_certification("认证图标可能是 KKM 标识"))
         self.assertFalse(contains_certification("疑似 certificate badge, unclear"))
+        self.assertFalse(contains_certification("蓝色圆形认证图标，图案模糊无法辨识，红色小标"))
+        self.assertFalse(contains_certification("可能是 KKM 认证，但无法确认"))
         self.assertTrue(contains_certification("画面展示 KKM 认证标识"))
         self.assertTrue(contains_certification("提供独立检测证书"))
         self.assertTrue(contains_certification("无认证，但展示 KKM 标识"))
+        self.assertTrue(contains_certification("认证图标模糊但展示 KKM 认证明确"))
+        self.assertTrue(contains_certification("可能是 KKM 认证，但另一处明确展示独立检测证书"))
 
         stages = [{"stage": f"S{i}"} for i in range(1, 7)]
         stages[-1]["benchmark_visual_evidence"] = ["无认证/证书等视觉背书"]

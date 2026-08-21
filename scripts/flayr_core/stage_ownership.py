@@ -27,25 +27,26 @@ _POSTFIX_NEGATED_CERTIFICATION_PATTERN = re.compile(
     r"not\s+(?:shown|present|seen)|absent)",
     flags=re.IGNORECASE,
 )
-# A Stage1 observation may mention a badge or icon while explicitly saying it
-# is too blurry to identify. That is an unresolved visual candidate, not a
-# positive certification claim. Keep the match bounded to the same clause so
-# a later, clearly identified certification remains visible to the ownership
-# check.
-_UNCERTAIN_CERTIFICATION_PATTERN = re.compile(
-    r"(?:"
-    + _CERTIFICATION_TERMS
-    + r"(?:[^。；;.!?，,\n]{0,24}?)(?:模糊|无法辨识|无法识别|不可辨识|看不清|不清晰|"
-    r"难以辨识|无法确认|不确定|疑似|可能是|unreadable|unclear|indistinct|"
-    r"not\s+identifiable|cannot\s+identify)"
-    r"(?:[^。；;.!?，,\n]{0,48})(?:"
-    + _CERTIFICATION_TERMS
-    + r")?"
-    r"|(?:模糊|无法辨识|无法识别|不可辨识|看不清|不清晰|难以辨识|无法确认|不确定|"
-    r"疑似|可能是|unreadable|unclear|indistinct|not\s+identifiable|cannot\s+identify)"
-    r"(?:[^。；;.!?，,\n]{0,48}?)"
-    + _CERTIFICATION_TERMS
-    + r")",
+_CERTIFICATION_CLAUSE_BREAK_PATTERN = re.compile(
+    r"[。；;.!?，,\n]+|(?:\s*(?:但|但是|然而|不过|同时|而且|而|but|however)\s*)",
+    flags=re.IGNORECASE,
+)
+_UNCERTAIN_CERTIFICATION_MARKER = re.compile(
+    r"模糊|无法辨识|无法识别|不可辨识|看不清|不清晰|难以辨识|无法确认|不确定|"
+    r"疑似|可能是|unreadable|unclear|indistinct|not\s+identifiable|cannot\s+identify",
+    flags=re.IGNORECASE,
+)
+_NEGATIVE_CERTIFICATION_MARKER = re.compile(
+    r"无|沒有|没有|没|缺乏|缺少|未(?:见|有|出现|发现|显示|提供|验证)?|不具备|不含|"
+    r"tanpa|tiada|tidak\s*ada|bukan|without|\bno\b|not\s+(?:shown|present|seen)|absent",
+    flags=re.IGNORECASE,
+)
+# These markers indicate an explicit positive observation. Generic terms such
+# as "certificate" or "badge" are deliberately absent: on their own they may
+# still be followed by a clause saying that the mark is too blurry to identify.
+_POSITIVE_CERTIFICATION_MARKER = re.compile(
+    r"展示|显示|提供|明确|出现|标识|标志|检测报告|独立检测|认证通过|"
+    r"shown|display|visible|verified|approved",
     flags=re.IGNORECASE,
 )
 CERTIFICATION_OWNERSHIP_PROMPT = (
@@ -74,10 +75,29 @@ def apply_certification_ownership_policy(text: str) -> str:
 def contains_certification(value: Any) -> bool:
     """判断文本或结构化值是否包含第三方认证主张。"""
     text = str(value or "")
-    text = _NEGATED_CERTIFICATION_PATTERN.sub("", text)
-    text = _POSTFIX_NEGATED_CERTIFICATION_PATTERN.sub("", text)
-    text = _UNCERTAIN_CERTIFICATION_PATTERN.sub("", text)
-    return bool(CERTIFICATION_PATTERN.search(text))
+    clauses = _CERTIFICATION_CLAUSE_BREAK_PATTERN.split(text)
+    for index, clause in enumerate(clauses):
+        if not CERTIFICATION_PATTERN.search(clause):
+            continue
+        cleaned = _NEGATED_CERTIFICATION_PATTERN.sub("", clause)
+        cleaned = _POSTFIX_NEGATED_CERTIFICATION_PATTERN.sub("", cleaned)
+        if not CERTIFICATION_PATTERN.search(cleaned):
+            continue
+        if _UNCERTAIN_CERTIFICATION_MARKER.search(clause):
+            continue
+        if _NEGATIVE_CERTIFICATION_MARKER.search(clause) and not _POSITIVE_CERTIFICATION_MARKER.search(clause):
+            continue
+        # A description may put the object in one clause and the uncertainty
+        # in the next one ("认证图标，图案模糊无法辨识"). Do not promote that
+        # object unless the clause itself contains an explicit positive cue.
+        following = " ".join(clauses[index + 1 : index + 3])
+        if (
+            _UNCERTAIN_CERTIFICATION_MARKER.search(following)
+            and not _POSITIVE_CERTIFICATION_MARKER.search(clause)
+        ):
+            continue
+        return True
+    return False
 
 
 def is_certification_owner_stage(stage: Any) -> bool:
