@@ -107,17 +107,36 @@ def _read_optional_json(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {"_sidecar_error": str(path)}
 
 
+def _manifest_row_id(row: dict[str, Any], index: int) -> str:
+    """Read the frozen manifest's ``id`` or the runner's ``sample_id``.
+
+    The two spellings are intentionally accepted only as aliases.  When both
+    are present they must agree, so a hand-edited manifest cannot silently
+    score one sample under another name.
+    """
+    raw_id = str(row.get("id") or "").strip()
+    raw_sample_id = str(row.get("sample_id") or "").strip()
+    if raw_id and raw_sample_id and raw_id != raw_sample_id:
+        raise ValueError(f"manifest sample {index} has conflicting id/sample_id values")
+    sample_id = raw_sample_id or raw_id
+    if not sample_id:
+        raise ValueError(f"manifest sample {index} must contain non-empty id or sample_id")
+    return sample_id
+
+
 def _sample_ids(gt_path: Path, manifest_path: Path | None) -> list[str]:
     if manifest_path is not None:
         data = _read_json(manifest_path)
         rows = data.get("samples") if isinstance(data, dict) else data
         if not isinstance(rows, list):
             raise ValueError("manifest must contain a samples list")
-        sample_ids = [str(row.get("sample_id") or "").strip() for row in rows if isinstance(row, dict)]
-        if not sample_ids or any(not item for item in sample_ids):
-            raise ValueError("manifest samples must contain non-empty sample_id values")
+        sample_ids: list[str] = []
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                raise ValueError(f"manifest sample {index} must be an object")
+            sample_ids.append(_manifest_row_id(row, index))
         if len(set(sample_ids)) != len(sample_ids):
-            raise ValueError("manifest contains duplicate sample_id values")
+            raise ValueError("manifest contains duplicate id/sample_id values")
         return sample_ids
     data = _read_json(gt_path)
     samples = data.get("samples") if isinstance(data, dict) else None
@@ -197,6 +216,239 @@ def _read_result_artifact(path: Path, result_key: str) -> tuple[dict[str, Any] |
         metadata["input_metadata_sidecar_error"] = input_metadata.get("_sidecar_error")
     metadata["request_metadata_sidecar_error"] = request_metadata.get("_sidecar_error")
     return result, metadata
+
+
+def _canonical_source_digest(video_source_sha256: list[str]) -> str:
+    payload = json.dumps(video_source_sha256, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _commit_matches(actual: Any, expected: Any, current: Any) -> bool:
+    actual_text = str(actual or "").strip().lower()
+    if not actual_text:
+        return False
+    candidates = {
+        str(value or "").strip().lower()
+        for value in (expected, current)
+        if str(value or "").strip()
+    }
+    return any(
+        actual_text == candidate
+        or actual_text.startswith(candidate)
+        or candidate.startswith(actual_text)
+        for candidate in candidates
+    )
+
+
+def _frozen_production_identity() -> dict[str, Any]:
+    freeze_path = ROOT / "references/semantic-baseline-freeze.json"
+    freeze = _read_json(freeze_path)
+    route = freeze.get("model_route") if isinstance(freeze.get("model_route"), dict) else {}
+    artifact_identity = (
+        freeze.get("artifact_identity")
+        if isinstance(freeze.get("artifact_identity"), dict)
+        else {}
+    )
+    return {
+        "vision_model": route.get("vision_model"),
+        "judgment_model": route.get("judgment_model"),
+        "production_behavior_commit": freeze.get("production_behavior_commit"),
+        "analysis_schema_sha256": artifact_identity.get("analysis_schema_sha256"),
+        "stage2_pipeline_version": artifact_identity.get("stage2_pipeline_version"),
+    }
+
+
+def _production_status_meta(
+    run_dir: Path,
+    *,
+    status: str,
+    reason: str,
+    source_identity_status: str = "source_identity_incomplete",
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "artifact": str(run_dir),
+        "source_identity_status": source_identity_status,
+        "failure_class": "production_artifact_incompatible",
+        "error": reason,
+    }
+
+
+def _read_production_run(
+    run_dir: Path,
+    *,
+    expected_model: str,
+    expected_vision_model: str | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any] | None, dict[str, Any]]:
+    """Project one completed production run into the offline score shapes.
+
+    This adapter is deliberately read-only. It validates the run manifest,
+    route, source hashes, schema and pipeline version before exposing facts or
+    stage judgments. A run that is merely readable but identity-incompatible is
+    returned as an explicit non-scoring artifact, never as a best-effort score.
+    """
+    run_dir = run_dir.expanduser().resolve()
+    identity = _frozen_production_identity()
+    expected_vision = expected_vision_model or str(identity.get("vision_model") or "")
+    success_path = run_dir / "_SUCCESS.json"
+    analysis_path = run_dir / "analysis.json"
+    if not success_path.is_file():
+        meta = _production_status_meta(run_dir, status="missing_manifest", reason="missing _SUCCESS.json")
+        return None, meta, None, meta.copy()
+    try:
+        success = _read_json(success_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        meta = _production_status_meta(run_dir, status="invalid_manifest", reason=str(exc))
+        return None, meta, None, meta.copy()
+    if success.get("status") != "completed" or not analysis_path.is_file():
+        meta = _production_status_meta(
+            run_dir,
+            status="incomplete_run",
+            reason="_SUCCESS.json is not completed or analysis.json is missing",
+        )
+        return None, meta, None, meta.copy()
+    try:
+        analysis = _read_json(analysis_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        meta = _production_status_meta(run_dir, status="invalid_artifact", reason=str(exc))
+        return None, meta, None, meta.copy()
+
+    provenance = success.get("provenance") if isinstance(success.get("provenance"), dict) else {}
+    contract = analysis.get("analysis_result_contract") if isinstance(analysis.get("analysis_result_contract"), dict) else {}
+    errors: list[str] = []
+    if str(analysis.get("analysis_run_state") or "") != "completed":
+        errors.append("analysis_run_state is not completed")
+    if analysis.get("stage2_pipeline_version") != identity.get("stage2_pipeline_version"):
+        errors.append("stage2_pipeline_version mismatch")
+    if contract.get("schema_sha256") != identity.get("analysis_schema_sha256"):
+        errors.append("analysis schema identity mismatch")
+    if provenance.get("judgment_model") != expected_model:
+        errors.append("judgment model mismatch")
+    if provenance.get("vision_model") != expected_vision:
+        errors.append("vision model mismatch")
+    if not _commit_matches(
+        provenance.get("code_commit"),
+        identity.get("production_behavior_commit"),
+        current_code_commit(),
+    ):
+        errors.append("source commit is outside the frozen behavior/current source")
+
+    inputs = success.get("inputs") if isinstance(success.get("inputs"), dict) else {}
+    source_hashes: list[str] = []
+    source_durations: dict[str, float] = {}
+    for role in ("benchmark", "creator"):
+        source = inputs.get(f"{role}_video") if isinstance(inputs.get(f"{role}_video"), dict) else {}
+        declared = str(source.get("sha256") or "").strip()
+        path_text = str(source.get("path") or "").strip()
+        if not declared or not path_text:
+            errors.append(f"{role} source identity is incomplete")
+            source_hashes.append("")
+            continue
+        source_path = Path(path_text).expanduser()
+        if not source_path.is_file():
+            errors.append(f"{role} source file is missing")
+            source_hashes.append(declared)
+            continue
+        actual = _sha256(source_path)
+        source_hashes.append(declared)
+        if actual != declared:
+            errors.append(f"{role} source sha256 mismatch")
+        duration = (
+            analysis.get("dependencies", {}).get("source_durations", {}).get(role)
+            if isinstance(analysis.get("dependencies"), dict)
+            and isinstance(analysis.get("dependencies", {}).get("source_durations"), dict)
+            else None
+        )
+        try:
+            if duration is not None and float(duration) > 0:
+                source_durations[role] = float(duration)
+        except (TypeError, ValueError):
+            pass
+
+    required_artifacts = success.get("required_artifacts")
+    if isinstance(required_artifacts, list):
+        for name in required_artifacts:
+            artifact_path = run_dir / str(name)
+            if not artifact_path.is_file():
+                errors.append(f"required artifact missing: {name}")
+                continue
+            declared = (success.get("artifacts", {}).get(str(name), {}) or {}).get("sha256")
+            if declared and _sha256(artifact_path) != declared:
+                errors.append(f"artifact sha256 mismatch: {name}")
+
+    source_digest = _canonical_source_digest(source_hashes) if all(source_hashes) else None
+    source_identity_status = "matched"
+    if any("sha256 mismatch" in error for error in errors):
+        source_identity_status = "blocked_source_identity_mismatch"
+    elif any("source identity" in error or "source file" in error for error in errors):
+        source_identity_status = "source_identity_incomplete"
+    if errors:
+        meta = _production_status_meta(
+            run_dir,
+            status="incompatible_artifact",
+            reason="; ".join(errors[:20]),
+            source_identity_status=source_identity_status,
+        )
+        return None, meta, None, meta.copy()
+
+    facts: dict[str, Any] = {}
+    for role in ("creator", "benchmark"):
+        facts_path = run_dir / f"video_facts_{role}.json"
+        if not facts_path.is_file():
+            errors.append(f"missing video_facts_{role}.json")
+            continue
+        try:
+            facts[role] = _read_json(facts_path)
+        except (OSError, json.JSONDecodeError) as exc:
+            errors.append(f"invalid video_facts_{role}.json: {exc}")
+            continue
+        acquisition = facts[role].get("stage1_acquisition")
+        if isinstance(acquisition, dict) and role not in source_durations:
+            try:
+                duration = float(acquisition.get("duration_seconds"))
+                if duration > 0:
+                    source_durations[role] = duration
+            except (TypeError, ValueError):
+                pass
+    if errors:
+        meta = _production_status_meta(run_dir, status="incomplete_artifact", reason="; ".join(errors[:20]))
+        return None, meta, None, meta.copy()
+
+    extraction_result = {
+        "schema_version": facts["creator"].get("stage_evidence_contract_version"),
+        "creator_evidence_units": facts["creator"].get("evidence_units", []),
+        "benchmark_evidence_units": facts["benchmark"].get("evidence_units", []),
+    }
+    stage_judgments: list[dict[str, Any]] = []
+    for stage in analysis.get("stage_analysis") if isinstance(analysis.get("stage_analysis"), list) else []:
+        if not isinstance(stage, dict):
+            continue
+        stage_judgments.append(
+            {
+                "stage": stage.get("stage"),
+                "gap_magnitude": stage.get("model_gap_magnitude") or stage.get("gap_magnitude") or stage.get("severity"),
+                "relation": stage.get("relation"),
+                "confidence": stage.get("confidence"),
+            }
+        )
+    judgment_result = {"stage_judgments": stage_judgments}
+    common_meta = {
+        "status": "completed",
+        "artifact": str(analysis_path),
+        "artifact_sha256": _sha256(analysis_path),
+        "source_digest": source_digest,
+        "paired_source_digest": source_digest,
+        "source_commit": provenance.get("code_commit"),
+        "request_source_commit": provenance.get("code_commit"),
+        "protocol_hash": contract.get("schema_sha256"),
+        "video_role_order": ["benchmark", "creator"],
+        "video_source_sha256": source_hashes,
+        "source_durations": source_durations,
+        "vision_model": provenance.get("vision_model"),
+        "judgment_model": provenance.get("judgment_model"),
+        "run_dir": str(run_dir),
+    }
+    return extraction_result, common_meta, judgment_result, common_meta.copy()
 
 
 def _human_stage_status(label: dict[str, Any] | None) -> str:
@@ -524,7 +776,7 @@ def _event_matches_unit(
         return False
     functions = {
         str(function).strip().upper().split("_", 1)[0]
-        for function in unit.get("functions", [])
+        for function in (unit.get("functions") or [])
         if isinstance(function, str)
     }
     unit_range = parse_time_range_seconds(unit.get("time_range"), source_duration_seconds)
@@ -698,7 +950,7 @@ def score_extraction(
             for unit in units
             if stage_code in {
                 str(function).strip().upper().split("_", 1)[0]
-                for function in unit.get("functions", [])
+                for function in (unit.get("functions") or [])
                 if isinstance(function, str)
             }
         ]
@@ -807,6 +1059,14 @@ def _source_identity_audit(
     judgment_meta: dict[str, Any],
 ) -> dict[str, Any]:
     """Make paired source provenance explicit before combining two artifacts."""
+    override = extraction_meta.get("source_identity_status") or judgment_meta.get("source_identity_status")
+    if override in {"blocked_source_identity_mismatch", "source_identity_incomplete"}:
+        return {
+            "status": override,
+            "mismatches": [],
+            "missing_fields": [],
+            "reason": extraction_meta.get("error") or judgment_meta.get("error"),
+        }
     if extraction_meta.get("status") == "not_requested" or judgment_meta.get("status") == "not_requested":
         return {"status": "not_comparable", "mismatches": [], "missing_fields": []}
     if extraction_meta.get("status") != "completed" or judgment_meta.get("status") != "completed":
@@ -862,7 +1122,39 @@ def _sample_record(
     *,
     sample_component: str,
     model_component: str,
+    production_root: Path | None = None,
+    production_vision_model: str | None = None,
 ) -> dict[str, Any]:
+    if production_root is not None:
+        production_run = production_root / sample_component
+        extraction_result, extraction_meta, judgment_result, judgment_meta = _read_production_run(
+            production_run,
+            expected_model=model,
+            expected_vision_model=production_vision_model,
+        )
+        source_identity = _source_identity_audit(extraction_meta, judgment_meta)
+        return {
+            "sample_id": sample_id,
+            "model": model,
+            "source_identity": source_identity,
+            "extraction": {
+                "artifact": extraction_meta,
+                "score": score_extraction(
+                    extraction_result,
+                    gt_sample,
+                    artifact_status=extraction_meta["status"],
+                    source_durations=extraction_meta.get("source_durations"),
+                ),
+            },
+            "judgment": {
+                "artifact": judgment_meta,
+                "score": score_judgment(
+                    judgment_result,
+                    gt_labels,
+                    artifact_status=judgment_meta["status"],
+                ),
+            },
+        }
     extraction_path = (
         extraction_root / sample_component / model_component / "visual_extraction_evaluation.json"
         if extraction_root is not None
@@ -1198,6 +1490,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gt-path", type=Path, required=True)
     parser.add_argument("--extraction-root", type=Path, default=None)
     parser.add_argument("--judgment-root", type=Path, default=None)
+    parser.add_argument(
+        "--production-root",
+        type=Path,
+        default=None,
+        help="Root containing one completed production run per sample-id; read-only strict adapter.",
+    )
     parser.add_argument("--manifest", type=Path, default=None)
     parser.add_argument("--models", nargs="+", required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -1211,8 +1509,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    if args.extraction_root is None and args.judgment_root is None:
-        raise SystemExit("at least one of --extraction-root or --judgment-root is required")
+    if args.extraction_root is None and args.judgment_root is None and args.production_root is None:
+        raise SystemExit("at least one artifact root is required")
+    if args.production_root is not None and (args.extraction_root is not None or args.judgment_root is not None):
+        raise SystemExit("--production-root cannot be combined with compact artifact roots")
     gt_path = args.gt_path.expanduser().resolve()
     gt_data = _read_json(gt_path)
     samples = gt_data.get("samples") if isinstance(gt_data, dict) else None
@@ -1226,6 +1526,7 @@ def main() -> int:
         raise SystemExit(str(exc)) from exc
     extraction_root = args.extraction_root.expanduser().resolve() if args.extraction_root else None
     judgment_root = args.judgment_root.expanduser().resolve() if args.judgment_root else None
+    production_root = args.production_root.expanduser().resolve() if args.production_root else None
     records: list[dict[str, Any]] = []
     for sample_id in sample_ids:
         sample = samples.get(sample_id)
@@ -1243,6 +1544,7 @@ def main() -> int:
                     model,
                     sample_component=sample_components[sample_id],
                     model_component=model_components[model],
+                    production_root=production_root,
                 )
             )
     output = {

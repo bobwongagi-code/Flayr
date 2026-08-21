@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 
 from scripts.evaluate_human_model_alignment import (
+    _read_production_run,
     _read_result_artifact,
+    _sample_ids,
     _safe_component_map,
     _source_identity_audit,
     aggregate_model,
@@ -59,6 +61,110 @@ def _quality() -> dict[str, str]:
 
 
 class HumanModelAlignmentTests(unittest.TestCase):
+    def test_manifest_accepts_frozen_id_and_runner_sample_id_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gt = root / "gt.json"
+            gt.write_text(json.dumps({"samples": {"one": {}, "two": {}}}), encoding="utf-8")
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps({"samples": [{"id": "one"}, {"sample_id": "two"}]}),
+                encoding="utf-8",
+            )
+            self.assertEqual(_sample_ids(gt, manifest), ["one", "two"])
+
+    def test_manifest_rejects_conflicting_or_duplicate_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gt = root / "gt.json"
+            gt.write_text(json.dumps({"samples": {"one": {}}}), encoding="utf-8")
+            conflict = root / "conflict.json"
+            conflict.write_text(
+                json.dumps({"samples": [{"id": "one", "sample_id": "two"}]}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "conflicting"):
+                _sample_ids(gt, conflict)
+            duplicate = root / "duplicate.json"
+            duplicate.write_text(
+                json.dumps({"samples": [{"id": "one"}, {"sample_id": "one"}]}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                _sample_ids(gt, duplicate)
+
+    def test_production_adapter_projects_completed_run_and_checks_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            creator = root / "creator.mp4"
+            benchmark = root / "benchmark.mp4"
+            creator.write_bytes(b"creator")
+            benchmark.write_bytes(b"benchmark")
+
+            def sha(path: Path) -> str:
+                import hashlib
+
+                return hashlib.sha256(path.read_bytes()).hexdigest()
+
+            schema_sha = json.loads(
+                (Path(__file__).resolve().parents[1] / "references/semantic-baseline-freeze.json").read_text(
+                    encoding="utf-8"
+                )
+            )["artifact_identity"]["analysis_schema_sha256"]
+            from scripts.flayr_core.report_metadata import current_code_commit
+
+            analysis = {
+                "analysis_run_state": "completed",
+                "stage2_pipeline_version": "segmented_stage_v1",
+                "analysis_result_contract": {"schema_sha256": schema_sha},
+                "dependencies": {"source_durations": {"creator": 2.0, "benchmark": 3.0}},
+                "stage_analysis": [
+                    {"stage": "S1 Hook", "severity": "small", "relation": "benchmark_better"}
+                ],
+            }
+            facts = {
+                "stage_evidence_contract_version": 4,
+                "stage1_acquisition": {"duration_seconds": 2.0},
+                "evidence_units": [
+                    {"id": "C1", "time_range": "0s - 1s", "functions": ["S1"], "information": "事实"}
+                ],
+            }
+            (root / "analysis.json").write_text(json.dumps(analysis), encoding="utf-8")
+            (root / "video_facts_creator.json").write_text(json.dumps(facts), encoding="utf-8")
+            (root / "video_facts_benchmark.json").write_text(json.dumps(facts), encoding="utf-8")
+            success = {
+                "status": "completed",
+                "inputs": {
+                    "benchmark_video": {"path": str(benchmark), "sha256": sha(benchmark)},
+                    "creator_video": {"path": str(creator), "sha256": sha(creator)},
+                },
+                "provenance": {
+                    "code_commit": current_code_commit(),
+                    "judgment_model": "qwen3.7-plus",
+                    "vision_model": "qwen3-vl-plus",
+                },
+                "required_artifacts": ["analysis.json", "video_facts_creator.json", "video_facts_benchmark.json"],
+                "artifacts": {
+                    name: {"sha256": sha(root / name)}
+                    for name in ("analysis.json", "video_facts_creator.json", "video_facts_benchmark.json")
+                },
+            }
+            (root / "_SUCCESS.json").write_text(json.dumps(success), encoding="utf-8")
+            extraction, extraction_meta, judgment, judgment_meta = _read_production_run(
+                root,
+                expected_model="qwen3.7-plus",
+            )
+            self.assertEqual(extraction_meta["status"], "completed")
+            self.assertEqual(judgment_meta["status"], "completed")
+            self.assertEqual(extraction["creator_evidence_units"][0]["id"], "C1")
+            self.assertEqual(judgment["stage_judgments"][0]["gap_magnitude"], "small")
+
+            success["provenance"]["vision_model"] = "qwen3-vl-flash"
+            (root / "_SUCCESS.json").write_text(json.dumps(success), encoding="utf-8")
+            _, bad_meta, _, _ = _read_production_run(root, expected_model="qwen3.7-plus")
+            self.assertEqual(bad_meta["status"], "incompatible_artifact")
+            self.assertEqual(bad_meta["source_identity_status"], "matched")
+
     def test_judgment_keeps_na_uncertain_missing_and_direction_errors_separate(self) -> None:
         score = score_judgment(_judgment_result(), _labels(), artifact_status="completed")
         denominator = score["denominator"]
@@ -259,6 +365,20 @@ class HumanModelAlignmentTests(unittest.TestCase):
         self.assertEqual(score["stage_metrics"]["S3"]["recall"], 1.0)
         self.assertEqual(score["stage_metrics"]["S4"]["recall"], 0.5)
         self.assertEqual(score["stage_metrics"]["S4"]["quality_counts"]["causal_link"]["weak"], 1)
+
+    def test_extraction_tolerates_null_functions_in_production_units(self) -> None:
+        score = score_extraction(
+            {
+                "creator_evidence_units": [
+                    {"id": "C1", "time_range": "1s - 2s", "functions": None},
+                ],
+                "benchmark_evidence_units": [],
+            },
+            {"key_events": []},
+            artifact_status="completed",
+        )
+        self.assertEqual(score["denominator"]["valid_model_units"], 1)
+        self.assertEqual(score["stage_metrics"]["S1"]["unit_count"], 0)
 
     def test_extraction_without_human_key_events_is_not_scored_as_zero(self) -> None:
         result = {
