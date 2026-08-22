@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-s6-audit-fix-2026-08-22",
+  "name": "semantic-baseline-refreeze-after-segmented-s6-audit-fix-2026-08-22",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
