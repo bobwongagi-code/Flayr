@@ -849,6 +849,11 @@ def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
             if isinstance(unit, dict) and str(unit.get("id")) in flag_ids and "_NO_CTA" not in str(unit.get("id"))
         ]
         if readiness_by_role[role] == "absent":
+            # Stage1 can authoritatively establish that no CTA was observed.
+            # Keep the negative state untouched, but still materialize the
+            # required audit explanation when the model omitted it.
+            if flag.get("exists") is False and not str(flag.get("cta_reason") or "").strip():
+                flag["cta_reason"] = "Stage1 已完整覆盖 S6，但未观察到明确的购买指令或购买路径。"
             cta[f"{role}_evidence_ids"] = []
             continue
         if readiness_by_role[role] == "present" and flag.get("exists") is True and not referenced:

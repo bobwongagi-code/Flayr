@@ -4359,6 +4359,52 @@ class ArchitectureContractTests(unittest.TestCase):
         ids = [unit["id"] for unit in result["video_understanding"]["benchmark"]["evidence_units"]]
         self.assertNotIn("B_NO_CTA", ids)
 
+    def test_absent_s6_cta_gets_audit_reason_when_model_omits_it(self) -> None:
+        stages = [{"stage": f"S{index}"} for index in range(1, 7)]
+        absent = {
+            "exists": False,
+            "module_type": "unknown",
+            "direct_order_met": False,
+            "action_path_clear": False,
+            "soft_purchase_invitation_met": False,
+            "offer_or_incentive_clear": False,
+            "price_anchor_met": False,
+            "urgency_evidence_met": False,
+            "gift_stack_met": False,
+            "guarantee_clear_met": False,
+            "urgency_met": False,
+            "product_value_recalled": False,
+            "module_fit_met": False,
+            "ending_position_met": False,
+            "depends_on_valid_s4": False,
+            "compliance_risk": False,
+            "start_seconds": 0.0,
+            "end_seconds": 0.0,
+            "cta_reason": "",
+            "evidence_ids": [],
+        }
+        present = {
+            **absent,
+            "exists": True,
+            "direct_order_met": True,
+            "action_path_clear": True,
+            "cta_reason": "明确购买路径",
+            "evidence_ids": ["C8"],
+        }
+        stages[5].update({"benchmark_s6": absent, "creator_s6": present})
+        result = {
+            "video_understanding": {"benchmark": {}, "creator": {}},
+            "stage_analysis": stages,
+        }
+        with mock.patch(
+            "flayr_core.postprocess.repair_evidence._stage_contract_readiness",
+            side_effect=lambda _result, _role, _stage: "absent",
+        ):
+            reconcile_unsupported_cta(result)
+
+        self.assertIn("未观察到明确的购买指令或购买路径", absent["cta_reason"])
+        validate_s6_cta_flags(result, {"s6_flags_required": True})
+
     def test_effect_summary_cannot_become_soft_cta_without_invitation_and_offer(self) -> None:
         stages = [{"stage": f"S{index}"} for index in range(1, 7)]
         stages[5].update(
