@@ -287,9 +287,13 @@ S3 重点看 `subject`、`visibility`、`composition`、`completion`；S4 重点
 ### Judgment
 
 - `gap_accuracy`：v2 语义差距准确率；只在 GT 为有效 `none/small/medium/large`、模型有可解析 gap，且不是 legacy severity-only 无法表达 `none` 的格子计算。
+- `gap_coverage`：GT 可评分 gap 格中，模型给出可解析 gap 的比例；它与 `gap_accuracy` 分开，防止只看已作答样本。
 - `contract_aware_gap_accuracy`：合同感知差距准确率；保留所有可解析的 GT/模型 gap，并把 legacy severity-only 对 GT=`none` 的格子作为合同表达错误。
 - `contract_representation_gap_rate`：GT 有效格中，模型结果因旧 severity-only 合同无法表达 `none` 的比例。
 - `relation_accuracy`：只在 GT 提供合法 relation、模型提供合法 relation 的格子计算。
+- `relation_coverage`：GT 可评分 relation 格中，模型给出可解析 relation 的比例。
+- `adjusted_gap_accuracy`：在模型已完成、GT gap 可评分且不是合同表达缺口的格子中，已作答且正确得分；对 Stage1 双侧 `status=clear` 且 `coverage=complete` 的事实充分格，`prediction_unavailable` 按错误计入分母。Stage1 事实充分未知时不强行处罚。
+- `adjusted_relation_accuracy`：与 `adjusted_gap_accuracy` 相同，但针对 relation 轴；只有事实充分且应作答的 unavailable 才计入惩罚分母。
 - `exact_direction_and_gap_accuracy`：只在两个轴都可评分的格子中计算方向和大小同时正确。
 - 每阶段输出 `semantic_gap_accuracy`、`relation_accuracy`、错误类型分布和 `gt_large_recall`；`gt_large_unavailable_cells` 单独记录模型失败或不可解析，不把它静默算成漏判。
 - `direction_error`：方向错、大小对。

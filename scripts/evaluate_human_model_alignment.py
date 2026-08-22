@@ -55,6 +55,10 @@ ALIGNMENT_METRIC_DEFINITIONS = {
     "contract_aware_gap_accuracy": "合同感知差距准确率；将 legacy severity-only 对 GT=none 的表达缺口计为不可表达错误",
     "contract_representation_gap_rate": "GT 有效格中，模型旧 severity-only 合同无法表达 none 的比例",
     "relation_accuracy": "仅在 GT relation 与模型 relation 均可解析时计算的方向准确率",
+    "gap_coverage": "GT 可评分 gap 格中，模型给出可解析 gap 的比例；不把未回答强行算成语义错误",
+    "relation_coverage": "GT 可评分 relation 格中，模型给出可解析 relation 的比例",
+    "adjusted_gap_accuracy": "事实充分且应作答的 GT gap 格为分母；prediction_unavailable 计为错误，事实充分由 Stage1 双侧 clear/complete 审计确定",
+    "adjusted_relation_accuracy": "事实充分且应作答的 GT relation 格为分母；prediction_unavailable 计为错误，事实充分由 Stage1 双侧 clear/complete 审计确定",
     "exact_direction_and_gap_accuracy": "方向和差距大小同时正确的准确率",
     "gt_large_recall": "GT=large 且模型产物可用于语义比较的格中，模型正确识别 large 的比例",
     "temporal_stage_recall_proxy": "人工 key_events 与模型 evidence_units 按角色、阶段和时间重叠匹配的召回代理",
@@ -274,6 +278,40 @@ def _production_status_meta(
     }
 
 
+def _stage_fact_sufficiency(facts: dict[str, dict[str, Any]]) -> dict[str, bool | None]:
+    """Derive a conservative per-stage fact sufficiency mask from Stage1 audits.
+
+    ``True`` requires both roles to have completed acquisition/qualification and
+    an explicit Stage1 coverage audit with ``status=clear`` and
+    ``coverage=complete``. Missing or unknown audits stay ``None``; they are not
+    treated as proof that facts were insufficient or sufficient.
+    """
+    result: dict[str, bool | None] = {stage: None for stage in STAGE_CODES}
+    for stage in STAGE_CODES:
+        role_statuses: list[bool] = []
+        for role in ROLE_NAMES:
+            facts_for_role = facts.get(role)
+            if not isinstance(facts_for_role, dict):
+                role_statuses.append(False)
+                continue
+            acquisition = facts_for_role.get("stage1_acquisition")
+            qualification = facts_for_role.get("stage1_qualification")
+            audit = facts_for_role.get("stage1_coverage_audit")
+            stage_audit = audit.get("stages", {}).get(stage) if isinstance(audit, dict) else None
+            role_statuses.append(
+                isinstance(acquisition, dict)
+                and acquisition.get("status") in {"complete", "completed"}
+                and isinstance(qualification, dict)
+                and qualification.get("status") == "completed"
+                and isinstance(stage_audit, dict)
+                and stage_audit.get("status") == "clear"
+                and stage_audit.get("coverage") == "complete"
+            )
+        if role_statuses and all(role_statuses):
+            result[stage] = True
+    return result
+
+
 def _read_production_run(
     run_dir: Path,
     *,
@@ -446,6 +484,7 @@ def _read_production_run(
         "source_durations": source_durations,
         "vision_model": provenance.get("vision_model"),
         "judgment_model": provenance.get("judgment_model"),
+        "fact_sufficiency_by_stage": _stage_fact_sufficiency(facts),
         "run_dir": str(run_dir),
     }
     return extraction_result, common_meta, judgment_result, common_meta.copy()
@@ -471,6 +510,12 @@ def _empty_denominator() -> dict[str, int]:
         "scored_relation_cells": 0,
         "semantic_gap_cells": 0,
         "contract_representation_gap_cells": 0,
+        "adjusted_gap_cells": 0,
+        "adjusted_gap_correct_cells": 0,
+        "adjusted_relation_cells": 0,
+        "adjusted_relation_correct_cells": 0,
+        "fact_sufficient_unavailable_gap_cells": 0,
+        "fact_sufficient_unavailable_relation_cells": 0,
         "prediction_unavailable_gap_cells": 0,
         "prediction_unavailable_relation_cells": 0,
         "gt_relation_missing_cells": 0,
@@ -518,6 +563,7 @@ def score_judgment(
     labels: dict[str, dict[str, Any]],
     *,
     artifact_status: str,
+    fact_sufficiency: dict[str, bool | None] | None = None,
 ) -> dict[str, Any]:
     """Score direction and magnitude independently with explicit exclusions."""
     denominator = _empty_denominator()
@@ -530,6 +576,7 @@ def score_judgment(
         gap = label.get("gap_magnitude")
         relation = label.get("relation")
         prediction = predictions.get(stage_code)
+        fact_sufficient = (fact_sufficiency or {}).get(stage_code) is True
         if status == "not_applicable":
             denominator["gt_not_applicable_cells"] += 1
         elif status == "uncertain" or gap in {"uncertain", "unknown"}:
@@ -583,7 +630,7 @@ def score_judgment(
                 }
             )
             continue
-        if artifact_status != "completed" or prediction is None:
+        if artifact_status != "completed":
             denominator["model_failed_or_missing_cells"] += 1
             rows.append(
                 {
@@ -593,6 +640,38 @@ def score_judgment(
                     "gt_relation": relation,
                     "prediction": prediction,
                     "error_class": "model_failed_or_missing",
+                }
+            )
+            continue
+        if prediction is None:
+            if gap in SCORABLE_GAPS:
+                denominator["prediction_unavailable_gap_cells"] += 1
+                if fact_sufficient:
+                    denominator["adjusted_gap_cells"] += 1
+                    denominator["fact_sufficient_unavailable_gap_cells"] += 1
+            if relation in SCORABLE_RELATIONS:
+                denominator["prediction_unavailable_relation_cells"] += 1
+                if fact_sufficient:
+                    denominator["adjusted_relation_cells"] += 1
+                    denominator["fact_sufficient_unavailable_relation_cells"] += 1
+            rows.append(
+                {
+                    "stage": stage_code,
+                    "status": status,
+                    "gt_gap_magnitude": gap,
+                    "gt_relation": relation,
+                    "prediction": None,
+                    "predicted_gap_available": False,
+                    "predicted_relation_available": False,
+                    "gt_gap_scorable": gap in SCORABLE_GAPS,
+                    "contract_representation_gap": False,
+                    "semantic_gap_comparable": False,
+                    "fact_sufficient": fact_sufficient,
+                    "adjusted_gap_eligible": gap in SCORABLE_GAPS and fact_sufficient,
+                    "adjusted_relation_eligible": relation in SCORABLE_RELATIONS and fact_sufficient,
+                    "gap_correct": None,
+                    "relation_correct": None,
+                    "error_class": "prediction_unavailable",
                 }
             )
             continue
@@ -626,6 +705,22 @@ def score_judgment(
                 relation_correct = None
         else:
             relation_correct = None
+        adjusted_gap_eligible = bool(
+            gt_gap_available and not representation_gap and (gap_available or fact_sufficient)
+        )
+        adjusted_relation_eligible = bool(
+            relation in SCORABLE_RELATIONS and (predicted_relation in SCORABLE_RELATIONS or fact_sufficient)
+        )
+        if gt_gap_available and not gap_available and fact_sufficient:
+            denominator["fact_sufficient_unavailable_gap_cells"] += 1
+        if relation in SCORABLE_RELATIONS and predicted_relation not in SCORABLE_RELATIONS and fact_sufficient:
+            denominator["fact_sufficient_unavailable_relation_cells"] += 1
+        if adjusted_gap_eligible:
+            denominator["adjusted_gap_cells"] += 1
+            denominator["adjusted_gap_correct_cells"] += int(gap_correct is True)
+        if adjusted_relation_eligible:
+            denominator["adjusted_relation_cells"] += 1
+            denominator["adjusted_relation_correct_cells"] += int(relation_correct is True)
         if representation_gap:
             error_class = "contract_representation_gap"
         elif (gt_gap_available and not gap_available) or not relation_available:
@@ -652,6 +747,9 @@ def score_judgment(
                 "gt_gap_scorable": gt_gap_available,
                 "contract_representation_gap": representation_gap,
                 "semantic_gap_comparable": semantic_gap_comparable,
+                "fact_sufficient": fact_sufficient,
+                "adjusted_gap_eligible": adjusted_gap_eligible,
+                "adjusted_relation_eligible": adjusted_relation_eligible,
                 "gap_correct": gap_correct,
                 "relation_correct": relation_correct,
                 "error_class": error_class,
@@ -698,6 +796,26 @@ def score_judgment(
                 sum(row.get("contract_representation_gap") is True for row in rows)
                 / sum(row.get("status") == "labeled" for row in rows)
                 if any(row.get("status") == "labeled" for row in rows)
+                else None
+            ),
+            "gap_coverage": (
+                denominator["scored_gap_cells"] / denominator["gt_scorable_gap_cells"]
+                if denominator["gt_scorable_gap_cells"]
+                else None
+            ),
+            "relation_coverage": (
+                denominator["scored_relation_cells"] / denominator["gt_scorable_relation_cells"]
+                if denominator["gt_scorable_relation_cells"]
+                else None
+            ),
+            "adjusted_gap_accuracy": (
+                denominator["adjusted_gap_correct_cells"] / denominator["adjusted_gap_cells"]
+                if denominator["adjusted_gap_cells"]
+                else None
+            ),
+            "adjusted_relation_accuracy": (
+                denominator["adjusted_relation_correct_cells"] / denominator["adjusted_relation_cells"]
+                if denominator["adjusted_relation_cells"]
                 else None
             ),
             "relation_accuracy": (
@@ -1156,6 +1274,7 @@ def _sample_record(
                     judgment_result,
                     gt_labels,
                     artifact_status=judgment_meta["status"],
+                    fact_sufficiency=extraction_meta.get("fact_sufficiency_by_stage"),
                 ),
             },
         }
@@ -1244,6 +1363,8 @@ def _aggregate_judgment_stage_metrics(judgment_rows: list[dict[str, Any]]) -> di
             if row.get("gt_gap_magnitude") in SCORABLE_GAPS
             and row.get("predicted_gap_magnitude") in SCORABLE_GAPS
         ]
+        adjusted_gap_rows = [row for row in rows if row.get("adjusted_gap_eligible")]
+        adjusted_relation_rows = [row for row in rows if row.get("adjusted_relation_eligible")]
         relation_rows = [row for row in rows if row.get("relation_correct") is not None]
         exact_rows = [row for row in semantic_gap_rows if row.get("relation_correct") is not None]
         large_rows = [row for row in rows if row.get("gt_gap_magnitude") == "large"]
@@ -1274,6 +1395,26 @@ def _aggregate_judgment_stage_metrics(judgment_rows: list[dict[str, Any]]) -> di
                 if semantic_gap_rows
                 else None
             ),
+            "gap_coverage": (
+                len(semantic_gap_rows) / sum(
+                    row.get("gt_gap_magnitude") in SCORABLE_GAPS
+                    and not row.get("contract_representation_gap")
+                    for row in rows
+                )
+                if any(
+                    row.get("gt_gap_magnitude") in SCORABLE_GAPS
+                    and not row.get("contract_representation_gap")
+                    for row in rows
+                )
+                else None
+            ),
+            "adjusted_gap_cells": len(adjusted_gap_rows),
+            "adjusted_gap_correct_cells": sum(row.get("gap_correct") is True for row in adjusted_gap_rows),
+            "adjusted_gap_accuracy": (
+                sum(row.get("gap_correct") is True for row in adjusted_gap_rows) / len(adjusted_gap_rows)
+                if adjusted_gap_rows
+                else None
+            ),
             "contract_representation_gap_cells": sum(
                 row.get("error_class") == "contract_representation_gap" for row in rows
             ),
@@ -1282,6 +1423,21 @@ def _aggregate_judgment_stage_metrics(judgment_rows: list[dict[str, Any]]) -> di
             "relation_accuracy": (
                 sum(row.get("relation_correct") is True for row in relation_rows) / len(relation_rows)
                 if relation_rows
+                else None
+            ),
+            "relation_coverage": (
+                len(relation_rows) / sum(row.get("gt_relation") in SCORABLE_RELATIONS for row in rows)
+                if any(row.get("gt_relation") in SCORABLE_RELATIONS for row in rows)
+                else None
+            ),
+            "adjusted_relation_cells": len(adjusted_relation_rows),
+            "adjusted_relation_correct_cells": sum(
+                row.get("relation_correct") is True for row in adjusted_relation_rows
+            ),
+            "adjusted_relation_accuracy": (
+                sum(row.get("relation_correct") is True for row in adjusted_relation_rows)
+                / len(adjusted_relation_rows)
+                if adjusted_relation_rows
                 else None
             ),
             "exact_direction_and_gap_cells": len(exact_rows),
@@ -1338,7 +1494,13 @@ def aggregate_model(records: list[dict[str, Any]], model: str) -> dict[str, Any]
         if isinstance(record.get("source_identity"), dict)
         and record["source_identity"].get("status") == "source_identity_incomplete"
     ]
-    excluded = {id(record) for record in [*blocked, *incomplete]}
+    not_comparable = [
+        record
+        for record in all_selected
+        if isinstance(record.get("source_identity"), dict)
+        and record["source_identity"].get("status") == "not_comparable"
+    ]
+    excluded = {id(record) for record in [*blocked, *incomplete, *not_comparable]}
     selected = [
         record
         for record in all_selected
@@ -1359,11 +1521,23 @@ def aggregate_model(records: list[dict[str, Any]], model: str) -> dict[str, Any]
         and row.get("predicted_gap_magnitude") in SCORABLE_GAPS
     ]
     semantic_gap_rows = [row for row in gap_rows if row.get("semantic_gap_comparable")]
+    adjusted_gap_rows = [
+        row
+        for score in judgment_rows
+        for row in score["rows"]
+        if row.get("adjusted_gap_eligible")
+    ]
     relation_rows = [
         row
         for score in judgment_rows
         for row in score["rows"]
         if row.get("relation_correct") is not None
+    ]
+    adjusted_relation_rows = [
+        row
+        for score in judgment_rows
+        for row in score["rows"]
+        if row.get("adjusted_relation_eligible")
     ]
     exact_rows = [row for row in gap_rows if row.get("relation_correct") is not None]
     extraction_denominator = {
@@ -1429,6 +1603,7 @@ def aggregate_model(records: list[dict[str, Any]], model: str) -> dict[str, Any]
         "scored_sample_count": len(selected),
         "source_identity_mismatch_sample_count": len(blocked),
         "source_identity_incomplete_sample_count": len(incomplete),
+        "source_identity_not_comparable_sample_count": len(not_comparable),
         "judgment": {
             "denominator": judgment_denominator,
             "gap_accuracy": (
@@ -1452,6 +1627,27 @@ def aggregate_model(records: list[dict[str, Any]], model: str) -> dict[str, Any]
                 if judgment_denominator["gt_labeled_cells"]
                 else None
             ),
+            "gap_coverage": (
+                judgment_denominator["scored_gap_cells"] / judgment_denominator["gt_scorable_gap_cells"]
+                if judgment_denominator["gt_scorable_gap_cells"]
+                else None
+            ),
+            "relation_coverage": (
+                judgment_denominator["scored_relation_cells"] / judgment_denominator["gt_scorable_relation_cells"]
+                if judgment_denominator["gt_scorable_relation_cells"]
+                else None
+            ),
+            "adjusted_gap_accuracy": (
+                sum(row.get("gap_correct") is True for row in adjusted_gap_rows) / len(adjusted_gap_rows)
+                if adjusted_gap_rows
+                else None
+            ),
+            "adjusted_relation_accuracy": (
+                sum(row.get("relation_correct") is True for row in adjusted_relation_rows)
+                / len(adjusted_relation_rows)
+                if adjusted_relation_rows
+                else None
+            ),
             "relation_accuracy": sum(row.get("relation_correct") is True for row in relation_rows) / len(relation_rows) if relation_rows else None,
             "exact_direction_and_gap_accuracy": (
                 sum(row.get("gap_correct") is True and row.get("relation_correct") is True for row in exact_rows if row.get("semantic_gap_comparable"))
@@ -1461,7 +1657,7 @@ def aggregate_model(records: list[dict[str, Any]], model: str) -> dict[str, Any]
             ),
             "stage_metrics": judgment_stage_metrics,
             "error_class_counts": error_class_counts,
-            "operational": _operational_summary(selected, "judgment"),
+            "operational": _operational_summary(all_selected, "judgment"),
         },
         "extraction": {
             "denominator": extraction_denominator,
@@ -1481,7 +1677,7 @@ def aggregate_model(records: list[dict[str, Any]], model: str) -> dict[str, Any]
                 else None
             ),
             "stage_metrics": stage_metrics,
-            "operational": _operational_summary(selected, "extraction"),
+            "operational": _operational_summary(all_selected, "extraction"),
         },
     }
 

@@ -8,9 +8,10 @@ from pathlib import Path
 from scripts.evaluate_human_model_alignment import (
     _read_production_run,
     _read_result_artifact,
-    _sample_ids,
     _safe_component_map,
+    _sample_ids,
     _source_identity_audit,
+    _stage_fact_sufficiency,
     aggregate_model,
     score_extraction,
     score_judgment,
@@ -177,6 +178,53 @@ class HumanModelAlignmentTests(unittest.TestCase):
         self.assertEqual(score["metrics"]["relation_accuracy"], 2 / 3)
         self.assertEqual(score["metrics"]["error_class_counts"]["direction_error"], 1)
         self.assertEqual(score["metrics"]["error_class_counts"]["magnitude_error"], 1)
+
+    def test_adjusted_metrics_penalize_fact_sufficient_abstention(self) -> None:
+        result = _judgment_result()
+        result["stage_judgments"][0]["gap_magnitude"] = "uncertain"
+        result["stage_judgments"][0]["relation"] = "uncertain"
+        fact_sufficiency = {"S1": True, "S2": True, "S3": True}
+        score = score_judgment(
+            result,
+            _labels(),
+            artifact_status="completed",
+            fact_sufficiency=fact_sufficiency,
+        )
+        self.assertEqual(score["metrics"]["gap_accuracy"], 1 / 2)
+        self.assertEqual(score["metrics"]["adjusted_gap_accuracy"], 1 / 3)
+        self.assertEqual(score["metrics"]["relation_accuracy"], 1.0)
+        self.assertEqual(score["metrics"]["adjusted_relation_accuracy"], 2 / 3)
+        self.assertEqual(score["denominator"]["fact_sufficient_unavailable_gap_cells"], 1)
+        self.assertEqual(score["denominator"]["fact_sufficient_unavailable_relation_cells"], 1)
+
+    def test_adjusted_metrics_do_not_penalize_unknown_fact_sufficiency(self) -> None:
+        result = _judgment_result()
+        result["stage_judgments"][0]["gap_magnitude"] = "uncertain"
+        result["stage_judgments"][0]["relation"] = "uncertain"
+        score = score_judgment(result, _labels(), artifact_status="completed")
+        self.assertEqual(score["metrics"]["adjusted_gap_accuracy"], score["metrics"]["gap_accuracy"])
+        self.assertEqual(score["metrics"]["adjusted_relation_accuracy"], score["metrics"]["relation_accuracy"])
+        self.assertEqual(score["denominator"]["fact_sufficient_unavailable_gap_cells"], 0)
+
+    def test_stage_fact_sufficiency_requires_bilateral_clear_complete_audits(self) -> None:
+        def facts(status: str, coverage: str) -> dict[str, object]:
+            return {
+                "stage1_acquisition": {"status": "complete"},
+                "stage1_qualification": {"status": "completed"},
+                "stage1_coverage_audit": {
+                    "stages": {
+                        "S5": {"status": status, "coverage": coverage},
+                    }
+                },
+            }
+
+        self.assertEqual(
+            _stage_fact_sufficiency({"creator": facts("clear", "complete"), "benchmark": facts("clear", "complete")})["S5"],
+            True,
+        )
+        self.assertIsNone(
+            _stage_fact_sufficiency({"creator": facts("clear", "complete"), "benchmark": facts("unknown", "unknown")})["S5"]
+        )
 
     def test_judgment_reports_missing_and_invalid_human_direction_separately(self) -> None:
         labels = _labels()
@@ -540,6 +588,26 @@ class HumanModelAlignmentTests(unittest.TestCase):
         self.assertEqual(aggregate["scored_sample_count"], 0)
         self.assertEqual(aggregate["source_identity_incomplete_sample_count"], 1)
         self.assertIsNone(aggregate["judgment"]["gap_accuracy"])
+
+    def test_not_comparable_source_identity_is_excluded_but_counted_operationally(self) -> None:
+        record = {
+            "model": "m",
+            "source_identity": {"status": "not_comparable"},
+            "judgment": {
+                "artifact": {"status": "incompatible_artifact"},
+                "score": score_judgment(_judgment_result(), _labels(), artifact_status="incompatible_artifact"),
+            },
+            "extraction": {
+                "artifact": {"status": "incompatible_artifact"},
+                "score": score_extraction(None, {}, artifact_status="incompatible_artifact"),
+            },
+        }
+        aggregate = aggregate_model([record], "m")
+        self.assertEqual(aggregate["scored_sample_count"], 0)
+        self.assertEqual(aggregate["source_identity_not_comparable_sample_count"], 1)
+        self.assertIsNone(aggregate["judgment"]["gap_accuracy"])
+        self.assertEqual(aggregate["judgment"]["operational"]["requested_artifacts"], 1)
+        self.assertEqual(aggregate["judgment"]["operational"]["failed_or_missing_artifacts"], 1)
 
     def test_sanitized_alignment_paths_cannot_collide(self) -> None:
         with self.assertRaisesRegex(ValueError, "share output component"):
