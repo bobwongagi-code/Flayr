@@ -3,8 +3,8 @@
   "status": "frozen",
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
-  "frozen_at": "2026-08-15",
-  "production_behavior_commit": "f1ac50f10bb33927a7a4f92e243b3e13b079e86b",
+  "frozen_at": "2026-08-22",
+  "production_behavior_commit": "23ec0a7",
   "evaluation_report_schema_version": 7,
   "gt_snapshot": {
     "labels_path": "references/semantic-baseline-gt.json",
