@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "name": "segmented-s6-audit-reason-2026-08-22",
+  "change_scope": {
+    "max_files": 5,
+    "max_added_lines": 120,
+    "max_deleted_lines": 20,
+    "allowed_globs": [
+      "references/segmented-s6-audit-reason-scope.json",
+      "scripts/flayr_core/postprocess/chain.py",
+      "scripts/flayr_core/postprocess/repair.py",
+      "scripts/flayr_core/postprocess/repair_evidence.py",
+      "tests/test_architecture_contracts.py"
+    ],
+    "forbidden_globs": [
+      "runs/**",
+      "outputs/**",
+      "jobs*.json",
+      "scripts/**/__pycache__/**"
+    ]
+  }
+}

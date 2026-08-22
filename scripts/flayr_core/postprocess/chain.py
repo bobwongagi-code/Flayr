@@ -41,6 +41,7 @@ from .repair import (
     fill_missing_evidence_references,
     ground_stage_visual_evidence,
     materialize_spoken_stage_evidence,
+    materialize_segmented_s6_absence_reasons,
     prune_multimodal_evidence_to_stage,
     validate_s2_hard_fact_consistency,
     validate_s3_s4_hard_fact_consistency,
@@ -177,6 +178,11 @@ def apply_segmented_postprocess_chain(
     step("postprocess.segmented.derive_product_visibility", derive_product_visibility, normalized, analysis)
     step("postprocess.segmented.materialize_cross_stage_inputs", materialize_cross_stage_inputs, normalized, analysis)
     step("postprocess.segmented.materialize_stage_evidence_gates", materialize_stage_evidence_gates, normalized)
+    step(
+        "postprocess.segmented.materialize_s6_absence_reasons",
+        materialize_segmented_s6_absence_reasons,
+        normalized,
+    )
     finalize_severity_after_repairs(
         normalized,
         analysis,

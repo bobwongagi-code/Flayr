@@ -99,7 +99,11 @@ from flayr_core.stage_evidence_contracts import (
 from flayr_core.llm.pipeline import preserve_valid_repair_sections
 from flayr_core.postprocess.proposition import materialize_cross_stage_inputs, materialize_quality_audits
 from flayr_core.postprocess.utils import parse_srt_timestamp, read_srt_segments
-from flayr_core.postprocess.chain import finalize_severity_after_repairs, stamp_comparison_eligibility
+from flayr_core.postprocess.chain import (
+    apply_segmented_postprocess_chain,
+    finalize_severity_after_repairs,
+    stamp_comparison_eligibility,
+)
 from flayr_core.postprocess.audit import PostprocessAudit, build_field_sources
 from flayr_core.postprocess.derive import (
     _derive_one,
@@ -120,6 +124,7 @@ from flayr_core.postprocess.repair import (
     fill_missing_evidence_references,
     prune_multimodal_evidence_to_stage,
     reconcile_s3_s4_evidence_coherence,
+    materialize_segmented_s6_absence_reasons,
     reconcile_unsupported_cta,
     reconcile_s5_trust_sources,
     stabilize_improvement_priorities,
@@ -4404,6 +4409,50 @@ class ArchitectureContractTests(unittest.TestCase):
 
         self.assertIn("未观察到明确的购买指令或购买路径", absent["cta_reason"])
         validate_s6_cta_flags(result, {"s6_flags_required": True})
+
+    def test_segmented_absent_s6_cta_gets_audit_reason_without_rewriting_judgment(self) -> None:
+        stages = [{"stage": f"S{index}"} for index in range(1, 7)]
+        absent = {
+            "exists": False,
+            "module_type": "unknown",
+            "direct_order_met": False,
+            "action_path_clear": False,
+            "soft_purchase_invitation_met": False,
+            "offer_or_incentive_clear": False,
+            "price_anchor_met": False,
+            "urgency_evidence_met": False,
+            "gift_stack_met": False,
+            "guarantee_clear_met": False,
+            "urgency_met": False,
+            "product_value_recalled": False,
+            "module_fit_met": False,
+            "ending_position_met": False,
+            "depends_on_valid_s4": False,
+            "compliance_risk": False,
+            "start_seconds": 0.0,
+            "end_seconds": 0.0,
+            "cta_reason": "",
+            "evidence_ids": [],
+        }
+        stages[5]["benchmark_s6"] = absent
+        result = {"stage_analysis": stages, "video_understanding": {"benchmark": {}, "creator": {}}}
+        with mock.patch(
+            "flayr_core.postprocess.repair_evidence._stage_contract_readiness",
+            side_effect=lambda _result, role, _stage: "absent" if role == "benchmark" else "present",
+        ):
+            materialize_segmented_s6_absence_reasons(result)
+        self.assertEqual(absent["exists"], False)
+        self.assertIn("未观察到明确的购买指令或购买路径", absent["cta_reason"])
+
+    def test_segmented_chain_invokes_s6_absence_reason_projection(self) -> None:
+        with mock.patch(
+            "flayr_core.postprocess.chain.materialize_segmented_s6_absence_reasons"
+        ) as projection:
+            with mock.patch(
+                "flayr_core.postprocess.chain.finalize_severity_after_repairs"
+            ):
+                apply_segmented_postprocess_chain({}, {})
+        projection.assert_called_once()
 
     def test_effect_summary_cannot_become_soft_cta_without_invitation_and_offer(self) -> None:
         stages = [{"stage": f"S{index}"} for index in range(1, 7)]

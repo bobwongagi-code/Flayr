@@ -928,6 +928,7 @@ def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
         if readiness_by_role[role] != "legacy":
             cta[f"{role}_evidence_ids"] = []
             continue
+
         unit_id = f"{code}_NO_CTA"
         placeholder = {
             "id": unit_id,
@@ -988,6 +989,32 @@ def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
         conclusion = "标杆结尾提供了有效 CTA，达人未形成有效 CTA；达人缺少促进下单的明确收口。"
         cta["gap"] = conclusion
         cta["gap_summary"] = [conclusion]
+
+
+def materialize_segmented_s6_absence_reasons(result: dict[str, Any]) -> None:
+    """Materialize audit text for an authoritative segmented S6 absence.
+
+    The segmented pipeline intentionally does not reuse the legacy CTA repair
+    chain.  It still needs the one non-semantic projection that the validator
+    requires: when Stage1 has completely covered a side and established that
+    no CTA was observed, an omitted ``cta_reason`` gets a deterministic audit
+    explanation.  This helper never changes ``exists`` or any CTA judgment;
+    unresolved/present sides remain invalid when the provider omits the reason.
+    """
+    stages = result.get("stage_analysis", [])
+    if not isinstance(stages, list) or len(stages) < 6 or not isinstance(stages[5], dict):
+        return
+    s6 = stages[5]
+    for role in ("benchmark", "creator"):
+        flag = s6.get(f"{role}_s6")
+        if not isinstance(flag, dict):
+            continue
+        if (
+            _stage_contract_readiness(result, role, "S6") == "absent"
+            and flag.get("exists") is False
+            and not str(flag.get("cta_reason") or "").strip()
+        ):
+            flag["cta_reason"] = "Stage1 已完整覆盖 S6，但未观察到明确的购买指令或购买路径。"
 
 
 _S5_VALID_BASES = {
