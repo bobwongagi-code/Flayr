@@ -4,8 +4,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.evaluate_human_model_alignment import (
+    _commit_is_compatible,
     _read_production_run,
     _read_result_artifact,
     _safe_component_map,
@@ -62,6 +64,25 @@ def _quality() -> dict[str, str]:
 
 
 class HumanModelAlignmentTests(unittest.TestCase):
+    def test_evaluator_only_descendant_keeps_frozen_artifact_compatible(self) -> None:
+        with patch(
+            "scripts.evaluate_human_model_alignment._commit_matches",
+            return_value=False,
+        ), patch(
+            "scripts.evaluate_human_model_alignment._production_surfaces_changed_between",
+            return_value=False,
+        ):
+            self.assertTrue(_commit_is_compatible("artifact-commit", "production-commit", "current-commit"))
+
+        with patch(
+            "scripts.evaluate_human_model_alignment._commit_matches",
+            return_value=False,
+        ), patch(
+            "scripts.evaluate_human_model_alignment._production_surfaces_changed_between",
+            return_value=True,
+        ):
+            self.assertFalse(_commit_is_compatible("artifact-commit", "production-commit", "current-commit"))
+
     def test_manifest_accepts_frozen_id_and_runner_sample_id_aliases(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

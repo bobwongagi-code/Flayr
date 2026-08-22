@@ -22,6 +22,7 @@ import hashlib
 import json
 import math
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,7 @@ from flayr_core.llm.compact_eval import (  # noqa: E402
 from flayr_core.report_metadata import current_code_commit  # noqa: E402
 from flayr_core.stage_catalog import DEFAULT_STAGES  # noqa: E402
 from flayr_core.utils import write_json  # noqa: E402
+from flayr_core.validation_cohort import SOURCE_CONTRACT_FILES  # noqa: E402
 
 
 STAGE_CODES = tuple(stage.code for stage in DEFAULT_STAGES)
@@ -244,6 +246,59 @@ def _commit_matches(actual: Any, expected: Any, current: Any) -> bool:
     )
 
 
+def _production_surfaces_changed_between(recorded: Any, current: Any) -> bool:
+    """Return whether production surfaces changed after a recorded artifact.
+
+    The evaluator and its protocol may change after a production run without
+    invalidating that run. A change under the frozen production surfaces is a
+    semantic incompatibility and must remain excluded.
+    """
+    recorded_text = str(recorded or "").strip()
+    current_text = str(current or "").strip()
+    if not recorded_text or not current_text:
+        return True
+    try:
+        recorded_commit = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{recorded_text}^{{commit}}"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        current_commit = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{current_text}^{{commit}}"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", recorded_commit, current_commit],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        surfaces = ("scripts/flayr.py", "scripts/flayr_core", *SOURCE_CONTRACT_FILES)
+        changed = subprocess.run(
+            ["git", "diff", "--name-only", f"{recorded_commit}..{current_commit}", "--", *surfaces],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        return any(str(path).strip() for path in changed)
+    except (OSError, subprocess.CalledProcessError):
+        return True
+
+
+def _commit_is_compatible(actual: Any, expected: Any, current: Any) -> bool:
+    """Accept frozen behavior, current source, or evaluator-only descendants."""
+    if _commit_matches(actual, expected, current):
+        return True
+    return not _production_surfaces_changed_between(actual, current)
+
+
 def _frozen_production_identity() -> dict[str, Any]:
     freeze_path = ROOT / "references/semantic-baseline-freeze.json"
     freeze = _read_json(freeze_path)
@@ -364,7 +419,7 @@ def _read_production_run(
         errors.append("judgment model mismatch")
     if provenance.get("vision_model") != expected_vision:
         errors.append("vision model mismatch")
-    if not _commit_matches(
+    if not _commit_is_compatible(
         provenance.get("code_commit"),
         identity.get("production_behavior_commit"),
         current_code_commit(),
