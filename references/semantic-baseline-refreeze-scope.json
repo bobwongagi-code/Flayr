@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "name": "semantic-baseline-refreeze-after-s6-audit-fix-2026-08-22",
+  "change_scope": {
+    "max_files": 3,
+    "max_added_lines": 40,
+    "max_deleted_lines": 20,
+    "allowed_globs": [
+      "references/semantic-baseline-refreeze-scope.json",
+      "references/semantic-baseline-freeze.json",
+      "references/semantic-baseline-freeze.md"
+    ],
+    "forbidden_globs": [
+      "runs/**",
+      "outputs/**",
+      "jobs*.json",
+      "scripts/**/__pycache__/**"
+    ]
+  }
+}
