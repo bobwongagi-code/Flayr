@@ -907,7 +907,15 @@ def is_retryable_error(error_text: str, *, http_status: int | None = None) -> bo
             return False
         if http_status in {408, 425, 429} or 500 <= http_status <= 599:
             return True
-        return False
+        # A streaming response can establish an HTTP 2xx status and then fail
+        # at the transport layer (for example curl 56 / connection reset).
+        # The status alone is not evidence that the response is complete; let
+        # the transport diagnostic decide whether the same logical request may
+        # be retried.
+        if 200 <= http_status <= 299:
+            http_status = None
+        else:
+            return False
     lowered = error_text.lower()
     if any(marker in lowered for marker in ("401", "403", "400", "unauthorized", "forbidden", "invalid api", "bad request")):
         return False

@@ -244,6 +244,61 @@ class LlmApiContractTests(unittest.TestCase):
                 sum(event["request_bytes"] for event in budget.api_events),
             )
 
+    def test_http_200_transport_reset_retries_same_logical_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            raw_path = root / "response.json"
+            payload_path.write_text('{"model":"qwen3.7-plus","messages":[]}', encoding="utf-8")
+            calls = 0
+            response_meta: dict[str, object] = {}
+
+            def fake_run(_command: list[str], **kwargs: object) -> mock.Mock:
+                nonlocal calls
+                calls += 1
+                callback = kwargs["stdout_callback"]
+                assert callable(callback)
+                if calls == 1:
+                    return mock.Mock(
+                        returncode=56,
+                        stderr=(
+                            "curl: (56) Recv failure: Connection reset by peer\n"
+                            "__FLAYR_HTTP_STATUS__200\n"
+                        ),
+                        stdout="",
+                    )
+                callback(
+                    b'data: {"choices":[{"delta":{"content":"{}"},'
+                    b'"finish_reason":"stop"}]}'
+                    b'\n\ndata: [DONE]\n\n'
+                )
+                return mock.Mock(returncode=0, stderr="__FLAYR_HTTP_STATUS__200\n", stdout="")
+
+            with (
+                mock.patch(
+                    "flayr_core.llm.api.validate_outbound_url",
+                    return_value=mock.Mock(
+                        hostname="example.test", port=443, resolved_addresses=("203.0.113.10",)
+                    ),
+                ),
+                mock.patch("flayr_core.llm.api.run_command", side_effect=fake_run),
+                mock.patch("flayr_core.llm.api.time.sleep"),
+            ):
+                call_llm_api(
+                    "https://example.test/v1/chat/completions",
+                    "secret",
+                    payload_path,
+                    raw_path,
+                    retries=1,
+                    output_expansions=0,
+                    response_meta=response_meta,
+                )
+
+            self.assertEqual(calls, 2)
+            self.assertEqual(response_meta["transport_attempts"], 2)
+            self.assertEqual(response_meta["request_retry_kinds"], ["transport"])
+            self.assertEqual(response_meta["transport_status"], "completed")
+
     def test_transport_retry_does_not_consume_output_expansion_allowance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -301,6 +356,14 @@ class LlmApiContractTests(unittest.TestCase):
         self.assertTrue(is_retryable_error("curl: (7) Failed to connect to host port 443"))
         self.assertTrue(is_retryable_error("curl: (7) Couldn't connect to server"))
         self.assertTrue(is_retryable_error("curl: (7) Could not connect to server"))
+
+    def test_http_200_stream_reset_is_retryable(self) -> None:
+        self.assertTrue(
+            is_retryable_error(
+                "HTTP 200: curl: (56) Recv failure: Connection reset by peer",
+                http_status=200,
+            )
+        )
 
     def test_no_retry_records_no_retry_kind(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
