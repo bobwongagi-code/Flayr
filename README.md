@@ -1,296 +1,245 @@
 # Flayr · TikTok 带货短视频分析与提升工具
 
-> 使用说明 | 2026-05-31
+Flayr 接收一条参考视频和一条达人视频，结合画面、口播、字幕和音频质检，按 S1-S6 功能阶段对比差距，输出可执行的拍摄、剪辑和表达建议。Flayr 生成结构化分析和 HTML 报告，不生成替换视频、达人音色视频或 AI 示意视频。
 
-Flayr 接收一条**爆款参考视频**和一条**达人视频**，结合连续画面、转写、本地音频质检和多模态模型逐段对比差距，产出一份可直接执行的提升报告（HTML）和改进版视频的拍摄/剪辑建议。Flayr 不生成替换视频、达人音色视频或 AI 示意视频。
-
----
-
-## 一、能力概览
+## 能力概览
 
 | 能力 | 说明 |
 |------|------|
-| 视频转写 | 北京 MaaS Fun-ASR 在线转写，支持东南亚语言（马来语/泰语/印尼语）自动识别，提供句级与词级口播时间戳 |
-| 视频理解 | canonical frames/时间线作为可审计主证据；原生视频只用于一次定向连续性复核 |
-| 音频边界 | 音量、静音和峰值风险是可复核硬质检；语气/BGM/音效只作观察，不进入差距等级 |
-| 结构化分析 | 对照 Chimera 6 槽位结构库（S1-S6），逐段对比达人与爆款差距 |
-| 改进建议 | 按 GMV 杠杆排序的提升点，含话术、画面和执行建议 |
-| HTML 报告 | 可视化主报告，含关键结论、差距概览、阶段拆解与提升点 |
+| 视频转写 | 通过可配置的在线 ASR 服务生成句级和词级时间戳，支持传入语言提示 |
+| 视频理解 | 以 canonical frames 和时间线为可审计主证据，必要时定向查看原生视频时间窗 |
+| 音频质检 | 检查音量、静音和峰值风险；语气、BGM 和音效只作观察，不直接决定差距等级 |
+| 结构化分析 | 按 S1-S6 功能阶段比较达人与参考视频 |
+| 改进建议 | 按商业影响排序，给出话术、画面和执行建议 |
+| 报告输出 | 生成业务分析报告、达人执行报告和结构化 JSON 产物 |
 
----
+## 使用边界
 
-## 二、两阶段分析架构
+Flayr 是辅助分析工具。relation、gap 和改进建议在发布前必须由人工确认；证据不足时应保留 `unknown` 或 `degraded` 状态，不自动发布确定结论。
 
-生产推荐路由固定为 `qwen3-vl-plus` 负责视觉观察，`qwen3.7-plus` 负责资格、比较、综合与世界知识判断。两者共用同一份 Evidence Ledger、resolver 和 Phase C 补丁合同，不存在 VL 专属的第二套事实或判断系统。`qwen3.6-plus` 只保留为人工指定的 judgment 备份，使用时仍与 `qwen3-vl-plus` 配对，不会在 3.7 失败时自动接管；`qwen3-vl-flash` 已退役并由 provider 边界拒绝。
+## 分析架构
 
-Flayr 用**两阶段 pipeline + 一次性回看**，而非一次性看完整视频：
+Flayr 使用视觉模型、判断模型和 ASR 服务分工协作。所有阶段共用统一事实账本、最终判定流程和受限复核机制，不为不同模型维护平行的事实或判断系统。
 
+```text
+Stage1：单视频事实抽取
+  分别处理参考视频和达人视频
+  canonical 关键帧/时间线 + 窗口化 ASR + OCR
+  -> 生成带时间戳的 evidence_units
+  -> Stage1-B 只基于事实做资格投影
+  -> 资格或连续性未闭合时，Stage1-C 最多补看一次目标时间窗
+  -> 确认后的 facts 成为后续判断的唯一事实源
+
+Stage2：跨视频比较
+  只读取两侧 facts，不重新查看完整视频
+  -> 按 S1-S6 分组判断 relation、gap 和 reason
+  -> Stage3 汇总 key_conclusions 与 improvements
+
+Phase C：定向复核
+  仅由覆盖、资格、连续性或最终判定冲突触发，最多复核两个阶段
+  -> 查看对应时间窗并生成受限事实补丁
+  -> 重新执行既有后处理与校验
+  -> 不整段重写判断，也不无限索取素材
 ```
-阶段一：单视频事实抽取（fact extraction）
-  对达人、标杆分别跑 Stage1-A：
-  canonical 关键帧/时间线 + 窗口安全 ASR + OCR（provider 支持时可附独立音频）
-  → 产出带时间戳的 evidence_units（画面/口播/字幕/音频事实）
-  若资格或连续性仍未闭合，Stage1-C 对目标时间窗最多补观察一次
-  facts 一旦锁定即为"唯一事实源"（防止达人/标杆串证据）
 
-阶段二：对比判断（comparison）
-  只喂入冻结后的两条 facts 文字（事实基线），不再附带视频
-  → 按 S1-S6 功能阶段横向对比，产出 severity、key_conclusions、改进建议
-  感官素材仅辅助判断，不可新增/改写 facts
+详细的模块边界和数据流见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
-Phase C：低置信阶段回看（只触发一次）
-  只有代码发现覆盖、资格、连续性或 resolver 冲突时触发（最多 2 个 S1-S6 阶段）；模型自报低置信不能单独触发
-  → 代码按该阶段真实时间窗切标杆/达人原生视频画面，并附同窗 Fun-ASR 文本
-  → 第二次只重判这些阶段，并重新走现有 postprocess/validate
-  不做无限多轮，也不允许模型继续索要素材
-```
+## 目录结构
 
-设计理由：抽帧主账本提供更高的阶段覆盖和可审计性；原生视频实验没有带来 Stage2 净准确率收益，因此只用于少数连续性/资格复核，不建立第二套事实系统。
-详见 `ARCHITECTURE.md`。
-
----
-
-## 三、目录结构
-
-```
+```text
 Flayr/
 ├── scripts/
 │   ├── flayr.py                  # CLI 主入口
+│   ├── web_app.py                # 本地 Web 入口
 │   ├── batch_analyze.py          # 批量作业、断点续跑与限并发
-│   ├── evaluate_analysis.py      # 分析结果与人工 GT 对照
-│   ├── build_legacy_gt_migration_inventory.py # 旧 GT 非破坏性迁移盘点
-│   ├── manage_validation_cohort.py # 冻结/校验/消费 blind cohort（不调模型）
-│   ├── verify_semantic_baseline_freeze.py # 离线语义基线冻结门
-│   ├── verify_analysis_contracts.py # S1-S6 与跨模块契约门
-│   └── flayr_core/               # 核心模块包
-│       ├── video.py asr.py       # 在线转写 + 抽帧 + 抽音频
-│       ├── translation.py        # 转写翻译
-│       ├── prompt.py             # analysis_input.md 装配
-│       ├── artifacts.py          # 帧/时间区间选取
-│       ├── video_evidence.py     # 去重审计、联系表、timeline 证据视图
-│       ├── analysis_model.py      # 结果领域模型、字段投影和生命周期合同
-│       ├── report.py             # HTML 报告渲染
-│       ├── llm/                  # LLM 调用层
-│       │   ├── api.py            #   HTTP 调用 + 视频/音频/图片转 data URL
-│       │   ├── analysis_contract.py # 结果最小运行时契约
-│       │   ├── json_codec.py     #   JSON 文本容错解析
-│       │   ├── product_profile.py #  产品地基与证明合同归一化
-│       │   ├── payload.py        #   请求 payload 构造（两阶段）
-│       │   ├── parse.py          #   响应解析 + 归一化
-│       │   └── pipeline.py       #   分析主入口 + 分段编排/最终收口
-│       └── postprocess/          # 结果后处理流水线
-│           ├── chain.py          #   流水线编排（说明书式）
-│           ├── repair.py         #   内容修补
-│           ├── validate.py       #   通用校验
-│           ├── claims_my.py      #   MY 市场认证主张专项
-│           └── health_rewrite.py #   健康品类合规重写
+│   ├── replay_finalization.py    # 确定性最终处理回放
+│   ├── run-quality-gates.sh      # 代码质量检查
+│   └── flayr_core/               # 分析、证据、报告和运行状态模块
+├── frontend/                     # Web 前端资源
+├── assets/                       # HTML 报告模板
+├── references/                   # 输出契约、观察指引和市场知识
 ├── QA-RULES.md                   # 分析结果校验规则
-├── structure_library_full.md     # Chimera 结构库（32 模块定义，进 LLM 输入）
-├── references/                   # 分析知识库（进 LLM 输入）
-│   ├── analysis-output-schema.json   # 模型输出契约（字段唯一真相源）
-│   ├── observation-guide.md          # 视频观察指引（看视频的方法）
-│   ├── commercial-judgement-framework.md
-│   ├── brand_propositions.json      # 冻结命题与痛点键
-│   ├── ground-truth-labels.md/.json # 人工 GT 理由版/机器版
-│   ├── market-knowledge-my.md
-│   ├── validation-inputs.json        # 主验证集与留出集的视频输入清单
-│   └── commerce-translation-guidelines.md
-├── assets/report.html            # 报告模板
-└── runs/                         # 每次分析的输出目录
+├── structure_library_full.md     # S1-S6 结构库
+└── runs/                         # 默认运行输出目录
 ```
 
----
+## 安装与依赖
 
-## 四、快速开始
+运行环境：
 
-### 依赖
+- Python 3.11、3.12 或 3.13
+- `ffmpeg` 和 `ffprobe`，用于媒体探测、抽帧和音频提取
+- `curl`，用于调用在线 ASR 服务
+- 可访问的视觉模型、判断模型和 ASR 服务
+
+核心分析代码只使用 Python 标准库。开发、报告增强和质量检查依赖已固定在 `requirements-dev.lock`：
 
 ```bash
-# Python 3.11+
-# ffmpeg, ffprobe（视频重编码 + 抽帧 + 抽音频）
-# 在线 Fun-ASR 使用 curl 调用；ffmpeg 负责提取/压缩音频
-# 可选报告增强：python3 -m pip install -r requirements-dev.lock
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --requirement requirements-dev.lock
 ```
 
-Python 依赖、外部工具边界和升级规则见 [DEPENDENCIES.md](DEPENDENCIES.md)。
-源码版本和发布流程见 [VERSION](VERSION) 与 [RELEASE.md](RELEASE.md)。
+依赖边界见 [DEPENDENCIES.md](DEPENDENCIES.md)，版本和发布流程见 [VERSION](VERSION) 与 [RELEASE.md](RELEASE.md)。
 
-### 基本用法
+## 配置
+
+密钥通过环境变量或 macOS Keychain 读取，不要写入命令、仓库或运行产物。下面的值均为占位符，需要替换为已批准服务的实际配置：
 
 ```bash
-python3 scripts/flayr.py \
-  --benchmark-video 爆款.mp4 \
-  --creator-video 达人.mp4 \
-  --product-name "儿童牙膏" \
-  --judgment-model qwen3.7-plus \
-  --vision-model qwen3-vl-plus \
-  --llm-api-url https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions \
-  --max-total-wall-time 3600 \
-  --llm-api-key-env DASHSCOPE_API_KEY \
+export FLAYR_JUDGMENT_MODEL="<judgment-model-id>"
+export FLAYR_VISION_MODEL="<vision-model-id>"
+export FLAYR_LLM_API_URL="<approved-chat-completions-url>"
+export FLAYR_LLM_API_KEY="<secret>"
+export FLAYR_LLM_API_KEY_ENV="FLAYR_LLM_API_KEY"
+
+export FLAYR_ASR_API_URL="<approved-asr-url>"
+export FLAYR_ASR_MODEL="<asr-model-id>"
+export FLAYR_ASR_API_KEY="<secret>"
+export FLAYR_ASR_API_KEY_ENV="FLAYR_ASR_API_KEY"
+```
+
+视觉模型和判断模型必须同时配置。系统不会在调用失败后静默切换模型。ASR 失败时，`compare` 和 `improve` 默认返回非零；只有显式使用 `--allow-degraded` 才会继续生成带降级状态的报告。
+
+## CLI 用法
+
+### 基本分析
+
+```bash
+python3 scripts/flayr.py improve \
+  --benchmark-video /path/to/benchmark.mp4 \
+  --creator-video /path/to/creator.mp4 \
+  --product-name "产品名称" \
+  --target-market auto \
+  --core-selling-points "已确认的核心卖点" \
+  --judgment-model "$FLAYR_JUDGMENT_MODEL" \
+  --vision-model "$FLAYR_VISION_MODEL" \
+  --llm-api-url "$FLAYR_LLM_API_URL" \
+  --llm-api-key-env FLAYR_LLM_API_KEY \
+  --asr-api-url "$FLAYR_ASR_API_URL" \
+  --asr-model "$FLAYR_ASR_MODEL" \
+  --asr-api-key-env FLAYR_ASR_API_KEY \
   --verification-stage production \
-  improve
+  --output-dir runs/example
 ```
 
-### 关键参数
+CLI 提供四种模式：
+
+| 模式 | 用途 |
+|------|------|
+| `breakdown` | 分析单条参考视频的结构 |
+| `compare` | 对比参考视频与达人视频 |
+| `improve` | 对比并生成改进建议和完整报告 |
+| `scope` | 只执行可比较性预检，不生成报告 |
+
+常用参数：
 
 | 参数 | 说明 |
 |------|------|
-| `--benchmark-video` | 爆款参考视频路径 |
-| `--creator-video` | 达人视频路径 |
+| `--benchmark-video` | 参考视频路径 |
+| `--creator-video` | 达人视频路径，`compare`、`improve` 和 `scope` 必需 |
 | `--product-name` | 产品名称 |
-| `--judgment-model` | Step-0、Stage1-B、Stage2/Stage3、综合与文本判断模型；当前推荐 `qwen3.7-plus` |
-| `--vision-model` | OCR、Stage1-A、Stage1-C、Phase C 与视频身份观察模型；当前推荐 `qwen3-vl-plus`，必须与 `--judgment-model` 同时提供 |
-| `--llm-model` | 旧单模型兼容入口；同一模型承担全部职责，不能与双模型参数混用。仅用于历史严格回放，不是生产备份或推荐路径 |
-| `--llm-api-url` | 已批准供应商的 Chat Completions 端点；当前网络策略允许 OpenAI、DashScope 官方域名和登记的北京 MaaS Qwen 端点 |
-| `--max-total-wall-time` | 单次运行总墙钟上限；默认 1800 秒，慢模型验证可显式提高，例如 3600 秒 |
-| `--llm-api-key-keychain-service` | macOS Keychain 服务名（或用 `--llm-api-key-env` 走环境变量） |
-| `--llm-include-images` | 默认启用：完整 Step-0 + 单视频事实抽取 + 分段 Stage2/Stage3 + Phase C；`--no-llm-include-images` 仅作为已拒绝的旧路径标志保留 |
-| `--asr-api-url` | 在线 Fun-ASR endpoint；默认使用北京 MaaS 地址 |
-| `--asr-model` | 在线 ASR 模型；默认 `fun-asr-flash-2026-06-15` |
-| `--asr-language` | ASR 语言提示；默认 `auto` |
-| `--asr-api-key-env` | 在线 ASR 使用的 key 环境变量；默认 `DASHSCOPE_API_KEY` |
-| `--ocr-mode auto/on/off` | 字幕 OCR 轨。默认 `auto`：复用分析模型的视觉能力和 key；`off` 可关闭 |
+| `--product-category` | 结构库中的产品类别 |
+| `--target-market` | `auto`、`sea` 或两位市场代码 |
+| `--core-selling-points` | 已核实的产品卖点和差异点 |
+| `--judgment-model` | 资格、比较、汇总和文本判断所用模型 ID |
+| `--vision-model` | OCR、事实观察和定向视频复核所用模型 ID；必须与判断模型同时提供 |
+| `--llm-api-url` | 已批准的 Chat Completions 兼容端点 |
+| `--llm-api-key-env` | 保存分析服务密钥的环境变量名 |
+| `--asr-api-url` | 在线 ASR 服务端点 |
+| `--asr-model` | 在线 ASR 模型 ID |
+| `--asr-language` | ASR 语言提示，默认 `auto` |
+| `--asr-api-key-env` | 保存 ASR 服务密钥的环境变量名 |
+| `--ocr-mode auto/on/off` | 字幕 OCR 模式，默认 `auto` |
+| `--max-total-wall-time` | 单次运行总墙钟预算，默认 1800 秒 |
+| `--max-llm-calls` | 单次运行允许的真实模型网络尝试上限，默认 32 |
+| `--reuse-preprocessing` | 复用同一输出目录中身份匹配的抽帧、转写和字幕轨 |
+| `--allow-degraded` | 明确允许生成降级结果；降级运行不会写成功清单 |
 
-Web worker 使用同一条路由：同时设置 `FLAYR_JUDGMENT_MODEL=qwen3.7-plus` 与
-`FLAYR_VISION_MODEL=qwen3-vl-plus`；只设置其中一个会在任务启动前失败。仅在两者都未设置时，
-才读取旧的 `FLAYR_LLM_MODEL` 单模型兼容变量，不会自动回退到 `qwen3.6-plus`。
+完整参数以命令帮助为准：
 
-需要人工观察 3.6 时，显式使用 `--judgment-model qwen3.6-plus --vision-model qwen3-vl-plus`；
-这只是一次新的、可审计的模型选择，不是运行失败后的自动 fallback。
-
-> 注：在线 Fun-ASR 是 compare/improve 的语音证据依赖；调用失败时默认返回非零，不会发布为完成状态。只有显式使用 `--allow-degraded` 才会继续生成降级报告，并写入 `degraded` 状态；不会伪造缺失的转写或证据。
-
----
-
-## 五、工作流程
-
+```bash
+python3 scripts/flayr.py --help
 ```
+
+## Web 用法
+
+Web worker 读取上一节的 `FLAYR_*` 配置。判断模型和视觉模型只设置一个时，任务会在启动分析前失败。
+
+```bash
+python3 scripts/web_app.py --host 127.0.0.1 --port 8787
+```
+
+启动后访问 `http://127.0.0.1:8787/`。默认只监听本机。对外监听必须显式使用 `--unsafe-expose`，并配置不少于 32 字节的 `FLAYR_WEB_AUTH_TOKEN` 和允许访问的 `FLAYR_WEB_ALLOWED_HOSTS`。使用前先查看：
+
+```bash
+python3 scripts/web_app.py --help
+```
+
+## 工作流程
+
+```text
 视频输入
-  ↓
-[1] 在线转写 + 抽帧 + 抽音频（Fun-ASR + ffmpeg）
-  ↓
-[2] 翻译（可选，LLM）
-  ↓
-[3] 阶段一：canonical 帧/时间线 + ASR/OCR 抽取事实；必要时 Stage1-C 定向看一次原生片段
-  ↓
-[4] 阶段二：只读冻结 facts 做分组判断，不附视频
-  ↓
-[5] Phase C 可选回看（独立结构信号触发，原生片段只生成受限事实补丁一次）
-  ↓
-[6] 校验 + 修补（postprocess chain + QA-RULES）
-  ↓
-[7] 渲染报告（report.html）
-  ↓
-输出到 runs/<时间戳>/
+  -> 在线转写、抽帧和音频提取
+  -> 可选的转写翻译
+  -> Stage1 单视频事实抽取和资格投影
+  -> Stage2 分阶段比较
+  -> 必要时 Phase C 定向复核
+  -> 后处理、契约校验和报告渲染
+  -> 输出到 --output-dir 或 runs/<时间戳>/
 ```
 
----
+## 输入与输出
 
-## 六、输出产物
+所有模式都需要参考视频；`compare`、`improve`、`scope` 还需要达人视频。建议明确提供产品名称、产品类别、目标市场和已核实卖点；目标用户与购买动机可进一步收窄判断上下文。未提供的信息不会由 README 示例替用户推断。
+
+成功的 `compare` 或 `improve` 运行会写入 `_SUCCESS.json`。降级运行会写入 `degraded_manifest.json`，不会伪装成成功。
+
+主要产物：
 
 | 文件 | 说明 |
 |------|------|
-| `report.html` | 主报告，可直接在浏览器打开 |
-| `analysis.json` | 完整分析数据 |
-| `analysis_result.json` | LLM 分析结果（归一化和统一后处理后） |
-| `raw_model_response.json` / `validated_normalized_result.json` / `final_derived_result.json` | LLM 原始、校验规范化和最终派生结果 |
-| `analysis_replay_context.json` / `postprocess_provenance` | 绑定确定性重放所需的分析上下文、输入哈希和规范化结果哈希；缺失或哈希不匹配时不得重放 |
-| `postprocess_change_log.json` | 后处理字段变更、规则、证据和字段来源记录 |
-| `video_facts_{benchmark,creator}.json` | 阶段一单视频事实清单 |
-| `stage1_provider_{role}_{A|B|C|D}*.json` | Stage1-A 观察、B 资格投影、C 定向补观察、D 定向重投影的 provider 原始 JSON、完整请求身份、响应哈希、重试与 usage 元数据；可用 `--stage1-replay-from` 严格重放 |
-| `stage2_provider_{GROUP}.json` | Stage2/Stage3 provider 原始 JSON、请求身份、响应哈希、重试与 usage 元数据；可用 `--stage2-replay-from` 严格重放 |
-| `provider_asr.json` | Fun-ASR 原始响应、请求身份、响应哈希和执行来源；可随主运行严格技术重放 |
-| `provider_compact_eval.json` | 独立 compact/cohort/control provider 原始响应；各评估入口支持严格技术重放 |
-| `transcript.txt` / `.srt` / `.zh.txt` | 转写与翻译 |
-| `frames/` `focus_frames/` | 抽取的关键帧 |
-| `frames/analysis_manifest.json` / `analysis_stage_frames.json` | 由镜头、字幕、变化点和词级 ASR 边界共同生成的 canonical 模型输入帧集 |
-| `frames/selection_report.*` | 全片帧去重审计，记录每帧 keep/drop 原因；不替代 canonical manifest |
-| `contact_sheets/` | canonical Hook、CTA、S1-S6 的顺序联系表 |
-| `timeline_views/` | canonical Hook、CTA 的帧序列 + 波形 + 口播证据图，并记录帧来源 |
-| `transcript_packed.*` | 带时间戳的紧凑口播索引 |
-| `video_evidence_audit.json` | 二级证据视图自检结果 |
+| `bd_report.html` | 业务分析报告 |
+| `creator_report.html` | 达人执行报告 |
+| `report.html` | 通用报告 |
+| `analysis.json` | 完整运行数据和状态 |
+| `analysis_result.json` | 归一化后的模型分析结果 |
+| `raw_model_response.json` | 原始模型响应 |
+| `validated_normalized_result.json` | 通过契约校验的规范化结果 |
+| `final_derived_result.json` | 最终派生结果和字段来源 |
+| `analysis_replay_context.json` | 最终处理回放所需的上下文与输入哈希 |
+| `postprocess_change_log.json` | 后处理字段变更、规则和证据记录 |
+| `video_facts_benchmark.json` / `video_facts_creator.json` | 两侧 Stage1 事实清单 |
+| `stage1_provider_*.json` / `stage2_provider_*.json` | Provider 响应、请求身份、哈希和执行来源 |
+| `provider_asr.json` | ASR 原始响应、请求身份、哈希和执行来源 |
+| `benchmark/` / `creator/` | 各侧转写、帧、联系表、时间线和证据审计产物 |
 
----
+## 回放
 
-### 分层 GT 验证
-
-新 blind 样本必须先完成人工 `human_gap`、`stage_relations`、`key_events`、`stage_oracles` 和 `decision_gt`，再冻结 cohort。旧 `stages` 只能作为兼容投影：
-
-```bash
-python3 scripts/manage_validation_cohort.py freeze \
-  --sample <sample-id> \
-  --provider <provider-id> \
-  --judgment-model qwen3.7-plus \
-  --vision-model qwen3-vl-plus \
-  --api-url <compatible-api-url> \
-  --temperature 0 \
-  --output runs/validation/<cohort-id>.lock.json
-```
-
-冻结时还必须显式锁定完整模型执行配置：生成上限、top-p/seed、response format、stop 序列、传输重试、完成尝试次数，以及 connect/read/low-speed/overall timeout；缺少 `FLAYR_VALIDATION_ROOT`、代码提交、prompt/schema/evaluator/GT/video identity 或模型配置 hash 时，freeze 会返回 `CohortFreezeStatus BLOCKED`。
-
-`evaluate_analysis.py --cohort-lock ...` 会分别报告预处理可用性、Stage1 事实召回、Stage2
-证据使用/判断、derive oracle 回放、Phase C 净收益和 Top-N 商业根因。cohort 结果一旦打开或用于
-修改规则，须执行 `manage_validation_cohort.py spend`，该批样本以后只作 `seen_validation` 回归。
-
-当前先执行不具备 promotion 资格的离线语义基线。它绑定生产行为提交、模型路由、GT 迁移规则、
-严重错误门槛和冻结期变更分类；先复用现有 artifact，不调用视频模型：
-
-```bash
-python3 scripts/build_legacy_gt_migration_inventory.py --check
-python3 scripts/verify_semantic_baseline_freeze.py
-python3 scripts/evaluate_analysis.py --semantic-baseline-freeze --output <baseline.json>
-```
-
-冻结协议见 [`references/semantic-baseline-freeze.md`](references/semantic-baseline-freeze.md)。旧 16 组的
-`small` 不会自动解释成当前 `small` 或 `none`，未确认格子不进入语义分母。人工原话与工程迁移建议
-集中在 [`references/legacy-gt-migration-review.md`](references/legacy-gt-migration-review.md)，它不是权威 GT。
-
-验证清单中的视频路径使用 `${FLAYR_VALIDATION_ROOT}` 占位符。运行冻结或评测前，需在本地环境设置该变量；真实视频目录不应写入仓库或作业清单。
-
-### 代码修复后的回放
-
-确定性后处理只使用已经验证的 canonical 结果和同一次运行的
-`analysis_replay_context.json`、`analysis_input.md`。运行：
+确定性最终处理只读取已存在的规范化结果、分析上下文和输入哈希，不读取视频，也不调用外部服务：
 
 ```bash
 python3 scripts/replay_finalization.py <source-run> <new-output-dir>
 ```
 
-这个命令在 provenance 缺失、规范化结果、分析上下文或输入哈希不一致时直接失败，
-不会读取视频、调用 ASR 或调用 LLM。Stage1/Stage2 provider 结果则分别使用
-`--stage1-replay-from` / `--stage2-replay-from`；请求身份变化时必须语义重跑，不能静默混用。
+Stage1、Stage2 或完整 Provider 结果可分别通过 `--stage1-replay-from`、`--stage2-replay-from` 和 `--provider-replay-from` 严格回放。缺失产物或请求身份不匹配会直接失败，不会静默回退到在线调用。
 
----
+## 验证
 
-## 七、设计原则
-
-1. **模态分工明确**：视觉模型负责可见事实和定向视频复核；在线 Fun-ASR 是口播语义权威源；判断模型只读冻结事实，不假装直接看过或听过原视频
-2. **关注变化点**：预算内自适应基础帧叠加镜头、字幕、局部变化和词级口播边界，模型消费统一的 canonical manifest
-3. **事实与判断分离**：阶段一锁定事实防串供，阶段二在事实基线上做感官判断
-4. **按证据形态切换主骨架**：有口播用口播时间线，无口播则切到字幕/OCR、画面变化、镜头轨和音频节奏
-5. **状态明确**：可选依赖缺失记录 `degraded`；已请求的 API、模型输出或 schema 失败返回非零；没有完成模型分析时，对比/改进默认失败，只有显式 `--allow-degraded` 才能继续
-6. **证据可追溯**：每个结论都绑定时间点和画面/口播证据
-7. **GMV 导向**：所有建议围绕停留、信任、下单转化
-8. **本地化**：话术用达人原语言，适配东南亚市场
-
-## 八、Bitter Lesson 落地门禁
-
-Flayr 的结论来自证据供应链，不是一次模型调用。冻结的层边界、字段类型、不变量、
-非目标和验收顺序位于 [`references/bitter-lesson-frozen-spec.json`](references/bitter-lesson-frozen-spec.json)。
-实现前后的判断清单位于 [`references/bitter-lesson-implementation-audit.md`](references/bitter-lesson-implementation-audit.md)。
-
-测试前会验证冻结规格和契约测试哈希：
+运行单元测试和质量检查：
 
 ```bash
-PYTHONPATH=scripts python3 scripts/verify_bitter_lesson_contract.py
+python3 -m unittest discover -s tests -v
+bash scripts/run-quality-gates.sh
+python3 scripts/check_release.py
 ```
 
-开始一次代码批次前，必须用冻结的文件和行数预算检查范围；超出预算就拆批次，不能在同一批次继续扩张：
+## 设计原则
 
-```bash
-PYTHONPATH=scripts python3 scripts/check_change_scope.py --base-ref HEAD
-```
-
-真实视频的验收顺序固定为 `fixture -> offline replay -> fake provider -> ordinary sample -> boundary sample`。
-真实视频不再同时承担开发调试、回归验证和最终验收三种角色。
+1. **模态分工明确**：视觉模型负责可见事实和定向视频复核，ASR 服务负责口播转写，判断模型只读取确认后的事实。
+2. **事实与判断分离**：Stage1 生成事实，Stage2 在事实账本上比较，避免两侧证据串用。
+3. **证据可追溯**：事实、判断和建议绑定时间范围、证据 ID 与执行来源。
+4. **失败显式化**：外部服务、模型输出或契约失败返回非零；降级结果不会写成功清单。
+5. **有限复核**：原生视频只用于触发条件明确的定向复核，不创建第二套事实系统。
+6. **商业导向**：建议围绕停留、信任和下单转化组织。
+7. **本地化**：输出适配目标市场，话术建议保留达人使用的语言语境。
