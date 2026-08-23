@@ -30,7 +30,12 @@ from .artifacts import (
     sample_evenly,
 )
 from .llm.api import call_llm_api, extract_chat_completion_text, image_to_data_url
-from .llm.provider_artifacts import provider_call_with_artifact, provider_role_replay_root
+from .llm.provider_artifacts import (
+    provider_call_with_artifact,
+    provider_role_replay_root,
+    replayable_completed_provider_artifact,
+    replayable_failed_provider_artifact,
+)
 from .resources import ResourceBudget, ResourceBudgetExceeded, current_budget, finite_nonnegative
 from .utils import write_json
 
@@ -281,7 +286,30 @@ def ocr_frame_with_retry(
             )
         except (Exception, SystemExit) as exc:  # noqa: BLE001 — live OCR is optional; replay remains strict.
             if provider_replay_from is not None:
-                raise
+                if attempt != 0:
+                    raise
+                failed_artifact = replayable_failed_provider_artifact(
+                    Path(provider_replay_from) / f"provider_ocr_{index:03d}_attempt1.json",
+                    call_kind=f"ocr:{index:03d}:1",
+                    payload=payload,
+                    model=model,
+                    api_url=api_url,
+                )
+                write_json(
+                    meta_path,
+                    {
+                        "schema_version": 1,
+                        "attempt": attempt + 1,
+                        "status": "failed",
+                        "error": str(failed_artifact.get("error") or exc)[:500],
+                        "provider_meta": live_meta,
+                        "provider_artifact": f"provider_ocr_{index:03d}_attempt1.json",
+                        "execution_source": "technical_replay",
+                        "replayed_failure": True,
+                        "retry_scheduled": True,
+                    },
+                )
+                continue
             write_json(
                 meta_path,
                 {
@@ -302,7 +330,30 @@ def ocr_frame_with_retry(
             text = extract_chat_completion_text(provider_response)
         except (Exception, SystemExit) as exc:  # noqa: BLE001 — malformed live OCR is retried.
             if provider_replay_from is not None:
-                raise
+                if attempt != 0:
+                    raise
+                replayable_completed_provider_artifact(
+                    Path(provider_replay_from) / f"provider_ocr_{index:03d}_attempt1.json",
+                    call_kind=f"ocr:{index:03d}:1",
+                    payload=payload,
+                    model=model,
+                    api_url=api_url,
+                )
+                write_json(
+                    meta_path,
+                    {
+                        "schema_version": 1,
+                        "attempt": attempt + 1,
+                        "status": "invalid_response",
+                        "error": str(exc)[:500],
+                        "provider_meta": response_meta,
+                        "provider_artifact": f"provider_ocr_{index:03d}_attempt1.json",
+                        "execution_source": "technical_replay",
+                        "replayed_invalid_response": True,
+                        "retry_scheduled": True,
+                    },
+                )
+                continue
             write_json(
                 meta_path,
                 {

@@ -253,6 +253,49 @@ def reusable_provider_response(
     )
 
 
+def replayable_failed_provider_artifact(
+    path: Path,
+    *,
+    call_kind: str,
+    payload: Any,
+    model: str,
+    api_url: str,
+) -> dict[str, Any]:
+    """Validate a failed artifact that may drive a deterministic retry."""
+    artifact = read_provider_artifact(path)
+    if artifact.get("status") != "failed":
+        raise ProviderReplayError("provider replay retry requires a failed artifact")
+    expected = provider_request_identity(
+        call_kind=call_kind,
+        payload=payload,
+        model=model,
+        api_url=api_url,
+    )
+    if artifact.get("request_identity") != expected:
+        raise ProviderReplayError("provider replay retry request identity mismatch")
+    return artifact
+
+
+def replayable_completed_provider_artifact(
+    path: Path,
+    *,
+    call_kind: str,
+    payload: Any,
+    model: str,
+    api_url: str,
+) -> dict[str, Any]:
+    """Validate a completed artifact before deterministic response retry handling."""
+    artifact = read_provider_artifact(path)
+    reusable_provider_response(
+        artifact,
+        call_kind=call_kind,
+        payload=payload,
+        model=model,
+        api_url=api_url,
+    )
+    return artifact
+
+
 def provider_call_with_artifact(
     *,
     artifact_path: Path,

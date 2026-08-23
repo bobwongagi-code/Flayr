@@ -43,7 +43,14 @@ from flayr_core.llm import api as llm_api
 from flayr_core.llm import media as llm_media
 from flayr_core.llm import payload as payload_module
 from flayr_core.llm import pipeline
-from flayr_core.llm.provider_artifacts import ProviderCallError, ProviderReplayError, read_provider_artifact
+from flayr_core.llm.provider_artifacts import (
+    ProviderCallError,
+    ProviderReplayError,
+    completed_provider_artifact,
+    failed_provider_artifact,
+    read_provider_artifact,
+    write_provider_artifact,
+)
 from flayr_core.llm.analysis_contract import (
     AnalysisContractError,
     validate_normalized_analysis_contract,
@@ -2559,6 +2566,231 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertEqual(call.call_args.kwargs["retries"], 0)
             self.assertEqual(call.call_args.kwargs["request_id"], "ocr-000-2")
             self.assertIn("provider_meta", json.loads((root / "ocr_000_attempt2_meta.json").read_text(encoding="utf-8")))
+
+    def test_ocr_strict_replay_replays_failed_attempt_before_completed_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            replay_root = root / "replay"
+            target_root = root / "target"
+            frame = root / "frame.jpg"
+            frame.write_bytes(b"\xff\xd8\xff" + b"not-a-real-jpeg")
+            payload = {"model": "vision-test", "request": "ocr"}
+            response = {"choices": [{"message": {"content": "字幕"}}]}
+            metadata = {
+                "logical_request_id": "ocr-replay",
+                "completion_attempts": 1,
+                "retry_reasons": [],
+                "usage": {},
+            }
+            write_provider_artifact(
+                replay_root / "provider_ocr_000_attempt1.json",
+                failed_provider_artifact(
+                    call_kind="ocr:000:1",
+                    payload=payload,
+                    model="vision-test",
+                    api_url="https://example.test/v1/chat/completions",
+                    error="transport failed",
+                    response_meta=metadata,
+                ),
+            )
+            write_provider_artifact(
+                replay_root / "provider_ocr_000_attempt2.json",
+                completed_provider_artifact(
+                    call_kind="ocr:000:2",
+                    payload=payload,
+                    response=response,
+                    model="vision-test",
+                    api_url="https://example.test/v1/chat/completions",
+                    response_meta=metadata,
+                ),
+            )
+            with mock.patch.object(
+                subtitle_track,
+                "build_ocr_payload",
+                return_value=payload,
+            ), mock.patch.object(
+                subtitle_track,
+                "call_llm_api",
+                side_effect=AssertionError("strict OCR replay must not call provider"),
+            ) as live_call:
+                lines, status = subtitle_track.ocr_frame_with_retry(
+                    frame,
+                    "",
+                    "https://example.test/v1/chat/completions",
+                    "vision-test",
+                    target_root,
+                    0,
+                    provider_replay_from=replay_root,
+                )
+
+            self.assertEqual(lines, ["字幕"])
+            self.assertEqual(status, "ocr_ready")
+            live_call.assert_not_called()
+            retry_meta = json.loads(
+                (target_root / "ocr_000_attempt1_meta.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(retry_meta["replayed_failure"])
+            self.assertTrue(retry_meta["retry_scheduled"])
+            self.assertEqual(retry_meta["execution_source"], "technical_replay")
+            self.assertEqual(retry_meta["error"], "transport failed")
+
+    def test_ocr_strict_replay_rejects_failed_attempt_identity_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            replay_root = root / "replay"
+            frame = root / "frame.jpg"
+            frame.write_bytes(b"\xff\xd8\xff" + b"not-a-real-jpeg")
+            payload = {"model": "vision-test", "request": "ocr"}
+            metadata = {
+                "logical_request_id": "ocr-mismatch",
+                "completion_attempts": 1,
+                "retry_reasons": [],
+                "usage": {},
+            }
+            write_provider_artifact(
+                replay_root / "provider_ocr_000_attempt1.json",
+                failed_provider_artifact(
+                    call_kind="ocr:000:1",
+                    payload={"model": "vision-test", "request": "different"},
+                    model="vision-test",
+                    api_url="https://example.test/v1/chat/completions",
+                    error="transport failed",
+                    response_meta=metadata,
+                ),
+            )
+            with mock.patch.object(
+                subtitle_track,
+                "build_ocr_payload",
+                return_value=payload,
+            ), mock.patch.object(
+                subtitle_track,
+                "call_llm_api",
+                side_effect=AssertionError("identity mismatch must not call provider"),
+            ) as live_call:
+                with self.assertRaisesRegex(ProviderReplayError, "identity mismatch"):
+                    subtitle_track.ocr_frame_with_retry(
+                        frame,
+                        "",
+                        "https://example.test/v1/chat/completions",
+                        "vision-test",
+                        root / "target",
+                        0,
+                        provider_replay_from=replay_root,
+                    )
+            live_call.assert_not_called()
+
+    def test_ocr_strict_replay_rejects_failed_second_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            replay_root = root / "replay"
+            frame = root / "frame.jpg"
+            frame.write_bytes(b"\xff\xd8\xff" + b"not-a-real-jpeg")
+            payload = {"model": "vision-test", "request": "ocr"}
+            metadata = {
+                "logical_request_id": "ocr-failed-twice",
+                "completion_attempts": 1,
+                "retry_reasons": [],
+                "usage": {},
+            }
+            for attempt in (1, 2):
+                write_provider_artifact(
+                    replay_root / f"provider_ocr_000_attempt{attempt}.json",
+                    failed_provider_artifact(
+                        call_kind=f"ocr:000:{attempt}",
+                        payload=payload,
+                        model="vision-test",
+                        api_url="https://example.test/v1/chat/completions",
+                        error=f"transport failed {attempt}",
+                        response_meta=metadata,
+                    ),
+                )
+            with mock.patch.object(
+                subtitle_track,
+                "build_ocr_payload",
+                return_value=payload,
+            ), mock.patch.object(
+                subtitle_track,
+                "call_llm_api",
+                side_effect=AssertionError("failed strict replay must not call provider"),
+            ) as live_call:
+                with self.assertRaisesRegex(ProviderReplayError, "completed artifact"):
+                    subtitle_track.ocr_frame_with_retry(
+                        frame,
+                        "",
+                        "https://example.test/v1/chat/completions",
+                        "vision-test",
+                        root / "target",
+                        0,
+                        provider_replay_from=replay_root,
+                    )
+            live_call.assert_not_called()
+
+    def test_ocr_strict_replay_retries_completed_malformed_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            replay_root = root / "replay"
+            target_root = root / "target"
+            frame = root / "frame.jpg"
+            frame.write_bytes(b"\xff\xd8\xff" + b"not-a-real-jpeg")
+            payload = {"model": "vision-test", "request": "ocr"}
+            malformed_response = {"choices": [{"message": {"content": {"bad": True}}}]}
+            valid_response = {"choices": [{"message": {"content": "字幕"}}]}
+            metadata = {
+                "logical_request_id": "ocr-malformed",
+                "completion_attempts": 1,
+                "retry_reasons": [],
+                "usage": {},
+            }
+            write_provider_artifact(
+                replay_root / "provider_ocr_000_attempt1.json",
+                completed_provider_artifact(
+                    call_kind="ocr:000:1",
+                    payload=payload,
+                    response=malformed_response,
+                    model="vision-test",
+                    api_url="https://example.test/v1/chat/completions",
+                    response_meta=metadata,
+                ),
+            )
+            write_provider_artifact(
+                replay_root / "provider_ocr_000_attempt2.json",
+                completed_provider_artifact(
+                    call_kind="ocr:000:2",
+                    payload=payload,
+                    response=valid_response,
+                    model="vision-test",
+                    api_url="https://example.test/v1/chat/completions",
+                    response_meta=metadata,
+                ),
+            )
+            with mock.patch.object(
+                subtitle_track,
+                "build_ocr_payload",
+                return_value=payload,
+            ), mock.patch.object(
+                subtitle_track,
+                "call_llm_api",
+                side_effect=AssertionError("strict OCR replay must not call provider"),
+            ) as live_call:
+                lines, status = subtitle_track.ocr_frame_with_retry(
+                    frame,
+                    "",
+                    "https://example.test/v1/chat/completions",
+                    "vision-test",
+                    target_root,
+                    0,
+                    provider_replay_from=replay_root,
+                )
+
+            self.assertEqual(lines, ["字幕"])
+            self.assertEqual(status, "ocr_ready")
+            live_call.assert_not_called()
+            retry_meta = json.loads(
+                (target_root / "ocr_000_attempt1_meta.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(retry_meta["replayed_invalid_response"])
+            self.assertTrue(retry_meta["retry_scheduled"])
+            self.assertEqual(retry_meta["execution_source"], "technical_replay")
 
     def test_ocr_payload_uses_provider_minimum_image_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
