@@ -22,6 +22,8 @@ from flayr_core.llm.pipeline import (  # noqa: E402
     _stage1_to_stage2_handoff_issues,
     _mark_legacy_import_result,
     _full_provider_replay_requested,
+    _stage1_replay_source,
+    _stage2_replay_source,
     merge_analysis_result,
     run_large_model_analysis,
 )
@@ -32,6 +34,7 @@ from flayr_core.llm.provider_artifacts import (  # noqa: E402
 )
 from scripts.audit_result_field_ownership import inventory, ownership_violations  # noqa: E402
 from flayr_core.llm.stage_fact_artifacts import (  # noqa: E402
+    StageFactArtifactError,
     completed_stage_fact_artifact,
     failed_stage_fact_artifact,
     reusable_stage_fact_response,
@@ -752,7 +755,57 @@ class BitterLessonContractTests(unittest.TestCase):
         )
         self.assertTrue(_full_provider_replay_requested(args))
         args.stage2_replay_from = None
+        self.assertTrue(_full_provider_replay_requested(args))
+
+        args.stage1_replay_from = None
+        self.assertTrue(_full_provider_replay_requested(args))
+
+        args.provider_replay_from = None
         self.assertFalse(_full_provider_replay_requested(args))
+
+        args.stage2_replay_from = Path("/replay/stage2")
+        self.assertFalse(_full_provider_replay_requested(args))
+
+        args.stage1_replay_from = Path("/replay/stage1")
+        self.assertFalse(_full_provider_replay_requested(args))
+
+    def test_global_provider_replay_is_strict_stage1_source(self) -> None:
+        args = argparse.Namespace(
+            provider_replay_from=Path("/replay/all"),
+            stage1_replay_from=None,
+            stage1_resume_from=Path("/resume/stage1"),
+        )
+
+        source, fallback_allowed = _stage1_replay_source(args)
+
+        self.assertEqual(source, Path("/replay/all").resolve())
+        self.assertFalse(fallback_allowed)
+
+    def test_global_provider_replay_is_strict_stage2_source(self) -> None:
+        args = argparse.Namespace(
+            provider_replay_from=Path("/replay/all"),
+            stage2_replay_from=Path("/replay/stage2"),
+            stage2_resume_from=Path("/resume/stage2"),
+        )
+
+        source, fallback_allowed = _stage2_replay_source(args)
+
+        self.assertEqual(source, Path("/replay/all").resolve())
+        self.assertFalse(fallback_allowed)
+
+    def test_global_provider_replay_stage_fact_failure_is_strict(self) -> None:
+        args = argparse.Namespace(
+            provider_replay_from=Path("/replay/all"),
+            stage1_replay_from=None,
+            stage2_replay_from=None,
+        )
+
+        self.assertTrue(
+            pipeline_module._is_strict_replay_failure(
+                args,
+                StageFactArtifactError("request identity mismatch"),
+            )
+        )
 
 
 if __name__ == "__main__":

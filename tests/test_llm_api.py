@@ -32,6 +32,7 @@ from flayr_core.llm.media import build_evidence_sensory_inputs  # noqa: E402
 from flayr_core.llm.payload import build_video_fact_payload  # noqa: E402
 from flayr_core.llm.pipeline import (  # noqa: E402
     _deterministic_product_visibility,
+    run_segmented_stage_pipeline,
     run_video_fact_extraction,
 )
 from flayr_core.resources import ResourceBudget, ResourceLimits  # noqa: E402
@@ -538,6 +539,103 @@ class LlmApiContractTests(unittest.TestCase):
                     run_video_fact_extraction(args, analysis, run_dir, "secret")
 
         fetch.assert_not_called()
+
+    def test_global_provider_replay_does_not_fall_back_to_provider(self) -> None:
+        args = Namespace(
+            llm_image_limit=8,
+            llm_dry_run=False,
+            llm_model="qwen-test",
+            llm_api_url="https://example.test/v1/chat/completions",
+            provider_replay_from=None,
+            stage1_replay_from=None,
+            stage1_resume_from=None,
+            _resource_budget=None,
+        )
+        analysis = {"videos": {"creator": {}}}
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            self.assertRaises(StageFactArtifactError),
+            mock.patch(
+                "flayr_core.llm.pipeline.select_role_visual_inputs",
+                return_value=[],
+            ),
+            mock.patch(
+                "flayr_core.llm.pipeline.build_video_fact_payload",
+                return_value={"messages": []},
+            ),
+            mock.patch(
+                "flayr_core.llm.pipeline.fetch_json_completion",
+            ) as fetch,
+        ):
+            args.provider_replay_from = Path(tmp) / "missing-provider-replay"
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            run_video_fact_extraction(args, analysis, run_dir, "secret")
+
+        fetch.assert_not_called()
+
+    def test_global_provider_replay_stage2_missing_artifact_does_not_call_provider(self) -> None:
+        args = Namespace(
+            llm_model="qwen-test",
+            llm_api_url="https://example.test/v1/chat/completions",
+            provider_replay_from=None,
+            stage2_replay_from=None,
+            stage2_resume_from=None,
+            _resource_budget=None,
+        )
+        analysis = {"videos": {}, "comparison_contract": {}}
+        handoff = {"version": 1, "pipeline": "segmented_stage_v1", "roles": {}}
+
+        def project(_raw, code, _facts, _comparison=None):
+            return {
+                "stage": code,
+                "stage_state": "unknown",
+                "stage_handoff_status": "grounded",
+                "model_gap_magnitude": "uncertain",
+                "model_severity": "uncertain",
+                "severity": "uncertain",
+                "comparison_status": "direct",
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args.provider_replay_from = Path(tmp) / "missing-provider-replay"
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            with (
+                mock.patch(
+                    "flayr_core.llm.pipeline._build_stage1_to_stage2_handoff",
+                    return_value=handoff,
+                ),
+                mock.patch(
+                    "flayr_core.llm.pipeline._stage1_to_stage2_handoff_issues",
+                    return_value=[],
+                ),
+                mock.patch(
+                    "flayr_core.llm.pipeline.build_stage_group_judgment_payload",
+                    return_value={"kind": "stage_group"},
+                ),
+                mock.patch(
+                    "flayr_core.llm.pipeline._normalize_segmented_stage",
+                    side_effect=project,
+                ),
+                mock.patch(
+                    "flayr_core.llm.pipeline.fetch_json_completion",
+                ) as fetch,
+            ):
+                result = run_segmented_stage_pipeline(
+                    args,
+                    analysis,
+                    "analysis input",
+                    {},
+                    run_dir,
+                    "secret",
+                )
+
+        fetch.assert_not_called()
+        first_group = result["segmented_pipeline"]["stage_groups"][0]
+        self.assertEqual(first_group["status"], "failed")
+        self.assertIn("无法离线重放", first_group["error"])
+        self.assertEqual(result["stage2_candidate_status"], "degraded")
 
     def test_evidence_normalization_is_lossless_unless_limit_is_explicit(self) -> None:
         values = [f"E{index}" for index in range(1, 9)]

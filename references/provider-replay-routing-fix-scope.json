@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "name": "provider-replay-routing-fix-2026-08-23",
+  "change_scope": {
+    "max_files": 5,
+    "max_added_lines": 220,
+    "max_deleted_lines": 20,
+    "allowed_globs": [
+      "references/provider-replay-routing-fix-scope.json",
+      "references/bitter-lesson-frozen-spec.json",
+      "scripts/flayr_core/llm/pipeline.py",
+      "tests/test_bitter_lesson_contract.py",
+      "tests/test_llm_api.py"
+    ],
+    "forbidden_globs": [
+      "runs/**",
+      "outputs/**",
+      "jobs*.json",
+      "scripts/**/__pycache__/**"
+    ]
+  },
+  "non_goals": [
+    "Do not change business contracts, prompts, evidence qualification, or Stage2 semantics.",
+    "Do not change model routing, fallback policy, thresholds, samples, or frozen baselines.",
+    "Do not change verification gates or rerun the fake provider / real video analysis."
+  ]
+}

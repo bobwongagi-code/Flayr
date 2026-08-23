@@ -258,12 +258,22 @@ def _is_strict_replay_failure(args: argparse.Namespace, exc: BaseException) -> b
     if isinstance(exc, ProviderReplayError):
         return any(
             getattr(args, name, None) is not None
-            for name in ("provider_replay_from", "stage2_replay_from")
+            for name in (
+                "provider_replay_from",
+                "stage1_replay_from",
+                "stage2_replay_from",
+            )
         )
     if isinstance(exc, StageFactArtifactError):
-        return getattr(args, "stage1_replay_from", None) is not None
+        return any(
+            getattr(args, name, None) is not None
+            for name in ("provider_replay_from", "stage1_replay_from")
+        )
     if isinstance(exc, StageGroupArtifactError):
-        return getattr(args, "stage2_replay_from", None) is not None
+        return any(
+            getattr(args, name, None) is not None
+            for name in ("provider_replay_from", "stage2_replay_from")
+        )
     return False
 
 
@@ -288,11 +298,8 @@ def _analysis_artifact_dir(analysis: dict[str, Any]) -> Path | None:
 
 
 def _full_provider_replay_requested(args: argparse.Namespace) -> bool:
-    """Return whether every LLM provider boundary has a strict replay source."""
-    return all(
-        getattr(args, name, None)
-        for name in ("provider_replay_from", "stage1_replay_from", "stage2_replay_from")
-    )
+    """Return whether every provider boundary has the global strict replay source."""
+    return bool(getattr(args, "provider_replay_from", None))
 
 
 def _clamp_result_time_ranges(result: dict[str, Any], analysis: dict[str, Any]) -> None:
@@ -1808,8 +1815,11 @@ def _stage1_to_stage2_handoff_issues(
 
 def _stage2_replay_source(args: argparse.Namespace) -> tuple[Path | None, bool]:
     """Return the source directory and whether missing entries may call LLM."""
+    provider_replay = getattr(args, "provider_replay_from", None)
     replay = getattr(args, "stage2_replay_from", None)
     resume = getattr(args, "stage2_resume_from", None)
+    if isinstance(provider_replay, (str, Path)) and str(provider_replay):
+        return Path(provider_replay).expanduser().resolve(), False
     if replay:
         return Path(replay).expanduser().resolve(), False
     if resume:
@@ -1819,8 +1829,11 @@ def _stage2_replay_source(args: argparse.Namespace) -> tuple[Path | None, bool]:
 
 def _stage1_replay_source(args: argparse.Namespace) -> tuple[Path | None, bool]:
     """Return the frozen Stage1 artifact source and provider fallback policy."""
+    provider_replay = getattr(args, "provider_replay_from", None)
     replay = getattr(args, "stage1_replay_from", None)
     resume = getattr(args, "stage1_resume_from", None)
+    if isinstance(provider_replay, (str, Path)) and str(provider_replay):
+        return Path(provider_replay).expanduser().resolve(), False
     if isinstance(replay, (str, Path)) and str(replay):
         return Path(replay).expanduser().resolve(), False
     if isinstance(resume, (str, Path)) and str(resume):
