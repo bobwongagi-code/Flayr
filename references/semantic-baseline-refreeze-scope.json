@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-canonical-timing-fix-2026-08-23",
+  "name": "semantic-baseline-refreeze-after-provider-replay-fix-2026-08-23",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
