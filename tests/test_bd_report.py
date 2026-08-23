@@ -147,13 +147,45 @@ class BdReportTests(unittest.TestCase):
             },
         ]
         data = build_bd_report_data(analysis)
-        self.assertEqual(data["summary"]["verdict"], "人工复核摘要")
+        self.assertEqual(data["summary"]["verdict"], analysis["one_line_verdict"])
+        self.assertEqual(data["summary"]["detail"], analysis["executive_summary"])
+        self.assertEqual(data["reviewStatus"], "approved")
+        self.assertEqual(data["gates"][0]["text"], "主卖点路线：主卖点路线需要先处理。")
         self.assertEqual(data["stages"][0]["severityLabel"], "无差距")
         self.assertEqual(data["stages"][0]["gap"], "无差距")
         self.assertEqual(data["stages"][1]["severityLabel"], "未涉及")
         self.assertEqual(data["stages"][1]["gap"], "未涉及")
         self.assertEqual(data["stages"][2]["severityLabel"], "证据不足，无法比较")
         self.assertEqual(data["stages"][2]["gap"], "证据不足，无法比较")
+
+    def test_review_summary_is_approved_fallback_only_when_commercial_summary_is_missing(self) -> None:
+        analysis = self._analysis()
+        analysis["review_status"] = "approved"
+        analysis["review_summary"] = {"verdict": "人工复核摘要", "detail": "人工复核详情"}
+        analysis.pop("one_line_verdict")
+        analysis.pop("executive_summary")
+        analysis.pop("commercial_priority_summary", None)
+        analysis["one_line_summary"] = "旧版摘要不应覆盖人工复核摘要"
+
+        data = build_bd_report_data(analysis)
+
+        self.assertEqual(data["summary"], {"verdict": "人工复核摘要", "detail": "人工复核详情"})
+        self.assertEqual(data["reviewStatus"], "approved")
+
+    def test_reviewed_summary_and_global_gates_precede_stage_payload(self) -> None:
+        analysis = self._analysis()
+        analysis["review_status"] = "approved"
+        analysis["review_summary"] = {"verdict": "不应覆盖", "detail": "不应覆盖"}
+        data = build_bd_report_data(analysis)
+
+        keys = list(data)
+        self.assertLess(keys.index("summary"), keys.index("gates"))
+        self.assertLess(keys.index("gates"), keys.index("stages"))
+        self.assertEqual(data["gates"][0]["priorityLabel"], "高优先级")
+        self.assertEqual(data["stages"][0]["code"], "S1")
+
+        template = Path("assets/bd_report.html").read_text(encoding="utf-8")
+        self.assertLess(template.index('id="summary-verdict"'), template.index('id="stage-tabs"'))
 
 
 if __name__ == "__main__":

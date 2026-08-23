@@ -117,7 +117,7 @@ def build_bd_report_data(
         _improvement_payload(item, rank, benchmark_understanding)
         for rank, item in enumerate(_sorted_improvements([item.data for item in semantic.improvements])[:3], start=1)
     ]
-    summary = _summary_payload(semantic)
+    summary = _summary_payload(semantic, review_status=effective_review_status)
     return {
         "title": f"{_safe_text(product.get('name')) or '未命名分析'} · 提升报告",
         "product": _safe_text(product.get("name")) or "未填写",
@@ -256,13 +256,26 @@ def _improvement_payload(item: dict[str, Any], rank: int, benchmark_understandin
     }
 
 
-def _summary_payload(semantic: SemanticAnalysis) -> dict[str, str]:
+def _summary_payload(
+    semantic: SemanticAnalysis,
+    *,
+    review_status: str | None = None,
+) -> dict[str, str]:
+    has_commercial_summary = any(
+        _safe_text(semantic.get(key))
+        for key in ("one_line_verdict", "commercial_priority_summary", "executive_summary")
+    )
     review_summary = semantic.get("review_summary")
-    if _safe_text(semantic.get("review_status")) == "approved" and isinstance(review_summary, dict):
+    if (
+        _safe_text(review_status) == "approved"
+        and not has_commercial_summary
+        and isinstance(review_summary, dict)
+    ):
         return {
             "verdict": _first_text(review_summary.get("verdict"), "人工复核已完成"),
             "detail": _first_text(review_summary.get("detail"), "以上结论来自逐阶段人工确认。"),
         }
+
     verdict = _first_text(
         semantic.get("one_line_verdict"),
         semantic.get("commercial_priority_summary"),
