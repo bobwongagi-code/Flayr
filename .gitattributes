@@ -1,0 +1,4 @@
+# Frozen identity files are hashed as raw bytes; keep their checkout bytes stable.
+references/semantic-baseline-gt.json text eol=lf
+references/semantic-baseline-manifest.json text eol=lf
+references/analysis-output-schema.json text eol=lf

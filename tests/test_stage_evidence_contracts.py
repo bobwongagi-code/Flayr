@@ -1888,10 +1888,14 @@ class StageEvidenceContractTests(unittest.TestCase):
                     facts,
                 )
             provider_artifact = json.loads(
-                next(run_dir.glob("stage1_provider_creator_C_*.json")).read_text()
+                next(run_dir.glob("stage1_provider_creator_C_*.json")).read_text(
+                    encoding="utf-8"
+                )
             )
             qualification_artifact = json.loads(
-                next(run_dir.glob("stage1_provider_creator_D_S1.json")).read_text()
+                next(run_dir.glob("stage1_provider_creator_D_S1.json")).read_text(
+                    encoding="utf-8"
+                )
             )
             qualification_request = json.loads(
                 (run_dir / "llm_facts_creator_requalification_S1_request.json").read_text(
@@ -3325,7 +3329,9 @@ class StageEvidenceContractTests(unittest.TestCase):
                 )
 
             provider_artifact = json.loads(
-                next(run_dir.glob("stage1_provider_creator_C_*.json")).read_text()
+                next(run_dir.glob("stage1_provider_creator_C_*.json")).read_text(
+                    encoding="utf-8"
+                )
             )
 
         self.assertEqual(result["evidence_units"], facts["evidence_units"])

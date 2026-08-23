@@ -7,6 +7,7 @@
     "max_deleted_lines": 700,
     "allowed_globs": [
       ".github/workflows/tests.yml",
+      ".gitattributes",
       "ARCHITECTURE.md",
       "QA-RULES.md",
       "references/bitter-lesson-frozen-spec.json",

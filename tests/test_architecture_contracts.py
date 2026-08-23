@@ -6784,7 +6784,9 @@ class ArchitectureContractTests(unittest.TestCase):
                 Path(tmp),
                 "",
             )
-            persisted = json.loads((Path(tmp) / "comparison_eligibility.json").read_text())
+            persisted = json.loads(
+                (Path(tmp) / "comparison_eligibility.json").read_text(encoding="utf-8")
+            )
 
         self.assertEqual(contract["overall_status"], "uncertain")
         self.assertEqual(contract["reason"], "双侧产品身份事实不足。")
