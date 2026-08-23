@@ -31,6 +31,9 @@ _RUNTIME_SEMANTIC_FIELDS = (
     "degraded_flags",
     "low_confidence_stages",
     "improvements_status",
+    "review_status",
+    "review_mode",
+    "review_summary",
 )
 
 # These fields existed in older callers but are not part of the normalized
@@ -61,6 +64,10 @@ _SEMANTIC_STAGE_FIELDS = (
     "affected_by_global_issues",
     "severity",
     "model_severity",
+    "relation",
+    "model_gap_magnitude",
+    "review_decision",
+    "review_note",
     "gap_type",
     "gap_summary",
     "comparison_reason",

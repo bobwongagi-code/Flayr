@@ -124,7 +124,9 @@ _RUN_OUTPUT_FILES = frozenset(
         "comparison_provider_meta.json",
         "comparison_rejection.json",
         "bd_report.html",
+        "bd_report.reviewed.html",
         "creator_report.html",
+        "creator_report.reviewed.html",
         "degraded_manifest.json",
         "final_derived_result.json",
         "failure.json",
@@ -149,6 +151,7 @@ _RUN_OUTPUT_PREFIXES = (
     "stage2_provider_",
     "video_facts_",
     "video_identity_",
+    "human_review.archived.",
 )
 
 
@@ -760,6 +763,48 @@ def _prepare_explicit_run_dir(
     if run_dir.exists() and not run_dir.is_dir():
         raise SystemExit(f"--output-dir 不是目录：{run_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
+    if reuse:
+        # Validate the complete directory before moving the active review
+        # sidecar or deleting reviewed reports.  An unknown file must leave
+        # the existing run untouched so a failed reuse attempt is reversible.
+        for entry in run_dir.iterdir():
+            if entry.name == RUN_STATE_FILE:
+                continue
+            if entry.is_dir() and not entry.is_symlink() and (
+                entry.name in _RUN_ROLE_DIRS
+                or entry.name.startswith(".benchmark.generation-")
+                or entry.name.startswith(".creator.generation-")
+                or entry.name.startswith(".benchmark.previous-")
+                or entry.name.startswith(".creator.previous-")
+            ):
+                continue
+            if entry.is_file() and (
+                entry.name == "human_review.json"
+                or entry.name.startswith("human_review.archived.")
+                or entry.name == "product_foundation.json"
+                or entry.name in _RUN_OUTPUT_FILES
+                or entry.name.startswith(_RUN_OUTPUT_PREFIXES)
+            ):
+                continue
+            raise SystemExit(
+                f"--output-dir 含有未识别的旧内容：{entry}。请使用新的运行目录，"
+                "不要把非 Flayr 产物与预处理缓存混用。"
+            )
+        sidecar = run_dir / "human_review.json"
+        if sidecar.is_file():
+            analysis_path = run_dir / "analysis.json"
+            try:
+                old_analysis_sha = hashlib.sha256(analysis_path.read_bytes()).hexdigest()[:12]
+            except OSError as exc:
+                raise SystemExit(
+                    "--reuse-preprocessing 无法归档 human_review.json：缺少可绑定的旧 analysis.json。"
+                ) from exc
+            archive = run_dir / f"human_review.archived.{old_analysis_sha}.json"
+            suffix = 2
+            while archive.exists():
+                archive = run_dir / f"human_review.archived.{old_analysis_sha}.{suffix}.json"
+                suffix += 1
+            sidecar.replace(archive)
     for entry in run_dir.iterdir():
         if entry.is_dir() and not entry.is_symlink() and (
             entry.name.startswith(".benchmark.generation-")
@@ -780,6 +825,10 @@ def _prepare_explicit_run_dir(
         )
     for entry in entries:
         if entry.is_dir() and not entry.is_symlink() and entry.name in _RUN_ROLE_DIRS:
+            continue
+        if entry.is_file() and entry.name.startswith("human_review.archived."):
+            # Archived sidecars are audit history, not active run artifacts.
+            # Keep them while the rerun removes the active reviewed reports.
             continue
         if entry.is_file() and entry.name == "product_foundation.json" and reuse:
             # Product foundation is a keyed, schema-checked cache. Keep it

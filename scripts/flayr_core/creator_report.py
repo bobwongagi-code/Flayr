@@ -51,6 +51,8 @@ def write_creator_report(
     analysis: dict[str, Any],
     *,
     budget: ResourceBudget | None = None,
+    output_name: str = CREATOR_REPORT_NAME,
+    review_status: str | None = None,
 ) -> Path:
     """Write the prototype-backed creator report for one completed analysis."""
     template = CREATOR_REPORT_TEMPLATE.read_text(encoding="utf-8")
@@ -58,7 +60,7 @@ def write_creator_report(
         run_dir,
         max_embedded_bytes=budget.limits.max_report_bytes if budget is not None else REPORT_MAX_EMBEDDED_BYTES,
     )
-    payload = build_creator_report_data(analysis, assets)
+    payload = build_creator_report_data(analysis, assets, review_status=review_status)
     serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     # Keep model text inside the script data block even when it contains HTML.
     serialized = serialized.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
@@ -74,7 +76,7 @@ def write_creator_report(
             f"creator report exceeds max_report_bytes={ResourceLimits().max_report_bytes}: "
             f"{len(report_bytes)} bytes"
         )
-    report_path = run_dir / CREATOR_REPORT_NAME
+    report_path = run_dir / output_name
     write_text(report_path, report)
     return report_path
 
@@ -82,9 +84,12 @@ def write_creator_report(
 def build_creator_report_data(
     analysis: dict[str, Any],
     assets: ReportAssetContext,
+    *,
+    review_status: str | None = None,
 ) -> dict[str, Any]:
     """Project semantic analysis into the creator report's public vocabulary."""
     semantic = SemanticAnalysis.from_mapping(analysis)
+    effective_review_status = _safe_text(review_status or semantic.get("review_status")) or "pending"
     product = semantic.product
     videos = semantic.videos
     creator_info = _as_dict(videos.get("creator"))
@@ -114,7 +119,12 @@ def build_creator_report_data(
         code, name = stage_display_names(stage.get("stage", ""), index)
         creator_range = _safe_text(stage.get("creator_time_range"))
         units = referenced_evidence_units(stage.get("creator_evidence_ids"), creator_understanding, code)
+        review_decision = _safe_text(stage.get("review_decision"))
         observation = _stage_observation(stage, units)
+        if review_decision == "not_applicable":
+            observation = "未涉及"
+        elif review_decision == "insufficient_evidence":
+            observation = "证据不足，无法比较"
         insufficient = bool(stage.get("insufficient_evidence")) or code in low_confidence_codes
         if not observation and not units:
             insufficient = True
@@ -140,12 +150,14 @@ def build_creator_report_data(
         frame_ts = creator_range or (format_seconds(frames[0].get("timestamp_seconds")) if frames else "")
 
         reference = _reference_payload(stage, linked)
-        status, status_label = _stage_status(
-            stage,
-            linked_id,
-            experiments,
-            insufficient,
-        )
+        if review_decision == "not_applicable":
+            linked_id = ""
+            status, status_label = "not_applicable", "未涉及"
+        elif review_decision == "insufficient_evidence":
+            linked_id = ""
+            status, status_label = "insufficient_evidence", "证据不足，无法比较"
+        else:
+            status, status_label = _stage_status(stage, linked_id, experiments, insufficient)
         confidence = _stage_confidence(stage, insufficient)
         stages.append(
             {
@@ -168,6 +180,9 @@ def build_creator_report_data(
     highlights = _build_highlights(semantic.creator_context)
     return {
         "brand": "Flayr · 心译复盘",
+        "reviewStatus": effective_review_status,
+        "reviewMode": _safe_text(semantic.get("review_mode")) or "draft_visible",
+        "reviewSummary": semantic.get("review_summary") if isinstance(semantic.get("review_summary"), dict) else None,
         "metadata": build_report_metadata("creator-v2", "flayr_core.creator_report"),
         "title": "这条视频，我们一起复盘",
         "context": _context_line(product),

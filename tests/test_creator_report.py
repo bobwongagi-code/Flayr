@@ -119,6 +119,23 @@ class CreatorReportTests(unittest.TestCase):
             self.assertIn("下一次可以试试看的方向", html)
             self.assertIn('"report_schema_version":2', html)
 
+    def test_reviewed_stage_statuses_show_na_and_insufficient(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            analysis = self._analysis(root / "run")
+            analysis["review_status"] = "approved"
+            analysis["stage_analysis"] = [
+                {"stage": "S1 Hook", "review_decision": "not_applicable", "creator_summary": "旧摘要"},
+                {"stage": "S2 Promise", "review_decision": "insufficient_evidence", "creator_summary": "旧摘要"},
+            ]
+            data = build_creator_report_data(analysis, ReportAssetContext(root / "run"))
+            self.assertEqual(data["stages"][0]["status"], "not_applicable")
+            self.assertEqual(data["stages"][0]["statusLabel"], "未涉及")
+            self.assertEqual(data["stages"][0]["observation"], "未涉及")
+            self.assertEqual(data["stages"][1]["status"], "insufficient_evidence")
+            self.assertEqual(data["stages"][1]["statusLabel"], "证据不足，无法比较")
+            self.assertEqual(data["stages"][1]["observation"], "证据不足，无法比较")
+
 
 if __name__ == "__main__":
     unittest.main()

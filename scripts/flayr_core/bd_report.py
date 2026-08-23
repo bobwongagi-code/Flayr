@@ -35,7 +35,15 @@ _MARKET_LABELS = {
     "sea": "东南亚",
     "auto": "未指定市场",
 }
-_SEVERITY_LABELS = {"large": "大", "medium": "中", "small": "小", "skip": "未涉及", "unknown": "未分析"}
+_SEVERITY_LABELS = {
+    "large": "大",
+    "medium": "中",
+    "small": "小",
+    "skip": "未涉及",
+    "unknown": "未分析",
+    "tie": "无差距",
+    "insufficient": "证据不足，无法比较",
+}
 _SEVERITY_CLASSES = {
     "large": "sev-large",
     "medium": "sev-medium",
@@ -63,10 +71,12 @@ def write_bd_report(
     analysis: dict[str, Any],
     *,
     budget: ResourceBudget | None = None,
+    output_name: str = BD_REPORT_NAME,
+    review_status: str | None = None,
 ) -> Path:
     """Write the prototype-backed BD/internal report for one run."""
     template = BD_REPORT_TEMPLATE.read_text(encoding="utf-8")
-    payload = build_bd_report_data(analysis)
+    payload = build_bd_report_data(analysis, review_status=review_status)
     serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     serialized = serialized.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     if "{{bd_report_data}}" not in template:
@@ -80,14 +90,19 @@ def write_bd_report(
         raise ResourceBudgetExceeded(
             f"BD report exceeds max_report_bytes={ResourceLimits().max_report_bytes}: {len(report_bytes)} bytes"
         )
-    report_path = run_dir / BD_REPORT_NAME
+    report_path = run_dir / output_name
     write_text(report_path, report)
     return report_path
 
 
-def build_bd_report_data(analysis: dict[str, Any]) -> dict[str, Any]:
+def build_bd_report_data(
+    analysis: dict[str, Any],
+    *,
+    review_status: str | None = None,
+) -> dict[str, Any]:
     """Project semantic analysis into the internal report vocabulary."""
     semantic = SemanticAnalysis.from_mapping(analysis)
+    effective_review_status = _safe_text(review_status or semantic.get("review_status")) or "pending"
     product = semantic.product
     creator_understanding = semantic.side("creator")
     benchmark_understanding = semantic.side("benchmark")
@@ -112,6 +127,9 @@ def build_bd_report_data(analysis: dict[str, Any]) -> dict[str, Any]:
         "strategyLevel": _safe_text(scope.get("level")) == "strategy",
         "degraded": state == "degraded",
         "degradedReason": _degraded_reason(semantic),
+        "reviewStatus": effective_review_status,
+        "reviewMode": _safe_text(semantic.get("review_mode")) or "draft_visible",
+        "reviewSummary": semantic.get("review_summary") if isinstance(semantic.get("review_summary"), dict) else None,
         "summary": summary,
         "gates": _gate_payload(semantic),
         "stages": stages,
@@ -128,7 +146,16 @@ def _stage_payload(
 ) -> dict[str, Any]:
     code, name = stage_display_names(stage.get("stage"), index)
     skipped, _ = stage_skipped(stage)
-    if skipped:
+    review_decision = _safe_text(stage.get("review_decision"))
+    relation = _safe_text(stage.get("relation")).lower()
+    if relation in {"equivalent", "matched", "same", "equal"}:
+        relation = "tie"
+    reviewed_gap = _safe_text(stage.get("severity") or stage.get("model_gap_magnitude")).lower()
+    if review_decision == "not_applicable":
+        severity = "skip"
+    elif review_decision == "insufficient_evidence":
+        severity = "unknown"
+    elif skipped:
         severity = "skip"
     elif analysis_state in {"degraded", "not_run"}:
         severity = "unknown"
@@ -136,11 +163,23 @@ def _stage_payload(
         severity = severity_value(stage_report_severity(stage)) or "skip"
     creator_units = referenced_evidence_units(stage.get("creator_evidence_ids"), creator_understanding, code)
     benchmark_units = referenced_evidence_units(stage.get("benchmark_evidence_ids"), benchmark_understanding, code)
-    gap = _first_text(
-        _join_text(stage.get("gap_summary")),
-        stage.get("gap"),
-        stage.get("comparison_reason"),
-    ) or "暂无明确差距描述。"
+    if review_decision == "not_applicable":
+        gap = "未涉及"
+    elif review_decision == "insufficient_evidence":
+        gap = "证据不足，无法比较"
+    elif review_decision in {"confirmed", "corrected"} and relation == "tie" and reviewed_gap == "none":
+        gap = "无差距"
+    else:
+        gap = _first_text(
+            _join_text(stage.get("gap_summary")),
+            stage.get("gap"),
+            stage.get("comparison_reason"),
+        ) or "暂无明确差距描述。"
+    severity_label = _SEVERITY_LABELS[severity]
+    if review_decision in {"confirmed", "corrected"} and relation == "tie" and reviewed_gap == "none":
+        severity_label = _SEVERITY_LABELS["tie"]
+    elif review_decision == "insufficient_evidence":
+        severity_label = _SEVERITY_LABELS["insufficient"]
     creator_text = _side_text(stage, "creator", creator_units)
     benchmark_text = _side_text(stage, "benchmark", benchmark_units)
     communication = _first_text(
@@ -157,7 +196,7 @@ def _stage_payload(
         "code": code,
         "name": name,
         "severityClass": _SEVERITY_CLASSES[severity],
-        "severityLabel": _SEVERITY_LABELS[severity],
+        "severityLabel": severity_label,
         "dotColor": _SEVERITY_DOTS[severity],
         "creator": {
             "ts": _safe_text(stage.get("creator_time_range")) or "待确认",
@@ -218,6 +257,12 @@ def _improvement_payload(item: dict[str, Any], rank: int, benchmark_understandin
 
 
 def _summary_payload(semantic: SemanticAnalysis) -> dict[str, str]:
+    review_summary = semantic.get("review_summary")
+    if _safe_text(semantic.get("review_status")) == "approved" and isinstance(review_summary, dict):
+        return {
+            "verdict": _first_text(review_summary.get("verdict"), "人工复核已完成"),
+            "detail": _first_text(review_summary.get("detail"), "以上结论来自逐阶段人工确认。"),
+        }
     verdict = _first_text(
         semantic.get("one_line_verdict"),
         semantic.get("commercial_priority_summary"),

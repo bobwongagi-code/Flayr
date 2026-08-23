@@ -120,6 +120,41 @@ class BdReportTests(unittest.TestCase):
         self.assertEqual(data["stages"][0]["severityLabel"], "未分析")
         self.assertEqual(data["stages"][0]["severityClass"], "sev-small")
 
+    def test_reviewed_stage_labels_distinguish_tie_na_and_insufficient(self) -> None:
+        analysis = self._analysis()
+        analysis["review_status"] = "approved"
+        analysis["review_summary"] = {"verdict": "人工复核摘要", "detail": "人工复核详情"}
+        analysis["stage_analysis"] = [
+            {
+                "stage": "S1 Hook",
+                "relation": "equivalent",
+                "severity": None,
+                "model_gap_magnitude": "none",
+                "review_decision": "confirmed",
+                "gap": "人工说明",
+            },
+            {
+                "stage": "S2 Promise",
+                "review_decision": "not_applicable",
+                "relation": None,
+                "severity": None,
+            },
+            {
+                "stage": "S3 Demo",
+                "review_decision": "insufficient_evidence",
+                "relation": None,
+                "severity": None,
+            },
+        ]
+        data = build_bd_report_data(analysis)
+        self.assertEqual(data["summary"]["verdict"], "人工复核摘要")
+        self.assertEqual(data["stages"][0]["severityLabel"], "无差距")
+        self.assertEqual(data["stages"][0]["gap"], "无差距")
+        self.assertEqual(data["stages"][1]["severityLabel"], "未涉及")
+        self.assertEqual(data["stages"][1]["gap"], "未涉及")
+        self.assertEqual(data["stages"][2]["severityLabel"], "证据不足，无法比较")
+        self.assertEqual(data["stages"][2]["gap"], "证据不足，无法比较")
+
 
 if __name__ == "__main__":
     unittest.main()

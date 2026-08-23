@@ -53,6 +53,8 @@
   .badge{font-size:11.5px;font-family:var(--font-mono);padding:4px 10px;border-radius:999px;}
   .badge-level-strategy{background:var(--ink);color:#fff;}
   .badge-level-basic{background:var(--gray-chip-soft);color:var(--gray-chip-ink);}
+  .badge-review-pending{background:#fff3d6;color:#8a5a00;border:1px solid #f0d18a;}
+  .badge-review-approved{background:#e6f5ea;color:#216b3a;border:1px solid #b9dfc4;}
   .report-meta{font-size:13px;color:var(--ink-soft);margin-top:6px;}
   .degraded-inline{font-size:12.5px;color:var(--amber-ink);margin-top:8px;display:flex;align-items:center;gap:6px;}
   .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-lg);box-shadow:var(--shadow-card);}
@@ -129,6 +131,7 @@
       <div class="report-title-row">
         <h2 style="font-size:20px;" id="report-title">提升报告</h2>
         <span class="badge" id="report-level-badge"></span>
+        <span class="badge badge-review-pending" id="report-review-badge">待人工确认，仅供复核</span>
       </div>
       <div class="report-meta" id="report-meta">产品：- · 市场：-</div>
       <div class="degraded-inline" id="report-degraded-inline" style="display:none;">
@@ -177,6 +180,10 @@
   }
   function severityClass(stage){ return stage.severityClass || 'sev-small'; }
   function severityLabel(stage){ return stage.severityLabel || '未分析'; }
+  function gapChipText(stage){
+    var label = severityLabel(stage);
+    return label === '无差距' || label === '未涉及' || label === '证据不足，无法比较' ? label : label + '差距';
+  }
   function renderStageTabs(){
     var tabs = $('stage-tabs');
     var panels = $('stage-panels');
@@ -203,7 +210,7 @@
       var grid = append(panel, 'div', 'compare-grid');
       renderSide(grid, 'creator', '达人表现', stage.creator);
       var gap = append(grid, 'div', 'gap-col');
-      append(gap, 'span', 'sev-chip ' + severityClass(stage), severityLabel(stage) + '差距');
+      append(gap, 'span', 'sev-chip ' + severityClass(stage), gapChipText(stage));
       append(gap, 'div', 'gap-text', stage.gap);
       renderSide(grid, 'benchmark', '标杆表现', stage.benchmark);
       var talking = append(panel, 'div', 'talking-point');
@@ -264,6 +271,10 @@
   var badge = $('report-level-badge');
   badge.textContent = report.strategyLevel ? '策略增强分析' : '视频证据分析';
   badge.className = 'badge ' + (report.strategyLevel ? 'badge-level-strategy' : 'badge-level-basic');
+  var reviewBadge = $('report-review-badge');
+  var reviewed = report.reviewStatus === 'approved';
+  reviewBadge.textContent = reviewed ? '人工确认完成' : '待人工确认，仅供复核';
+  reviewBadge.className = 'badge ' + (reviewed ? 'badge-review-approved' : 'badge-review-pending');
   if (report.degraded){
     $('report-degraded-inline').style.display = 'flex';
     $('degraded-text').textContent = report.degradedReason || '分析存在降级信息';
