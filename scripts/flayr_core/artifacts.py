@@ -540,3 +540,19 @@ def format_seconds(value: Any) -> str:
     if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and value >= 0:
         return f"{float(value):.1f}s"
     return "未知"
+
+
+def format_canonical_seconds(value: Any) -> str:
+    """Format an evidence boundary without narrowing word-timed ranges.
+
+    ``format_seconds`` is intentionally a presentation helper and keeps its
+    one-decimal output.  Canonical evidence ranges are consumed by timing
+    validators, so they retain up to six decimal places and remove only
+    insignificant trailing zeroes.
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and value >= 0:
+        text = f"{float(value):.6f}".rstrip("0").rstrip(".")
+        if "." not in text:
+            text += ".0"
+        return f"{text}s"
+    return "未知"

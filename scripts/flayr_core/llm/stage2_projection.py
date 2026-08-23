@@ -11,7 +11,7 @@ import math
 import re
 from typing import Any
 
-from ..artifacts import format_seconds, parse_time_range_seconds
+from ..artifacts import format_canonical_seconds, parse_time_range_seconds
 from ..stage_evidence_contracts import qualified_stage_evidence_ids, stage_evidence_readiness
 
 
@@ -72,7 +72,10 @@ def _segmented_evidence_range(facts: dict[str, Any], role: str, stage: str, ids:
     parsed = [item for item in parsed if item is not None]
     if not parsed:
         return ""
-    return f"{format_seconds(min(item[0] for item in parsed))} - {format_seconds(max(item[1] for item in parsed))}"
+    return (
+        f"{format_canonical_seconds(min(item[0] for item in parsed))} - "
+        f"{format_canonical_seconds(max(item[1] for item in parsed))}"
+    )
 
 
 def _segmented_qualified_units(

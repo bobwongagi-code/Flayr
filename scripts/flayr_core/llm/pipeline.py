@@ -296,14 +296,19 @@ def _full_provider_replay_requested(args: argparse.Namespace) -> bool:
 
 
 def _clamp_result_time_ranges(result: dict[str, Any], analysis: dict[str, Any]) -> None:
-    """Clamp rounded fact timestamps against a matching rounded video duration.
+    """Clamp legacy rounded ranges against a matching rounded video duration.
 
-    Facts and stage ranges are serialized to one decimal place, while ffprobe
-    durations can retain sub-frame precision (for example 45.666667s).  Use a
-    shallow analysis copy for this boundary check so a legitimate final 45.7s
-    fact is not erased, without changing the exact duration retained elsewhere.
+    Legacy facts and stage ranges are serialized to one decimal place, while
+    ffprobe durations can retain sub-frame precision (for example 45.666667s).
+    Segmented canonical stage ranges retain their evidence precision and use
+    the exact source duration. Use a shallow analysis copy for the legacy
+    boundary check so a legitimate final 45.7s fact is not erased, without
+    changing the exact duration retained elsewhere.
     """
     videos = analysis.get("videos") if isinstance(analysis, dict) else None
+    if result.get("stage2_pipeline_version") == "segmented_stage_v1":
+        clamp_result_time_ranges(result, analysis)
+        return
     if not isinstance(videos, dict):
         clamp_result_time_ranges(result, analysis)
         return

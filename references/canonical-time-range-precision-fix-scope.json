@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "name": "canonical-time-range-precision-fix-2026-08-23",
+  "change_scope": {
+    "max_files": 7,
+    "max_added_lines": 220,
+    "max_deleted_lines": 20,
+    "allowed_globs": [
+      "references/canonical-time-range-precision-fix-scope.json",
+      "scripts/flayr_core/artifacts.py",
+      "scripts/flayr_core/llm/pipeline.py",
+      "scripts/flayr_core/llm/stage2_projection.py",
+      "scripts/flayr_core/postprocess/repair_claims.py",
+      "scripts/flayr_core/postprocess/repair_evidence.py",
+      "tests/test_stage_evidence_contracts.py"
+    ],
+    "forbidden_globs": [
+      "runs/**",
+      "outputs/**",
+      "jobs*.json",
+      "scripts/**/__pycache__/**"
+    ]
+  },
+  "non_goals": [
+    "Do not change validator tolerance or evidence qualification rules.",
+    "Do not change Stage2 semantics, prompts, routing, model fallback, or thresholds.",
+    "Do not change samples, frozen baselines, or verification gates.",
+    "Do not run real video analysis in this batch."
+  ]
+}

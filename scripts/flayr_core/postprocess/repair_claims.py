@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from ..artifacts import (
+    format_canonical_seconds,
     format_seconds,
     parse_time_range_seconds,
     parse_timestamp_seconds,
@@ -211,9 +212,18 @@ def clamp_result_time_ranges(result: dict[str, Any], analysis: dict[str, Any]) -
                             )
                         continue
                     unit["time_range"] = bounded_time_range(unit.get("time_range"), duration)
+    segmented_stage_ranges = result.get("stage2_pipeline_version") == "segmented_stage_v1"
     for stage in result.get("stage_analysis", []):
-        stage["benchmark_time_range"] = bounded_time_range(stage.get("benchmark_time_range"), benchmark_duration)
-        stage["creator_time_range"] = bounded_time_range(stage.get("creator_time_range"), creator_duration)
+        stage["benchmark_time_range"] = bounded_time_range(
+            stage.get("benchmark_time_range"),
+            benchmark_duration,
+            canonical=segmented_stage_ranges,
+        )
+        stage["creator_time_range"] = bounded_time_range(
+            stage.get("creator_time_range"),
+            creator_duration,
+            canonical=segmented_stage_ranges,
+        )
         stage["time_range"] = f"标杆 {stage['benchmark_time_range']} / 达人 {stage['creator_time_range']}"
     for item in result.get("improvements", []):
         item["benchmark_time_range"] = bounded_time_range(item.get("benchmark_time_range"), benchmark_duration)
@@ -227,11 +237,12 @@ def clamp_result_time_ranges(result: dict[str, Any], analysis: dict[str, Any]) -
             item["best_base_frame_time"] = format_seconds(best_time)
 
 
-def bounded_time_range(value: Any, duration: Any) -> str:
+def bounded_time_range(value: Any, duration: Any, *, canonical: bool = False) -> str:
     parsed = parse_time_range_seconds(value, duration)
     if parsed is None:
         return ""
     start, end = parsed
-    return f"{format_seconds(start)} - {format_seconds(end)}"
+    formatter = format_canonical_seconds if canonical else format_seconds
+    return f"{formatter(start)} - {formatter(end)}"
 
 # endregion

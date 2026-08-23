@@ -36,8 +36,10 @@ from flayr_core.llm.pipeline import (
     _video_fact_cache_stage1_coverage_issues,
     _run_stage1_qualification,
     _validated_stage_group_response,
+    _clamp_result_time_ranges,
     detect_low_confidence_stages,
 )
+from flayr_core.llm.stage2_projection import _segmented_evidence_range
 from flayr_core.llm.stage_fact_artifacts import (
     StageFactArtifactError,
     completed_stage_fact_artifact,
@@ -78,6 +80,7 @@ from flayr_core.postprocess.validate import (
     validate_evidence_alignment,
     validate_s2_contract_flags,
     validate_stage_evidence_qualification,
+    validate_transcript_attribution,
 )
 from flayr_core.stage_evidence_contracts import (
     STAGE1_OBSERVATION_CONTRACT_VERSION,
@@ -4736,6 +4739,84 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(stages[2]["benchmark_quote"], "")
         self.assertEqual(stages[2]["benchmark_quote_zh"], "")
 
+    def test_canonical_ranges_preserve_word_timed_quote_endpoint(self) -> None:
+        benchmark = self._active_side("B")
+        s2_check = next(item for item in benchmark["stage_evidence_checks"] if item["stage"] == "S2")
+        s2_check.update(
+            {
+                "status": "present",
+                "coverage": "complete",
+                "evidence_ids": ["B2"],
+                "observed_signals": list(stage_evidence_contract("S2").required_signals),
+                "missing_signals": [],
+                "signal_bindings": self._signal_bindings("S2", "B2"),
+            }
+        )
+        benchmark["stage1_coverage_audit"]["stages"]["S2"].update(
+            {
+                "status": "found",
+                "coverage": "complete",
+                "evidence_ids": ["B2"],
+                "observed_signals": list(stage_evidence_contract("S2").required_signals),
+                "missing_signals": [],
+                "signal_bindings": self._signal_bindings("S2", "B2"),
+            }
+        )
+        unit = next(item for item in benchmark["evidence_units"] if item["id"] == "B2")
+        unit.update(
+            {
+                "time_range": "6.0s - 11.24s",
+                "voiceover": "alpha beta gamma",
+                "voiceover_zh": "alpha beta gamma",
+            }
+        )
+        benchmark["stage1_acquisition"]["channels"]["voiceover"] = {
+            "status": "ready",
+            "coverage": "full",
+            "count": 1,
+            "boundary_precision": "word",
+        }
+        freeze_stage_evidence(benchmark)
+
+        stages = [{"stage": f"S{index}"} for index in range(1, 7)]
+        result = {
+            "stage_analysis": stages,
+            "video_understanding": {"benchmark": benchmark},
+        }
+        facts = {"benchmark": benchmark}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transcript_path = root / "transcript.txt"
+            transcript_path.write_text("alpha beta gamma", encoding="utf-8")
+            words_path = root / "transcript_words.json"
+            words_path.write_text(
+                json.dumps(
+                    {
+                        "words": [
+                            {"text": "alpha", "start_seconds": 6.0, "end_seconds": 7.0},
+                            {"text": "beta", "start_seconds": 10.0, "end_seconds": 11.0},
+                            {"text": "gamma", "start_seconds": 11.21, "end_seconds": 11.24},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            analysis = {
+                "videos": {
+                    "benchmark": {
+                        "transcript_path": str(transcript_path),
+                        "transcript_words_path": str(words_path),
+                    }
+                }
+            }
+
+            bind_timed_transcript_quotes(result, analysis)
+
+            self.assertEqual(stages[1]["benchmark_time_range"], "6.0s - 11.24s")
+            self.assertEqual(_segmented_evidence_range(facts, "benchmark", "S2", ["B2"]), "6.0s - 11.24s")
+            validate_transcript_attribution(result, analysis)
+
     def test_explicit_absence_does_not_hide_positive_s2_without_evidence(self) -> None:
         creator = self._active_side("C")
         creator_check = next(item for item in creator["stage_evidence_checks"] if item["stage"] == "S2")
@@ -6089,14 +6170,46 @@ class StageEvidenceContractTests(unittest.TestCase):
         freeze_stage_evidence(side)
         result = {
             "video_understanding": {"creator": side},
-            "stage_analysis": [{} for _ in range(6)],
+            "stage2_pipeline_version": "segmented_stage_v1",
+            "stage_analysis": [
+                {"benchmark_time_range": "6.0s - 11.24s"} if index == 1 else {}
+                for index in range(6)
+            ],
             "improvements": [],
         }
         clamp_result_time_ranges(result, {"videos": {"creator": {"duration_seconds": 6.0}}})
         self.assertEqual(result["video_understanding"]["creator"]["evidence_units"][0]["time_range"], "5.0s - 6.0s")
+        self.assertEqual(result["stage_analysis"][1]["benchmark_time_range"], "6.0s - 11.24s")
         side["evidence_units"][0]["time_range"] = "5.0s - 7.0s"
         with self.assertRaisesRegex(SystemExit, "invalid time_range"):
             clamp_result_time_ranges(result, {"videos": {"creator": {"duration_seconds": 6.0}}})
+
+    def test_segmented_time_clamp_uses_exact_video_duration(self) -> None:
+        result = {
+            "stage2_pipeline_version": "segmented_stage_v1",
+            "video_understanding": {
+                "benchmark": {"evidence_units": []},
+                "creator": {"evidence_units": []},
+            },
+            "stage_analysis": [
+                {
+                    "benchmark_time_range": "31.98s - 35.339002s",
+                    "creator_time_range": "",
+                }
+                for _ in range(6)
+            ],
+            "improvements": [],
+        }
+        analysis = {
+            "videos": {
+                "benchmark": {"duration_seconds": 35.339002},
+                "creator": {"duration_seconds": 10.0},
+            }
+        }
+
+        _clamp_result_time_ranges(result, analysis)
+
+        self.assertEqual(result["stage_analysis"][0]["benchmark_time_range"], "31.98s - 35.339002s")
 
 
 if __name__ == "__main__":

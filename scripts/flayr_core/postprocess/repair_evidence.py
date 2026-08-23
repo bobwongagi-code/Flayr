@@ -17,6 +17,7 @@ import re
 from typing import Any
 
 from ..artifacts import (
+    format_canonical_seconds,
     format_seconds,
     parse_time_range_seconds,
     parse_timestamp_seconds,
@@ -113,7 +114,8 @@ def bind_timed_transcript_quotes(result: dict[str, Any], analysis: dict[str, Any
                     start = min(item[0] for item in timed_ranges)
                     end = max(item[1] for item in timed_ranges)
                     stage[f"{role}_time_range"] = (
-                        f"{format_seconds(start)} - {format_seconds(max(end, start + 0.5))}"
+                        f"{format_canonical_seconds(start)} - "
+                        f"{format_canonical_seconds(max(end, start + 0.5))}"
                     )
                 spoken = next(
                     (unit for unit in units if is_effective_voiceover(unit.get("voiceover"))),
