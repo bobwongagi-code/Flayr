@@ -20,6 +20,29 @@ class ProjectContractTests(unittest.TestCase):
         self.assertNotIn("/Users/", serialized)
         self.assertNotIn("/Documents/", serialized)
 
+    def test_operator_verified_product_mismatches_are_excluded(self) -> None:
+        manifest_path = ROOT / "references" / "validation-inputs.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        samples = {
+            item["id"]: item
+            for item in manifest["samples"]
+            if isinstance(item, dict) and item.get("id")
+        }
+        expected_fields = {
+            "comparison_scope_status": "operator_verified_different_product",
+            "comparison_scope": "different_product",
+            "direct_product_stages": [],
+            "metric_scope": "excluded",
+        }
+        for sample_id in ("wukoubo-c0", "wukoubo-c1", "youkoubo-c0", "simplus"):
+            self.assertEqual(
+                {key: samples[sample_id].get(key) for key in expected_fields},
+                expected_fields,
+                sample_id,
+            )
+        self.assertEqual(samples["colorkey-lip-c1"].get("evaluation_scope"), "whole_video_observation")
+        self.assertEqual(samples["colorkey-lip-c1"].get("metric_scope"), "whole_video_observation")
+
     def test_cli_and_committed_docs_have_no_personal_keychain_or_model_path(self) -> None:
         cli = (ROOT / "scripts" / "flayr.py").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

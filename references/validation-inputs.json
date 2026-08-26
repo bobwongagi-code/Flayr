@@ -182,13 +182,11 @@
       "product_tier": "high",
       "benchmark_video": "${FLAYR_VALIDATION_ROOT}/pobiji/wukoubo/标杆视频.mp4",
       "creator_video": "${FLAYR_VALIDATION_ROOT}/pobiji/wukoubo/达人视频.mp4",
-      "comparison_scope_status": "verified",
-      "comparison_scope": "cross_product",
-      "direct_product_stages": [
-        "S1",
-        "S6"
-      ],
-      "metric_scope": "structure_only"
+      "comparison_scope_status": "operator_verified_different_product",
+      "comparison_scope": "different_product",
+      "direct_product_stages": [],
+      "metric_scope": "excluded",
+      "exclusion_reason": "达人为便携榨汁机，标杆为破壁机，产品不匹配。"
     },
     {
       "id": "youkoubo-c2",
@@ -275,17 +273,11 @@
       "target_market": "auto",
       "benchmark_video": "${FLAYR_VALIDATION_ROOT}/simplus/标杆simplus.mp4",
       "creator_video": "${FLAYR_VALIDATION_ROOT}/simplus/达人视频.mp4",
-      "comparison_scope_status": "verified",
-      "comparison_scope": "comparable_variant",
-      "direct_product_stages": [
-        "S1",
-        "S2",
-        "S3",
-        "S4",
-        "S5",
-        "S6"
-      ],
-      "metric_scope": "product_gt"
+      "comparison_scope_status": "operator_verified_different_product",
+      "comparison_scope": "different_product",
+      "direct_product_stages": [],
+      "metric_scope": "excluded",
+      "exclusion_reason": "达人为挂烫机，标杆为熨斗或不同熨烫设备，产品不匹配。"
     },
     {
       "id": "mmx",
@@ -311,7 +303,12 @@
       "target_market": "my",
       "product_tier": "high",
       "benchmark_video": "${FLAYR_VALIDATION_ROOT}/pobiji/wukoubo/标杆视频.mp4",
-      "creator_video": "${FLAYR_VALIDATION_ROOT}/pobiji/wukoubo/达人视频1.mp4"
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/pobiji/wukoubo/达人视频1.mp4",
+      "comparison_scope_status": "operator_verified_different_product",
+      "comparison_scope": "different_product",
+      "direct_product_stages": [],
+      "metric_scope": "excluded",
+      "exclusion_reason": "达人为便携榨汁机，标杆为破壁机，产品不匹配。"
     },
     {
       "id": "youkoubo-c0",
@@ -321,7 +318,12 @@
       "target_market": "my",
       "product_tier": "high",
       "benchmark_video": "${FLAYR_VALIDATION_ROOT}/pobiji/youkoubo/标杆视频1.mp4",
-      "creator_video": "${FLAYR_VALIDATION_ROOT}/pobiji/youkoubo/达人视频.mp4"
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/pobiji/youkoubo/达人视频.mp4",
+      "comparison_scope_status": "operator_verified_different_product",
+      "comparison_scope": "different_product",
+      "direct_product_stages": [],
+      "metric_scope": "excluded",
+      "exclusion_reason": "达人为便携榨汁机，标杆为破壁机，产品不匹配。"
     },
     {
       "id": "carslan-b1",
