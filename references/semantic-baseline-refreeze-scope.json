@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-report-summary-fix-2026-08-24",
-  "description": "approved 人工复核报告保留既有商业 summary；review_summary 仅在商业 summary 缺失时作为 fallback。",
+  "name": "semantic-baseline-refreeze-after-certification-ownership-enforcement-2026-08-26",
+  "description": "已有认证唯一归属 S5 合同在 Stage1 资格投影和分段 Stage2 早期执行；未改动资格尺度、gap 标尺或模型路由。",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
