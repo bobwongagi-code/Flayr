@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-certification-ownership-enforcement-2026-08-26",
-  "description": "已有认证唯一归属 S5 合同在 Stage1 资格投影和分段 Stage2 早期执行；未改动资格尺度、gap 标尺或模型路由。",
+  "name": "semantic-baseline-refreeze-after-certification-exclusion-disclaimer-fix-2026-08-26",
+  "description": "Stage1 允许在同一资格项中明确声明认证归入 S5 且当前阶段仅使用非认证事实；Stage2 仍禁止非 S5 复述或利用认证。未改动资格尺度、gap 标尺或模型路由。",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
