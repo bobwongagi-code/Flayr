@@ -118,16 +118,24 @@ def bind_timed_transcript_quotes(result: dict[str, Any], analysis: dict[str, Any
                         f"{format_canonical_seconds(start)} - "
                         f"{format_canonical_seconds(max(end, start + 0.5))}"
                     )
-                spoken = next(
-                    (unit for unit in units if is_effective_voiceover(unit.get("voiceover"))),
-                    None,
-                )
-                if spoken is not None:
-                    stage[f"{role}_quote"] = str(spoken.get("voiceover") or "").strip()
-                    stage[f"{role}_quote_zh"] = str(spoken.get("voiceover_zh") or "").strip()
+                if f"S{index}" == "S5":
+                    spoken = next(
+                        (unit for unit in units if is_effective_voiceover(unit.get("voiceover"))),
+                        None,
+                    )
+                    quote = str(spoken.get("voiceover") or "").strip() if spoken else ""
+                    quote_zh = str(spoken.get("voiceover_zh") or "").strip() if spoken else ""
                 else:
-                    stage[f"{role}_quote"] = ""
-                    stage[f"{role}_quote_zh"] = ""
+                    quote = quote_zh = ""
+                    for unit in units:
+                        candidate = strip_positive_certification_clauses(unit.get("voiceover"))
+                        if not is_effective_voiceover(candidate):
+                            continue
+                        quote = candidate
+                        quote_zh = strip_positive_certification_clauses(unit.get("voiceover_zh"))
+                        break
+                stage[f"{role}_quote"] = quote
+                stage[f"{role}_quote_zh"] = quote_zh
                 continue
             references = [str(value) for value in stage.get(f"{role}_evidence_ids", [])]
             if any("_NO_" in value for value in references):

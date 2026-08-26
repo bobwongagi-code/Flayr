@@ -52,6 +52,7 @@ from flayr_core.llm.payload import (
     _replace_recovery_full_media,
     build_video_fact_recovery_payload,
 )
+from flayr_core.postprocess.chain import apply_segmented_postprocess_chain
 from flayr_core.postprocess.derive import _derive_one, _stage_strength_gate, derive_severity_from_facts
 from flayr_core.postprocess.claims_my import reconcile_certification_ownership
 from flayr_core.postprocess.repair_evidence import (
@@ -65,6 +66,7 @@ from flayr_core.postprocess.repair_evidence import (
 from flayr_core.postprocess.repair_claims import derive_product_visibility
 from flayr_core.postprocess.repair_claims import clamp_result_time_ranges
 from flayr_core.postprocess.claims_my import discard_unreferenced_certification_claims
+from flayr_core.stage_ownership import contains_certification
 from flayr_core.postprocess.repair_stages import (
     align_clear_commerce_evidence,
     align_timed_cta_from_transcript,
@@ -1230,6 +1232,149 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(projected["stage_handoff_status"], "grounded")
         self.assertEqual(projected["benchmark_evidence_ids"], ["B6"])
         self.assertEqual(projected["creator_evidence_ids"], ["C6"])
+
+    def test_segmented_mixed_units_are_scoped_through_full_postprocess(self) -> None:
+        benchmark_unit = {
+            "id": "B3",
+            "time_range": "1.0s - 2.0s",
+            "evidence_strength": "direct",
+            "information": "产品身份清晰；HALAL 认证标识",
+            "visual_fact": "画面展示产品瓶身；展示 HALAL 认证标识",
+            "voiceover": "介绍这款产品；展示 HALAL 认证",
+            "voiceover_zh": "介绍这款产品；展示 HALAL 认证",
+            "subtitle_fact": "产品名称；HALAL 认证",
+            "trust_source_signals": ["authority"],
+            "trust_source_reference": "独立机构报告",
+            "trust_source_status": "explicit_present",
+        }
+        creator_unit = {
+            "id": "C3",
+            "time_range": "1.0s - 2.0s",
+            "evidence_strength": "direct",
+            "information": "产品用途清晰；自称 HALAL 认证",
+            "visual_fact": "画面展示产品瓶身；自称 HALAL 认证",
+            "voiceover": "介绍产品用途；自称 HALAL 认证",
+            "voiceover_zh": "介绍产品用途；自称 HALAL 认证",
+            "subtitle_fact": "产品用途；自称 HALAL 认证",
+        }
+        benchmark = self._segmented_active_side(
+            "B",
+            {"S2": ["B3"], "S5": ["B3"]},
+            [benchmark_unit],
+        )
+        creator = self._segmented_active_side(
+            "C",
+            {"S2": ["C3"]},
+            [creator_unit],
+            absent_stages={"S5"},
+        )
+        facts = {"benchmark": benchmark, "creator": creator}
+
+        raw_stages = []
+        for stage in stage_codes():
+            raw = {
+                "stage": stage,
+                "stage_state": "completed" if stage in {"S2", "S5"} else "unknown",
+                "relation": "benchmark_better",
+                "model_gap_magnitude": "medium",
+                "judgment_reason": "基于已锁定阶段证据。",
+            }
+            if stage == "S2":
+                raw.update({"benchmark_evidence_ids": ["B3"], "creator_evidence_ids": ["C3"]})
+            elif stage == "S5":
+                raw.update({"benchmark_evidence_ids": ["B3"], "creator_evidence_ids": []})
+            raw_stages.append(_normalize_segmented_stage(raw, stage, facts))
+        result = {
+            "stage_analysis": raw_stages,
+            "video_understanding": facts,
+            "improvements": [],
+        }
+        apply_segmented_postprocess_chain(result, self._analysis())
+        validate_stage_ownership(result)
+
+        s2 = result["stage_analysis"][1]
+        for role in ("benchmark", "creator"):
+            role_claims = json.dumps(
+                {key: value for key, value in s2.items() if key.startswith(role)},
+                ensure_ascii=False,
+            )
+            self.assertFalse(contains_certification(role_claims), role_claims)
+        self.assertEqual(s2["benchmark_evidence_ids"], ["B3"])
+        self.assertEqual(s2["creator_evidence_ids"], ["C3"])
+        self.assertIn("产品身份清晰", s2["benchmark_summary"])
+        self.assertIn("产品用途清晰", s2["creator_summary"])
+        self.assertNotIn("HALAL", s2["benchmark_quote"])
+        self.assertNotIn("HALAL", s2["creator_quote"])
+
+        s5 = result["stage_analysis"][4]
+        self.assertIn("HALAL", s5["benchmark_summary"])
+        self.assertIn("HALAL", s5["benchmark_quote"])
+        self.assertEqual(s5["creator_evidence_ids"], [])
+        self.assertNotIn("HALAL", json.dumps(
+            {key: value for key, value in s5.items() if key.startswith("creator")},
+            ensure_ascii=False,
+        ))
+        self.assertIn("HALAL", benchmark["evidence_units"][0]["visual_fact"])
+        self.assertIn("HALAL", creator["evidence_units"][0]["visual_fact"])
+
+    def _segmented_active_side(
+        self,
+        role_code: str,
+        present_stages: dict[str, list[str]],
+        evidence_units: list[dict[str, object]],
+        *,
+        absent_stages: set[str] | None = None,
+    ) -> dict[str, object]:
+        side = self._active_side(role_code)
+        checks = self._checks("unknown")
+        absent_stages = absent_stages or set()
+        for stage, evidence_ids in present_stages.items():
+            contract = stage_evidence_contract(stage)
+            check = next(item for item in checks if item["stage"] == stage)
+            check.update(
+                {
+                    "status": "present",
+                    "coverage": "complete",
+                    "evidence_ids": list(evidence_ids),
+                    "observed_signals": list(contract.required_signals),
+                    "missing_signals": [],
+                    "signal_bindings": self._signal_bindings(stage, evidence_ids[0]),
+                    "evidence_strength": "direct",
+                }
+            )
+        for stage in absent_stages:
+            contract = stage_evidence_contract(stage)
+            check = next(item for item in checks if item["stage"] == stage)
+            check.update(
+                {
+                    "status": "absent",
+                    "coverage": "complete",
+                    "evidence_ids": [],
+                    "observed_signals": [],
+                    "missing_signals": list(contract.required_signals),
+                    "signal_bindings": {},
+                    "observed_disqualifiers": [contract.disqualifiers[0]],
+                    "evidence_strength": "absent",
+                }
+            )
+        side["stage_evidence_checks"] = checks
+        side["stage1_coverage_audit"] = self._coverage_audit(checks)
+        count = len(evidence_units)
+        side["stage1_acquisition"]["channels"]["voiceover"] = {
+            "status": "ready",
+            "coverage": "full",
+            "count": count,
+            "boundary_precision": "word",
+        }
+        side["stage1_acquisition"]["channels"]["subtitle"] = {
+            "status": "ready",
+            "coverage": "full",
+            "count": count,
+            "boundary_precision": "frame",
+        }
+        side["evidence_units"] = evidence_units
+        freeze_stage_evidence(side)
+        return side
 
     @classmethod
     def _closed_negative_side(cls, role_code: str, stage: str) -> dict[str, object]:
@@ -4796,6 +4941,38 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(stages[2]["creator_quote"], "挤一点在手上，再涂到脚后跟。")
         self.assertEqual(stages[2]["benchmark_quote"], "")
         self.assertEqual(stages[2]["benchmark_quote_zh"], "")
+
+    def test_non_s5_quote_skips_filtered_certification_unit(self) -> None:
+        creator = self._segmented_active_side(
+            "C",
+            {"S2": ["C_CERT", "C_TEXT"]},
+            [
+                {
+                    "id": "C_CERT",
+                    "time_range": "1.0s - 1.5s",
+                    "evidence_strength": "direct",
+                    "voiceover": "展示 HALAL 认证",
+                    "voiceover_zh": "展示 HALAL 认证",
+                },
+                {
+                    "id": "C_TEXT",
+                    "time_range": "1.5s - 2.0s",
+                    "evidence_strength": "direct",
+                    "voiceover": "介绍产品用途",
+                    "voiceover_zh": "介绍产品用途",
+                },
+            ],
+        )
+        stages = [{"stage": f"S{index}"} for index in range(1, 7)]
+        result = {
+            "stage_analysis": stages,
+            "video_understanding": {"creator": creator},
+        }
+
+        bind_timed_transcript_quotes(result, {})
+
+        self.assertEqual(stages[1]["creator_quote"], "介绍产品用途")
+        self.assertEqual(stages[1]["creator_quote_zh"], "介绍产品用途")
 
     def test_canonical_ranges_preserve_word_timed_quote_endpoint(self) -> None:
         benchmark = self._active_side("B")

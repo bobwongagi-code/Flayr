@@ -13,6 +13,7 @@ from typing import Any
 
 from ..artifacts import format_canonical_seconds, parse_time_range_seconds
 from ..stage_evidence_contracts import qualified_stage_evidence_ids, stage_evidence_readiness
+from ..stage_ownership import strip_positive_certification_clauses
 
 
 _SEGMENTED_STAGE_NAMES = {
@@ -91,11 +92,21 @@ def _segmented_qualified_units(
         if isinstance(unit, dict) and str(unit.get("id") or "").strip()
     }
     qualified = qualified_stage_evidence_ids(side, stage)
-    return [
+    selected = [
         units[evidence_id]
         for evidence_id in ids
         if evidence_id in qualified and evidence_id in units
     ]
+    if stage == "S5":
+        return selected
+    scoped: list[dict[str, Any]] = []
+    for unit in selected:
+        stage_unit = copy.deepcopy(unit)
+        for field in ("information", "visual_fact", "voiceover", "voiceover_zh", "subtitle_fact"):
+            if field in stage_unit:
+                stage_unit[field] = strip_positive_certification_clauses(stage_unit.get(field))
+        scoped.append(stage_unit)
+    return scoped
 
 
 def _segmented_side_summary(units: list[dict[str, Any]], role: str, readiness: str) -> str:
