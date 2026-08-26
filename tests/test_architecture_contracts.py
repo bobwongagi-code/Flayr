@@ -2996,10 +2996,22 @@ class ArchitectureContractTests(unittest.TestCase):
             "colorblu-c1": "colorblu_waterproof_sealant",
             "carslan-powder-c0": "carslan",
             "carslan-powder-c1": "carslan",
+            "carslan-b1": "carslan",
+            "colorkey-b1": "colorkey",
         }
         for sample_id, proposition_key in expected_keys.items():
             self.assertEqual(samples[sample_id].get("proposition_key"), proposition_key)
             self.assertIsNotNone(load_brand_proposition(Path("/tmp/online-run"), proposition_key))
+
+        expected_scope = {
+            "carslan-b1": "carslan",
+            "colorkey-b1": "colorkey",
+        }
+        for sample_id, proposition_key in expected_scope.items():
+            self.assertEqual(samples[sample_id].get("comparison_scope_status"), "operator_verified_same_product")
+            self.assertEqual(samples[sample_id].get("comparison_scope"), "same_product")
+            self.assertEqual(samples[sample_id].get("direct_product_stages"), [f"S{index}" for index in range(1, 7)])
+            self.assertEqual(samples[sample_id].get("metric_scope"), "product_gt")
 
     def test_invalid_new_proof_contract_cannot_fallback_to_legacy_visual_claim(self) -> None:
         foundation = self._proposition_foundation()

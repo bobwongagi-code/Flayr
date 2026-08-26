@@ -332,7 +332,19 @@
       "product_category": "美妆 - 定妆",
       "target_market": "auto",
       "benchmark_video": "${FLAYR_VALIDATION_ROOT}/CARSLAN/标杆视频1.mp4",
-      "creator_video": "${FLAYR_VALIDATION_ROOT}/CARSLAN/达人视频.mp4"
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/CARSLAN/达人视频.mp4",
+      "proposition_key": "carslan",
+      "comparison_scope_status": "operator_verified_same_product",
+      "comparison_scope": "same_product",
+      "direct_product_stages": [
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S5",
+        "S6"
+      ],
+      "metric_scope": "product_gt"
     },
     {
       "id": "colorkey-b1",
@@ -341,7 +353,19 @@
       "product_category": "护肤 - 面膜",
       "target_market": "auto",
       "benchmark_video": "${FLAYR_VALIDATION_ROOT}/COLORKEY/标杆视频1.mp4",
-      "creator_video": "${FLAYR_VALIDATION_ROOT}/COLORKEY/达人视频.mp4"
+      "creator_video": "${FLAYR_VALIDATION_ROOT}/COLORKEY/达人视频.mp4",
+      "proposition_key": "colorkey",
+      "comparison_scope_status": "operator_verified_same_product",
+      "comparison_scope": "same_product",
+      "direct_product_stages": [
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S5",
+        "S6"
+      ],
+      "metric_scope": "product_gt"
     },
     {
       "id": "colorblu-c0",
