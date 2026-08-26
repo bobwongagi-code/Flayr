@@ -32,6 +32,7 @@ from ..evidence_states import (
     s2_hard_fact_snapshot,
 )
 from ..llm.parse import S5_SOURCE_STATUSES, is_effective_voiceover, normalize_s5_source_status
+from ..stage_ownership import strip_positive_certification_clauses
 from ..stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
     qualified_stage_evidence_ids,
@@ -1288,6 +1289,10 @@ def ground_stage_visual_evidence(result: dict[str, Any]) -> None:
                 for key in ("visual_fact", "subtitle_fact"):
                     fact = str(unit.get(key) or "").strip()
                     if fact:
+                        if f"S{index}" != "S5":
+                            fact = strip_positive_certification_clauses(fact)
+                        if not fact:
+                            continue
                         facts.append(fact)
             cautions = [
                 str(value)

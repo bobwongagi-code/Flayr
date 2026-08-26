@@ -81,6 +81,7 @@ from flayr_core.postprocess.validate import (
     validate_s2_contract_flags,
     validate_stage_evidence_qualification,
     validate_transcript_attribution,
+    validate_stage_ownership,
 )
 from flayr_core.stage_evidence_contracts import (
     STAGE1_OBSERVATION_CONTRACT_VERSION,
@@ -4242,6 +4243,57 @@ class StageEvidenceContractTests(unittest.TestCase):
         freeze_stage_evidence(side)
         return side
 
+    def _cert_projection_fixture(
+        self,
+        *,
+        qualified_stages: dict[str, list[str]],
+        stage_references: dict[str, list[str]],
+        evidence_units: list[dict[str, object]],
+    ) -> dict[str, object]:
+        side = self._active_side("C")
+        checks = self._checks("unknown")
+        for stage, evidence_ids in qualified_stages.items():
+            index = int(stage[1:]) - 1
+            checks[index] = {
+                "stage": stage,
+                "status": "present",
+                "coverage": "complete",
+                "evidence_ids": list(evidence_ids),
+                "observed_signals": list(stage_evidence_contract(stage).required_signals),
+                "missing_signals": [],
+                "signal_bindings": self._signal_bindings(stage, evidence_ids[0]),
+                "evidence_strength": "direct",
+            }
+        side["stage_evidence_checks"] = checks
+        side["stage1_coverage_audit"] = self._coverage_audit(checks)
+        side["stage1_acquisition"]["channels"]["voiceover"] = {
+            "status": "ready",
+            "coverage": "full",
+            "count": 1,
+            "boundary_precision": "word",
+        }
+        side["stage1_acquisition"]["channels"]["subtitle"] = {
+            "status": "ready",
+            "coverage": "full",
+            "count": 1,
+            "boundary_precision": "frame",
+        }
+        side["evidence_units"] = evidence_units
+        freeze_stage_evidence(side)
+        result: dict[str, object] = {
+            "stage_analysis": [{"stage": f"S{index}"} for index in range(1, 7)],
+            "video_understanding": {
+                "creator": side,
+                "benchmark": self._active_side("B"),
+            },
+            "improvements": [],
+        }
+        stages = result["stage_analysis"]
+        assert isinstance(stages, list)
+        for stage, evidence_ids in stage_references.items():
+            stages[int(stage[1:]) - 1]["creator_evidence_ids"] = list(evidence_ids)
+        return result
+
     @staticmethod
     def _partial_side(role_code: str, stage: str) -> dict[str, object]:
         """Build a locked side with direct participation but incomplete proof."""
@@ -5164,6 +5216,97 @@ class StageEvidenceContractTests(unittest.TestCase):
             result["stage_analysis"][1]["creator_evidence_ids"],
             ["C_UNQUALIFIED"],
         )
+
+    def test_active_reconciliation_preserves_qualified_mixed_id(self) -> None:
+        result = self._cert_projection_fixture(
+            qualified_stages={"S2": ["C_MIX"], "S5": ["C_MIX"]},
+            stage_references={"S2": ["C_MIX"]},
+            evidence_units=[
+                {
+                    "id": "C_MIX",
+                    "time_range": "1s - 2s",
+                    "evidence_strength": "direct",
+                    "information": "产品身份与 HALAL 认证标识",
+                    "voiceover": "介绍产品并展示 HALAL 认证",
+                    "visual_fact": "画面展示产品瓶身；展示 HALAL 认证标识",
+                    "subtitle_fact": "产品名称；HALAL 认证",
+                    "trust_source_signals": ["authority"],
+                    "trust_source_reference": "独立机构报告",
+                    "trust_source_status": "explicit_present",
+                }
+            ],
+        )
+        reconcile_certification_ownership(result)
+        self.assertEqual(result["stage_analysis"][1]["creator_evidence_ids"], ["C_MIX"])
+
+    def test_active_reconciliation_removes_unqualified_cert_only_id(self) -> None:
+        result = self._cert_projection_fixture(
+            qualified_stages={"S5": ["C_CERT"]},
+            stage_references={"S2": ["C_CERT"]},
+            evidence_units=[
+                {
+                    "id": "C_CERT",
+                    "time_range": "1s - 2s",
+                    "evidence_strength": "direct",
+                    "information": "HALAL 认证标识",
+                    "voiceover": "展示 HALAL 认证",
+                    "visual_fact": "画面展示 HALAL 认证标识",
+                    "subtitle_fact": "HALAL 认证",
+                    "trust_source_signals": ["authority"],
+                    "trust_source_reference": "独立机构报告",
+                    "trust_source_status": "explicit_present",
+                }
+            ],
+        )
+        reconcile_certification_ownership(result)
+        self.assertEqual(result["stage_analysis"][1]["creator_evidence_ids"], [])
+
+    def test_active_visual_grounding_strips_only_certification_clauses_and_keeps_s5(self) -> None:
+        result = self._cert_projection_fixture(
+            qualified_stages={"S3": ["C_MIX"], "S5": ["C_MIX"]},
+            stage_references={"S3": ["C_MIX"], "S5": ["C_MIX"]},
+            evidence_units=[
+                {
+                    "id": "C_MIX",
+                    "time_range": "1s - 2s",
+                    "evidence_strength": "direct",
+                    "visual_fact": "产品画面清晰；展示 HALAL 认证标识",
+                    "subtitle_fact": "HALAL 认证标识",
+                    "trust_source_signals": ["authority"],
+                    "trust_source_reference": "独立机构报告",
+                    "trust_source_status": "explicit_present",
+                }
+            ],
+        )
+        ground_stage_visual_evidence(result)
+        self.assertEqual(result["stage_analysis"][2]["creator_visual_evidence"], ["产品画面清晰"])
+        self.assertEqual(
+            result["stage_analysis"][4]["creator_visual_evidence"],
+            ["产品画面清晰；展示 HALAL 认证标识", "HALAL 认证标识"],
+        )
+
+    def test_active_mixed_projection_passes_final_stage_ownership_validation(self) -> None:
+        result = self._cert_projection_fixture(
+            qualified_stages={"S2": ["C_MIX"], "S5": ["C_MIX"]},
+            stage_references={"S2": ["C_MIX"], "S5": ["C_MIX"]},
+            evidence_units=[
+                {
+                    "id": "C_MIX",
+                    "time_range": "1s - 2s",
+                    "evidence_strength": "direct",
+                    "information": "产品身份与 HALAL 认证标识",
+                    "visual_fact": "产品画面清晰；展示 HALAL 认证标识",
+                    "subtitle_fact": "HALAL 认证标识",
+                    "trust_source_signals": ["authority"],
+                    "trust_source_reference": "独立机构报告",
+                    "trust_source_status": "explicit_present",
+                }
+            ],
+        )
+        result["stage_analysis"][1]["creator_visual_evidence"] = []
+        reconcile_certification_ownership(result)
+        ground_stage_visual_evidence(result)
+        validate_stage_ownership(result)
 
     def test_nested_stage_references_are_closed_world_under_active_contract(self) -> None:
         result = {

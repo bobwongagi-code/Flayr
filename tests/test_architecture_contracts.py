@@ -164,6 +164,7 @@ from flayr_core.stage_catalog import DEFAULT_STAGES, fallback_artifact_ranges, s
 from flayr_core.stage_ownership import (
     CERTIFICATION_OWNERSHIP_PROMPT,
     contains_certification,
+    strip_positive_certification_clauses,
 )
 
 
@@ -360,6 +361,43 @@ class ArchitectureContractTests(unittest.TestCase):
         )
         self.assertEqual(allowed_disclaimer["S2"]["status"], "present")
 
+        exclusion_only_disclaimer = pipeline._validated_stage1_qualification_response(
+            {
+                "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                "stage_evidence_checks": [
+                    check("S2", "第三方认证内容已严格排除在 S2 信号之外")
+                ],
+            },
+            targets=["S2"],
+            valid_ids={"B1"},
+            phase_label="Stage1-B",
+        )
+        self.assertEqual(exclusion_only_disclaimer["S2"]["status"], "present")
+
+        with self.assertRaisesRegex(ValueError, "不得将第三方认证"):
+            pipeline._validated_stage1_qualification_response(
+                {
+                    "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                    "stage_evidence_checks": [check("S2", "认证内容已严格排除")],
+                },
+                targets=["S2"],
+                valid_ids={"B1"},
+                phase_label="Stage1-B",
+            )
+
+        with self.assertRaisesRegex(ValueError, "不得将第三方认证"):
+            pipeline._validated_stage1_qualification_response(
+                {
+                    "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                    "stage_evidence_checks": [
+                        check("S2", "认证信息归入S5")
+                    ],
+                },
+                targets=["S2"],
+                valid_ids={"B1"},
+                phase_label="Stage1-B",
+            )
+
         split_disclaimer = pipeline._validated_stage1_qualification_response(
             {
                 "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
@@ -382,21 +420,9 @@ class ArchitectureContractTests(unittest.TestCase):
                 {
                     "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
                     "stage_evidence_checks": [
-                        check("S2", "认证不得作为S2信号")
-                    ],
-                },
-                targets=["S2"],
-                valid_ids={"B1"},
-                phase_label="Stage1-B",
-            )
-        with self.assertRaisesRegex(ValueError, "不得将第三方认证"):
-            pipeline._validated_stage1_qualification_response(
-                {
-                    "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
-                    "stage_evidence_checks": [
                         check(
                             "S2",
-                            "S5 信任放大；认证信息仅用于当前判断，不作为非认证依据",
+                            "S5 信任放大；认证信息支持当前阶段判断",
                         )
                     ],
                 },
@@ -459,6 +485,22 @@ class ArchitectureContractTests(unittest.TestCase):
                 ["S2"],
                 label="S2",
             )
+
+    def test_positive_certification_clause_stripping_keeps_mixed_visual_fact(self) -> None:
+        self.assertEqual(
+            strip_positive_certification_clauses("产品画面清晰；展示 HALAL 认证标识"),
+            "产品画面清晰",
+        )
+        self.assertEqual(
+            strip_positive_certification_clauses("HALAL 认证标识"),
+            "",
+        )
+        self.assertEqual(
+            strip_positive_certification_clauses(
+                "帧@38.5s...；帧@40.5s字幕‘KORANG ADA HALAL’出现；产品瓶身清晰"
+            ),
+            "帧@38.5s；产品瓶身清晰",
+        )
 
     def test_segmented_stage_group_allows_s5_certification_and_negative_claims(self) -> None:
         s5 = {

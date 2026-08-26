@@ -69,6 +69,7 @@ def _reconcile_role_certification(
     # 新合同只允许迁移已经由 Stage1 资格化的 S5 证据；没有资格化证据时
     # 不能凭阶段文本创建一个“认证事实”单元，否则会把下游推断写回 Stage1。
     cert_id = ""
+    cert_unit_ids: set[str] = set()
     if active_contract:
         if stage_evidence_readiness(understanding, "S5") != "present":
             return
@@ -85,6 +86,7 @@ def _reconcile_role_certification(
         if not isinstance(cert_unit, dict):
             return
         cert_id = str(cert_unit.get("id") or "").strip()
+        cert_unit_ids = {cert_id}
         cert_quote = str(cert_unit.get("voiceover") or "").strip()
         cert_zh = str(cert_unit.get("voiceover_zh") or "").strip()
         cert_time = str(cert_unit.get("time_range") or "").strip()
@@ -158,9 +160,7 @@ def _reconcile_role_certification(
     # active contract 下只能使用已资格化的认证单元；未资格化单元即使文本里
     # 出现“认证”，也不能成为跨阶段清理的依据，否则会把 Stage1 未确认的
     # 观察当成确定事实消费。
-    if active_contract:
-        cert_unit_ids = {cert_id}
-    else:
+    if not active_contract:
         cert_unit_ids = {
             str(unit.get("id"))
             for unit in units
@@ -170,8 +170,13 @@ def _reconcile_role_certification(
     for index, stage in enumerate(stages):
         if index == 4:
             continue
+        removable_cert_ids = cert_unit_ids
+        if active_contract:
+            stage_code = f"S{index + 1}"
+            qualified_ids = qualified_stage_evidence_ids(understanding, stage_code)
+            removable_cert_ids = cert_unit_ids - qualified_ids
         stage[evidence_key] = [
-            i for i in stage.get(evidence_key, []) if str(i) not in cert_unit_ids
+            i for i in stage.get(evidence_key, []) if str(i) not in removable_cert_ids
         ]
         for key in (
             message_key,
@@ -187,7 +192,7 @@ def _reconcile_role_certification(
             cleaned = dict(value)
             for nested_key, nested_value in cleaned.items():
                 if nested_key == "evidence_ids" and isinstance(nested_value, list):
-                    cleaned[nested_key] = [item for item in nested_value if str(item) not in cert_unit_ids]
+                    cleaned[nested_key] = [item for item in nested_value if str(item) not in removable_cert_ids]
                 elif isinstance(nested_value, str):
                     cleaned[nested_key] = remove_certification_clauses(nested_value, nested_key)
                 elif isinstance(nested_value, list):

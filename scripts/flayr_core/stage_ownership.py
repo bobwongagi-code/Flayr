@@ -31,6 +31,10 @@ _CERTIFICATION_CLAUSE_BREAK_PATTERN = re.compile(
     r"[。；;.!?，,\n]+|(?:\s*(?:但|但是|然而|不过|同时|而且|而|but|however)\s*)",
     flags=re.IGNORECASE,
 )
+# Avoid treating decimal timestamps such as ``38.5s`` as sentence boundaries.
+_CERTIFICATION_FACT_BOUNDARY_PATTERN = re.compile(
+    r"[。；;!?\n]+|(?<!\d)\.{1,3}(?!\d)"
+)
 _UNCERTAIN_CERTIFICATION_MARKER = re.compile(
     r"模糊|无法辨识|无法识别|不可辨识|看不清|不清晰|难以辨识|无法确认|不确定|"
     r"疑似|可能是|unreadable|unclear|indistinct|not\s+identifiable|cannot\s+identify",
@@ -59,7 +63,9 @@ _CERTIFICATION_NON_SIGNAL_MARKER = re.compile(
     r"认证[^。；;.!?，,\n]{0,24}?(?:不|不得|不能|不可|仅)[^。；;.!?，,\n]{0,24}?"
     r"(?:作为|当作|用于|支持|依据|信号|证据)|"
     r"(?:不把|不将|不得把|不得将)[^。；;.!?，,\n]{0,20}认证[^。；;.!?，,\n]{0,24}?"
-    r"(?:作为|当作|用于|支持|依据|信号|证据)",
+    r"(?:作为|当作|用于|支持|依据|信号|证据)|"
+    r"认证[^。；;.!?，,\n]{0,24}?排除(?:在|出)[^。；;.!?，,\n]{0,24}?"
+    r"(?:当前阶段|S[1-6]|(?:当前)?信号|(?:当前)?证据)[^。；;.!?，,\n]{0,8}?外",
     flags=re.IGNORECASE,
 )
 CERTIFICATION_OWNERSHIP_PROMPT = (
@@ -113,6 +119,27 @@ def contains_certification(value: Any) -> bool:
     return False
 
 
+def strip_positive_certification_clauses(value: Any) -> str:
+    """Remove positive certification clauses while retaining other facts.
+
+    Stage projections may cite one mixed evidence unit whose visual/subtitle
+    facts contain both ordinary product observations and S5-only certification.
+    Split only at sentence/semicolon boundaries so the non-certification fact
+    remains available to the owning stage; pure certification facts become
+    empty rather than receiving a fabricated placeholder.
+    """
+    text = str(value or "").strip()
+    if not text or not contains_certification(text):
+        return text
+    clauses = [
+        clause.strip()
+        for clause in _CERTIFICATION_FACT_BOUNDARY_PATTERN.split(text)
+        if clause.strip()
+    ]
+    retained = [clause for clause in clauses if not contains_certification(clause)]
+    return "；".join(retained)
+
+
 def _text_leaves(value: Any) -> list[str]:
     """Flatten structured output to text leaves without interpreting fields."""
     if isinstance(value, dict):
@@ -131,20 +158,16 @@ def _text_leaves(value: Any) -> list[str]:
 
 
 def _is_stage1_certification_disclaimer(value: Any) -> bool:
-    """Allow one Stage1 item to split ownership and exclusion across fields."""
+    """Allow Stage1 to record exclusion without re-stating S5 ownership."""
     positive_leaves = [
         text for text in _text_leaves(value) if contains_certification(text)
     ]
     if not positive_leaves:
         return False
-    has_ownership = any(
-        _CERTIFICATION_S5_OWNERSHIP_MARKER.search(text)
-        for text in positive_leaves
-    )
     has_non_signal = any(
         _CERTIFICATION_NON_SIGNAL_MARKER.search(text) for text in positive_leaves
     )
-    if not (has_ownership and has_non_signal):
+    if not has_non_signal:
         return False
     for text in positive_leaves:
         clauses = _CERTIFICATION_CLAUSE_BREAK_PATTERN.split(text)
