@@ -70,7 +70,10 @@ from ..stage_evidence_contracts import (
     required_stage_signals_satisfied,
 )
 from ..structure_modules import canonical_module_id
-from ..stage_ownership import contains_certification, is_certification_owner_stage
+from ..stage_ownership import (
+    certification_policy_violations,
+    is_certification_owner_stage,
+)
 from .api import (
     call_llm_api,
     extract_chat_completion_text,
@@ -1911,9 +1914,7 @@ def _validated_stage_group_response(
     valid_magnitudes = {"none", "small", "medium", "large", "uncertain"}
     for code in target:
         item = by_code[code]
-        if not is_certification_owner_stage(code) and contains_certification(
-            json.dumps(item, ensure_ascii=False)
-        ):
+        if not is_certification_owner_stage(code) and certification_policy_violations(item):
             raise ValueError(
                 f"阶段组 {label} 的 {code} 不得将第三方认证作为判断信号或阶段字段；"
                 "认证主张只能归入 S5"
@@ -4362,8 +4363,8 @@ def _validated_stage1_qualification_response(
         code = normalize_stage_code(item.get("stage"))
         if code is None:
             raise ValueError(f"{phase_label} qualification 返回了无效阶段。")
-        if not is_certification_owner_stage(code) and contains_certification(
-            json.dumps(item, ensure_ascii=False)
+        if not is_certification_owner_stage(code) and certification_policy_violations(
+            item, allow_stage1_disclaimer=True
         ):
             raise ValueError(
                 f"{phase_label} qualification 的 {code} 不得将第三方认证作为资格信号或阶段字段；"

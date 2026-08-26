@@ -49,6 +49,19 @@ _POSITIVE_CERTIFICATION_MARKER = re.compile(
     r"shown|display|visible|verified|approved",
     flags=re.IGNORECASE,
 )
+_CERTIFICATION_S5_OWNERSHIP_MARKER = re.compile(
+    r"(?:认证|证书|KKM|KKMA|kelulusan|halal|sirim|sijil|certificate(?:s)?)"
+    r"[^。；;.!?，,\n]{0,24}?(?:归入|归属(?:于)?|属于|只能由|仅由|由)\s*S5",
+    flags=re.IGNORECASE,
+)
+_CERTIFICATION_NON_SIGNAL_MARKER = re.compile(
+    r"非认证|非背书|仅引用[^。；;.!?，,\n]{0,30}(?:非认证|产品身份|成分)|"
+    r"认证[^。；;.!?，,\n]{0,24}?(?:不|不得|不能|不可|仅)[^。；;.!?，,\n]{0,24}?"
+    r"(?:作为|当作|用于|支持|依据|信号|证据)|"
+    r"(?:不把|不将|不得把|不得将)[^。；;.!?，,\n]{0,20}认证[^。；;.!?，,\n]{0,24}?"
+    r"(?:作为|当作|用于|支持|依据|信号|证据)",
+    flags=re.IGNORECASE,
+)
 CERTIFICATION_OWNERSHIP_PROMPT = (
     "第三方认证/审批/权威机构背书（如 KKM、Halal、SIRIM、检测报告）按功能唯一归入 S5 信任放大，"
     "不归 S1 Hook 或 S2 产品引出；即使它与产品介绍同画面或出现在开头，也不得重复归因。"
@@ -98,6 +111,67 @@ def contains_certification(value: Any) -> bool:
             continue
         return True
     return False
+
+
+def _text_leaves(value: Any) -> list[str]:
+    """Flatten structured output to text leaves without interpreting fields."""
+    if isinstance(value, dict):
+        leaves: list[str] = []
+        for nested in value.values():
+            leaves.extend(_text_leaves(nested))
+        return leaves
+    if isinstance(value, (list, tuple)):
+        leaves = []
+        for nested in value:
+            leaves.extend(_text_leaves(nested))
+        return leaves
+    if isinstance(value, str):
+        return [value]
+    return []
+
+
+def _is_stage1_certification_disclaimer(value: Any) -> bool:
+    """Allow one Stage1 item to split ownership and exclusion across fields."""
+    positive_leaves = [
+        text for text in _text_leaves(value) if contains_certification(text)
+    ]
+    if not positive_leaves:
+        return False
+    has_ownership = any(
+        _CERTIFICATION_S5_OWNERSHIP_MARKER.search(text)
+        for text in positive_leaves
+    )
+    has_non_signal = any(
+        _CERTIFICATION_NON_SIGNAL_MARKER.search(text) for text in positive_leaves
+    )
+    if not (has_ownership and has_non_signal):
+        return False
+    for text in positive_leaves:
+        clauses = _CERTIFICATION_CLAUSE_BREAK_PATTERN.split(text)
+        positive_clauses = [
+            clause for clause in clauses if contains_certification(clause)
+        ]
+        if not all(
+            _CERTIFICATION_S5_OWNERSHIP_MARKER.search(clause)
+            or _CERTIFICATION_NON_SIGNAL_MARKER.search(clause)
+            for clause in positive_clauses
+        ):
+            return False
+    return True
+
+
+def certification_policy_violations(
+    value: Any,
+    *,
+    allow_stage1_disclaimer: bool = False,
+) -> list[str]:
+    """Return positive certification leaves not covered by an allowed disclaimer."""
+    positive_leaves = [
+        text for text in _text_leaves(value) if contains_certification(text)
+    ]
+    if allow_stage1_disclaimer and _is_stage1_certification_disclaimer(value):
+        return []
+    return positive_leaves
 
 
 def is_certification_owner_stage(stage: Any) -> bool:

@@ -908,6 +908,8 @@ def build_stage_evidence_qualification_payload(
                 if "S2" in normalized_targets
                 else "reason 和 signal binding 只能依据非认证部分，认证不得作为任何非 S5 阶段信号。"
             )
+            + "若必须解释混合 evidence unit，只能明确说明认证归入 S5，且当前阶段仅引用非认证部分；"
+            "不得在其他字段复述认证或把认证作为当前阶段信号。"
         )
     output_stages = _stage_evidence_qualification_examples(normalized_targets)
     s6_language_review = (
@@ -1635,7 +1637,7 @@ def build_stage_group_judgment_payload(
             CERTIFICATION_OWNERSHIP_PROMPT
             + "\n当前阶段组不拥有第三方认证归属；认证不是非 S5 阶段的合法判断信号，"
             "不得写入 judgment_reason、任何阶段专属字段，也不得用于 relation 或 model_gap_magnitude；"
-            "认证事实只由 S5 处理。"
+            "认证事实只由 S5 处理。非 S5 不得为了声明排除而复述认证，直接只写非认证依据。"
         )
     else:
         # Preserve the existing request identity for groups whose locked facts
