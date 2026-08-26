@@ -95,6 +95,51 @@ class HumanModelAlignmentTests(unittest.TestCase):
             )
             self.assertEqual(_sample_ids(gt, manifest), ["one", "two"])
 
+    def test_manifest_excludes_non_stage_scopes_from_alignment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gt = root / "gt.json"
+            gt.write_text(
+                json.dumps(
+                    {
+                        "samples": {
+                            "wukoubo-c1": {},
+                            "whole-video": {},
+                            "whole-video-metric": {},
+                            "included": {},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "samples": [
+                            {
+                                "id": "wukoubo-c1",
+                                "metric_scope": "excluded",
+                            },
+                            {
+                                "id": "whole-video",
+                                "evaluation_scope": "whole_video_observation",
+                            },
+                            {
+                                "id": "whole-video-metric",
+                                "metric_scope": "whole_video_observation",
+                            },
+                            {
+                                "id": "included",
+                                "metric_scope": "product_gt",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(_sample_ids(gt, manifest), ["included"])
+
     def test_manifest_rejects_conflicting_or_duplicate_aliases(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

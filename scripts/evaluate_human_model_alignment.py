@@ -51,6 +51,7 @@ SCORABLE_RELATIONS = frozenset({"benchmark_better", "creator_better", "tie"})
 QUALITY_FIELDS = ("subject", "visibility", "composition", "completion", "proof", "causal_link")
 S3_QUALITY_FIELDS = ("subject", "visibility", "composition", "completion")
 S4_QUALITY_FIELDS = ("visibility", "proof", "causal_link")
+WHOLE_VIDEO_OBSERVATION_SCOPE = "whole_video_observation"
 
 ALIGNMENT_METRIC_DEFINITIONS = {
     "gap_accuracy": "语义差距准确率；排除 legacy severity-only 无法表达 GT=none 的合同表达缺口",
@@ -130,6 +131,17 @@ def _manifest_row_id(row: dict[str, Any], index: int) -> str:
     return sample_id
 
 
+def _manifest_row_is_stage_alignment_eligible(row: dict[str, Any]) -> bool:
+    """Mirror the manifest scope rules used by the stage evaluator."""
+    evaluation_scope = str(row.get("evaluation_scope") or "").strip()
+    metric_scope = str(row.get("metric_scope") or "").strip()
+    return not (
+        metric_scope == "excluded"
+        or evaluation_scope == WHOLE_VIDEO_OBSERVATION_SCOPE
+        or metric_scope == WHOLE_VIDEO_OBSERVATION_SCOPE
+    )
+
+
 def _sample_ids(gt_path: Path, manifest_path: Path | None) -> list[str]:
     if manifest_path is not None:
         data = _read_json(manifest_path)
@@ -137,12 +149,16 @@ def _sample_ids(gt_path: Path, manifest_path: Path | None) -> list[str]:
         if not isinstance(rows, list):
             raise ValueError("manifest must contain a samples list")
         sample_ids: list[str] = []
+        seen: set[str] = set()
         for index, row in enumerate(rows):
             if not isinstance(row, dict):
                 raise ValueError(f"manifest sample {index} must be an object")
-            sample_ids.append(_manifest_row_id(row, index))
-        if len(set(sample_ids)) != len(sample_ids):
-            raise ValueError("manifest contains duplicate id/sample_id values")
+            sample_id = _manifest_row_id(row, index)
+            if sample_id in seen:
+                raise ValueError("manifest contains duplicate id/sample_id values")
+            seen.add(sample_id)
+            if _manifest_row_is_stage_alignment_eligible(row):
+                sample_ids.append(sample_id)
         return sample_ids
     data = _read_json(gt_path)
     samples = data.get("samples") if isinstance(data, dict) else None
