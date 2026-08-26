@@ -192,6 +192,221 @@ class ArchitectureContractTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             validate_stage_ownership({"stage_analysis": stages})
 
+    def test_segmented_stage_group_payload_carries_certification_policy_for_every_group(self) -> None:
+        positive_scoped_facts = {
+            "benchmark": {
+                "product_identity": {"note": "画面展示 KKM 认证标识"},
+                "stages": {"S1": {"qualified_evidence": []}},
+            },
+            "creator": {"product_identity": {}, "stages": {"S1": {}}},
+        }
+        with mock.patch.object(
+            payload_module,
+            "_compact_stage_group_facts",
+            return_value=positive_scoped_facts,
+        ):
+            for target in (["S1", "S2"], ["S3", "S4"], ["S6"]):
+                with self.subTest(target=target):
+                    payload = build_stage_group_judgment_payload(
+                        "test", "", {}, {"videos": {}}, list(target)
+                    )
+                    prompt = payload["messages"][1]["content"][0]["text"]
+                    self.assertIn(CERTIFICATION_OWNERSHIP_PROMPT, prompt)
+                    self.assertNotIn("本阶段组不处理第三方认证归属", prompt)
+
+        s5_prompt = build_stage_group_judgment_payload(
+            "test", "", {}, {"videos": {}}, ["S5"]
+        )["messages"][1]["content"][0]["text"]
+        self.assertIn(CERTIFICATION_OWNERSHIP_PROMPT, s5_prompt)
+        no_cert_prompt = build_stage_group_judgment_payload(
+            "test", "", {}, {"videos": {}}, ["S1", "S2"]
+        )["messages"][1]["content"][0]["text"]
+        self.assertNotIn(CERTIFICATION_OWNERSHIP_PROMPT, no_cert_prompt)
+        self.assertIn("本阶段组不处理第三方认证归属", no_cert_prompt)
+
+    def test_stage1_qualification_payload_adds_certification_policy_only_for_positive_facts(self) -> None:
+        positive_facts = {
+            "evidence_units": [
+                {
+                    "id": "B1",
+                    "information": "画面展示 KKM 认证标识",
+                    "visual_fact": "画面展示 KKM 认证标识",
+                    "functions": ["S2_intro", "S5_trust"],
+                }
+            ]
+        }
+        positive_payload = build_stage_evidence_qualification_payload(
+            "test", "benchmark", {"videos": {}}, positive_facts, ["S1", "S2"]
+        )
+        positive_text = positive_payload["messages"][1]["content"][0]["text"]
+        self.assertIn(CERTIFICATION_OWNERSHIP_PROMPT, positive_text)
+        self.assertIn("混合 evidence unit", positive_text)
+        self.assertIn("不得作为 S2 信号", positive_text)
+
+        for target in (["S3", "S4"], ["S6"], ["S5"]):
+            payload = build_stage_evidence_qualification_payload(
+                "test", "benchmark", {"videos": {}}, positive_facts, target
+            )
+            text = payload["messages"][1]["content"][0]["text"]
+            self.assertNotIn(CERTIFICATION_OWNERSHIP_PROMPT, text)
+
+        no_cert_payload = build_stage_evidence_qualification_payload(
+            "test", "benchmark", {"videos": {}}, {}, ["S1", "S2"]
+        )
+        no_cert_text = no_cert_payload["messages"][1]["content"][0]["text"]
+        self.assertNotIn(CERTIFICATION_OWNERSHIP_PROMPT, no_cert_text)
+
+    def test_stage1_qualification_rejects_non_s5_certification_claims_but_allows_s5_and_negative(self) -> None:
+        def check(stage: str, reason: str, binding_reason: str | None = None) -> dict[str, object]:
+            item: dict[str, object] = {
+                "stage": stage,
+                "status": "present",
+                "coverage": "complete",
+                "evidence_ids": ["B1"],
+                "observed_signals": [],
+                "missing_signals": [],
+                "signal_bindings": {},
+                "reason": reason,
+            }
+            if binding_reason is not None:
+                item["signal_bindings"] = {
+                    "product_identity": {
+                        "status": "supported",
+                        "evidence_ids": ["B1"],
+                        "reason": binding_reason,
+                    }
+                }
+            return item
+
+        with self.assertRaisesRegex(ValueError, "不得将第三方认证"):
+            pipeline._validated_stage1_qualification_response(
+                {
+                    "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                    "stage_evidence_checks": [
+                        check("S2", "标杆展示 KKM 认证信息")
+                    ],
+                },
+                targets=["S2"],
+                valid_ids={"B1"},
+                phase_label="Stage1-B",
+            )
+        with self.assertRaisesRegex(ValueError, "不得将第三方认证"):
+            pipeline._validated_stage1_qualification_response(
+                {
+                    "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                    "stage_evidence_checks": [
+                        check("S2", "产品引出完成", "产品展示 KKM 认证信息")
+                    ],
+                },
+                targets=["S2"],
+                valid_ids={"B1"},
+                phase_label="Stage1-B",
+            )
+
+        s5 = pipeline._validated_stage1_qualification_response(
+            {
+                "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                "stage_evidence_checks": [
+                    check("S5", "标杆展示 KKM 认证信息")
+                ],
+            },
+            targets=["S5"],
+            valid_ids={"B1"},
+            phase_label="Stage1-B",
+        )
+        self.assertEqual(s5["S5"]["status"], "present")
+
+        negative = pipeline._validated_stage1_qualification_response(
+            {
+                "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                "stage_evidence_checks": [
+                    check("S2", "无认证/证书等视觉背书")
+                ],
+            },
+            targets=["S2"],
+            valid_ids={"B1"},
+            phase_label="Stage1-B",
+        )
+        self.assertEqual(negative["S2"]["status"], "present")
+
+        uncertain = pipeline._validated_stage1_qualification_response(
+            {
+                "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                "stage_evidence_checks": [
+                    check("S2", "可能是 KKM 认证，但无法确认")
+                ],
+            },
+            targets=["S2"],
+            valid_ids={"B1"},
+            phase_label="Stage1-B",
+        )
+        self.assertEqual(uncertain["S2"]["status"], "present")
+
+    def test_segmented_stage_group_rejects_certification_claims_outside_s5(self) -> None:
+        def response(**extra: object) -> dict[str, object]:
+            item: dict[str, object] = {
+                "stage": "S2 产品引出",
+                "stage_state": "completed",
+                "relation": "benchmark_better",
+                "model_gap_magnitude": "medium",
+                "benchmark_evidence_ids": [],
+                "creator_evidence_ids": [],
+                "judgment_reason": "标杆展示 KKM 认证标识，提升可信度",
+            }
+            item.update(extra)
+            return {"stages": [item]}
+
+        with self.assertRaisesRegex(ValueError, "不得将第三方认证"):
+            pipeline._validated_stage_group_response(
+                response(), ["S2"], label="S2"
+            )
+        with self.assertRaisesRegex(ValueError, "不得将第三方认证"):
+            pipeline._validated_stage_group_response(
+                response(
+                    judgment_reason="标杆完成产品引出",
+                    benchmark_s2={"trust_note": "画面展示 KKM 认证标识"},
+                ),
+                ["S2"],
+                label="S2",
+            )
+
+    def test_segmented_stage_group_allows_s5_certification_and_negative_claims(self) -> None:
+        s5 = {
+            "stages": [
+                {
+                    "stage": "S5 信任放大",
+                    "stage_state": "completed",
+                    "relation": "benchmark_better",
+                    "model_gap_magnitude": "medium",
+                    "benchmark_evidence_ids": [],
+                    "creator_evidence_ids": [],
+                    "judgment_reason": "标杆展示 KKM 认证标识",
+                    "benchmark_s5": {"trust_note": "独立检测证书可见"},
+                }
+            ]
+        }
+        validated = pipeline._validated_stage_group_response(s5, ["S5"], label="S5")
+        self.assertEqual(validated["S5"]["stage"], "S5 信任放大")
+
+        negative = {
+            "stages": [
+                {
+                    "stage": "S2 产品引出",
+                    "stage_state": "completed",
+                    "relation": "equivalent",
+                    "model_gap_magnitude": "none",
+                    "benchmark_evidence_ids": [],
+                    "creator_evidence_ids": [],
+                    "judgment_reason": "双方均无认证/证书等视觉背书",
+                    "benchmark_s2": {"trust_note": "认证未出现"},
+                }
+            ]
+        }
+        validated = pipeline._validated_stage_group_response(
+            negative, ["S2"], label="S2"
+        )
+        self.assertEqual(validated["S2"]["relation"], "equivalent")
+
     def test_degraded_report_does_not_render_unknown_severity_as_medium(self) -> None:
         analysis = {
             "mode": "compare",

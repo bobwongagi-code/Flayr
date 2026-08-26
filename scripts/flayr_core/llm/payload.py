@@ -39,6 +39,7 @@ from ..structure_modules import stage1_event_catalog
 from ..stage_ownership import (
     CERTIFICATION_OWNERSHIP_PROMPT,
     CERTIFICATION_POSITION_EXCEPTION_PROMPT,
+    contains_certification,
 )
 from ..subtitle_track import render_subtitle_track_markdown
 from ..transcript import (
@@ -66,6 +67,27 @@ QWEN36_PLUS_MODEL_PREFIX = "qwen3.6-plus"
 GENERIC_FULL_ANALYSIS_OUTPUT_BUDGET = 32768
 QWEN36_PLUS_FULL_ANALYSIS_OUTPUT_BUDGET = 65536
 STAGE1_RECOVERY_PADDING_SECONDS = 0.5
+
+
+def _certification_units_for_target_stages(
+    units: list[dict[str, Any]],
+    target_stages: list[str],
+) -> list[dict[str, Any]]:
+    """Keep certification policy scoped to functions owned by this request."""
+    target = {str(stage).strip().upper() for stage in target_stages}
+    selected: list[dict[str, Any]] = []
+    for unit in units:
+        if not isinstance(unit, dict):
+            continue
+        functions = unit.get("functions")
+        if not isinstance(functions, list):
+            continue
+        if any(
+            str(function).strip().upper().partition("_")[0] in target
+            for function in functions
+        ):
+            selected.append(unit)
+    return selected
 
 
 def _uses_qwen36_plus_completion_budget(model: str) -> bool:
@@ -870,6 +892,23 @@ def build_stage_evidence_qualification_payload(
         "stage1_acquisition": acquisition,
         "evidence_units": units,
     }
+    target_certification_units = _certification_units_for_target_stages(
+        units, normalized_targets
+    )
+    certification_policy = ""
+    if "S5" not in normalized_targets and contains_certification(
+        json.dumps(target_certification_units, ensure_ascii=False)
+    ):
+        certification_policy = (
+            CERTIFICATION_OWNERSHIP_PROMPT
+            + "\n当前目标阶段不拥有第三方认证归属；认证不得作为非 S5 阶段的资格信号。"
+            + (
+                "混合 evidence unit 可以因其中的产品身份或问题到产品承接部分被 S2 引用；"
+                "但 reason 和 signal binding 只能依据非认证部分，认证不得作为 S2 信号。"
+                if "S2" in normalized_targets
+                else "reason 和 signal binding 只能依据非认证部分，认证不得作为任何非 S5 阶段信号。"
+            )
+        )
     output_stages = _stage_evidence_qualification_examples(normalized_targets)
     s6_language_review = (
         "## S6 本地化口播复核\n"
@@ -916,6 +955,7 @@ def build_stage_evidence_qualification_payload(
             "## 输出时必须遵守的阶段信号白名单",
             _stage_evidence_signal_codebook(normalized_targets),
             *([s5_independence_review] if s5_independence_review else []),
+            *([certification_policy] if certification_policy else []),
             s6_language_review,
             "## 已锁定 Canonical Stage1-A/C 事实（只读）",
             json.dumps(context, ensure_ascii=False, indent=2),
@@ -1576,18 +1616,31 @@ def build_stage_group_judgment_payload(
     if not targets:
         raise ValueError("stage group must contain at least one known stage")
     scoped_facts = _compact_stage_group_facts(facts, targets)
+    has_positive_certification = contains_certification(
+        json.dumps(scoped_facts, ensure_ascii=False)
+    )
     eligibility = _compact_stage_group_comparison_contract(
         analysis.get("comparison_contract") or analysis.get("comparison_eligibility") or {},
         targets,
     )
     foundation = analysis.get("product_foundation") or {}
     flag_contract = "\n".join(f"{stage}: {_stage_group_flag_contract(stage)}" for stage in targets)
-    stage_ownership_contract = (
-        "S5 是可选的信任放大阶段，不代表达人必须完成背书，也不能用品类先验否定任一侧实际出现的信任事实。"
-        + CERTIFICATION_OWNERSHIP_PROMPT
-        if "S5" in targets
-        else "（本阶段组不处理第三方认证归属）"
-    )
+    if "S5" in targets:
+        stage_ownership_contract = (
+            "S5 是可选的信任放大阶段，不代表达人必须完成背书，也不能用品类先验否定任一侧实际出现的信任事实。"
+            + CERTIFICATION_OWNERSHIP_PROMPT
+        )
+    elif has_positive_certification:
+        stage_ownership_contract = (
+            CERTIFICATION_OWNERSHIP_PROMPT
+            + "\n当前阶段组不拥有第三方认证归属；认证不是非 S5 阶段的合法判断信号，"
+            "不得写入 judgment_reason、任何阶段专属字段，也不得用于 relation 或 model_gap_magnitude；"
+            "认证事实只由 S5 处理。"
+        )
+    else:
+        # Preserve the existing request identity for groups whose locked facts
+        # contain no positive certification claim.
+        stage_ownership_contract = "（本阶段组不处理第三方认证归属）"
     text = "\n\n".join(
         [
             "# Flayr Stage2 小阶段组判断",
