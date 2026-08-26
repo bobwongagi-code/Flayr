@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "semantic-baseline-refreeze-after-mixed-evidence-projection-fix-2026-08-26",
-  "description": "同一 evidence unit 同时承载阶段事实和 S5 认证事实时，保留已资格化的非 S5 引用，并在阶段画面投影中只移除认证子句。未改动认证唯一归属 S5 的合同、资格尺度、gap 标尺或模型路由。",
+  "description": "non-S5 segmented stage reports now project mixed evidence without positive certification clauses; ledger/IDs/S5 unchanged",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
