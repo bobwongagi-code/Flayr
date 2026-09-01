@@ -81,6 +81,8 @@ from flayr_core.report import stage_report_severity, stage_skipped
 from flayr_core.postprocess.validate import (
     validate_evidence_alignment,
     validate_s2_contract_flags,
+    validate_s3_usage_flags,
+    validate_s4_effect_flags,
     validate_stage_evidence_qualification,
     validate_transcript_attribution,
     validate_stage_ownership,
@@ -1433,6 +1435,174 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(projected["model_gap_magnitude"], "medium")
         self.assertEqual(projected["benchmark_evidence_ids"], [])
         self.assertEqual(projected["creator_evidence_ids"], ["C6"])
+
+    def test_segmented_projection_fills_missing_s3_s4_flags_for_explicit_absence(self) -> None:
+        for stage in ("S3", "S4"):
+            with self.subTest(stage=stage):
+                facts = {
+                    "benchmark": self._closed_negative_side("B", stage),
+                    "creator": self._closed_negative_side("C", stage),
+                }
+                projected = _normalize_segmented_stage(
+                    {
+                        "stage": stage,
+                        "stage_state": "completed",
+                        "relation": "equivalent",
+                        "model_gap_magnitude": "none",
+                        "judgment_reason": "双方均为闭合负向事实",
+                        f"benchmark_{stage.lower()}": {"exists": False},
+                    },
+                    stage,
+                    facts,
+                )
+
+                for role in ("benchmark", "creator"):
+                    flag = projected[f"{role}_{stage.lower()}"]
+                    self.assertTrue(flag["usage_reason" if stage == "S3" else "effect_reason"])
+                    self.assertEqual(flag["evidence_ids"], [])
+                    self.assertEqual(flag["proposition_ids"], [])
+                    if stage == "S3":
+                        self.assertFalse(flag["exists"])
+                        self.assertEqual(flag["usage_evidence_state"], "none")
+                        self.assertEqual(flag["scene_mode"], "unknown")
+                        self.assertEqual(flag["presentation_overlays"], ["none"])
+                        self.assertEqual((flag["start_seconds"], flag["end_seconds"]), (0, 0))
+                        bool_fields = (
+                            "usage_process_visible",
+                            "result_only_without_process",
+                            "mouth_only_or_static",
+                            "real_usage_met",
+                            "core_selling_point_visible",
+                            "action_proof_met",
+                            "action_target_contact_met",
+                            "action_application_change_visible",
+                            "critical_action_continuity_met",
+                            "continuity_met",
+                        )
+                    else:
+                        self.assertEqual(flag["effect_type"], "none")
+                        self.assertEqual(flag["effect_evidence_state"], "none")
+                        self.assertEqual(flag["effect_salience"], "none")
+                        bool_fields = (
+                            "effect_visible",
+                            "effect_proposition_matched",
+                            "comparison_control_met",
+                            "visual_difference_observed",
+                            "effect_attribution_supported",
+                            "result_only_without_process",
+                            "process_linked_effect",
+                        )
+                    self.assertTrue(all(flag[field] is False for field in bool_fields))
+
+    def test_segmented_projection_fills_absent_side_and_preserves_complete_other_side(self) -> None:
+        for stage in ("S3", "S4"):
+            with self.subTest(stage=stage):
+                absent_benchmark = self._closed_negative_side("B", stage)
+                generated = _normalize_segmented_stage(
+                    {
+                        "stage": stage,
+                        "stage_state": "completed",
+                        "relation": "equivalent",
+                        "model_gap_magnitude": "none",
+                        "judgment_reason": "双方均为闭合负向事实",
+                    },
+                    stage,
+                    {
+                        "benchmark": absent_benchmark,
+                        "creator": self._closed_negative_side("C", stage),
+                    },
+                )
+                provider_key = f"creator_{stage.lower()}"
+                provider_flag = copy.deepcopy(generated[provider_key])
+                if stage == "S3":
+                    provider_flag.update(
+                        {
+                            "exists": True,
+                            "usage_evidence_state": "partial",
+                            "usage_process_visible": True,
+                            "real_usage_met": True,
+                            "core_selling_point_visible": True,
+                            "action_proof_met": True,
+                            "action_target_contact_met": True,
+                            "evidence_ids": ["C3"],
+                            "usage_reason": "provider complete flag",
+                        }
+                    )
+                else:
+                    provider_flag.update(
+                        {
+                            "effect_type": "before_after",
+                            "effect_evidence_state": "result_only",
+                            "effect_visible": True,
+                            "visual_difference_observed": True,
+                            "evidence_ids": ["C4"],
+                            "effect_reason": "provider complete flag",
+                        }
+                    )
+                creator = self._partial_side("C", stage)
+                raw = {
+                    "stage": stage,
+                    "stage_state": "completed",
+                    "relation": "benchmark_better",
+                    "model_gap_magnitude": "medium",
+                    "benchmark_evidence_ids": [],
+                    "creator_evidence_ids": [f"C{stage[1:]}"],
+                    provider_key: provider_flag,
+                    "judgment_reason": "benchmark 为闭合负向事实，creator 有阶段证据",
+                }
+                projected = _normalize_segmented_stage(
+                    raw,
+                    stage,
+                    {"benchmark": absent_benchmark, "creator": creator},
+                )
+
+                self.assertEqual(projected["stage_handoff_status"], "grounded")
+                self.assertEqual(projected["relation"], "benchmark_better")
+                self.assertEqual(projected["model_gap_magnitude"], "medium")
+                self.assertIn(f"benchmark_{stage.lower()}", projected)
+                self.assertEqual(projected[provider_key], provider_flag)
+                result = {
+                    "stage_analysis": ([{}, {}, projected] if stage == "S3" else [{}, {}, {}, projected]),
+                    "video_understanding": {"benchmark": absent_benchmark, "creator": creator},
+                }
+                validator = validate_s3_usage_flags if stage == "S3" else validate_s4_effect_flags
+                validator(result, {"evidence_state_required": True, f"{stage.lower()}_flags_required": True})
+
+    def test_segmented_projection_does_not_fill_s3_s4_flags_for_unknown_or_partial(self) -> None:
+        for stage in ("S3", "S4"):
+            with self.subTest(stage=stage):
+                for status in ("unknown", "partial"):
+                    with self.subTest(status=status):
+                        if status == "unknown":
+                            facts = {
+                                "benchmark": self._active_side("B"),
+                                "creator": self._active_side("C"),
+                            }
+                            raw_ids = {}
+                        else:
+                            facts = {
+                                "benchmark": self._partial_side("B", stage),
+                                "creator": self._partial_side("C", stage),
+                            }
+                            raw_ids = {
+                                "benchmark_evidence_ids": [f"B{stage[1:]}"],
+                                "creator_evidence_ids": [f"C{stage[1:]}"],
+                            }
+                        projected = _normalize_segmented_stage(
+                            {
+                                "stage": stage,
+                                "stage_state": "completed",
+                                "relation": "benchmark_better",
+                                "model_gap_magnitude": "medium",
+                                "judgment_reason": "证据状态待确认",
+                                **raw_ids,
+                            },
+                            stage,
+                            facts,
+                        )
+
+                        self.assertNotIn(f"benchmark_{stage.lower()}", projected)
+                        self.assertNotIn(f"creator_{stage.lower()}", projected)
 
     def test_stage_group_rejects_tie_when_only_one_side_executes(self) -> None:
         facts = {

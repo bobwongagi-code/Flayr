@@ -199,6 +199,87 @@ def _segmented_complete_flag(value: Any, stage: str) -> bool:
     return True
 
 
+_S3_ABSENT_BOOLEAN_FIELDS = (
+    "usage_process_visible",
+    "result_only_without_process",
+    "mouth_only_or_static",
+    "real_usage_met",
+    "core_selling_point_visible",
+    "process_framing_met",
+    "action_proof_met",
+    "action_target_contact_met",
+    "action_application_change_visible",
+    "critical_action_continuity_met",
+    "usage_context_fit",
+    "continuity_met",
+    "richness_met",
+    "single_scene_continuity_met",
+    "single_scene_variation_met",
+    "multi_scene_logic_met",
+    "multi_scene_transition_met",
+    "multi_scene_role_adaptation_met",
+    "role_design_met",
+    "role_interaction_met",
+    "distinct_personas_met",
+    "steps_clear_met",
+    "pov_immersive_met",
+    "fake_or_staged",
+)
+_S4_ABSENT_BOOLEAN_FIELDS = (
+    "effect_visible",
+    "effect_proposition_matched",
+    "comparison_control_met",
+    "closeup_or_focus_met",
+    "visual_difference_observed",
+    "module_constraints_met",
+    "effect_maximized",
+    "requires_close_inspection",
+    "effect_attribution_supported",
+    "result_only_without_process",
+    "process_linked_effect",
+    "tamper_or_cut_risk",
+)
+
+
+def _segmented_explicit_absence_flag(stage: str, role: str) -> dict[str, Any] | None:
+    """Build the code-owned negative flag for a closed Stage1 absence.
+
+    This is intentionally limited to S3/S4.  It must never turn an incomplete
+    or uncertain observation into a negative fact, and it must not reuse any
+    provider-authored partial values.
+    """
+    reason = f"Stage1 已明确闭合 {role} 的 {stage} 为 absent；未发现合同要求的明确证据。"
+    if stage == "S3":
+        flag: dict[str, Any] = {
+            "exists": False,
+            "module_type": "unknown",
+            "usage_evidence_state": "none",
+            "scene_mode": "unknown",
+            "presentation_overlays": ["none"],
+            "demonstrated_selling_points": [],
+            "missing_selling_points": [],
+            "start_seconds": 0,
+            "end_seconds": 0,
+            "usage_reason": reason,
+            "evidence_ids": [],
+            "proposition_ids": [],
+        }
+        flag.update({field: False for field in _S3_ABSENT_BOOLEAN_FIELDS})
+        return flag
+    if stage == "S4":
+        flag = {
+            "effect_type": "none",
+            "effect_evidence_state": "none",
+            "effect_salience": "none",
+            "effect_reason": reason,
+            "evidence_ids": [],
+            "proposition_ids": [],
+        }
+        flag.update({field: False for field in _S4_ABSENT_BOOLEAN_FIELDS})
+        return flag
+    return None
+
+
 def _project_segmented_role_evidence(
     output: dict[str, Any],
     raw: dict[str, Any],
@@ -419,12 +500,16 @@ def _normalize_segmented_stage(
     # A nested structured flag is accepted only as a complete object. Partial
     # semantic objects are worse than an explicit unknown because the existing
     # resolver/validators would otherwise mistake omitted booleans for facts.
-    if output.get("stage_handoff_status") == "grounded":
-        for role in ("benchmark", "creator"):
-            key = f"{role}_{stage.lower() if stage != 'S1' else 'hook'}"
-            value = raw.get(key)
-            if _segmented_complete_flag(value, stage):
-                output[key] = _sanitize_segmented_flag(value, set(role_ids[role]))
+    for role in ("benchmark", "creator"):
+        key = f"{role}_{stage.lower() if stage != 'S1' else 'hook'}"
+        value = raw.get(key)
+        if output.get("stage_handoff_status") == "grounded" and _segmented_complete_flag(value, stage):
+            output[key] = _sanitize_segmented_flag(value, set(role_ids[role]))
+            continue
+        if stage in {"S3", "S4"} and readiness[role] == "absent" and not _segmented_complete_flag(value, stage):
+            absent_flag = _segmented_explicit_absence_flag(stage, role)
+            if absent_flag is not None:
+                output[key] = absent_flag
     return output
 
 
