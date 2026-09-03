@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-contract-and-compact-input-extraction-2026-09-04",
-  "description": "Structure only: the stage contract registry and compact evaluator frozen-input loading moved into dedicated modules behind their existing facades. Contract definitions, qualification behavior, frozen input identity, and evaluation semantics are unchanged.",
+  "name": "semantic-baseline-refreeze-after-comparison-and-qualification-extraction-2026-09-04",
+  "description": "Structure only: comparison normalization, parser primitives, and Stage1 qualification planning moved behind their existing facades; CLI and evidence projection tests were moved into focused modules. Comparison semantics, qualification gates, provider behavior, and assertions are unchanged.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
