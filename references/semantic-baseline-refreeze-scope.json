@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-full-analysis-payload-extraction-2026-09-03",
-  "description": "Structure only: full-analysis and legacy-repair payload construction moved from the shared payload module into a dedicated module while preserving the existing payload imports. Prompts, evidence qualification, gap rules, provider requests, artifacts, and model routing are unchanged.",
+  "name": "semantic-baseline-refreeze-after-cli-parser-extraction-2026-09-03",
+  "description": "Structure only: CLI parser construction moved from the entry-point script into a dedicated module. Arguments, defaults, model routing, verification order, and run-state behavior are unchanged.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
