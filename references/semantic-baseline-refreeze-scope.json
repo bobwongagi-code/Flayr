@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-comparison-and-qualification-extraction-2026-09-04",
-  "description": "Structure only: comparison normalization, parser primitives, and Stage1 qualification planning moved behind their existing facades; CLI and evidence projection tests were moved into focused modules. Comparison semantics, qualification gates, provider behavior, and assertions are unchanged.",
+  "name": "semantic-baseline-refreeze-after-cache-identity-coverage-fix-2026-09-04",
+  "description": "Correctness fix: video-fact cache identity now includes all extracted LLM implementation modules and direct stage contract dependencies, preventing stale fact reuse after uncommitted semantic source changes. Provider requests, evidence qualification, and judgment semantics are unchanged.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
