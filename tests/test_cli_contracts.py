@@ -225,3 +225,7 @@ class CliContractTests(unittest.TestCase):
     def test_cli_does_not_accept_abbreviated_protected_network_flags(self) -> None:
         with self.assertRaises(SystemExit):
             flayr.build_parser().parse_args(["compare", "--llm-api-u", "https://attacker.invalid"])
+
+
+if __name__ == "__main__":
+    unittest.main()

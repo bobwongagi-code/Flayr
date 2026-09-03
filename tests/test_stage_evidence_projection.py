@@ -330,3 +330,7 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(mismatched["status"], "blocked")
         self.assertEqual(mismatched["reason_code"], "comparison_scope_closed")
         self.assertFalse(mismatched["analysis_allowed"])
+
+
+if __name__ == "__main__":
+    unittest.main()
