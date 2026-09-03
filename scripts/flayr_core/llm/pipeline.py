@@ -122,6 +122,8 @@ from .stage1_qualification import (
     _prepare_stage1_qualification_response,
     _unknown_stage_qualification_check,
     _validated_stage1_qualification_response,  # noqa: F401
+    build_stage1_qualification_plan,
+    prepare_stage1_qualification_group,
 )
 from .stage2_projection import (
     _SEGMENTED_FLAG_REQUIRED_KEYS,
@@ -3994,24 +3996,21 @@ def _run_stage1_qualification(
     A focused call is recorded as phase D so it cannot overwrite the original
     phase-B artifact that explains why recovery was needed.
     """
-    requested_stages = {
-        code
-        for value in (target_stages or stage_codes())
-        if (code := normalize_stage_code(value)) is not None
-    }
-    groups_to_run = [
-        [stage for stage in group if stage in requested_stages]
-        for group in STAGE1_QUALIFICATION_GROUPS
-        if any(stage in requested_stages for stage in group)
-    ]
-    focused_requalification = target_stages is not None
-    provider_phase = "D" if focused_requalification else "B"
-    phase_label = f"Stage1-{provider_phase}"
-    valid_ids = {
-        str(item.get("id") or "").strip()
-        for item in facts.get("evidence_units") or []
-        if isinstance(item, dict) and str(item.get("id") or "").strip()
-    }
+    plan = build_stage1_qualification_plan(
+        facts,
+        target_stages,
+        include_existing_state=not args.llm_dry_run,
+    )
+    requested_stages = plan.requested_stages
+    groups_to_run = plan.groups_to_run
+    focused_requalification = plan.focused_requalification
+    provider_phase = plan.provider_phase
+    phase_label = plan.phase_label
+    valid_ids = plan.valid_ids
+    checks_by_stage = plan.checks_by_stage
+    group_records = plan.group_records
+    prior_failed_stage_codes = plan.prior_failed_stage_codes
+    failed_stage_codes = plan.failed_stage_codes
     if args.llm_dry_run:
         facts["stage1_qualification"] = {
             "source": "pipeline",
@@ -4024,43 +4023,6 @@ def _run_stage1_qualification(
             reason="Stage1-B 在 dry-run 中未执行，阶段资格保持未知。",
         )
         return facts
-    existing_checks = normalize_stage_evidence_checks(
-        facts.get("stage_evidence_checks"),
-        valid_ids,
-    )
-    checks_by_stage = {
-        str(item.get("stage")): item
-        for item in existing_checks
-        if isinstance(item, dict) and str(item.get("stage") or "").strip()
-    }
-    existing_qualification = (
-        facts.get("stage1_qualification")
-        if isinstance(facts.get("stage1_qualification"), dict)
-        else {}
-    )
-    group_records: list[dict[str, Any]] = [
-        copy.deepcopy(item)
-        for item in existing_qualification.get("group_records") or []
-        if isinstance(item, dict)
-    ]
-    prior_failed_stage_codes = {
-        code
-        for value in existing_qualification.get("failed_stage_codes") or []
-        if (code := normalize_stage_code(value)) is not None
-    }
-    if (
-        focused_requalification
-        and existing_qualification.get("status") == "failed"
-        and not prior_failed_stage_codes
-    ):
-        # Legacy failed qualification records did not identify their failed
-        # groups. The bounded D targets are the only safe lineage we can infer.
-        prior_failed_stage_codes = set(requested_stages)
-    failed_stage_codes: list[str] = [
-        code
-        for code in prior_failed_stage_codes
-        if code not in requested_stages
-    ] if focused_requalification else []
     current_successful_group_count = 0
     replay_source, provider_fallback_allowed = _stage1_replay_source(args)
 
@@ -4105,11 +4067,12 @@ def _run_stage1_qualification(
                         payload=payload,
                         args=args,
                     )
-                    _, normalized_by_stage, qualification_normalization = _prepare_stage1_qualification_response(
+                    normalized_by_stage, qualification_normalization, blocked_stage_codes = prepare_stage1_qualification_group(
                         response,
                         targets=targets,
                         valid_ids=valid_ids,
                         phase_label=phase_label,
+                        prepare_response=_prepare_stage1_qualification_response,
                     )
                 except (StageFactArtifactError, ValueError) as exc:
                     if not provider_fallback_allowed:
@@ -4134,19 +4097,14 @@ def _run_stage1_qualification(
                 )
                 response = parse_json_text(response_text)
             if normalized_by_stage is None:
-                _, normalized_by_stage, qualification_normalization = _prepare_stage1_qualification_response(
+                normalized_by_stage, qualification_normalization, blocked_stage_codes = prepare_stage1_qualification_group(
                     response,
                     targets=targets,
                     valid_ids=valid_ids,
                     phase_label=phase_label,
+                    prepare_response=_prepare_stage1_qualification_response,
                 )
             if qualification_normalization is not None:
-                blocked_stage_codes = {
-                    code
-                    for item in qualification_normalization.get("blocked_stages") or []
-                    if isinstance(item, dict)
-                    and (code := normalize_stage_code(item.get("stage"))) is not None
-                }
                 failed_stage_codes.extend(
                     stage for stage in targets if stage in blocked_stage_codes
                 )

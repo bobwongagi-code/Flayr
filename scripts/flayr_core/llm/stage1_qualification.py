@@ -3,21 +3,154 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
 from typing import Any
 
 from ..stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
+    STAGE1_QUALIFICATION_GROUPS,
     normalize_stage_code,
     normalize_stage_evidence_checks,
     stage1_forbidden_field_issues,
     stage1_pipeline_owned_field_issues,
     stage_evidence_contract,
+    stage_codes,
 )
 from ..stage_ownership import (
     certification_policy_violations,
     is_certification_owner_stage,
 )
 from .artifact_identity import stable_sha256
+
+
+@dataclass
+class Stage1QualificationPlan:
+    """Pure per-run qualification state prepared before provider calls."""
+
+    requested_stages: set[str]
+    groups_to_run: list[list[str]]
+    focused_requalification: bool
+    provider_phase: str
+    phase_label: str
+    valid_ids: set[str]
+    checks_by_stage: dict[str, dict[str, Any]]
+    group_records: list[dict[str, Any]]
+    prior_failed_stage_codes: set[str]
+    failed_stage_codes: list[str]
+
+
+def build_stage1_qualification_plan(
+    facts: dict[str, Any],
+    target_stages: list[str] | tuple[str, ...] | None = None,
+    *,
+    include_existing_state: bool = True,
+) -> Stage1QualificationPlan:
+    """Prepare qualification targets and optional existing state without providers."""
+    requested_stages = {
+        code
+        for value in (target_stages or stage_codes())
+        if (code := normalize_stage_code(value)) is not None
+    }
+    groups_to_run = [
+        [stage for stage in group if stage in requested_stages]
+        for group in STAGE1_QUALIFICATION_GROUPS
+        if any(stage in requested_stages for stage in group)
+    ]
+    focused_requalification = target_stages is not None
+    provider_phase = "D" if focused_requalification else "B"
+    phase_label = f"Stage1-{provider_phase}"
+    valid_ids = {
+        str(item.get("id") or "").strip()
+        for item in facts.get("evidence_units") or []
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    if not include_existing_state:
+        return Stage1QualificationPlan(
+            requested_stages=requested_stages,
+            groups_to_run=groups_to_run,
+            focused_requalification=focused_requalification,
+            provider_phase=provider_phase,
+            phase_label=phase_label,
+            valid_ids=valid_ids,
+            checks_by_stage={},
+            group_records=[],
+            prior_failed_stage_codes=set(),
+            failed_stage_codes=[],
+        )
+    existing_checks = normalize_stage_evidence_checks(
+        facts.get("stage_evidence_checks"),
+        valid_ids,
+    )
+    checks_by_stage = {
+        str(item.get("stage")): item
+        for item in existing_checks
+        if isinstance(item, dict) and str(item.get("stage") or "").strip()
+    }
+    existing_qualification = (
+        facts.get("stage1_qualification")
+        if isinstance(facts.get("stage1_qualification"), dict)
+        else {}
+    )
+    group_records = [
+        copy.deepcopy(item)
+        for item in existing_qualification.get("group_records") or []
+        if isinstance(item, dict)
+    ]
+    prior_failed_stage_codes = {
+        code
+        for value in existing_qualification.get("failed_stage_codes") or []
+        if (code := normalize_stage_code(value)) is not None
+    }
+    if (
+        focused_requalification
+        and existing_qualification.get("status") == "failed"
+        and not prior_failed_stage_codes
+    ):
+        # Legacy failed qualification records did not identify their failed
+        # groups. The bounded D targets are the only safe lineage we can infer.
+        prior_failed_stage_codes = set(requested_stages)
+    failed_stage_codes = [
+        code
+        for code in prior_failed_stage_codes
+        if code not in requested_stages
+    ] if focused_requalification else []
+    return Stage1QualificationPlan(
+        requested_stages=requested_stages,
+        groups_to_run=groups_to_run,
+        focused_requalification=focused_requalification,
+        provider_phase=provider_phase,
+        phase_label=phase_label,
+        valid_ids=valid_ids,
+        checks_by_stage=checks_by_stage,
+        group_records=group_records,
+        prior_failed_stage_codes=prior_failed_stage_codes,
+        failed_stage_codes=failed_stage_codes,
+    )
+
+
+def prepare_stage1_qualification_group(
+    response: Any,
+    *,
+    targets: list[str],
+    valid_ids: set[str],
+    phase_label: str,
+    prepare_response: Any = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any] | None, set[str]]:
+    """Validate and normalize one provider response before pipeline bookkeeping."""
+    prepare = prepare_response or _prepare_stage1_qualification_response
+    _, normalized_by_stage, qualification_normalization = prepare(
+        response,
+        targets=targets,
+        valid_ids=valid_ids,
+        phase_label=phase_label,
+    )
+    blocked_stage_codes = {
+        code
+        for item in qualification_normalization.get("blocked_stages") or []
+        if isinstance(item, dict)
+        and (code := normalize_stage_code(item.get("stage"))) is not None
+    } if qualification_normalization is not None else set()
+    return normalized_by_stage, qualification_normalization, blocked_stage_codes
 
 
 def _unknown_stage_qualification_check(stage: str, reason: str) -> dict[str, Any]:
