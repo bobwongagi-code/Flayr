@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-stage1-cache-extraction-2026-09-04",
-  "description": "Structure only: Stage1 cache records, identities, and artifact reuse validation moved from the pipeline into a dedicated module. Cache schema, key fields, model routing, provider calls, and qualification behavior are unchanged.",
+  "name": "semantic-baseline-refreeze-after-contract-and-compact-input-extraction-2026-09-04",
+  "description": "Structure only: the stage contract registry and compact evaluator frozen-input loading moved into dedicated modules behind their existing facades. Contract definitions, qualification behavior, frozen input identity, and evaluation semantics are unchanged.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
