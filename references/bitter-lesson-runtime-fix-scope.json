@@ -36,6 +36,7 @@
       "scripts/evaluate_analysis.py",
       "scripts/build_reviewed_s4_qualification.py",
       "scripts/flayr_core/asr.py",
+      "scripts/flayr_core/cli.py",
       "scripts/flayr_core/llm/api.py",
       "scripts/flayr_core/llm/compact_eval.py",
       "scripts/flayr_core/llm/json_codec.py",
