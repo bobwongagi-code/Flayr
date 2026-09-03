@@ -41,6 +41,7 @@
       "scripts/flayr_core/llm/json_codec.py",
       "scripts/flayr_core/llm/parse.py",
       "scripts/flayr_core/llm/payload.py",
+      "scripts/flayr_core/llm/phase_c_payload.py",
       "scripts/flayr_core/llm/pipeline.py",
       "scripts/flayr_core/llm/provider_artifacts.py",
       "scripts/flayr_core/llm/stage_fact_artifacts.py",

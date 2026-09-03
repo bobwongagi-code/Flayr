@@ -42,6 +42,7 @@ from flayr_core.artifacts import (
 from flayr_core.llm import api as llm_api
 from flayr_core.llm import media as llm_media
 from flayr_core.llm import payload as payload_module
+from flayr_core.llm import phase_c_payload as phase_c_payload_module
 from flayr_core.llm import pipeline
 from flayr_core.llm.provider_artifacts import (
     ProviderCallError,
@@ -5927,9 +5928,9 @@ class ArchitectureContractTests(unittest.TestCase):
                 "creator": {"evidence_units": []},
             }
             with (
-                mock.patch.object(payload_module, "build_timeline_view_for_range", return_value={}),
+                mock.patch.object(phase_c_payload_module, "build_timeline_view_for_range", return_value={}),
                 mock.patch.object(
-                    payload_module,
+                    phase_c_payload_module,
                     "video_to_data_url",
                     return_value="data:video/mp4;base64,clip",
                 ),
