@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import os
 import json
+import os
+import sys
 import tempfile
 import unittest
 from argparse import Namespace
@@ -10,14 +11,18 @@ from unittest import mock
 
 from scripts.batch_analyze import (
     _run_jobs,
+    _runner_provider_configuration_error,
     _success_manifest_valid,
     _trusted_runner_args,
     acquire_lock,
     build_command,
     validate_spec,
 )
-from scripts.flayr_core.run_manifest import write_success_manifest, validate_success_manifest
-from scripts.flayr_core.run_manifest import command_digest
+from scripts.flayr_core.run_manifest import (
+    command_digest,
+    validate_success_manifest,
+    write_success_manifest,
+)
 from scripts.flayr_core.run_state import (
     ANALYSIS_COMPLETED,
     COMPLETED,
@@ -114,6 +119,66 @@ class BatchAnalyzeValidationTests(unittest.TestCase):
         self.assertIn("qwen3.7-plus", values)
         self.assertIn("--vision-model", values)
         self.assertIn("qwen3-vl-plus", values)
+
+    def test_runner_rejects_live_qwen_models_without_endpoint(self) -> None:
+        error = _runner_provider_configuration_error(
+            Namespace(
+                llm_model=None,
+                judgment_model="qwen3.7-plus",
+                vision_model="qwen3-vl-plus",
+                llm_api_url="",
+                translation_model=None,
+            )
+        )
+        self.assertRegex(error or "", "FLAYR_LLM_API_URL")
+
+    def test_runner_rejects_qwen_models_on_unknown_provider_endpoint(self) -> None:
+        error = _runner_provider_configuration_error(
+            Namespace(
+                llm_model=None,
+                judgment_model="qwen3.7-plus",
+                vision_model="qwen3-vl-plus",
+                llm_api_url="https://api.openai.com/v1/chat/completions",
+                translation_model=None,
+            )
+        )
+        self.assertRegex(error or "", "approved Qwen endpoint")
+
+    def test_runner_allows_non_live_jobs_without_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs_file = root / "jobs.json"
+            jobs_file.write_text(
+                json.dumps(
+                    {
+                        "common_args": ["--llm-dry-run"],
+                        "jobs": [self._job()],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            argv = [
+                "batch_analyze.py",
+                str(jobs_file),
+                "--runs-dir",
+                str(root / "runs"),
+                "--judgment-model",
+                "qwen3.7-plus",
+                "--vision-model",
+                "qwen3-vl-plus",
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.dict(os.environ, {}, clear=False),
+                mock.patch("scripts.batch_analyze.acquire_lock"),
+                mock.patch("scripts.batch_analyze.release_lock"),
+                mock.patch("scripts.batch_analyze._run_jobs", return_value=0) as run_jobs,
+            ):
+                os.environ.pop("FLAYR_LLM_API_URL", None)
+                from scripts.batch_analyze import main
+
+                self.assertEqual(main(), 0)
+            run_jobs.assert_called_once()
 
     def test_lock_creation_is_atomic_and_rejects_live_owner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

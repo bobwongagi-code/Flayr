@@ -1625,6 +1625,68 @@ class ArchitectureContractTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "retired"):
                 flayr.validate_inputs(retired)
 
+    def test_cli_reads_endpoint_from_env_and_rejects_missing_live_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FLAYR_LLM_API_URL", None)
+            root = Path(tmp)
+            benchmark = root / "benchmark.mp4"
+            creator = root / "creator.mp4"
+            benchmark.write_bytes(b"benchmark")
+            creator.write_bytes(b"creator")
+            args = flayr.build_parser().parse_args(
+                [
+                    "compare",
+                    "--benchmark-video",
+                    str(benchmark),
+                    "--creator-video",
+                    str(creator),
+                    "--verification-stage",
+                    "production",
+                    "--judgment-model",
+                    "qwen3.7-plus",
+                    "--vision-model",
+                    "qwen3-vl-plus",
+                ]
+            )
+            self.assertEqual(args.llm_api_url, "")
+            with self.assertRaisesRegex(SystemExit, "FLAYR_LLM_API_URL"):
+                flayr.validate_inputs(args)
+
+    def test_cli_rejects_qwen_on_openai_endpoint_and_accepts_dashscope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            benchmark = root / "benchmark.mp4"
+            creator = root / "creator.mp4"
+            benchmark.write_bytes(b"benchmark")
+            creator.write_bytes(b"creator")
+            common = [
+                "compare",
+                "--benchmark-video",
+                str(benchmark),
+                "--creator-video",
+                str(creator),
+                "--verification-stage",
+                "production",
+                "--judgment-model",
+                "qwen3.7-plus",
+                "--vision-model",
+                "qwen3-vl-plus",
+            ]
+            rejected = flayr.build_parser().parse_args(
+                [*common, "--llm-api-url", "https://api.openai.com/v1/chat/completions"]
+            )
+            with self.assertRaisesRegex(SystemExit, "approved Qwen endpoint"):
+                flayr.validate_inputs(rejected)
+
+            accepted = flayr.build_parser().parse_args(
+                [
+                    *common,
+                    "--llm-api-url",
+                    "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+                ]
+            )
+            self.assertEqual(set(flayr.validate_inputs(accepted)), {"benchmark", "creator"})
+
     def test_cli_requires_explicit_execution_intent(self) -> None:
         with self.assertRaises(SystemExit):
             flayr.build_parser().parse_args(["compare"])

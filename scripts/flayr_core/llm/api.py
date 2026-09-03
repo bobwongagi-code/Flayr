@@ -127,6 +127,37 @@ def provider_capabilities(api_url: str, model: str = "") -> ProviderCapabilities
     )
 
 
+def llm_provider_configuration_error(
+    api_url: str,
+    models: tuple[str, ...],
+    *,
+    require_endpoint: bool = True,
+) -> str | None:
+    """Return a deterministic configuration error before media or network work."""
+    endpoint = str(api_url or "").strip()
+    configured_models = tuple(
+        str(model or "").strip() for model in models if str(model or "").strip()
+    )
+    if require_endpoint and configured_models and not endpoint:
+        return "live LLM models require --llm-api-url or FLAYR_LLM_API_URL."
+    if not endpoint:
+        return None
+    for model in configured_models:
+        if (
+            model.lower().startswith("qwen")
+            and provider_capabilities(endpoint, model).profile == "unknown_provider"
+        ):
+            try:
+                hostname = (urlsplit(endpoint).hostname or "").lower()
+            except ValueError:
+                hostname = ""
+            return (
+                f"qwen model {model} requires an approved Qwen endpoint; "
+                f"got host {hostname or '<invalid>'}"
+            )
+    return None
+
+
 def can_send_standalone_audio(api_url: str, model: str = "") -> bool:
     """Return the matrix decision for OpenAI-style ``input_audio`` blocks."""
     return provider_capabilities(api_url, model).standalone_audio_input

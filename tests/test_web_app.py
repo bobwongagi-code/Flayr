@@ -453,6 +453,7 @@ class WebAppHelpersTests(unittest.TestCase):
                     "FLAYR_JUDGMENT_MODEL": "qwen3.7-plus",
                     "FLAYR_VISION_MODEL": "qwen3-vl-plus",
                     "FLAYR_LLM_MODEL": "qwen3.6-plus",
+                    "FLAYR_LLM_API_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
                 },
                 clear=False,
             ):
@@ -463,6 +464,32 @@ class WebAppHelpersTests(unittest.TestCase):
             self.assertIn("--vision-model", command)
             self.assertIn("qwen3-vl-plus", command)
             self.assertNotIn("--llm-model", command)
+
+    def test_web_worker_rejects_configured_models_without_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            job = {
+                "benchmark_path": "/tmp/benchmark.mp4",
+                "creator_path": "/tmp/creator.mp4",
+                "product_name": "product",
+                "category": "category",
+                "price": "1",
+                "market_code": "my",
+                "selling_point": "point",
+                "run_dir": str(Path(tmp) / "run"),
+            }
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "FLAYR_JUDGMENT_MODEL": "qwen3.7-plus",
+                    "FLAYR_VISION_MODEL": "qwen3-vl-plus",
+                },
+                clear=False,
+            ):
+                os.environ.pop("FLAYR_LLM_API_URL", None)
+                with self.assertRaisesRegex(RuntimeError, "FLAYR_LLM_API_URL"):
+                    store._command(job)
+            store.shutdown()
 
     def test_estimated_remaining_time_uses_coarse_phase_buckets(self) -> None:
         self.assertEqual(estimated_remaining_seconds(0), 30 * 60)

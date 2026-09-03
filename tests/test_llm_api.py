@@ -22,6 +22,7 @@ from flayr_core.llm.api import (  # noqa: E402
     call_llm_api,
     increase_output_budget,
     is_retryable_error,
+    llm_provider_configuration_error,
     parse_curl_http_status,
     provider_capabilities,
     reject_retired_model,
@@ -928,6 +929,23 @@ class LlmApiContractTests(unittest.TestCase):
         self.assertFalse(can_send_standalone_audio("https://example.test/v1/chat/completions", "vision-test"))
         self.assertFalse(can_analyze_native_video("https://example.test/v1/chat/completions", "vision-test"))
         self.assertFalse(can_analyze_native_audio("https://example.test/v1/chat/completions", "vision-test"))
+
+    def test_qwen_provider_error_redacts_endpoint_details(self) -> None:
+        error = llm_provider_configuration_error(
+            "https://user:secret-token@api.openai.com/v1/chat/completions?token=secret-token",
+            ("qwen3-vl-plus",),
+        )
+        self.assertIn("api.openai.com", error or "")
+        self.assertNotIn("secret-token", error or "")
+        self.assertNotIn("/v1", error or "")
+        self.assertNotIn("token", error or "")
+
+        invalid = llm_provider_configuration_error(
+            "https://[invalid?token=secret-token",
+            ("qwen3-vl-plus",),
+        )
+        self.assertIn("<invalid>", invalid or "")
+        self.assertNotIn("secret-token", invalid or "")
 
     def test_length_at_output_cap_is_returned_once_for_outer_repair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

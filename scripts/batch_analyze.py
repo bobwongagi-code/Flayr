@@ -49,11 +49,21 @@ from pathlib import Path
 from typing import Any
 
 try:  # works both as ``python scripts/batch_analyze.py`` and as a test module
-    from flayr_core.run_manifest import SUCCESS_MANIFEST_NAME, command_digest, validate_success_manifest
+    from flayr_core.llm.api import llm_provider_configuration_error
+    from flayr_core.run_manifest import (
+        SUCCESS_MANIFEST_NAME,
+        command_digest,
+        validate_success_manifest,
+    )
     from flayr_core.run_state import COMPLETED, read_run_state
     from flayr_core.utils import process_group_popen_kwargs
 except ModuleNotFoundError:  # pragma: no cover - package import path in test runners
-    from scripts.flayr_core.run_manifest import SUCCESS_MANIFEST_NAME, command_digest, validate_success_manifest
+    from scripts.flayr_core.llm.api import llm_provider_configuration_error
+    from scripts.flayr_core.run_manifest import (
+        SUCCESS_MANIFEST_NAME,
+        command_digest,
+        validate_success_manifest,
+    )
     from scripts.flayr_core.run_state import COMPLETED, read_run_state
     from scripts.flayr_core.utils import process_group_popen_kwargs
 
@@ -174,6 +184,33 @@ def _option_value(values: list[str], option: str) -> str:
         if value.startswith(f"{option}="):
             return value.split("=", 1)[1]
     return ""
+
+
+def _runner_provider_configuration_error(
+    args: argparse.Namespace,
+    *,
+    require_endpoint: bool = True,
+) -> str | None:
+    models = (
+        str(getattr(args, "llm_model", "") or "").strip(),
+        str(getattr(args, "judgment_model", "") or "").strip(),
+        str(getattr(args, "vision_model", "") or "").strip(),
+        str(getattr(args, "translation_model", "") or "").strip(),
+    )
+    return llm_provider_configuration_error(
+        str(getattr(args, "llm_api_url", "") or "").strip(),
+        models,
+        require_endpoint=require_endpoint,
+    )
+
+
+def _job_uses_live_llm(common_args: list[str], job: dict) -> bool:
+    effective_args = [*common_args, *job.get("args", [])]
+    return not any(
+        value == option or value.startswith(f"{option}=")
+        for value in effective_args
+        for option in ("--llm-dry-run", "--provider-replay-from")
+    )
 
 
 def _success_manifest_valid(
@@ -414,7 +451,7 @@ def main() -> int:
     parser.add_argument("--llm-model")
     parser.add_argument("--judgment-model")
     parser.add_argument("--vision-model")
-    parser.add_argument("--llm-api-url")
+    parser.add_argument("--llm-api-url", default=os.environ.get("FLAYR_LLM_API_URL", "").strip())
     parser.add_argument("--llm-api-key-env")
     parser.add_argument("--llm-api-key-keychain-service")
     parser.add_argument("--llm-api-key-keychain-account")
@@ -424,13 +461,19 @@ def main() -> int:
         parser.error("--llm-model cannot be combined with --judgment-model/--vision-model")
     if bool(args.judgment_model) != bool(args.vision_model):
         parser.error("--judgment-model and --vision-model must be provided together")
-
     runs_dir = Path(args.runs_dir).expanduser().resolve()
     try:
         spec = json.loads(Path(args.jobs_file).read_text(encoding="utf-8"))
         jobs, common_args = validate_spec(spec, runs_dir, args.concurrency)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         parser.error(str(error))
+    for job in jobs:
+        configuration_error = _runner_provider_configuration_error(
+            args,
+            require_endpoint=_job_uses_live_llm(common_args, job),
+        )
+        if configuration_error:
+            parser.error(configuration_error)
     batch_dir = runs_dir / "_batch"
     batch_dir.mkdir(parents=True, exist_ok=True)
     status_path = batch_dir / "status.json"

@@ -47,6 +47,7 @@ from flayr_core import utils as utils_core
 from flayr_core.llm import api as llm_api_core
 from flayr_core.llm.api import (
     can_analyze_native_audio,
+    llm_provider_configuration_error,
     provider_capabilities,
     read_llm_api_key,
     reject_retired_model,
@@ -605,7 +606,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--llm-api-url",
-        default="https://api.openai.com/v1/chat/completions",
+        default=os.environ.get("FLAYR_LLM_API_URL", "").strip(),
         help="Approved-provider Chat Completions endpoint; only allowlisted official domains are accepted.",
     )
     parser.add_argument(
@@ -884,6 +885,18 @@ def validate_inputs(args: argparse.Namespace) -> dict[str, Path]:
     for configured_model in (legacy_model, explicit_judgment, explicit_vision):
         if configured_model:
             reject_retired_model(configured_model)
+
+    configured_models = [legacy_model, explicit_judgment, explicit_vision]
+    if getattr(args, "translate_with_llm", False):
+        configured_models.append(str(getattr(args, "translation_model", "") or "").strip())
+    configuration_error = llm_provider_configuration_error(
+        str(getattr(args, "llm_api_url", "") or "").strip(),
+        tuple(configured_models),
+        require_endpoint=not getattr(args, "llm_dry_run", False)
+        and not getattr(args, "provider_replay_from", None),
+    )
+    if configuration_error:
+        raise SystemExit(configuration_error)
 
     if args.mode in {"breakdown", "compare", "improve", "scope"}:
         if not args.benchmark_video:

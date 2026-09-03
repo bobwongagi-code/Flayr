@@ -35,6 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.flayr_core.llm.api import llm_provider_configuration_error
 from scripts.flayr_core.market import normalize_target_market
 from scripts.flayr_core.run_manifest import SUCCESS_MANIFEST_NAME, validate_success_manifest
 from scripts.flayr_core.run_state import (
@@ -1382,6 +1383,13 @@ class JobStore:
         judgment_model = os.environ.get("FLAYR_JUDGMENT_MODEL", "").strip()
         vision_model = os.environ.get("FLAYR_VISION_MODEL", "").strip()
         legacy_model = os.environ.get("FLAYR_LLM_MODEL", "").strip()
+        llm_api_url = os.environ.get("FLAYR_LLM_API_URL", "").strip()
+        configuration_error = llm_provider_configuration_error(
+            llm_api_url,
+            (legacy_model, judgment_model, vision_model),
+        )
+        if configuration_error:
+            raise RuntimeError(configuration_error)
         if judgment_model or vision_model:
             if not judgment_model or not vision_model:
                 raise RuntimeError(
@@ -1394,7 +1402,7 @@ class JobStore:
                     "--vision-model",
                     vision_model,
                     "--llm-api-url",
-                    os.environ.get("FLAYR_LLM_API_URL", "https://api.openai.com/v1/chat/completions"),
+                    llm_api_url,
                     "--llm-api-key-env",
                     os.environ.get("FLAYR_LLM_API_KEY_ENV", "OPENAI_API_KEY"),
                 ]
@@ -1405,7 +1413,7 @@ class JobStore:
                     "--llm-model",
                     legacy_model,
                     "--llm-api-url",
-                    os.environ.get("FLAYR_LLM_API_URL", "https://api.openai.com/v1/chat/completions"),
+                    llm_api_url,
                     "--llm-api-key-env",
                     os.environ.get("FLAYR_LLM_API_KEY_ENV", "OPENAI_API_KEY"),
                 ]
@@ -1968,6 +1976,16 @@ def main() -> int:
         public_mode, auth_token, allowed_hosts = _resolve_web_security(args.host, args.unsafe_expose)
     except ValueError as exc:
         parser.error(str(exc))
+    configuration_error = llm_provider_configuration_error(
+        os.environ.get("FLAYR_LLM_API_URL", "").strip(),
+        (
+            os.environ.get("FLAYR_LLM_MODEL", "").strip(),
+            os.environ.get("FLAYR_JUDGMENT_MODEL", "").strip(),
+            os.environ.get("FLAYR_VISION_MODEL", "").strip(),
+        ),
+    )
+    if configuration_error:
+        parser.error(configuration_error)
     store = JobStore()
     server = FlayrServer(
         (args.host, args.port),
