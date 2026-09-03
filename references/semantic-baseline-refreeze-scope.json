@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-stage1-binding-normalization-2026-09-03",
-  "description": "Stage1 qualification only: nested signal bindings are deterministically narrowed to the same stage's authoritative top-level evidence_ids; top-level evidence is never expanded, raw provider artifacts remain unchanged, and a supported binding emptied by normalization fails closed for only that stage. Qualification scale, gap rules, prompts, and model routing are unchanged.",
+  "name": "semantic-baseline-refreeze-after-provider-endpoint-validation-2026-09-03",
+  "description": "Provider configuration only: live model runs require an explicit trusted endpoint, Qwen model IDs fail fast on non-Qwen hosts, and CLI, web, and batch entrypoints no longer inherit an OpenAI endpoint fallback. Dry-run and strict replay remain offline-capable. Prompts, evidence qualification, gap rules, and model routing are unchanged.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
