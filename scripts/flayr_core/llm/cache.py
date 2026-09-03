@@ -335,7 +335,7 @@ def _cache_reference_digests(repo_root: Path) -> dict[str, str]:
         relative_path: _sha256_file(repo_root / relative_path)
         for relative_path in sorted(
             {
-                str(path.relative_to(repo_root))
+                path.relative_to(repo_root).as_posix()
                 for path in candidates
                 if path.is_file()
             }

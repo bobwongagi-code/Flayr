@@ -2278,6 +2278,7 @@ class ArchitectureContractTests(unittest.TestCase):
             first = cache_module._cache_reference_digests(root)
 
             self.assertEqual(set(semantic_paths), set(first))
+            self.assertTrue(all(Path(path).as_posix() == path for path in first))
             self.assertEqual(list(first), sorted(first))
             changed_path = root / semantic_paths[0]
             changed_path.write_text("# changed\n", encoding="utf-8")

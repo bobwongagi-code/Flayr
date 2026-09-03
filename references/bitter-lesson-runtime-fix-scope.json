@@ -3,7 +3,7 @@
   "name": "bitter-lesson-runtime-fix-2026-08-09",
   "change_scope": {
     "max_files": 52,
-    "max_added_lines": 8561,
+    "max_added_lines": 8562,
     "max_deleted_lines": 3515,
     "allowed_globs": [
       "assets/bd_report.html",
