@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-cli-parser-extraction-2026-09-03",
-  "description": "Structure only: CLI parser construction moved from the entry-point script into a dedicated module. Arguments, defaults, model routing, verification order, and run-state behavior are unchanged.",
+  "name": "semantic-baseline-refreeze-after-alignment-scoring-extraction-2026-09-04",
+  "description": "Structure only: pure offline human/model alignment scoring moved from the evaluator script into a dedicated module. Metric definitions, denominators, thresholds, artifact loading, and report output are unchanged.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
