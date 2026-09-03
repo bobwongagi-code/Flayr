@@ -45,6 +45,7 @@
       "scripts/flayr_core/llm/provider_artifacts.py",
       "scripts/flayr_core/llm/stage_fact_artifacts.py",
       "scripts/flayr_core/llm/stage_group_artifacts.py",
+      "scripts/flayr_core/llm/stage1_qualification.py",
       "scripts/flayr_core/llm/s4_visual_verifier.py",
       "scripts/flayr_core/multimodal.py",
       "scripts/flayr_core/model_execution.py",
