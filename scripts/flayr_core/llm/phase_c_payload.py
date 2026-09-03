@@ -572,4 +572,3 @@ def normalize_stage_codes(values: list[str]) -> list[str]:
 def stage_code(value: Any) -> str:
     match = re.search(r"S[1-6]", str(value or "").upper())
     return match.group(0) if match else ""
-

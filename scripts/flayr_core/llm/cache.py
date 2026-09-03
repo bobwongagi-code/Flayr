@@ -314,22 +314,32 @@ def _sha256_file(path: Path) -> str:
 
 def _cache_reference_digests(repo_root: Path) -> dict[str, str]:
     """Hash code and reference material that changes the meaning of an LLM request."""
-    candidates = [
-        repo_root / "scripts" / "flayr_core" / "llm" / "pipeline.py",
-        repo_root / "scripts" / "flayr_core" / "llm" / "cache.py",
-        repo_root / "scripts" / "flayr_core" / "llm" / "payload.py",
-        repo_root / "scripts" / "flayr_core" / "market.py",
-        repo_root / "scripts" / "flayr_core" / "structure_modules.py",
-        repo_root / "structure_library_full.md",
-        repo_root / "QA-RULES.md",
-    ]
+    llm_dir = repo_root / "scripts" / "flayr_core" / "llm"
+    candidates = set(llm_dir.glob("*.py")) if llm_dir.is_dir() else set()
+    candidates.update(
+        repo_root / relative_path
+        for relative_path in (
+            "scripts/flayr_core/stage_evidence_contracts.py",
+            "scripts/flayr_core/stage_contract_registry.py",
+            "scripts/flayr_core/stage_ownership.py",
+            "scripts/flayr_core/market.py",
+            "scripts/flayr_core/structure_modules.py",
+            "structure_library_full.md",
+            "QA-RULES.md",
+        )
+    )
     references_dir = repo_root / "references"
     if references_dir.is_dir():
-        candidates.extend(sorted(path for path in references_dir.iterdir() if path.is_file()))
+        candidates.update(path for path in references_dir.iterdir() if path.is_file())
     return {
-        str(path.relative_to(repo_root)): _sha256_file(path)
-        for path in candidates
-        if path.exists()
+        relative_path: _sha256_file(repo_root / relative_path)
+        for relative_path in sorted(
+            {
+                str(path.relative_to(repo_root))
+                for path in candidates
+                if path.is_file()
+            }
+        )
     }
 
 

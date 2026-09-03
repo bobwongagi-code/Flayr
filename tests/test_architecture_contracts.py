@@ -40,6 +40,7 @@ from flayr_core.artifacts import (
     select_frames_for_time_range,
 )
 from flayr_core.llm import api as llm_api
+from flayr_core.llm import cache as cache_module
 from flayr_core.llm import media as llm_media
 from flayr_core.llm import payload as payload_module
 from flayr_core.llm import phase_c_payload as phase_c_payload_module
@@ -2258,6 +2259,32 @@ class ArchitectureContractTests(unittest.TestCase):
             {"product": {"category": "护脚霜", "target_market": "MY"}},
         )
         self.assertNotEqual(first["request_payload_sha256"], changed["request_payload_sha256"])
+
+    def test_cache_reference_digests_cover_llm_modules_and_track_source_changes(self) -> None:
+        semantic_paths = [
+            "scripts/flayr_core/llm/stage1_qualification.py",
+            "scripts/flayr_core/llm/phase_c_payload.py",
+            "scripts/flayr_core/llm/full_analysis_payload.py",
+            "scripts/flayr_core/llm/comparison_contract.py",
+            "scripts/flayr_core/llm/normalization_primitives.py",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for relative_path in semantic_paths:
+                path = root / relative_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"# {relative_path}\n", encoding="utf-8")
+
+            first = cache_module._cache_reference_digests(root)
+
+            self.assertEqual(set(semantic_paths), set(first))
+            self.assertEqual(list(first), sorted(first))
+            changed_path = root / semantic_paths[0]
+            changed_path.write_text("# changed\n", encoding="utf-8")
+            second = cache_module._cache_reference_digests(root)
+
+            self.assertNotEqual(first[semantic_paths[0]], second[semantic_paths[0]])
+            self.assertEqual(set(first), set(second))
 
     def test_product_foundation_failure_is_explicit_not_a_silent_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
