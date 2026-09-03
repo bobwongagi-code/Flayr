@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-explicit-absence-projection-fix-2026-09-01",
-  "description": "S3/S4 only: when Stage1 explicitly closes a role as absent, the projection layer materializes standardized negative flags only when provider flags are missing or incomplete; complete provider flags are preserved, and present/partial/unknown/conflict are not filled. Qualification scale, gap rules, prompts, and model routing are unchanged.",
+  "name": "semantic-baseline-refreeze-after-stage1-binding-normalization-2026-09-03",
+  "description": "Stage1 qualification only: nested signal bindings are deterministically narrowed to the same stage's authoritative top-level evidence_ids; top-level evidence is never expanded, raw provider artifacts remain unchanged, and a supported binding emptied by normalization fails closed for only that stage. Qualification scale, gap rules, prompts, and model routing are unchanged.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
