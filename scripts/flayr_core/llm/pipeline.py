@@ -4312,6 +4312,11 @@ def _unknown_stage_qualification_check(stage: str, reason: str) -> dict[str, Any
     }
 
 
+STAGE1_QUALIFICATION_BINDING_ERROR_CODE = (
+    "nested_binding_id_outside_top_level_stage_evidence_ids"
+)
+
+
 def _validated_stage1_qualification_response(
     response: Any,
     *,
@@ -4459,6 +4464,108 @@ def _validated_stage1_qualification_response(
     }
 
 
+def _normalize_stage1_qualification_bindings(
+    response: Any,
+    *,
+    phase_label: str,
+) -> tuple[Any, dict[str, Any] | None]:
+    """Normalize nested references against each stage's immutable ID list.
+
+    The provider response is never mutated. The consumption copy only removes
+    nested IDs absent from the same stage's top-level list; a supported binding
+    emptied by that removal blocks that stage with a code-owned unknown check.
+    """
+    normalized = copy.deepcopy(response)
+    checks = normalized.get("stage_evidence_checks") if isinstance(normalized, dict) else None
+    if not isinstance(checks, list):
+        return normalized, None
+    removed_refs: list[dict[str, Any]] = []
+    blocked_stages: list[dict[str, str]] = []
+    for index, item in enumerate(checks):
+        if not isinstance(item, dict):
+            continue
+        top_level_ids = item.get("evidence_ids")
+        bindings = item.get("signal_bindings")
+        if not isinstance(top_level_ids, list) or not isinstance(bindings, dict):
+            continue
+        allowed_ids = set(top_level_ids)
+        stage = normalize_stage_code(item.get("stage")) or str(item.get("stage") or "")
+        blocked = False
+        for signal, binding in bindings.items():
+            if not isinstance(binding, dict) or not isinstance(binding.get("evidence_ids"), list):
+                continue
+            original_ids = binding["evidence_ids"]
+            outside_ids = [value for value in original_ids if value not in allowed_ids]
+            if not outside_ids:
+                continue
+            normalized_ids = [value for value in original_ids if value in allowed_ids]
+            removed_refs.append(
+                {
+                    "stage": stage,
+                    "signal": str(signal),
+                    "removed_evidence_ids": outside_ids,
+                }
+            )
+            if (
+                str(binding.get("status") or "").strip().lower() == "supported"
+                and not normalized_ids
+            ):
+                blocked = True
+                continue
+            binding["evidence_ids"] = normalized_ids
+        if blocked:
+            blocked_stages.append(
+                {
+                    "stage": stage,
+                    "reason": (
+                        f"{phase_label} {stage} supported binding lost all evidence_ids "
+                        "after normalization; 资格保持未知。"
+                    ),
+                }
+            )
+            normalized["stage_evidence_checks"][index] = _unknown_stage_qualification_check(
+                stage,
+                blocked_stages[-1]["reason"],
+            )
+    if not removed_refs and not blocked_stages:
+        return normalized, None
+    return normalized, {
+        "reason_code": STAGE1_QUALIFICATION_BINDING_ERROR_CODE,
+        "removed_refs": removed_refs,
+        "blocked_stages": blocked_stages,
+        "raw_response_sha256": _stable_digest(response),
+    }
+
+
+def _prepare_stage1_qualification_response(
+    response: Any,
+    *,
+    targets: list[str],
+    valid_ids: set[str],
+    phase_label: str,
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, Any] | None]:
+    """Validate raw JSON, normalize references, then validate the copy."""
+    _validated_stage1_qualification_response(
+        response,
+        targets=targets,
+        valid_ids=valid_ids,
+        phase_label=phase_label,
+    )
+    normalized, record = _normalize_stage1_qualification_bindings(
+        response,
+        phase_label=phase_label,
+    )
+    normalized_by_stage = _validated_stage1_qualification_response(
+        normalized,
+        targets=targets,
+        valid_ids=valid_ids,
+        phase_label=phase_label,
+    )
+    if not isinstance(normalized, dict):  # pragma: no cover - validator guards this
+        raise ValueError(f"{phase_label} normalized qualification must be an object")
+    return normalized, normalized_by_stage, record
+
+
 def _run_stage1_qualification(
     args: argparse.Namespace,
     analysis: dict[str, Any],
@@ -4472,9 +4579,10 @@ def _run_stage1_qualification(
     """Run bounded Stage1-B/D projections over the locked atomic facts.
 
     Qualification is split into the same four semantic groups as Stage2. A
-    response failure or cross-stage binding error therefore blocks only the
-    affected group; successful groups remain available for downstream
-    judgment and the single Stage1-C pass can target only the failed stages.
+    response failure blocks the affected group, while a binding normalization
+    failure blocks only its stage; successful stages remain available for
+    downstream judgment and the single Stage1-C pass can target only failed
+    stages.
     A focused call is recorded as phase D so it cannot overwrite the original
     phase-B artifact that explains why recovery was needed.
     """
@@ -4558,6 +4666,8 @@ def _run_stage1_qualification(
         response_meta: dict[str, Any] = {}
         execution_source = "provider"
         response: dict[str, Any] | None = None
+        qualification_normalization: dict[str, Any] | None = None
+        normalized_by_stage: dict[str, dict[str, Any]] | None = None
         replay_artifact_path = (
             stage_fact_artifact_path(replay_source, role, provider_phase, targets)
             if replay_source is not None
@@ -4587,7 +4697,7 @@ def _run_stage1_qualification(
                         payload=payload,
                         args=args,
                     )
-                    _validated_stage1_qualification_response(
+                    _, normalized_by_stage, qualification_normalization = _prepare_stage1_qualification_response(
                         response,
                         targets=targets,
                         valid_ids=valid_ids,
@@ -4603,6 +4713,8 @@ def _run_stage1_qualification(
                     execution_source = "provider"
                     response = None
                     response_meta = {}
+                    normalized_by_stage = None
+                    qualification_normalization = None
             if response is None:
                 write_json(request_path, payload)
                 response_text = fetch_json_completion(
@@ -4613,12 +4725,23 @@ def _run_stage1_qualification(
                     response_meta=response_meta,
                 )
                 response = parse_json_text(response_text)
-            normalized_by_stage = _validated_stage1_qualification_response(
-                response,
-                targets=targets,
-                valid_ids=valid_ids,
-                phase_label=phase_label,
-            )
+            if normalized_by_stage is None:
+                _, normalized_by_stage, qualification_normalization = _prepare_stage1_qualification_response(
+                    response,
+                    targets=targets,
+                    valid_ids=valid_ids,
+                    phase_label=phase_label,
+                )
+            if qualification_normalization is not None:
+                blocked_stage_codes = {
+                    code
+                    for item in qualification_normalization.get("blocked_stages") or []
+                    if isinstance(item, dict)
+                    and (code := normalize_stage_code(item.get("stage"))) is not None
+                }
+                failed_stage_codes.extend(
+                    stage for stage in targets if stage in blocked_stage_codes
+                )
             for stage in targets:
                 checks_by_stage[stage] = normalized_by_stage.get(
                     stage,
@@ -4653,6 +4776,10 @@ def _run_stage1_qualification(
                     "completion_attempts": response_meta.get("completion_attempts", 0),
                 }
             )
+            if qualification_normalization is not None:
+                group_records[-1]["qualification_normalization"] = copy.deepcopy(
+                    qualification_normalization
+                )
         except (OSError, ValueError, RuntimeError, SystemExit) as exc:
             if _is_strict_replay_failure(args, exc):
                 raise
@@ -4701,6 +4828,10 @@ def _run_stage1_qualification(
                         "response_sha256": failure_artifact.get("response_sha256", ""),
                     }
                 )
+            if qualification_normalization is not None:
+                failure_record["qualification_normalization"] = copy.deepcopy(
+                    qualification_normalization
+                )
             group_records.append(failure_record)
 
     facts["stage_evidence_checks"] = normalize_stage_evidence_checks(
@@ -4730,7 +4861,9 @@ def _run_stage1_qualification(
             key=list(stage_codes()).index,
         )
     if failed_stage_codes:
-        qualification["failure_reason"] = f"一个或多个 {phase_label} 阶段组失败；仅对应阶段保持未知。"
+        qualification["failure_reason"] = (
+            f"一个或多个 {phase_label} 阶段组或阶段资格失败；仅对应阶段保持未知。"
+        )
     facts["stage1_qualification"] = qualification
     return facts
 
