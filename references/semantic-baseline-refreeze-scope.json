@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-stage1-qualification-extraction-2026-09-03",
-  "description": "Structure only: Stage1 qualification response validation and binding normalization moved from the pipeline orchestrator into a dedicated module while preserving the existing pipeline imports and stable response digest. Prompts, evidence qualification, gap rules, provider requests, artifacts, and model routing are unchanged.",
+  "name": "semantic-baseline-refreeze-after-phase-c-payload-extraction-2026-09-03",
+  "description": "Structure only: Phase C payload construction and focused-window media helpers moved from the shared payload module into a dedicated module while preserving the existing payload imports. Prompts, evidence qualification, gap rules, provider requests, artifacts, and model routing are unchanged.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
