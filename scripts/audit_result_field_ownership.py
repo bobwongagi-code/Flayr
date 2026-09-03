@@ -35,6 +35,7 @@ DEFAULT_FIELDS = (
 EXCLUDED_PARTS = {".git", ".venv", "__pycache__", "runs", "output"}
 TEXT_SUFFIXES = {".html", ".js", ".json", ".md", ".mjs", ".sh"}
 PRODUCTION_PREFIX = "scripts/flayr_core/"
+# human_review.py is allowed below only for its deep-copied reviewed projection; it is not a provider/canonical writer.
 PRODUCTION_WRITE_POLICY = {
     "analysis_status": {
         "scripts/flayr_core/llm/pipeline.py",
@@ -52,10 +53,12 @@ PRODUCTION_WRITE_POLICY = {
         "scripts/flayr_core/llm/stage2_projection.py",
         "scripts/flayr_core/postprocess/repair_stages.py",
         "scripts/flayr_core/stage_evidence_contracts.py",
+        "scripts/flayr_core/human_review.py",
     },
     "model_gap_magnitude": {
         "scripts/flayr_core/llm/pipeline.py",
         "scripts/flayr_core/llm/stage2_projection.py",
+        "scripts/flayr_core/human_review.py",
     },
     "model_severity": {
         "scripts/flayr_core/llm/pipeline.py",
@@ -67,6 +70,7 @@ PRODUCTION_WRITE_POLICY = {
         "scripts/flayr_core/llm/pipeline.py",
         "scripts/flayr_core/llm/stage2_projection.py",
         "scripts/flayr_core/postprocess/derive.py",
+        "scripts/flayr_core/human_review.py",
     },
     "severity_derivation": {
         "scripts/flayr_core/finalization/equivalence.py",

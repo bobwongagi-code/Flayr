@@ -79,6 +79,7 @@
       "tests/test_cli_contracts.py",
       "tests/test_batch_analyze.py",
       "tests/test_bitter_lesson_contract.py",
+      "tests/test_result_field_ownership.py",
       "tests/test_compact_eval.py",
       "tests/test_derive_resolver.py",
       "tests/test_audio_layers.py",
