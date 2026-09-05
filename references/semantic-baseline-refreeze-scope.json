@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-cross-platform-cache-identity-fix-2026-09-04",
-  "description": "Correctness fix: video-fact cache reference-digest keys now use POSIX separators across platforms, so the same semantic source set has a stable cache identity on Windows and POSIX systems. Provider requests, evidence qualification, and judgment semantics are unchanged.",
+  "name": "semantic-baseline-refreeze-after-short-video-recovery-preflight-fix-2026-09-05",
+  "description": "Correctness fix: native Stage1 video recovery now rejects provider-invalid windows shorter than two seconds before any encoding or provider request. Provider requests for valid windows, evidence qualification, and judgment semantics are unchanged.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
