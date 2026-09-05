@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-short-video-recovery-preflight-fix-2026-09-05",
-  "description": "Correctness fix: native Stage1 video recovery now rejects provider-invalid windows shorter than two seconds before any encoding or provider request. Provider requests for valid windows, evidence qualification, and judgment semantics are unchanged.",
+  "name": "semantic-baseline-refreeze-after-stage1-recovery-window-accounting-fix-2026-09-06",
+  "description": "Correctness fix: Stage1-C recovery now records the exact native video windows actually sent; full coverage requires a verified gap-free union, while canonical, partial, and invalid inputs remain fail-closed. This changes media acquisition accounting and recovery source scope only, not evidence qualification, judgment semantics, model routing, or GT.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
