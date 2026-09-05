@@ -74,6 +74,7 @@ from .full_analysis_payload import (
 
 ROOT = Path(__file__).resolve().parents[3]
 STAGE1_RECOVERY_PADDING_SECONDS = 0.5
+MIN_NATIVE_VIDEO_WINDOW_SECONDS = 2.0
 
 
 def _certification_units_for_target_stages(
@@ -1341,6 +1342,25 @@ def _recovery_stage_code(value: Any) -> str:
     return match.group(0) if match else ""
 
 
+def _validate_stage1_recovery_video_windows(
+    windows: list[tuple[str, float, float]],
+    role: str,
+) -> None:
+    """Reject native-video recovery batches containing a provider-invalid window."""
+    minimum = MIN_NATIVE_VIDEO_WINDOW_SECONDS
+    for label, start, end in windows:
+        window_start = float(start)
+        window_end = float(end)
+        duration = window_end - window_start
+        if duration < minimum:
+            raise ValueError(
+                "Stage1-C native video recovery window too short: "
+                "reason_code=stage1_recovery_video_window_too_short "
+                f"role={role} label={label} start={window_start:g} "
+                f"end={window_end:g} min={minimum:g} duration={duration:g}"
+            )
+
+
 def _replace_recovery_full_media(
     media: list[dict[str, Any]],
     analysis: dict[str, Any],
@@ -1364,6 +1384,9 @@ def _replace_recovery_full_media(
         target_stages,
         s6_tail_review=s6_tail_review,
     )
+    native_video = can_analyze_native_video(api_url, model) and video_path.is_file()
+    if native_video:
+        _validate_stage1_recovery_video_windows(windows, role)
     retained = [
         item for item in media
         if item.get("type") not in {"video_url", "input_audio"}
@@ -1386,7 +1409,7 @@ def _replace_recovery_full_media(
                 ),
             }
         )
-        if can_analyze_native_video(api_url, model) and video_path.is_file():
+        if native_video:
             clip = video_to_data_url(
                 video_path,
                 start=start,
