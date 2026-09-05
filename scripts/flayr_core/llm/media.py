@@ -7,14 +7,12 @@ image_url / input_audio / video_url 块；不写 prompt，不碰业务判断规�
 from __future__ import annotations
 
 from pathlib import Path
-import re
 from typing import Any
 
 from ..artifacts import (
     format_seconds,
     get_analysis_frame_entries,
     get_focus_frame_entries,
-    get_stage_frame_entries,
     parse_time_range_seconds,
     parse_timestamp_seconds,
     resolve_artifact_path,
@@ -57,72 +55,98 @@ def select_stage_recovery_visual_inputs(
     role: str,
     target_stages: list[str],
     image_limit: int,
+    media_windows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Select a bounded, stage-focused view for the one Stage1-C pass.
+    """Select canonical frames inside the shared full-context recovery plan.
 
-    The initial extractor gets the canonical whole-video selection. Recovery
-    must use the stage-frame manifest instead of silently sending that same
-    selection and hoping a different instruction repairs the blind spot.
+    Stage1-C searches for missed observations.  Its target stages are a
+    retrieval label only, never a semantic label copied from a stage-frame
+    manifest.
     """
     if image_limit <= 0:
         return []
-    targets = {
-        stage
-        for value in target_stages
-        if (stage := _stage_token(value)) is not None
-    }
-    entries = [
-        entry
-        for entry in get_stage_frame_entries(info)
-        if (stage := _stage_token(entry.get("stage"))) in targets
-    ]
-    if not entries:
-        return select_role_visual_inputs(info, role, image_limit)
+    windows = _recovery_visual_windows(info, role, target_stages, media_windows)
+    if not windows:
+        return []
 
-    # Preserve temporal coverage across requested stages, with at most one
-    # extra frame for a remainder. Dedupe by path because stage boundaries can
-    # intentionally share a frame.
-    selected_entries: list[dict[str, Any]] = []
-    per_stage = max(1, image_limit // max(1, len(targets)))
-    for stage in sorted(targets):
-        stage_entries = [
-            entry
-            for entry in entries
-            if _stage_token(entry.get("stage")) == stage
-        ]
-        selected_entries.extend(sample_evenly(stage_entries, per_stage))
-    if len(selected_entries) < image_limit:
-        chosen = {str(entry.get("path") or "") for entry in selected_entries}
-        selected_entries.extend(
-            entry for entry in entries if str(entry.get("path") or "") not in chosen
-        )
-    selected_entries = selected_entries[:image_limit]
+    # Resolve and dedupe before sampling.  A shared canonical frame must not
+    # consume one slot per duplicate manifest entry or per requested stage.
+    entries_by_path: dict[str, dict[str, Any]] = {}
+    for entry in get_analysis_frame_entries(info):
+        timestamp = parse_timestamp_seconds(entry.get("timestamp_seconds"))
+        if timestamp is None or not any(start <= timestamp <= end for start, end in windows):
+            continue
+        frame = resolve_artifact_path(info, entry.get("path"), require_file=True, require_root=True)
+        if frame is None:
+            continue
+        key = str(frame)
+        if key not in entries_by_path:
+            entries_by_path[key] = {**entry, "path": key, "timestamp_seconds": timestamp}
+    entries = sorted(
+        entries_by_path.values(),
+        key=lambda item: (
+            parse_timestamp_seconds(item.get("timestamp_seconds"))
+            if parse_timestamp_seconds(item.get("timestamp_seconds")) is not None
+            else float("inf"),
+            str(item.get("path") or ""),
+        ),
+    )
+    selected_entries = sample_evenly(entries, image_limit)
     selected: list[dict[str, Any]] = []
-    seen_paths: set[str] = set()
     for entry in selected_entries:
         frame = resolve_artifact_path(info, entry.get("path"), require_file=True, require_root=True)
-        if frame is None or str(frame) in seen_paths:
+        timestamp_value = parse_timestamp_seconds(entry.get("timestamp_seconds"))
+        if frame is None or timestamp_value is None:
             continue
-        seen_paths.add(str(frame))
-        timestamp = format_seconds(entry.get("timestamp_seconds")) if entry.get("timestamp_seconds") is not None else ""
+        timestamp = format_seconds(timestamp_value)
         marker = f" @ {timestamp}" if timestamp else ""
+        source_timestamps = list(entry.get("source_frame_timestamps") or [])
+        if not source_timestamps:
+            source_timestamps = [timestamp_value]
         selected.append(
             {
                 "role": role,
                 "path": str(frame),
-                "label": f"{role} Stage1-C {entry.get('stage') or 'stage'}{marker} {frame.name}",
+                "label": f"{role}{marker} {frame.name}",
                 "data_url": image_to_data_url(frame),
-                "timestamp_seconds": entry.get("timestamp_seconds"),
-                "source_frame_timestamps": list(entry.get("source_frame_timestamps") or []),
+                "timestamp_seconds": timestamp_value,
+                "source_frame_timestamps": source_timestamps,
             }
         )
     return selected[:image_limit]
 
 
-def _stage_token(value: Any) -> str | None:
-    """Extract one canonical stage token without trusting arbitrary labels."""
-    match = re.search(r"\bS([1-6])\b", str(value or "").upper())
-    return f"S{match.group(1)}" if match else None
+def _recovery_visual_windows(
+    info: dict[str, Any],
+    role: str,
+    target_stages: list[str],
+    media_windows: list[dict[str, Any]] | None,
+) -> list[tuple[float, float]]:
+    """Read the pipeline-owned time plan, defaulting to the full source span."""
+    raw_duration = info.get("duration_seconds")
+    duration = None if isinstance(raw_duration, bool) else parse_timestamp_seconds(raw_duration)
+    if duration is None or duration <= 0:
+        return []
+    if media_windows is None:
+        return [(0.0, float(duration))]
+    if not isinstance(media_windows, list):
+        return []
+    requested = {str(value).strip().upper() for value in target_stages}
+    target_label = "+".join(
+        f"S{index}" for index in range(1, 7) if f"S{index}" in requested
+    )
+    if len(media_windows) != 1 or not target_label:
+        return []
+    item = media_windows[0]
+    if not isinstance(item, dict) or str(item.get("role") or "").strip() != role:
+        return []
+    if str(item.get("window_label") or "").strip() != target_label:
+        return []
+    start = parse_timestamp_seconds(item.get("start_seconds"))
+    end = parse_timestamp_seconds(item.get("end_seconds"))
+    if start is None or end is None or start != 0.0 or end != float(duration):
+        return []
+    return [(start, end)]
 
 
 def get_llm_visual_candidates(info: dict[str, Any], limit: int) -> list[dict[str, Any]]:

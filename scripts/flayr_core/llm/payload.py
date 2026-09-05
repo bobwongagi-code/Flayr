@@ -15,7 +15,6 @@ from ..artifacts import (
     format_seconds,
     parse_timestamp_seconds,
     resolve_artifact_path,
-    stage_time_ranges,
 )
 from ..proposition_contract import build_product_proposition_contract
 from ..market import render_market_knowledge
@@ -73,7 +72,6 @@ from .full_analysis_payload import (
 )
 
 ROOT = Path(__file__).resolve().parents[3]
-STAGE1_RECOVERY_PADDING_SECONDS = 0.5
 MIN_NATIVE_VIDEO_WINDOW_SECONDS = 2.0
 
 
@@ -983,6 +981,7 @@ def build_video_fact_recovery_payload(
     target_stages: list[str],
     api_url: str = "",
     budget: ResourceBudget | None = None,
+    media_windows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build one bounded pre-lock re-observation request.
 
@@ -1080,14 +1079,29 @@ def build_video_fact_recovery_payload(
         api_url=api_url,
         model=model,
         budget=budget,
+        media_windows=media_windows,
         s6_tail_review=(
             "S6" in target_set
             and not (s6_current_status == "present" and s6_current_coverage == "complete")
         ),
     )
+    if visual_inputs:
+        labeled_media: list[dict[str, Any]] = []
+        visual_index = 0
+        for item in media:
+            if item.get("type") != "image_url":
+                labeled_media.append(item)
+                continue
+            if visual_index < len(visual_inputs):
+                label = str(visual_inputs[visual_index].get("label") or "").strip()
+                if label:
+                    labeled_media.append({"type": "text", "text": f"图片：{label}"})
+            labeled_media.append(item)
+            visual_index += 1
+        media = labeled_media
     s6_tail_review_block = (
-        "## S6 尾段 CTA 定向复核\n"
-        "当前 S6 资格未闭合（可能是 absent、unknown 或 conflict）。本轮只对原始视频最后 8-12 秒做一次漏检复核；"
+        "## S6 完整上下文 CTA 定向复核\n"
+        "当前 S6 资格未闭合（可能是 absent、unknown 或 conflict）。本轮对原始视频完整上下文做一次漏检复核；"
         "不要因为出现关键词就直接写成 CTA 结论，必须原样记录完整语句、说话对象、画面路径和真实时间。\n"
         "马来/东南亚电商口语可能用 beg kuning、bakul kuning、yellow bag/cart，或 tekan、klik、tap、beli、order、checkout、link 等表达；"
         "这些只是检索线索，不是自动等价规则。若观察中可能包含购买行动或路径，只追加一条保留原句和上下文的候选观察；"
@@ -1260,57 +1274,23 @@ def _recovery_stage_windows(
     *,
     s6_tail_review: bool = False,
 ) -> list[tuple[str, float, float]]:
-    """Return contiguous target-stage windows for bounded recovery media."""
+    """Return one full-context window for a bounded recovery request.
+
+    Stage1-C is an omission search, not a verification pass over known stage
+    evidence.  Stage labels therefore identify retrieval targets only; they do
+    not describe the time span represented by the media.
+    """
     videos = analysis.get("videos") if isinstance(analysis.get("videos"), dict) else {}
     info = videos.get(role) if isinstance(videos.get(role), dict) else {}
-    duration = parse_timestamp_seconds(info.get("duration_seconds"))
-    if duration is None or duration <= 0:
+    raw_duration = info.get("duration_seconds")
+    duration = None if isinstance(raw_duration, bool) else parse_timestamp_seconds(raw_duration)
+    target_codes = _recovery_target_codes(target_stages)
+    if duration is None or duration <= 0 or not target_codes:
         return []
-    target_set = {
-        match.group(0)
-        for value in target_stages
-        if (match := re.search(r"\bS([1-6])\b", str(value).upper()))
-    }
-    all_ranges = stage_time_ranges(float(duration))
-    ranges = []
-    for item in all_ranges:
-        code = _recovery_stage_code(item[0])
-        if code not in target_set:
-            continue
-        if code == "S6" and s6_tail_review:
-            ranges.append((item[0], item[1], max(0.0, float(duration) - 10.0), float(duration)))
-        else:
-            ranges.append(item)
-    if not ranges:
-        return []
-    index_by_stage = {
-        _recovery_stage_code(item[0]): index
-        for index, item in enumerate(all_ranges)
-    }
-    windows: list[tuple[str, float, float]] = []
-    current_labels = [_recovery_stage_code(ranges[0][0])]
-    current_start, current_end = ranges[0][2], ranges[0][3]
-    current_index = index_by_stage.get(current_labels[-1], -2)
-    for stage, _label, start, end in ranges[1:]:
-        stage_code = _recovery_stage_code(stage)
-        index = index_by_stage.get(stage_code, -2)
-        keep_s6_separate = s6_tail_review and ("S6" in current_labels or stage_code == "S6")
-        if index == current_index + 1 and not keep_s6_separate:
-            current_end = end
-            current_labels.append(stage_code)
-        else:
-            windows.append(("+".join(current_labels), current_start, current_end))
-            current_labels, current_start, current_end = [stage_code], start, end
-        current_index = index
-    windows.append(("+".join(current_labels), current_start, current_end))
-    return [
-        (
-            label,
-            max(0.0, start - STAGE1_RECOVERY_PADDING_SECONDS),
-            min(float(duration), end + STAGE1_RECOVERY_PADDING_SECONDS),
-        )
-        for label, start, end in windows
-    ]
+    # ``s6_tail_review`` remains accepted for replay/caller compatibility, but
+    # a recovery request always searches the same complete source context.
+    _ = s6_tail_review
+    return [("+".join(target_codes), 0.0, float(duration))]
 
 
 def stage1_recovery_media_windows(
@@ -1320,13 +1300,15 @@ def stage1_recovery_media_windows(
     *,
     s6_tail_review: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return the code-owned Stage1-C windows used for audit metadata."""
+    """Return the code-owned full-context plan used for audit metadata."""
     return [
         {
             "role": role,
             "window_label": label,
-            "start_seconds": round(start, 3),
-            "end_seconds": round(end, 3),
+            # Keep the exact source endpoint for native encoding, ASR, and
+            # audit consumers.  Formatting belongs only in display text.
+            "start_seconds": start,
+            "end_seconds": end,
         }
         for label, start, end in _recovery_stage_windows(
             analysis,
@@ -1337,9 +1319,97 @@ def stage1_recovery_media_windows(
     ]
 
 
-def _recovery_stage_code(value: Any) -> str:
-    match = re.search(r"\bS([1-6])\b", str(value or "").upper())
-    return match.group(0) if match else ""
+def _recovery_target_codes(target_stages: list[str] | tuple[str, ...] | None) -> list[str]:
+    """Normalize requested stage tokens in canonical stage order."""
+    requested = {
+        match.group(0)
+        for value in target_stages or []
+        if (match := re.search(r"\bS([1-6])\b", str(value).upper()))
+    }
+    return [code for code in stage_codes() if code in requested]
+
+
+def _recovery_media_window_tuples(
+    media_windows: list[dict[str, Any]],
+    role: str,
+    target_label: str,
+) -> list[tuple[str, float, float]]:
+    """Normalize one pipeline-owned recovery plan without changing endpoints."""
+    normalized: list[tuple[str, float, float]] = []
+    for item in media_windows:
+        if not isinstance(item, dict):
+            raise ValueError(
+                "Stage1-C recovery media plan is invalid: "
+                f"reason_code=stage1_recovery_media_window_invalid role={role}"
+            )
+        plan_role = str(item.get("role") or "").strip()
+        label = str(item.get("window_label") or "").strip()
+        raw_start = item.get("start_seconds")
+        raw_end = item.get("end_seconds")
+        start = parse_timestamp_seconds(raw_start)
+        end = parse_timestamp_seconds(raw_end)
+        if (
+            plan_role != role
+            or label != target_label
+            or start is None
+            or end is None
+            or end <= start
+        ):
+            raise ValueError(
+                "Stage1-C recovery media plan is invalid: "
+                f"reason_code=stage1_recovery_media_window_invalid role={role} "
+                f"plan_role={plan_role or '<missing>'} label={label or '<missing>'} "
+                f"start={raw_start!r} end={raw_end!r}"
+            )
+        normalized.append((label, float(start), float(end)))
+    return normalized
+
+
+def _planned_recovery_windows(
+    analysis: dict[str, Any],
+    role: str,
+    target_stages: list[str],
+    media_windows: list[dict[str, Any]] | None,
+) -> list[tuple[str, float, float]]:
+    """Resolve the shared full-context plan and fail closed on bad duration."""
+    videos = analysis.get("videos") if isinstance(analysis.get("videos"), dict) else {}
+    info = videos.get(role) if isinstance(videos.get(role), dict) else {}
+    raw_duration = info.get("duration_seconds")
+    duration = None if isinstance(raw_duration, bool) else parse_timestamp_seconds(raw_duration)
+    target_codes = _recovery_target_codes(target_stages)
+    if not target_codes:
+        return []
+    if duration is None or duration <= 0:
+        raise ValueError(
+            "Stage1-C recovery source duration is invalid: "
+            f"reason_code=stage1_recovery_video_duration_invalid role={role} "
+            f"duration={info.get('duration_seconds')!r}"
+        )
+    target_label = "+".join(target_codes)
+    if media_windows is not None and not isinstance(media_windows, list):
+        raise ValueError(
+            "Stage1-C recovery media plan must be a list of window objects: "
+            f"reason_code=stage1_recovery_media_window_invalid role={role}"
+        )
+    windows = (
+        _recovery_stage_windows(analysis, role, target_stages)
+        if media_windows is None
+        else _recovery_media_window_tuples(media_windows, role, target_label)
+    )
+    if len(windows) != 1:
+        raise ValueError(
+            "Stage1-C recovery media plan must contain one full-context window: "
+            f"reason_code=stage1_recovery_media_window_invalid role={role} "
+            f"window_count={len(windows)}"
+        )
+    label, start, end = windows[0]
+    if start != 0.0 or end != float(duration):
+        raise ValueError(
+            "Stage1-C recovery media plan must cover the full source video: "
+            f"reason_code=stage1_recovery_media_window_invalid role={role} "
+            f"label={label} start={start:g} end={end:g} duration={float(duration):g}"
+        )
+    return windows
 
 
 def _validate_stage1_recovery_video_windows(
@@ -1370,21 +1440,30 @@ def _replace_recovery_full_media(
     api_url: str,
     model: str,
     budget: ResourceBudget | None,
+    media_windows: list[dict[str, Any]] | None = None,
     s6_tail_review: bool = False,
 ) -> list[dict[str, Any]]:
-    """Replace full media with target video windows and window-safe ASR."""
+    """Replace initial media with one full-context recovery request."""
     videos = analysis.get("videos") if isinstance(analysis.get("videos"), dict) else {}
     info = videos.get(role) if isinstance(videos.get(role), dict) else {}
     role_dir = Path(str(info.get("work_dir") or ""))
     video_path = Path(str(info.get("path") or ""))
     audio_path = role_dir / "audio.wav"
-    windows = _recovery_stage_windows(
+    windows = _planned_recovery_windows(
         analysis,
         role,
         target_stages,
-        s6_tail_review=s6_tail_review,
+        media_windows,
     )
-    native_video = can_analyze_native_video(api_url, model) and video_path.is_file()
+    _ = s6_tail_review
+    native_video_capable = can_analyze_native_video(api_url, model)
+    if native_video_capable and not video_path.is_file():
+        raise ValueError(
+            "Stage1-C native video recovery source is unavailable: "
+            f"reason_code=stage1_recovery_video_source_missing role={role} "
+            f"path={video_path}"
+        )
+    native_video = native_video_capable
     if native_video:
         _validate_stage1_recovery_video_windows(windows, role)
     retained = [
@@ -1399,7 +1478,7 @@ def _replace_recovery_full_media(
             {
                 "type": "text",
                 "text": (
-                    f"Stage1-C 窗口安全 Fun-ASR｜{role}｜{label}｜"
+                    f"Stage1-C 完整上下文 Fun-ASR 检索目标｜{role}｜{label}｜"
                     f"{format_seconds(start)} - {format_seconds(end)}\n"
                     + (
                         transcript_text
@@ -1416,14 +1495,27 @@ def _replace_recovery_full_media(
                 duration=window_duration,
                 budget=budget,
             )
-            if clip:
-                retained.extend(
-                    [
-                        {"type": "text", "text": f"Stage1-C 目标视频窗口 {label}：{format_seconds(start)} - {format_seconds(end)}"},
-                        {"type": "video_url", "video_url": {"url": clip}},
-                    ]
+            if not clip:
+                raise ValueError(
+                    "Stage1-C native video recovery encoding failed: "
+                    f"reason_code=stage1_recovery_video_encoding_failed role={role} "
+                    f"label={label} start={start:g} end={end:g} "
+                    "video_to_data_url returned no data"
                 )
-                continue
+            retained.extend(
+                [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Stage1-C 完整上下文视频检索目标 {label}："
+                            f"{format_seconds(start)} - {format_seconds(end)}"
+                            "（阶段标签是检索目标，不是时间段语义标签）"
+                        ),
+                    },
+                    {"type": "video_url", "video_url": {"url": clip}},
+                ]
+            )
+            continue
         if can_analyze_native_audio(api_url, model) and can_send_standalone_audio(api_url, model):
             audio_clip = audio_to_mp3_data_url(
                 audio_path,
@@ -1434,7 +1526,14 @@ def _replace_recovery_full_media(
             if audio_clip:
                 retained.extend(
                     [
-                        {"type": "text", "text": f"Stage1-C 目标音频窗口 {label}：{format_seconds(start)} - {format_seconds(end)}"},
+                        {
+                            "type": "text",
+                            "text": (
+                                f"Stage1-C 完整上下文音频检索目标 {label}："
+                                f"{format_seconds(start)} - {format_seconds(end)}"
+                                "（阶段标签是检索目标，不是时间段语义标签）"
+                            ),
+                        },
                         {"type": "input_audio", "input_audio": {"data": audio_clip, "format": "mp3"}},
                     ]
                 )

@@ -38,11 +38,13 @@ from ..analysis_model import (
 from ..stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
     STAGE_EVIDENCE_SNAPSHOT_VERSION,
+    STAGE1_ACQUISITION_VERSION,
     STAGE1_COVERAGE_AUDIT_VERSION,
     STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
     build_stage1_acquisition_manifest,
     freeze_stage_evidence,
     normalize_stage_evidence_checks,
+    normalize_stage1_acquisition,
     normalize_stage1_coverage_audit,
     stage_evidence_check_map,
     stage_evidence_contract,
@@ -3193,6 +3195,19 @@ def payload_has_video(payload: dict[str, Any]) -> bool:
     return False
 
 
+def _payload_video_block_count(payload: dict[str, Any]) -> int:
+    """Count video blocks in the exact recovery request."""
+    count = 0
+    for message in payload.get("messages", []):
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            count += sum(
+                isinstance(item, dict) and item.get("type") == "video_url"
+                for item in content
+            )
+    return count
+
+
 def payload_has_audio(payload: dict[str, Any]) -> bool:
     """Return whether the exact request contains a standalone audio block."""
     for message in payload.get("messages", []):
@@ -5067,6 +5082,7 @@ def _extend_stage1_acquisition_for_recovery(
     recovery_visual_inputs: list[dict[str, Any]],
     *,
     direct_audio: bool,
+    media_windows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Record media actually consumed by Stage1-C before Stage1-D gates it."""
     existing = (
@@ -5075,10 +5091,41 @@ def _extend_stage1_acquisition_for_recovery(
         else {}
     )
     existing_channels = existing.get("channels") if isinstance(existing.get("channels"), dict) else {}
-    native_video = existing.get("input_mode") == "native_video" or payload_has_video(payload)
+    existing_manifest = normalize_stage1_acquisition(existing)
+    existing_invalid_native_windows = "native_video_windows_invalid" in (
+        existing_manifest.get("errors") or []
+    )
+    existing_native_windows = (
+        existing_manifest.get("native_video_windows")
+        if (
+            existing_manifest.get("version") == STAGE1_ACQUISITION_VERSION
+            and existing_manifest.get("input_mode") == "native_video"
+            and not existing_invalid_native_windows
+        )
+        else []
+    )
+    existing_native_windows = (
+        existing_native_windows if isinstance(existing_native_windows, list) else []
+    )
+    requested_windows = media_windows if isinstance(media_windows, list) else []
+    payload_contains_video = payload_has_video(payload)
+    if payload_contains_video:
+        if not requested_windows:
+            raise ValueError(
+                "Recovery payload contains video blocks but no matching media windows."
+            )
+        video_block_count = _payload_video_block_count(payload)
+        if video_block_count != len(requested_windows):
+            raise ValueError(
+                "Recovery payload video-block count does not match media windows "
+                f"({video_block_count} != {len(requested_windows)})."
+            )
+    new_native_windows = copy.deepcopy(requested_windows) if payload_contains_video else []
+    native_windows = [*existing_native_windows, *new_native_windows]
+    native_video = bool(native_windows)
     recovery_timestamps = _visual_input_timestamps(recovery_visual_inputs)
     if not native_video and not recovery_timestamps and not direct_audio:
-        return copy.deepcopy(existing)
+        return copy.deepcopy(existing_manifest if existing_manifest else existing)
     visual_timestamps = [
         *[item for item in existing.get("visual_input_timestamps") or []],
         *recovery_timestamps,
@@ -5091,6 +5138,7 @@ def _extend_stage1_acquisition_for_recovery(
         analysis,
         role,
         native_video=native_video,
+        native_video_windows=native_windows,
         visual_input_count=(
             int(existing_channels.get("visual", {}).get("count") or 0)
             if isinstance(existing_channels.get("visual"), dict)
@@ -5100,6 +5148,14 @@ def _extend_stage1_acquisition_for_recovery(
         audio_input_available=audio_ready or direct_audio,
     )
     manifest["provider_artifacts"] = copy.deepcopy(existing.get("provider_artifacts") or [])
+    if existing_invalid_native_windows and not new_native_windows:
+        manifest["errors"] = list(
+            dict.fromkeys([
+                *(manifest.get("errors") or []),
+                "native_video_windows_invalid",
+            ])
+        )
+        manifest = normalize_stage1_acquisition(manifest)
     return manifest
 
 
@@ -5279,11 +5335,18 @@ def _prepare_stage1_recovery_request(
 ) -> tuple[dict[str, Any], list[dict[str, Any]], str, list[dict[str, Any]], int]:
     videos = analysis.get("videos")
     video_info = videos.get(role, {}) if isinstance(videos, dict) else {}
+    media_windows = stage1_recovery_media_windows(
+        analysis,
+        role,
+        targets,
+        s6_tail_review=review_s6_tail,
+    )
     visual_inputs = select_stage_recovery_visual_inputs(
         video_info if isinstance(video_info, dict) else {},
         role,
         targets,
         image_limit=max(4, int(getattr(args, "llm_image_limit", 0) or 0)),
+        media_windows=media_windows,
     )
     payload = build_video_fact_recovery_payload(
         vision_model(args),
@@ -5294,19 +5357,25 @@ def _prepare_stage1_recovery_request(
         targets,
         api_url=args.llm_api_url,
         budget=getattr(args, "_resource_budget", None),
+        media_windows=media_windows,
     )
+    if payload_has_video(payload):
+        if not media_windows:
+            raise ValueError(
+                "Recovery payload contains video blocks but no matching media windows."
+            )
+        video_block_count = _payload_video_block_count(payload)
+        if video_block_count != len(media_windows):
+            raise ValueError(
+                "Recovery payload video-block count does not match media windows "
+                f"({video_block_count} != {len(media_windows)})."
+            )
     media_mode = (
         "focused_native_video"
         if payload_has_video(payload)
         else "focused_audio"
         if payload_has_audio(payload)
         else "canonical_frames"
-    )
-    media_windows = stage1_recovery_media_windows(
-        analysis,
-        role,
-        targets,
-        s6_tail_review=review_s6_tail,
     )
     return payload, visual_inputs, media_mode, media_windows, _payload_size_bytes(payload)
 
@@ -5500,6 +5569,7 @@ def _merge_stage1_recovery_observations(
         payload,
         recovery_visual_inputs,
         direct_audio=direct_audio,
+        media_windows=media_windows,
     )
     candidate_id_map: list[dict[str, Any]] = []
     sanitize_audio_observations(

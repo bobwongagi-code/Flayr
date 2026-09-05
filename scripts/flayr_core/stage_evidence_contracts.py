@@ -41,7 +41,7 @@ STAGE_EVIDENCE_CONTRACT_VERSION = 6
 STAGE1_OBSERVATION_CONTRACT_VERSION = 6
 STAGE_EVIDENCE_SNAPSHOT_VERSION = 1
 STAGE_EVIDENCE_GATE_VERSION = 2
-STAGE1_ACQUISITION_VERSION = 4
+STAGE1_ACQUISITION_VERSION = 5
 STAGE1_COVERAGE_AUDIT_VERSION = 2
 STAGE1_PROJECTION_VERSION = "stage1_qualification_projection_v2"
 STAGE_EVIDENCE_STATES = (
@@ -253,6 +253,69 @@ def _snap_to_known_visual_timestamp(value: Any, known_timestamps: list[float]) -
     return nearest
 
 
+def _normalize_native_video_windows(
+    value: Any,
+    duration: float | None,
+) -> tuple[list[dict[str, float]], bool]:
+    """Keep only finite, positive, duration-bounded native-video windows."""
+    if value is None:
+        return [], False
+    if not isinstance(value, list):
+        return [], True
+    windows: list[dict[str, float]] = []
+    # A native range without the source duration cannot be bounded against the
+    # actual media. Retain finite entries for auditability, but mark the set
+    # invalid so it cannot establish coverage.
+    invalid = duration is None and bool(value)
+    for item in value:
+        if not isinstance(item, dict):
+            invalid = True
+            continue
+        start = _finite_nonnegative(item.get("start_seconds"))
+        end = _finite_nonnegative(item.get("end_seconds"))
+        if (
+            start is None
+            or end is None
+            or end <= start
+            or (duration is not None and end > duration)
+        ):
+            invalid = True
+            continue
+        windows.append({"start_seconds": start, "end_seconds": end})
+    windows = sorted(
+        {
+            (item["start_seconds"], item["end_seconds"])
+            for item in windows
+        }
+    )
+    return [
+        {"start_seconds": start, "end_seconds": end}
+        for start, end in windows
+    ], invalid
+
+
+def _windows_cover_range(
+    windows: list[dict[str, float]],
+    start: float,
+    end: float,
+) -> bool:
+    """Return whether exact, gap-free windows cover ``start..end``."""
+    if end < start:
+        return False
+    cursor = start
+    for window in sorted(windows, key=lambda item: (item["start_seconds"], item["end_seconds"])):
+        window_start = window["start_seconds"]
+        window_end = window["end_seconds"]
+        if window_end < cursor:
+            continue
+        if window_start > cursor:
+            return False
+        cursor = max(cursor, window_end)
+        if cursor >= end:
+            return True
+    return cursor >= end
+
+
 def _nonnegative_int(value: Any) -> int:
     try:
         return max(0, int(value or 0))
@@ -333,15 +396,72 @@ def normalize_stage1_acquisition(value: Any) -> dict[str, Any]:
     visual_input_timestamps.sort()
     raw_status = str(value.get("status") or "unknown").strip().lower()
     status = raw_status if raw_status in STAGE1_ACQUISITION_STATUSES else "unknown"
+    input_mode = str(value.get("input_mode") or "unknown").strip().lower()
+    raw_duration = _finite_nonnegative(value.get("duration_seconds"))
+    raw_errors = [
+        str(item).strip()
+        for item in (value.get("errors") if isinstance(value.get("errors"), list) else [])
+        if str(item).strip()
+    ]
+    native_video_windows, invalid_native_video_windows = _normalize_native_video_windows(
+        value.get("native_video_windows") if input_mode == "native_video" else None,
+        raw_duration,
+    )
+    invalid_native_video_windows = invalid_native_video_windows or (
+        "native_video_windows_invalid" in raw_errors
+    )
+    if invalid_native_video_windows and "native_video_windows_invalid" not in raw_errors:
+        raw_errors.append("native_video_windows_invalid")
+
+    native_video_full = (
+        input_mode == "native_video"
+        and value.get("version") == STAGE1_ACQUISITION_VERSION
+        and not invalid_native_video_windows
+        and raw_duration is not None
+        and raw_duration > 0
+        and bool(native_video_windows)
+        and _windows_cover_range(native_video_windows, 0.0, raw_duration)
+    )
+    if input_mode == "native_video":
+        if native_video_full:
+            normalized_channels["visual"]["coverage"] = "full"
+        elif native_video_windows and not invalid_native_video_windows:
+            normalized_channels["visual"]["coverage"] = "partial"
+        else:
+            normalized_channels["visual"]["status"] = "unknown"
+            normalized_channels["visual"]["coverage"] = "none"
+    else:
+        # Canonical frames are discrete observations; without native windows a
+        # persisted ``full`` declaration is not evidence of full-timeline
+        # acquisition.
+        native_video_windows = []
+        if normalized_channels["visual"]["coverage"] == "full":
+            if visual_input_timestamps:
+                normalized_channels["visual"]["coverage"] = "sampled"
+            else:
+                normalized_channels["visual"]["status"] = "unknown"
+                normalized_channels["visual"]["coverage"] = "none"
+    if normalized_channels["visual"]["coverage"] != "full":
+        normalized_stage_coverage = {
+            stage: {"count": 0, "status": "unknown"}
+            for stage in stage_codes()
+        }
+        if status == "complete":
+            status = (
+                "partial"
+                if normalized_channels["visual"]["coverage"] in {"sampled", "partial"}
+                else "unknown"
+            )
     return {
         "version": value.get("version") if value.get("version") == STAGE1_ACQUISITION_VERSION else None,
         "source": str(value.get("source") or "").strip().lower(),
         "status": status,
-        "input_mode": str(value.get("input_mode") or "unknown").strip().lower(),
+        "input_mode": input_mode,
         "speech_mode": str(value.get("speech_mode") or "unknown").strip().lower(),
-        "duration_seconds": _finite_nonnegative(value.get("duration_seconds")),
+        "duration_seconds": raw_duration,
         "channels": normalized_channels,
         "visual_input_timestamps": visual_input_timestamps,
+        "native_video_windows": native_video_windows,
         "stage_coverage": normalized_stage_coverage,
         "provider_artifacts": [
             {
@@ -363,11 +483,7 @@ def normalize_stage1_acquisition(value: Any) -> dict[str, Any]:
             for item in (value.get("provider_artifacts") if isinstance(value.get("provider_artifacts"), list) else [])
             if isinstance(item, dict) and str(item.get("artifact") or "").strip()
         ],
-        "errors": [
-            str(item).strip()
-            for item in (value.get("errors") if isinstance(value.get("errors"), list) else [])
-            if str(item).strip()
-        ],
+        "errors": raw_errors,
     }
 
 
@@ -472,6 +588,7 @@ def build_stage1_acquisition_manifest(
     role: str,
     *,
     native_video: bool = False,
+    native_video_windows: list[dict[str, Any]] | None = None,
     visual_input_count: int = 0,
     visual_input_timestamps: list[Any] | None = None,
     audio_input_available: bool | None = None,
@@ -528,11 +645,35 @@ def build_stage1_acquisition_manifest(
                 if (timestamp := _snap_to_known_visual_timestamp(item, valid_timed_frames)) is not None
             }
         )
-    visual_ready = bool(native_video or (duration is not None and request_timestamps))
-    if native_video:
+    native_windows, invalid_native_windows = _normalize_native_video_windows(
+        native_video_windows if native_video else None,
+        duration,
+    )
+    native_video_full = (
+        native_video
+        and not invalid_native_windows
+        and duration is not None
+        and duration > 0
+        and bool(native_windows)
+        and _windows_cover_range(native_windows, 0.0, duration)
+    )
+    native_video_partial = native_video and bool(native_windows)
+    visual_ready = bool(
+        (native_video and (native_video_full or native_video_partial))
+        or (not native_video and duration is not None and request_timestamps)
+    )
+    if native_video_full:
         visual_reason = "本次请求由代码确认包含原生视频。"
         visual_coverage = "full"
         visual_count = max(len(request_timestamps), int(visual_input_count or 0))
+    elif native_video_partial:
+        visual_reason = "本次请求包含代码确认的原生视频窗口，但窗口并未覆盖全片。"
+        visual_coverage = "partial"
+        visual_count = max(len(request_timestamps), int(visual_input_count or 0))
+    elif native_video:
+        visual_reason = "请求标记为原生视频，但缺少可验证的源时间窗口。"
+        visual_coverage = "none"
+        visual_count = len(request_timestamps)
     elif visual_ready:
         # A finite, valid frame manifest proves that the extractor received
         # sampled visual observations. It does not prove that every moment of
@@ -550,7 +691,13 @@ def build_stage1_acquisition_manifest(
         "ready" if visual_ready else "failed" if frames or frame_errors else "unknown",
         coverage=visual_coverage,
         count=visual_count,
-        boundary_precision=("continuous" if native_video else "frame" if request_timestamps else "unknown"),
+        boundary_precision=(
+            "continuous"
+            if native_video and (native_video_full or native_video_partial)
+            else "frame"
+            if request_timestamps
+            else "unknown"
+        ),
         reason=visual_reason,
     )
 
@@ -650,8 +797,8 @@ def build_stage1_acquisition_manifest(
     # Stage1 qualification there is no code-owned semantic boundary to count
     # against, so sampled inputs remain diagnostic-only here. Positive claims
     # are checked below against their own evidence time ranges and the exact
-    # request timestamps; native video is known to cover the full timeline.
-    if native_video and duration is not None:
+    # request timestamps; only a verified native window union is full.
+    if native_video_full:
         stage_coverage = {
             stage: {"count": 1, "status": "observed"}
             for stage in stage_codes()
@@ -661,6 +808,10 @@ def build_stage1_acquisition_manifest(
             stage: {"count": 0, "status": "unknown"}
             for stage in stage_codes()
         }
+
+    manifest_errors = [*frame_errors, *missing_required]
+    if invalid_native_windows:
+        manifest_errors.append("native_video_windows_invalid")
 
     return normalize_stage1_acquisition(
         {
@@ -673,8 +824,9 @@ def build_stage1_acquisition_manifest(
             "channels": channels,
             "stage_coverage": stage_coverage,
             "visual_input_timestamps": request_timestamps,
+            "native_video_windows": native_windows,
             "provider_artifacts": [],
-            "errors": frame_errors + missing_required,
+            "errors": manifest_errors,
         }
     )
 
@@ -1911,26 +2063,39 @@ def stage1_acquisition_issues(side: Any, stage: Any) -> list[str]:
             required_channels.add("visual")
 
         # A syntactically valid visual fact is not proof that the extractor
-        # received a frame covering that fact. Native video covers the whole
-        # timeline. For sampled inputs, use the actual request timestamps and
-        # the unit's own time range; no fixed S1-S6 time slice is assumed.
+        # received a frame covering that fact. For sampled inputs, use the
+        # actual request timestamps; a native request may support the fact
+        # only when its verified windows cover the unit's own time range. No
+        # fixed S1-S6 time slice is assumed.
         visual_units = [unit for unit in referenced if _unit_has_channel(unit, "visual")]
         if visual_units:
             visual_info = channels.get("visual") if isinstance(channels.get("visual"), dict) else {}
-            if manifest.get("input_mode") != "native_video" and visual_info.get("coverage") != "full":
+            if visual_info.get("coverage") != "full":
                 request_timestamps = manifest.get("visual_input_timestamps")
-                if not isinstance(request_timestamps, list) or not request_timestamps:
-                    issues.append(f"{code}:acquisition_visual_input_unobserved")
-                else:
-                    duration = manifest.get("duration_seconds")
-                    for unit in visual_units:
-                        parsed = parse_time_range_seconds(unit.get("time_range"), duration)
-                        if parsed is None:
-                            issues.append(f"{code}:acquisition_visual_evidence_time_invalid")
-                            continue
-                        start, end = parsed
-                        if not any(start <= timestamp <= end for timestamp in request_timestamps):
-                            issues.append(f"{code}:acquisition_visual_input_outside_evidence_range")
+                request_timestamps = request_timestamps if isinstance(request_timestamps, list) else []
+                native_windows = manifest.get("native_video_windows")
+                native_windows = native_windows if isinstance(native_windows, list) else []
+                duration = manifest.get("duration_seconds")
+                for unit in visual_units:
+                    parsed = parse_time_range_seconds(unit.get("time_range"), duration)
+                    if parsed is None:
+                        issues.append(f"{code}:acquisition_visual_evidence_time_invalid")
+                        continue
+                    start, end = parsed
+                    if any(start <= timestamp <= end for timestamp in request_timestamps):
+                        continue
+                    if (
+                        manifest.get("input_mode") == "native_video"
+                        and manifest.get("version") == STAGE1_ACQUISITION_VERSION
+                        and duration is not None
+                        and "native_video_windows_invalid" not in (manifest.get("errors") or [])
+                        and _windows_cover_range(native_windows, start, end)
+                    ):
+                        continue
+                    if not request_timestamps:
+                        issues.append(f"{code}:acquisition_visual_input_unobserved")
+                    else:
+                        issues.append(f"{code}:acquisition_visual_input_outside_evidence_range")
 
     for channel in sorted(required_channels):
         channel_info = channels.get(channel) if isinstance(channels.get(channel), dict) else {}

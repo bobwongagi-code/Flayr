@@ -142,7 +142,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "version": STAGE1_ACQUISITION_VERSION,
                 "source": "pipeline",
                 "status": "complete",
-                "input_mode": "canonical_frames",
+                "input_mode": "native_video",
                 "speech_mode": "visual_driven",
                 "duration_seconds": 6.0,
                 "channels": {
@@ -156,6 +156,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                     for stage in stage_codes()
                 },
                 "visual_input_timestamps": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+                "native_video_windows": [{"start_seconds": 0.0, "end_seconds": 6.0}],
                 "errors": [],
             },
             "stage_evidence_checks": checks,

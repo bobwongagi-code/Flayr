@@ -1807,6 +1807,8 @@ class StageEvidenceContractTests(unittest.TestCase):
         }
         side["stage1_coverage_audit"]["stages"]["S1"]["status"] = "clear"
         side["stage1_coverage_audit"]["stages"]["S1"]["coverage"] = "complete"
+        side["stage1_acquisition"]["input_mode"] = "canonical_frames"
+        side["stage1_acquisition"]["native_video_windows"] = []
         side["stage1_acquisition"]["channels"]["visual"]["coverage"] = "sampled"
         freeze_stage_evidence(side)
         diagnostics = stage_evidence_diagnostics(side, "S1")
@@ -1867,6 +1869,12 @@ class StageEvidenceContractTests(unittest.TestCase):
     def test_focused_recovery_execution_uses_registered_targets(self) -> None:
         """The live Stage1-C path reaches the append-only merge safely."""
         facts = self._active_side("C")
+        # This case exercises the continuity trigger from a sampled primary
+        # pass; the shared fixture otherwise represents a verified full native
+        # request.
+        facts["stage1_acquisition"]["input_mode"] = "canonical_frames"
+        facts["stage1_acquisition"]["native_video_windows"] = []
+        facts["stage1_acquisition"]["channels"]["visual"]["coverage"] = "sampled"
         args = type(
             "Args",
             (),
@@ -1900,6 +1908,12 @@ class StageEvidenceContractTests(unittest.TestCase):
             for group in STAGE1_QUALIFICATION_GROUPS
         ]
         with tempfile.TemporaryDirectory() as tmp_dir:
+            analysis = self._analysis()
+            analysis["videos"]["creator"] = {
+                "duration_seconds": 6.0,
+                "path": str(Path(tmp_dir) / "creator.mp4"),
+                "work_dir": str(Path(tmp_dir)),
+            }
             responses = iter((recovery_response, *qualification_responses))
             with patch(
                 "flayr_core.llm.pipeline.build_video_fact_recovery_payload",
@@ -1910,7 +1924,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             ):
                 result = _maybe_recover_video_facts(
                     args,
-                    self._analysis(),
+                    analysis,
                     Path(tmp_dir),
                     "secret",
                     "creator",
@@ -2022,6 +2036,13 @@ class StageEvidenceContractTests(unittest.TestCase):
         )()
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir)
+            analysis = self._analysis()
+            analysis["videos"]["creator"] = {
+                "duration_seconds": 6.0,
+                "path": str(run_dir / "creator.mp4"),
+                "work_dir": str(run_dir),
+                "speech_mode": {"mode": "visual_driven"},
+            }
             provider_responses = iter((recovery_response, qualification_response))
 
             def provider_call(*_args, **kwargs):
@@ -2056,7 +2077,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             ):
                 result = _maybe_recover_video_facts(
                     args,
-                    self._analysis(),
+                    analysis,
                     run_dir,
                     "secret",
                     "creator",
@@ -2126,10 +2147,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             }
         }
         windows = _recovery_stage_windows(analysis, "creator", ["S2", "S3", "S6"])
-        self.assertEqual([item[0] for item in windows], ["S2+S3", "S6"])
-        self.assertLessEqual(windows[0][1], 3.0)
-        self.assertGreaterEqual(windows[0][2], 15.0)
-        self.assertEqual(windows[1][2], 60.0)
+        self.assertEqual(windows, [("S2+S3+S6", 0.0, 60.0)])
 
         tail_windows = _recovery_stage_windows(
             analysis,
@@ -2137,14 +2155,10 @@ class StageEvidenceContractTests(unittest.TestCase):
             ["S3", "S6"],
             s6_tail_review=True,
         )
-        self.assertEqual([item[0] for item in tail_windows], ["S3", "S6"])
-        # The normal recovery padding is retained around the last-ten-second
-        # tail window; the bounded review therefore starts at 49.5s here.
-        self.assertGreaterEqual(tail_windows[-1][1], 49.5)
-        self.assertEqual(tail_windows[-1][2], 60.0)
+        self.assertEqual(tail_windows, [("S3+S6", 0.0, 60.0)])
 
         adjacent = _recovery_stage_windows(analysis, "creator", ["S3", "S4"])
-        self.assertEqual([item[0] for item in adjacent], ["S3+S4"])
+        self.assertEqual(adjacent, [("S3+S4", 0.0, 60.0)])
 
     def test_native_stage1_c_observation_extends_acquisition_before_stage1_d_gate(self) -> None:
         facts = self._active_side("C", "present")
@@ -2207,6 +2221,8 @@ class StageEvidenceContractTests(unittest.TestCase):
             },
         )()
         responses = iter((recovery_response, *qualification_responses))
+        analysis = self._analysis()
+        analysis["videos"]["creator"] = {"duration_seconds": 6.0}
 
         def provider_call(*_args, **kwargs):
             kwargs["response_meta"].update(
@@ -2237,7 +2253,7 @@ class StageEvidenceContractTests(unittest.TestCase):
         ):
             result = _maybe_recover_video_facts(
                 args,
-                self._analysis(),
+                analysis,
                 Path(tmp_dir),
                 "secret",
                 "creator",
@@ -2261,7 +2277,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             stage1_acquisition_issues(result, "S4"),
         )
 
-    def test_recovery_media_never_falls_back_to_full_video(self) -> None:
+    def test_recovery_media_uses_one_full_source_video_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             video_path = root / "creator.mp4"
@@ -2304,10 +2320,10 @@ class StageEvidenceContractTests(unittest.TestCase):
             self.assertNotIn("full", json.dumps(result))
             rendered = json.dumps(result, ensure_ascii=False)
             self.assertIn("SAFE_WINDOW", rendered)
-            self.assertNotIn("OUTSIDE_WINDOW", rendered)
+            self.assertIn("OUTSIDE_WINDOW", rendered)
             clip.assert_called_once()
-            self.assertGreater(clip.call_args.kwargs["duration"], 0)
-            self.assertLess(clip.call_args.kwargs["start"], 15.0)
+            self.assertEqual(clip.call_args.kwargs["start"], 0.0)
+            self.assertEqual(clip.call_args.kwargs["duration"], 60.0)
 
     def test_beijing_vl_recovery_sends_video_without_claiming_audio_perception(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3471,6 +3487,13 @@ class StageEvidenceContractTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir)
+            analysis = self._analysis()
+            analysis["videos"]["creator"] = {
+                "duration_seconds": 6.0,
+                "path": str(run_dir / "creator.mp4"),
+                "work_dir": str(run_dir),
+                "speech_mode": {"mode": "visual_driven"},
+            }
             responses = iter((recovery_response, qualification_response))
 
             def provider_call(*_args, **kwargs):
@@ -3496,7 +3519,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             ):
                 result = _maybe_recover_video_facts(
                     args,
-                    self._analysis(),
+                    analysis,
                     run_dir,
                     "secret",
                     "creator",
@@ -4369,7 +4392,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "version": STAGE1_ACQUISITION_VERSION,
                 "source": "pipeline",
                 "status": "complete",
-                "input_mode": "canonical_frames",
+                "input_mode": "native_video",
                 "speech_mode": "visual_driven",
                 "duration_seconds": 6.0,
                 "channels": {
@@ -4383,6 +4406,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                     for stage in stage_codes()
                 },
                 "visual_input_timestamps": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+                "native_video_windows": [{"start_seconds": 0.0, "end_seconds": 6.0}],
                 "errors": [],
             },
             "stage_evidence_checks": checks,
@@ -5844,6 +5868,8 @@ class StageEvidenceContractTests(unittest.TestCase):
                     "missing_signals": list(stage_evidence_contract(check["stage"]).required_signals),
                 }
             )
+        side["stage1_acquisition"]["input_mode"] = "canonical_frames"
+        side["stage1_acquisition"]["native_video_windows"] = []
         side["stage1_acquisition"]["channels"]["visual"]["coverage"] = "sampled"
         freeze_stage_evidence(side)
         for stage in stage_codes():
@@ -5855,6 +5881,8 @@ class StageEvidenceContractTests(unittest.TestCase):
 
     def test_sampled_visual_input_can_support_direct_positive_fact(self) -> None:
         side = self._active_side("C", "present")
+        side["stage1_acquisition"]["input_mode"] = "canonical_frames"
+        side["stage1_acquisition"]["native_video_windows"] = []
         side["stage1_acquisition"]["channels"]["visual"]["coverage"] = "sampled"
         freeze_stage_evidence(side)
         self.assertEqual(stage_evidence_readiness(side, "S6"), "present")
@@ -6090,6 +6118,8 @@ class StageEvidenceContractTests(unittest.TestCase):
             "missing_signals": list(stage_evidence_contract("S4").required_signals),
             "signal_bindings": self._signal_bindings("S4", "", "missing"),
         }
+        side["stage1_acquisition"]["input_mode"] = "canonical_frames"
+        side["stage1_acquisition"]["native_video_windows"] = []
         side["stage1_acquisition"]["channels"]["visual"]["coverage"] = "sampled"
         side["stage1_acquisition"]["visual_input_timestamps"] = []
         freeze_stage_evidence(side)
@@ -6108,6 +6138,8 @@ class StageEvidenceContractTests(unittest.TestCase):
             "signal_bindings": self._signal_bindings("S4", "C4"),
         }
         side["evidence_units"][3]["visual_fact"] = "效果变化直接可见"
+        side["stage1_acquisition"]["input_mode"] = "canonical_frames"
+        side["stage1_acquisition"]["native_video_windows"] = []
         side["stage1_acquisition"]["channels"]["visual"]["coverage"] = "sampled"
         side["stage1_acquisition"]["visual_input_timestamps"] = []
         freeze_stage_evidence(side)
@@ -6129,6 +6161,8 @@ class StageEvidenceContractTests(unittest.TestCase):
             "signal_bindings": self._signal_bindings("S4", "C4"),
         }
         side["evidence_units"][3]["time_range"] = "3.4s - 3.8s"
+        side["stage1_acquisition"]["input_mode"] = "canonical_frames"
+        side["stage1_acquisition"]["native_video_windows"] = []
         side["stage1_acquisition"]["channels"]["visual"]["coverage"] = "sampled"
         side["stage1_acquisition"]["stage_coverage"]["S4"] = {"status": "unknown", "count": 0}
         side["stage1_acquisition"]["visual_input_timestamps"] = [3.5]
@@ -6146,6 +6180,8 @@ class StageEvidenceContractTests(unittest.TestCase):
             "missing_signals": [],
         }
         side["evidence_units"][3]["time_range"] = "3.4s - 3.8s"
+        side["stage1_acquisition"]["input_mode"] = "canonical_frames"
+        side["stage1_acquisition"]["native_video_windows"] = []
         side["stage1_acquisition"]["channels"]["visual"]["coverage"] = "sampled"
         side["stage1_acquisition"]["visual_input_timestamps"] = [1.0]
         freeze_stage_evidence(side)
@@ -6230,9 +6266,11 @@ class StageEvidenceContractTests(unittest.TestCase):
             analysis,
             "creator",
             native_video=True,
+            native_video_windows=[{"start_seconds": 0.0, "end_seconds": 12.0}],
             visual_input_count=1,
         )
         self.assertEqual(manifest["channels"]["visual"]["status"], "ready")
+        self.assertEqual(manifest["channels"]["visual"]["coverage"], "full")
         self.assertEqual(manifest["stage_coverage"]["S4"]["status"], "observed")
 
     def test_stage_links_are_explicit_and_primary_ownership_is_unique(self) -> None:

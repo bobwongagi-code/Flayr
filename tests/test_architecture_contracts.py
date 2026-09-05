@@ -5511,7 +5511,12 @@ class ArchitectureContractTests(unittest.TestCase):
         validate_normalized_analysis_contract(result)
 
     def test_stage1_recovery_contract_uses_role_specific_evidence_prefix(self) -> None:
-        analysis = {"videos": {"benchmark": {}, "creator": {}}}
+        analysis = {
+            "videos": {
+                "benchmark": {"duration_seconds": 12.0},
+                "creator": {"duration_seconds": 12.0},
+            }
+        }
         for role, expected, forbidden in (
             ("benchmark", "B9", "C9"),
             ("creator", "C9", "B9"),
@@ -7180,14 +7185,15 @@ class ArchitectureContractTests(unittest.TestCase):
             "product": {"name": "测试品"},
             "videos": {"creator": {"duration_seconds": 12.0}},
         }
-        payload = build_video_fact_recovery_payload(
-            "test-model",
-            "creator",
-            analysis,
-            [],
-            {"evidence_units": []},
-            ["S4"],
-        )
+        with mock.patch.object(payload_module, "_replace_recovery_full_media", return_value=[]):
+            payload = build_video_fact_recovery_payload(
+                "test-model",
+                "creator",
+                analysis,
+                [],
+                {"evidence_units": []},
+                ["S4"],
+            )
         text = payload["messages"][1]["content"][0]["text"]
         self.assertIn('"stage": "S4"', text)
         self.assertIn('"result_difference"', text)
@@ -7202,18 +7208,19 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertNotIn('"stop_trigger"', text)
         self.assertNotIn('"product_identity"', text)
 
-        vl_payload = build_video_fact_recovery_payload(
-            "qwen3-vl-plus",
-            "creator",
-            analysis,
-            [],
-            {"evidence_units": []},
-            ["S4"],
-        )
+        with mock.patch.object(payload_module, "_replace_recovery_full_media", return_value=[]):
+            vl_payload = build_video_fact_recovery_payload(
+                "qwen3-vl-plus",
+                "creator",
+                analysis,
+                [],
+                {"evidence_units": []},
+                ["S4"],
+            )
         self.assertEqual(vl_payload["response_format"], {"type": "json_object"})
         self.assertIs(vl_payload["enable_thinking"], False)
 
-    def test_stage1_recovery_exposes_candidates_and_reviews_unclosed_s6_tail(self) -> None:
+    def test_stage1_recovery_exposes_candidates_and_reviews_unclosed_s6_full_context(self) -> None:
         analysis = {
             "product": {"name": "测试品"},
             "videos": {"creator": {"duration_seconds": 60.0}},
@@ -7255,12 +7262,12 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn('"candidate_observations_by_stage"', text)
         self.assertIn('"id": "C7"', text)
         self.assertIn("beg kuning", text)
-        self.assertIn("S6 尾段 CTA 定向复核", text)
+        self.assertIn("S6 完整上下文 CTA 定向复核", text)
         self.assertIn("补齐了会改变 CTA 解释的完整上下文", text)
         self.assertIn("必须追加一条补充候选观察", text)
         self.assertNotIn("当前 Stage1 明确把 S6 判为 absent", text)
 
-    def test_stage1_recovery_does_not_tail_review_closed_s6(self) -> None:
+    def test_stage1_recovery_does_not_full_context_review_closed_s6(self) -> None:
         analysis = {
             "product": {"name": "测试品"},
             "videos": {"creator": {"duration_seconds": 60.0}},
@@ -7287,7 +7294,7 @@ class ArchitectureContractTests(unittest.TestCase):
             ["S6"],
         )
         text = payload["messages"][1]["content"][0]["text"]
-        self.assertNotIn("S6 尾段 CTA 定向复核", text)
+        self.assertNotIn("S6 完整上下文 CTA 定向复核", text)
 
     def test_stage1_recovery_prompt_excludes_execution_provenance(self) -> None:
         analysis = {

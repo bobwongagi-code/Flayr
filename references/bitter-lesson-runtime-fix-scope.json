@@ -13,6 +13,7 @@
       "references/semantic-baseline-freeze.json",
       "references/semantic-baseline-freeze.md",
       "references/semantic-baseline-refreeze-scope.json",
+      "references/stage1-short-video-recovery-incident.md",
       "references/validation-inputs.json",
       "scripts/audit_result_field_ownership.py",
       "scripts/batch_analyze.py",
@@ -31,6 +32,7 @@
       "scripts/flayr_core/llm/full_analysis_payload.py",
       "scripts/flayr_core/llm/normalization_primitives.py",
       "scripts/flayr_core/llm/parse.py",
+      "scripts/flayr_core/llm/media.py",
       "scripts/flayr_core/llm/payload.py",
       "scripts/flayr_core/llm/phase_c_payload.py",
       "scripts/flayr_core/llm/pipeline.py",
@@ -54,9 +56,12 @@
       "tests/test_llm_api.py",
       "tests/test_project_contracts.py",
       "tests/test_result_field_ownership.py",
+      "tests/test_stage1_acquisition_windows.py",
       "tests/test_stage1_qualification_binding_repair.py",
+      "tests/test_stage1_recovery_video_preflight.py",
       "tests/test_stage_evidence_contracts.py",
       "tests/test_stage_evidence_projection.py",
+      "tests/test_video_evidence_selection.py",
       "tests/test_web_app.py"
     ],
     "forbidden_globs": [

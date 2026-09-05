@@ -609,20 +609,25 @@ class VideoEvidenceSelectionTests(unittest.TestCase):
         stages = build_stage_frame_manifest(frames, 5)
         self.assertTrue(any("selection_reasons" in item for item in stages))
 
-    def test_stage_recovery_visual_inputs_only_include_requested_stages(self) -> None:
+    def test_stage_recovery_visual_inputs_ignore_stage_manifest_and_use_canonical_timestamps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             frames_dir = root / "frames"
             frames_dir.mkdir()
-            s1 = self._write_frame(frames_dir, "s1.jpg", (20, 30, 40))
-            s3 = self._write_frame(frames_dir, "s3.jpg", (40, 50, 60))
-            s4 = self._write_frame(frames_dir, "s4.jpg", (60, 70, 80))
+            pseudo_stage = self._write_frame(frames_dir, "pseudo-s3.jpg", (20, 30, 40))
+            canonical_early = self._write_frame(frames_dir, "canonical-early.jpg", (40, 50, 60))
+            canonical_middle = self._write_frame(frames_dir, "canonical-middle.jpg", (60, 70, 80))
+            canonical_late = self._write_frame(frames_dir, "canonical-late.jpg", (80, 90, 100))
             info = {
                 "work_dir": str(root),
+                "duration_seconds": 18.0,
+                "analysis_frames": [
+                    {"path": str(canonical_early), "timestamp_seconds": 1.0},
+                    {"path": str(canonical_middle), "timestamp_seconds": 8.0},
+                    {"path": str(canonical_late), "timestamp_seconds": 16.0},
+                ],
                 "analysis_stage_frames": [
-                    {"stage": "S1", "path": str(s1), "timestamp_seconds": 1.0},
-                    {"stage": "S3", "path": str(s3), "timestamp_seconds": 3.0},
-                    {"stage": "S4", "path": str(s4), "timestamp_seconds": 4.0},
+                    {"stage": "S3", "path": str(pseudo_stage), "timestamp_seconds": 8.0},
                 ],
             }
             selected = select_stage_recovery_visual_inputs(
@@ -630,9 +635,76 @@ class VideoEvidenceSelectionTests(unittest.TestCase):
                 "creator",
                 ["S3", "malformed-stage"],
                 image_limit=4,
+                media_windows=[
+                    {
+                        "role": "creator",
+                        "window_label": "S3",
+                        "start_seconds": 0.0,
+                        "end_seconds": 18.0,
+                    }
+                ],
             )
-            self.assertEqual([item["path"] for item in selected], [str(s3.resolve())])
-            self.assertTrue(all("Stage1-C S3" in item["label"] for item in selected))
+            self.assertEqual(
+                [item["path"] for item in selected],
+                [
+                    str(canonical_early.resolve()),
+                    str(canonical_middle.resolve()),
+                    str(canonical_late.resolve()),
+                ],
+            )
+            self.assertEqual(
+                [item["label"] for item in selected],
+                [
+                    "creator @ 1.0s canonical-early.jpg",
+                    "creator @ 8.0s canonical-middle.jpg",
+                    "creator @ 16.0s canonical-late.jpg",
+                ],
+            )
+            self.assertNotIn(str(pseudo_stage.resolve()), [item["path"] for item in selected])
+
+    def test_stage_recovery_sampling_dedupes_and_covers_full_timeline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames_dir = root / "frames"
+            frames_dir.mkdir()
+            frames = [
+                self._write_frame(frames_dir, f"frame-{index}.jpg", (index * 20, 30, 40))
+                for index in range(10)
+            ]
+            info = {
+                "work_dir": str(root),
+                "duration_seconds": 10.0,
+                "analysis_frames": [
+                    *[
+                        {"path": str(path), "timestamp_seconds": float(index)}
+                        for index, path in enumerate(frames)
+                    ],
+                    # The same image appears twice in the canonical manifest.
+                    {"path": str(frames[5]), "timestamp_seconds": 5.5},
+                ],
+                "analysis_stage_frames": [
+                    {"stage": "S1", "path": str(frames[0]), "timestamp_seconds": 0.0},
+                    {"stage": "S2", "path": str(frames[1]), "timestamp_seconds": 1.0},
+                    {"stage": "S3", "path": str(frames[2]), "timestamp_seconds": 2.0},
+                    {"stage": "S4", "path": str(frames[3]), "timestamp_seconds": 3.0},
+                ],
+            }
+            selected = select_stage_recovery_visual_inputs(
+                info,
+                "creator",
+                ["S1", "S2", "S3", "S4", "S5", "S6"],
+                image_limit=4,
+                media_windows=[
+                    {
+                        "role": "creator",
+                        "window_label": "S1+S2+S3+S4+S5+S6",
+                        "start_seconds": 0.0,
+                        "end_seconds": 10.0,
+                    }
+                ],
+            )
+            self.assertEqual([item["timestamp_seconds"] for item in selected], [0.0, 3.0, 6.0, 9.0])
+            self.assertEqual(len({item["path"] for item in selected}), 4)
 
     def test_ocr_frame_candidates_include_focus_frames_without_duplicates(self) -> None:
         info = {
