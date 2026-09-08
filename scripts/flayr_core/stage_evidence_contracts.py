@@ -1989,8 +1989,14 @@ def _stage_check_issues(
             if isinstance(binding, dict)
             and binding.get("status") == "supported"
         )
-        if coverage != "complete" or evidence_ids or supported_bindings or not required.issubset(missing):
+        if coverage != "complete":
             issues.append(f"{contract.code}:absence_without_complete_coverage")
+        if evidence_ids:
+            issues.append(f"{contract.code}:absence_with_evidence")
+        if supported_bindings:
+            issues.append(f"{contract.code}:absence_with_supported_signals")
+        if not required.issubset(missing):
+            issues.append(f"{contract.code}:absence_missing_required_signals")
     elif status == "not_applicable":
         if coverage != "complete" or evidence_ids or signal_bindings or not str(check.get("reason") or "").strip():
             issues.append(f"{contract.code}:not_applicable_without_explicit_basis")
@@ -2179,7 +2185,12 @@ def stage1_coverage_audit_issues(side: Any, stage: Any | None = None) -> list[st
                 issues.append(f"{code}:coverage_audit_disagrees_with_partial")
             if coverage not in {"complete", "partial"}:
                 issues.append(f"{code}:coverage_audit_scope_incomplete")
-            if audit.get("status") != "completed":
+            local_partial_audit_closed = (
+                audit.get("status") == "partial"
+                and status == "found"
+                and coverage == "complete"
+            )
+            if audit.get("status") != "completed" and not local_partial_audit_closed:
                 issues.append(f"{code}:coverage_audit_not_completed")
         elif status in {"unknown", "conflict"} or coverage != "complete":
             issues.append(f"{code}:coverage_audit_scope_incomplete")

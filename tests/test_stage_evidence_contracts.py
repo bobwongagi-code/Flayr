@@ -326,7 +326,8 @@ class StageEvidenceContractTests(unittest.TestCase):
             f"S4:supported_signal_without_evidence:{required_signal}",
             issues,
         )
-        self.assertIn("S4:absence_without_complete_coverage", issues)
+        self.assertIn("S4:absence_with_supported_signals", issues)
+        self.assertNotIn("S4:absence_without_complete_coverage", issues)
 
     def test_primary_and_audit_signal_disagreement_is_explicit_conflict(self) -> None:
         checks = self._checks("present", "direct")
@@ -4874,7 +4875,11 @@ class StageEvidenceContractTests(unittest.TestCase):
             "stage_evidence_checks": normalize_stage_evidence_checks([raw], {"B5"}),
             "evidence_units": [{"id": "B5", "evidence_strength": "direct"}],
         }
-        self.assertIn("S5:absence_without_complete_coverage", stage_evidence_contract_issues(side))
+        issues = stage_evidence_contract_issues(side)
+        self.assertIn("S5:absence_with_evidence", issues)
+        self.assertIn("S5:absence_with_supported_signals", issues)
+        self.assertIn("S5:absence_missing_required_signals", issues)
+        self.assertNotIn("S5:absence_without_complete_coverage", issues)
 
     def test_s5_unknown_does_not_close_scope_even_if_provider_says_not_applicable(self) -> None:
         result = self._s5_comparison_result("unknown", "absent")

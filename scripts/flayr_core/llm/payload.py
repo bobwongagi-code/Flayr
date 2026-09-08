@@ -932,6 +932,7 @@ def build_stage_evidence_qualification_payload(
             "partial 表示已用 direct/explicit 证据确认该阶段确实被执行或尝试，但尚未满足全部 required signals。partial 必须引用证据、coverage 只能是 complete 或 partial，且至少一个 participation_signal 有 supported binding；不得用 partial 包装未绑定事实、歧义、排除项或采集失败。",
             "‘做了但较弱/不完整’不得压成 unknown；unknown 只表示观察本身不充分、边界不清、引用未绑定或相互冲突。partial 也不等于完整证明，缺失的 required signals 必须保留在 missing_signals。",
             "absent 只有在相关观察范围已完整覆盖、且合同要求的信号明确未出现时才允许。离散采样、粗粒度口播或未完成覆盖不能证明 absent。",
+            "Stage1-B/Stage1-D 的 absent 引用合同：status=absent 时 evidence_ids 必须为空；观察过的原子事实仍留在输入事实集中，但观察来源不等于合格的正向阶段 ID。absent 不得伪造 observed_disqualifiers 来凑合通过，只有实际观察到合同定义的排除项时才填写；required signals 必须全部列入 missing_signals，且不得保留 supported signal binding。",
             "not_applicable 只有在比较合同明确说明该阶段不适用时才允许，并必须在 reason 中写明依据；不能用它掩盖采集缺失。",
             "每个 signal_binding 必须引用当前输入中真实存在的 evidence_id；不得跨角色、跨视频或跨阶段创造引用。",
             "fact_quality 是 Canonical Stage1-A/C 对每条观察的描述性质量元数据；只能结合输入中的这些字段判断资格，不能把缺失或 uncertain 猜成已验证。",
