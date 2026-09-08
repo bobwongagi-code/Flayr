@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-stage1-recovery-window-accounting-fix-2026-09-06",
-  "description": "Correctness fix: Stage1-C recovery now records the exact native video windows actually sent; full coverage requires a verified gap-free union, while canonical, partial, and invalid inputs remain fail-closed. This changes media acquisition accounting and recovery source scope only, not evidence qualification, judgment semantics, model routing, or GT.",
+  "name": "semantic-baseline-refreeze-after-stage1-absent-contract-and-local-audit-fix-2026-09-08",
+  "description": "Correctness fix: Stage1 absent validation now separates coverage, evidence-ID, supported-signal, and required-signal failures; Stage1-B/D producer instructions clarify that observed sources are not positive evidence IDs and do not permit fabricated disqualifiers; the local audit exemption applies only when global status is partial, the primary stage status is partial, and the local audit is found with complete coverage. This changes contract diagnostics, producer instructions, and local audit gating behavior; thresholds, model routes, GT, and promotion eligibility remain unchanged.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,

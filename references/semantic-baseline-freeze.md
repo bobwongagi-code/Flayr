@@ -5,14 +5,16 @@
 
 ## 冻结目标
 
-这轮只回答一件事：在生产行为基线 `e7577c566436c3819adde70498bb4ae9a32ef4e6`、
+这轮只回答一件事：在生产行为基线 `9fb9c039e40f7fc49ec550ce7b5c6a81e0725da7`、
 `qwen3-vl-plus` 视觉观察和 `qwen3.7-plus` 判断路由下，现有可用人工 GT 能证明的 Stage1
 事实召回、资格交接和 S1-S6 判断质量分别是多少。
 
 它不是 fresh blind promotion。所有结果先作为离线语义基线和根因诊断，`promotion_eligible=false`。
 技术门禁通过不能替代语义验收通过。
 
-本次重新冻结只记录 Stage1-C 实际发送素材范围及其全片覆盖记账修正，不代表业务或模型晋级；本轮未调用模型。
+本次重新冻结记录 Stage1 absent 校验的具体诊断原因、Stage1-B/D 生产者指令对既有字段职责的澄清，以及
+`stage1_coverage_audit_issues` 在严格条件下的局部 audit 隔离。这些是已承认的源码行为变化，不代表业务或模型晋级；
+本轮未调用模型，阈值、模型路由、GT 和 `promotion_eligible=false` 均保持不变。
 
 ## 执行顺序
 
