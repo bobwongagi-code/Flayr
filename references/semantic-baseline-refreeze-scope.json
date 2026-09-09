@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-stage1-absent-contract-and-local-audit-fix-2026-09-08",
-  "description": "Correctness fix: Stage1 absent validation now separates coverage, evidence-ID, supported-signal, and required-signal failures; Stage1-B/D producer instructions clarify that observed sources are not positive evidence IDs and do not permit fabricated disqualifiers; the local audit exemption applies only when global status is partial, the primary stage status is partial, and the local audit is found with complete coverage. This changes contract diagnostics, producer instructions, and local audit gating behavior; thresholds, model routes, GT, and promotion eligibility remain unchanged.",
+  "name": "semantic-baseline-refreeze-after-failed-stream-diagnostic-2026-09-09",
+  "description": "Correctness fix: bounded failed-stream diagnostic evidence is retained for failed streaming attempts. This changes transport diagnostics only; judgment semantics, resource budgets, model routes, GT, thresholds, and promotion eligibility remain unchanged, and promotion_eligible stays false.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
