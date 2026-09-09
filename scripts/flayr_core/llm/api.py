@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import hashlib
 import json
 import math
 import os
@@ -62,6 +63,8 @@ IMAGE_DATA_URL_MAX_BYTES = 8 * 1024 * 1024
 DEFAULT_SINGLE_REQUEST_BYTES = 64 * 1024 * 1024
 SSE_MAX_EVENT_BYTES = 4 * 1024 * 1024
 LLM_TRANSPORT_DIAGNOSTIC_BYTES = 64 * 1024
+SSE_PROVIDER_REQUEST_ID_MAX_CHARS = 256
+STREAM_DIAGNOSTIC_SCHEMA_VERSION = 1
 RETIRED_MODEL_PREFIXES = ("qwen3-vl-flash",)
 
 
@@ -89,6 +92,17 @@ class _StreamingAttemptResult:
     finish_reason: str | None = None
     error: str = ""
     retryable: bool = True
+    response_path: Path | None = None
+    received_bytes: int = 0
+    retained_bytes: int = 0
+    stream_truncated: bool = False
+    received_chunks: int = 0
+    first_received_seconds: float | None = None
+    last_received_seconds: float | None = None
+    done_received: bool = False
+    curl_exit_code: int | None = None
+    provider_request_id: str | None = None
+    http_status: int | None = None
 
 
 def provider_capabilities(api_url: str, model: str = "") -> ProviderCapabilities:
@@ -251,9 +265,16 @@ def read_llm_api_key(args: argparse.Namespace) -> str:
 class IncrementalSSEParser:
     """Parse SSE events as bytes arrive, with explicit event and stream caps."""
 
-    def __init__(self, *, max_event_bytes: int = SSE_MAX_EVENT_BYTES, max_total_bytes: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        max_event_bytes: int = SSE_MAX_EVENT_BYTES,
+        max_total_bytes: int | None = None,
+        started_at: float | None = None,
+    ) -> None:
         self.max_event_bytes = max(1, int(max_event_bytes))
         self.max_total_bytes = max_total_bytes
+        self._started_at = time.monotonic() if started_at is None else started_at
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
         self._line_buffer = ""
         self._data_lines: list[str] = []
@@ -263,12 +284,24 @@ class IncrementalSSEParser:
         self._usage: dict[str, Any] | None = None
         self._complete = False
         self._finish_reason: str | None = None
+        self._received_chunks = 0
+        self._first_received_seconds: float | None = None
+        self._last_received_seconds: float | None = None
+        self._done_received = False
+        self._provider_request_id: str | None = None
         self.error: str | None = None
 
-    def feed(self, chunk: bytes) -> None:
+    def feed(self, chunk: bytes, *, received_at: float | None = None) -> None:
+        self._received_chunks += 1
+        if received_at is None:
+            received_at = time.monotonic() - self._started_at
+        received_at = max(0.0, float(received_at))
+        if self._first_received_seconds is None:
+            self._first_received_seconds = received_at
+        self._last_received_seconds = received_at
+        self._total_bytes += len(chunk)
         if self.error:
             return
-        self._total_bytes += len(chunk)
         if self.max_total_bytes is not None and self._total_bytes > self.max_total_bytes:
             self.error = f"SSE response exceeded {self.max_total_bytes} bytes"
             return
@@ -296,6 +329,18 @@ class IncrementalSSEParser:
 
     def result(self) -> tuple[str, dict[str, Any] | None, bool, str | None, str | None]:
         return "".join(self._parts), self._usage, self._complete, self._finish_reason, self.error
+
+    def diagnostics(self) -> dict[str, Any]:
+        """Return bounded transport observations without exposing request data."""
+        return {
+            "received_bytes": self._total_bytes,
+            "received_chunks": self._received_chunks,
+            "first_received_seconds": self._first_received_seconds,
+            "last_received_seconds": self._last_received_seconds,
+            "finish_reason": self._finish_reason,
+            "done_received": self._done_received,
+            "provider_request_id": self._provider_request_id,
+        }
 
     def _consume_lines(self) -> None:
         while not self.error:
@@ -340,6 +385,7 @@ class IncrementalSSEParser:
         self._event_bytes = 0
         if data == "[DONE]":
             self._complete = True
+            self._done_received = True
             return
         try:
             chunk = json.loads(data)
@@ -349,6 +395,11 @@ class IncrementalSSEParser:
         if not isinstance(chunk, dict):
             self.error = "SSE JSON event must be an object"
             return
+        provider_request_id = chunk.get("id")
+        if self._provider_request_id is None and isinstance(provider_request_id, str):
+            provider_request_id = provider_request_id.strip()
+            if provider_request_id:
+                self._provider_request_id = provider_request_id[:SSE_PROVIDER_REQUEST_ID_MAX_CHARS]
         choices = chunk.get("choices") or []
         if choices:
             if not isinstance(choices, list) or not isinstance(choices[0], dict):
@@ -564,11 +615,24 @@ def _run_streaming_attempt(
             attempt_timeout_seconds
         )
     response_path = temp_root / f"attempt-{attempt}.sse"
-    parser = IncrementalSSEParser(max_total_bytes=request_limit)
+    attempt_started_at = time.monotonic()
+    parser = IncrementalSSEParser(
+        max_total_bytes=request_limit,
+        started_at=attempt_started_at,
+    )
+    retained_bytes = 0
     with response_path.open("wb") as response_file:
         def consume_response(chunk: bytes) -> None:
-            response_file.write(chunk)
-            parser.feed(chunk)
+            nonlocal retained_bytes
+            parser.feed(
+                chunk,
+                received_at=time.monotonic() - attempt_started_at,
+            )
+            if retained_bytes >= request_limit:
+                return
+            retained_chunk = chunk[: request_limit - retained_bytes]
+            response_file.write(retained_chunk)
+            retained_bytes += len(retained_chunk)
 
         completed = run_command(
             attempt_command,
@@ -580,10 +644,23 @@ def _run_streaming_attempt(
             capture_stdout=False,
         )
     parser.finish()
-    response_size = response_path.stat().st_size if response_path.is_file() else 0
+    parser_diagnostics = parser.diagnostics()
+    attempt_fields = {
+        "response_path": response_path,
+        "received_bytes": parser_diagnostics["received_bytes"],
+        "retained_bytes": retained_bytes,
+        "stream_truncated": parser_diagnostics["received_bytes"] > retained_bytes,
+        "received_chunks": parser_diagnostics["received_chunks"],
+        "first_received_seconds": parser_diagnostics["first_received_seconds"],
+        "last_received_seconds": parser_diagnostics["last_received_seconds"],
+        "finish_reason": parser_diagnostics["finish_reason"],
+        "done_received": parser_diagnostics["done_received"],
+        "provider_request_id": parser_diagnostics["provider_request_id"],
+        "curl_exit_code": completed.returncode,
+    }
     if active_budget is not None:
         try:
-            active_budget.reserve_download(response_size)
+            active_budget.reserve_download(int(parser_diagnostics["received_bytes"]))
         except ResourceBudgetExceeded as exc:
             raise SystemExit(str(exc)) from exc
     http_status = parse_curl_http_status(completed.stderr)
@@ -605,20 +682,139 @@ def _run_streaming_attempt(
         return _StreamingAttemptResult(
             error=error,
             retryable=is_retryable_error(error, http_status=http_status),
+            http_status=http_status,
+            **attempt_fields,
         )
-    if response_size > request_limit:
+    if parser_diagnostics["received_bytes"] > request_limit:
         return _StreamingAttemptResult(
-            error="LLM response exceeded the single-request byte limit"
+            error="LLM response exceeded the single-request byte limit",
+            http_status=http_status,
+            **attempt_fields,
         )
-    content, usage, complete, finish_reason, parse_error = parser.result()
+    content, usage, complete, _, parse_error = parser.result()
     if parse_error:
-        return _StreamingAttemptResult(error=f"SSE parse failed: {parse_error}")
+        return _StreamingAttemptResult(
+            error=f"SSE parse failed: {parse_error}",
+            http_status=http_status,
+            **attempt_fields,
+        )
     return _StreamingAttemptResult(
         content=content,
         usage=usage,
         complete=complete,
-        finish_reason=finish_reason,
+        http_status=http_status,
+        **attempt_fields,
     )
+
+
+def _failed_stream_diagnostic_token(logical_request_id: str) -> str:
+    return hashlib.sha256(str(logical_request_id).encode("utf-8")).hexdigest()[:16]
+
+
+def _failed_stream_paths(
+    raw_path: Path,
+    *,
+    logical_request_id: str,
+    attempt: int,
+) -> tuple[Path, Path]:
+    """Choose sibling paths tied to one logical request and attempt."""
+    base = (
+        f"{raw_path.stem}.failed-stream-"
+        f"{_failed_stream_diagnostic_token(logical_request_id)}.attempt-{attempt}"
+    )
+    suffix = ""
+    while True:
+        stream_path = raw_path.with_name(f"{base}{suffix}.sse")
+        diagnostic_path = raw_path.with_name(f"{base}{suffix}.json")
+        if not stream_path.exists() and not diagnostic_path.exists():
+            return stream_path, diagnostic_path
+        suffix = f"-{uuid.uuid4().hex[:8]}"
+
+
+def _persist_failed_stream_attempts(
+    *,
+    raw_path: Path,
+    logical_request_id: str,
+    attempts: list[_StreamingAttemptResult],
+) -> list[dict[str, Any]]:
+    """Copy bounded failed streams after the request is known to have failed.
+
+    Every write is best effort. The caller's transport failure remains the
+    source of truth if diagnostics cannot be persisted.
+    """
+    persisted: list[dict[str, Any]] = []
+    for attempt, result in enumerate(attempts, start=1):
+        if result.response_path is None:
+            continue
+        try:
+            stream_path, diagnostic_path = _failed_stream_paths(
+                raw_path,
+                logical_request_id=logical_request_id,
+                attempt=attempt,
+            )
+        except (OSError, TypeError, ValueError, RuntimeError) as exc:
+            persisted.append(
+                {
+                    "schema_version": STREAM_DIAGNOSTIC_SCHEMA_VERSION,
+                    "logical_request_id": str(logical_request_id)[:256],
+                    "attempt": attempt,
+                    "stream_file": None,
+                    "diagnostic_file": None,
+                    "received_bytes": result.received_bytes,
+                    "retained_bytes": result.retained_bytes,
+                    "stream_truncated": result.stream_truncated,
+                    "received_chunks": result.received_chunks,
+                    "first_received_seconds": result.first_received_seconds,
+                    "last_received_seconds": result.last_received_seconds,
+                    "finish_reason": result.finish_reason,
+                    "done_received": result.done_received,
+                    "curl_exit_code": result.curl_exit_code,
+                    "provider_request_id": result.provider_request_id,
+                    "http_status": result.http_status,
+                    "error": result.error[:500],
+                    "persist_error": f"diagnostic path failed: {exc}"[:500],
+                }
+            )
+            continue
+        record: dict[str, Any] = {
+            "schema_version": STREAM_DIAGNOSTIC_SCHEMA_VERSION,
+            "logical_request_id": str(logical_request_id)[:256],
+            "attempt": attempt,
+            "stream_file": stream_path.name,
+            "diagnostic_file": diagnostic_path.name,
+            "received_bytes": result.received_bytes,
+            "retained_bytes": result.retained_bytes,
+            "stream_truncated": result.stream_truncated,
+            "received_chunks": result.received_chunks,
+            "first_received_seconds": result.first_received_seconds,
+            "last_received_seconds": result.last_received_seconds,
+            "finish_reason": result.finish_reason,
+            "done_received": result.done_received,
+            "curl_exit_code": result.curl_exit_code,
+            "provider_request_id": result.provider_request_id,
+            "http_status": result.http_status,
+            "error": result.error[:500],
+        }
+        try:
+            shutil.copyfile(result.response_path, stream_path)
+        except (OSError, TypeError, ValueError, RuntimeError) as exc:
+            # Diagnostics must not replace the transport error.
+            record["stream_file"] = None
+            record["diagnostic_file"] = None
+            record["persist_error"] = f"stream copy failed: {exc}"[:500]
+            persisted.append(record)
+            continue
+        try:
+            write_text(
+                diagnostic_path,
+                json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+            )
+        except (OSError, TypeError, ValueError, RuntimeError) as exc:
+            # Diagnostics must not replace the transport error.
+            record["diagnostic_file"] = None
+            record["persist_error"] = f"diagnostic write failed: {exc}"[:500]
+        persisted.append(record)
+    return persisted
 
 
 def _write_successful_stream_response(
@@ -688,6 +884,7 @@ def _execute_streaming_request(
         attempt = 0
         transport_retries_used = 0
         output_expansions_used = 0
+        attempt_results: list[_StreamingAttemptResult] = []
         while True:
             attempt += 1
             attempt_timeout, last_error = _transport_attempt_timeout(
@@ -711,6 +908,7 @@ def _execute_streaming_request(
                 api_key=api_key,
                 response_meta=response_meta,
             )
+            attempt_results.append(result)
             if result.error:
                 last_error = result.error
                 if (
@@ -782,15 +980,26 @@ def _execute_streaming_request(
                 if sleep_seconds <= 0:
                     break
                 time.sleep(sleep_seconds)
+        failure_message = f"LLM streaming request failed: {last_error}"
+        try:
+            stream_diagnostics = _persist_failed_stream_attempts(
+                raw_path=raw_path,
+                logical_request_id=logical_request_id,
+                attempts=attempt_results,
+            )
+        except (OSError, TypeError, ValueError, RuntimeError) as exc:
+            # Diagnostics must not replace the transport error.
+            stream_diagnostics = [{"persist_error": str(exc)[:500]}]
         if response_meta is not None:
             response_meta.update(
                 {
                     "transport_status": "failed",
                     "transport_retry_reasons": list(transport_retry_reasons),
                     "transport_error": last_error[:500],
+                    "stream_diagnostics": stream_diagnostics,
                 }
             )
-        raise SystemExit(f"LLM streaming request failed: {last_error}")
+        raise SystemExit(failure_message)
 
 
 def call_llm_api(

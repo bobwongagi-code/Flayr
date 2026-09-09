@@ -400,6 +400,316 @@ class LlmApiContractTests(unittest.TestCase):
             self.assertEqual(response_meta["transport_attempts"], 1)
             self.assertEqual(response_meta["request_retry_kinds"], [])
 
+    def test_failed_stream_retains_bounded_sse_and_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            raw_path = root / "response.json"
+            payload_path.write_text('{"model":"qwen3-vl-plus","messages":[]}', encoding="utf-8")
+            response_meta: dict[str, object] = {}
+            stream = (
+                b'data: {"id":"provider-request-123","choices":[{"delta":{"content":"partial"}}]}\n\n'
+            )
+
+            def fake_run(_command: list[str], **kwargs: object) -> mock.Mock:
+                split_at = stream.index(b"\n\n")
+                kwargs["stdout_callback"](stream[: split_at + 1])
+                kwargs["stdout_callback"](stream[split_at + 1 :])
+                return mock.Mock(returncode=0, stderr="__FLAYR_HTTP_STATUS__200\n", stdout="")
+
+            with (
+                mock.patch(
+                    "flayr_core.llm.api.validate_outbound_url",
+                    return_value=mock.Mock(
+                        hostname="example.test", port=443, resolved_addresses=("203.0.113.10",)
+                    ),
+                ),
+                mock.patch("flayr_core.llm.api.run_command", side_effect=fake_run),
+                self.assertRaisesRegex(SystemExit, "流式响应不完整"),
+            ):
+                call_llm_api(
+                    "https://example.test/v1/chat/completions",
+                    "secret",
+                    payload_path,
+                    raw_path,
+                    retries=0,
+                    output_expansions=0,
+                    request_id="request/with unsafe path chars",
+                    response_meta=response_meta,
+                )
+
+            stream_paths = sorted(root.glob("response.failed-stream-*.sse"))
+            diagnostic_paths = sorted(root.glob("response.failed-stream-*.json"))
+            self.assertEqual(len(stream_paths), 1)
+            self.assertEqual(len(diagnostic_paths), 1)
+            self.assertEqual(stream_paths[0].read_bytes(), stream)
+            diagnostics = json.loads(diagnostic_paths[0].read_text(encoding="utf-8"))
+            self.assertEqual(diagnostics["received_bytes"], len(stream))
+            self.assertEqual(diagnostics["received_chunks"], 2)
+            self.assertIsNotNone(diagnostics["first_received_seconds"])
+            self.assertIsNotNone(diagnostics["last_received_seconds"])
+            self.assertLessEqual(
+                diagnostics["first_received_seconds"], diagnostics["last_received_seconds"]
+            )
+            self.assertIsNone(diagnostics["finish_reason"])
+            self.assertFalse(diagnostics["done_received"])
+            self.assertEqual(diagnostics["curl_exit_code"], 0)
+            self.assertEqual(diagnostics["provider_request_id"], "provider-request-123")
+            self.assertNotIn("secret", diagnostic_paths[0].read_text(encoding="utf-8"))
+            self.assertEqual(len(response_meta["stream_diagnostics"]), 1)
+
+    def test_curl_failure_with_done_retains_stream_and_original_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            raw_path = root / "response.json"
+            payload_path.write_text('{"model":"qwen3-vl-plus","messages":[]}', encoding="utf-8")
+            stream = (
+                b'data: {"id":"provider-request-456","choices":[{"delta":{"content":"{}"},"finish_reason":"stop"}]}\n\n'
+                b"data: [DONE]\n\n"
+            )
+
+            def fake_run(_command: list[str], **kwargs: object) -> mock.Mock:
+                kwargs["stdout_callback"](stream)
+                return mock.Mock(
+                    returncode=56,
+                    stderr="curl: (56) Recv failure\n__FLAYR_HTTP_STATUS__200\n",
+                    stdout="",
+                )
+
+            with (
+                mock.patch(
+                    "flayr_core.llm.api.validate_outbound_url",
+                    return_value=mock.Mock(
+                        hostname="example.test", port=443, resolved_addresses=("203.0.113.10",)
+                    ),
+                ),
+                mock.patch("flayr_core.llm.api.run_command", side_effect=fake_run),
+                self.assertRaisesRegex(SystemExit, "Recv failure"),
+            ):
+                call_llm_api(
+                    "https://example.test/v1/chat/completions",
+                    "secret",
+                    payload_path,
+                    raw_path,
+                    retries=0,
+                    output_expansions=0,
+                )
+
+            diagnostic_path = next(root.glob("response.failed-stream-*.json"))
+            diagnostics = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+            self.assertTrue(diagnostics["done_received"])
+            self.assertEqual(diagnostics["finish_reason"], "stop")
+            self.assertEqual(diagnostics["curl_exit_code"], 56)
+            self.assertEqual(diagnostics["provider_request_id"], "provider-request-456")
+
+    def test_finish_reason_without_done_keeps_existing_success_behavior(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            raw_path = root / "response.json"
+            payload_path.write_text('{"model":"qwen3-vl-plus","messages":[]}', encoding="utf-8")
+            stream = (
+                b'data: {"choices":[{"delta":{"content":"{}"},"finish_reason":"stop"}]}\n\n'
+            )
+
+            def fake_run(_command: list[str], **kwargs: object) -> mock.Mock:
+                kwargs["stdout_callback"](stream)
+                return mock.Mock(returncode=0, stderr="__FLAYR_HTTP_STATUS__200\n", stdout="")
+
+            with (
+                mock.patch(
+                    "flayr_core.llm.api.validate_outbound_url",
+                    return_value=mock.Mock(
+                        hostname="example.test", port=443, resolved_addresses=("203.0.113.10",)
+                    ),
+                ),
+                mock.patch("flayr_core.llm.api.run_command", side_effect=fake_run),
+            ):
+                result = call_llm_api(
+                    "https://example.test/v1/chat/completions",
+                    "secret",
+                    payload_path,
+                    raw_path,
+                    retries=0,
+                    output_expansions=0,
+                )
+
+            self.assertIn('"finish_reason": "stop"', result)
+            self.assertFalse(raw_path.exists())
+            self.assertEqual(list(root.glob("response.failed-stream-*.sse")), [])
+            self.assertEqual(list(root.glob("response.failed-stream-*.json")), [])
+
+    def test_failed_retries_retain_distinct_attempt_streams(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            raw_path = root / "response.json"
+            payload_path.write_text('{"model":"qwen3-vl-plus","messages":[]}', encoding="utf-8")
+            calls = 0
+
+            def fake_run(_command: list[str], **kwargs: object) -> mock.Mock:
+                nonlocal calls
+                calls += 1
+                kwargs["stdout_callback"](
+                    f'data: {{"id":"provider-request-{calls}","choices":[{{"delta":{{"content":"partial-{calls}"}}}}]}}\n\n'.encode()
+                )
+                return mock.Mock(
+                    returncode=56,
+                    stderr="curl: (56) Recv failure\n__FLAYR_HTTP_STATUS__200\n",
+                    stdout="",
+                )
+
+            with (
+                mock.patch(
+                    "flayr_core.llm.api.validate_outbound_url",
+                    return_value=mock.Mock(
+                        hostname="example.test", port=443, resolved_addresses=("203.0.113.10",)
+                    ),
+                ),
+                mock.patch("flayr_core.llm.api.run_command", side_effect=fake_run),
+                mock.patch("flayr_core.llm.api.time.sleep"),
+                self.assertRaisesRegex(SystemExit, "Recv failure"),
+            ):
+                call_llm_api(
+                    "https://example.test/v1/chat/completions",
+                    "secret",
+                    payload_path,
+                    raw_path,
+                    retries=1,
+                    output_expansions=0,
+                )
+
+            self.assertEqual(calls, 2)
+            stream_paths = sorted(root.glob("response.failed-stream-*.sse"))
+            diagnostic_paths = sorted(root.glob("response.failed-stream-*.json"))
+            self.assertEqual(len(stream_paths), 2)
+            self.assertEqual(len(diagnostic_paths), 2)
+            self.assertEqual(
+                [json.loads(path.read_text(encoding="utf-8"))["attempt"] for path in diagnostic_paths],
+                [1, 2],
+            )
+            self.assertNotEqual(stream_paths[0].read_bytes(), stream_paths[1].read_bytes())
+
+    def test_failed_stream_retention_is_bounded_by_request_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            raw_path = root / "response.json"
+            payload_path.write_text('{"model":"qwen3-vl-plus"}', encoding="utf-8")
+            stream = b"x" * 256
+            budget = mock.Mock()
+            budget.limits.max_single_request_bytes = 128
+            budget.remaining_wall_seconds.return_value = 100.0
+
+            def fake_run(_command: list[str], **kwargs: object) -> mock.Mock:
+                kwargs["stdout_callback"](stream)
+                return mock.Mock(returncode=0, stderr="__FLAYR_HTTP_STATUS__200\n", stdout="")
+
+            with (
+                mock.patch(
+                    "flayr_core.llm.api.validate_outbound_url",
+                    return_value=mock.Mock(
+                        hostname="example.test", port=443, resolved_addresses=("203.0.113.10",)
+                    ),
+                ),
+                mock.patch("flayr_core.llm.api.run_command", side_effect=fake_run),
+                self.assertRaisesRegex(SystemExit, "single-request byte limit"),
+            ):
+                call_llm_api(
+                    "https://example.test/v1/chat/completions",
+                    "secret",
+                    payload_path,
+                    raw_path,
+                    retries=0,
+                    output_expansions=0,
+                    budget=budget,
+                )
+
+            stream_path = next(root.glob("response.failed-stream-*.sse"))
+            diagnostic_path = next(root.glob("response.failed-stream-*.json"))
+            self.assertEqual(stream_path.stat().st_size, 128)
+            diagnostics = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+            self.assertEqual(diagnostics["received_bytes"], len(stream))
+            self.assertEqual(diagnostics["retained_bytes"], 128)
+            self.assertTrue(diagnostics["stream_truncated"])
+
+    def test_diagnostic_write_failure_does_not_replace_transport_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            raw_path = root / "response.json"
+            payload_path.write_text('{"model":"qwen3-vl-plus"}', encoding="utf-8")
+
+            def fake_run(_command: list[str], **kwargs: object) -> mock.Mock:
+                kwargs["stdout_callback"](b"partial")
+                return mock.Mock(
+                    returncode=7,
+                    stderr="curl: (7) Failed to connect\n",
+                    stdout="",
+                )
+
+            with (
+                mock.patch(
+                    "flayr_core.llm.api.validate_outbound_url",
+                    return_value=mock.Mock(
+                        hostname="example.test", port=443, resolved_addresses=("203.0.113.10",)
+                    ),
+                ),
+                mock.patch("flayr_core.llm.api.run_command", side_effect=fake_run),
+                mock.patch(
+                    "flayr_core.llm.api.shutil.copyfile",
+                    side_effect=OSError("disk full"),
+                ),
+                self.assertRaisesRegex(SystemExit, "Failed to connect"),
+            ):
+                call_llm_api(
+                    "https://example.test/v1/chat/completions",
+                    "secret",
+                    payload_path,
+                    raw_path,
+                    retries=0,
+                    output_expansions=0,
+                )
+
+    def test_diagnostic_json_failure_does_not_replace_transport_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            raw_path = root / "response.json"
+            payload_path.write_text('{"model":"qwen3-vl-plus"}', encoding="utf-8")
+
+            def fake_run(_command: list[str], **kwargs: object) -> mock.Mock:
+                kwargs["stdout_callback"](b"partial")
+                return mock.Mock(
+                    returncode=7,
+                    stderr="curl: (7) Failed to connect\n",
+                    stdout="",
+                )
+
+            with (
+                mock.patch(
+                    "flayr_core.llm.api.validate_outbound_url",
+                    return_value=mock.Mock(
+                        hostname="example.test", port=443, resolved_addresses=("203.0.113.10",)
+                    ),
+                ),
+                mock.patch("flayr_core.llm.api.run_command", side_effect=fake_run),
+                mock.patch(
+                    "flayr_core.llm.api.write_text",
+                    side_effect=OSError("disk full"),
+                ),
+                self.assertRaisesRegex(SystemExit, "Failed to connect"),
+            ):
+                call_llm_api(
+                    "https://example.test/v1/chat/completions",
+                    "secret",
+                    payload_path,
+                    raw_path,
+                    retries=0,
+                    output_expansions=0,
+                )
+
     def test_budget_blocked_retry_records_no_retry_kind(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
