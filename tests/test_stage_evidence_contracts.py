@@ -39,7 +39,7 @@ from flayr_core.llm.pipeline import (
     _clamp_result_time_ranges,
     detect_low_confidence_stages,
 )
-from flayr_core.llm.stage2_projection import _segmented_evidence_range
+from flayr_core.llm.stage2_projection import _segmented_evidence_range, _segmented_qualified_units
 from flayr_core.llm.stage_fact_artifacts import (
     StageFactArtifactError,
     completed_stage_fact_artifact,
@@ -274,11 +274,56 @@ class StageEvidenceContractTests(unittest.TestCase):
                         "reason": "fixture binding",
                     }
                 }
+                if signal == "explicit_action":
+                    side["evidence_units"][5]["voiceover"] = "下单送牙刷"
+                    side["evidence_units"][5]["information"] = "明确购买条件激励：下单送牙刷"
+                    side["stage1_acquisition"]["channels"]["voiceover"] = {
+                        "status": "ready",
+                        "coverage": "full",
+                        "count": 1,
+                        "boundary_precision": "word",
+                    }
                 freeze_stage_evidence(side)
                 self.assertEqual(stage_evidence_readiness(side, "S6"), "present")
                 self.assertEqual(stage_evidence_contract_issues(side), [])
                 projection = stage1_qualification_projection(side, ["S6"])["stages"]["S6"]
                 self.assertEqual(projection["missing_requirements"], [])
+
+    def test_certification_alone_does_not_satisfy_s2_s3_or_s4_required_signals(self) -> None:
+        for stage in ("S2", "S3", "S4"):
+            with self.subTest(stage=stage):
+                side = self._active_side("C")
+                index = int(stage[1:]) - 1
+                evidence_id = f"C{index + 1}"
+                unit = side["evidence_units"][index]
+                unit["information"] = "画面展示 HALAL 认证标识"
+                unit["visual_fact"] = "画面展示 HALAL 认证标识"
+                contract = stage_evidence_contract(stage)
+                check = next(
+                    item for item in side["stage_evidence_checks"] if item["stage"] == stage
+                )
+                check.update(
+                    {
+                        "status": "present",
+                        "coverage": "complete",
+                        "evidence_ids": [evidence_id],
+                        "observed_signals": [],
+                        "missing_signals": list(contract.required_signals),
+                        "signal_bindings": {},
+                        "evidence_strength": "direct",
+                        "reason": "只观察到认证标识",
+                    }
+                )
+                side["stage1_coverage_audit"] = self._coverage_audit(side["stage_evidence_checks"])
+                freeze_stage_evidence(side)
+                issues = stage_evidence_contract_issues(side)
+                self.assertTrue(
+                    any(
+                        issue.startswith(f"{stage}:present_missing_required_signals:")
+                        for issue in issues
+                    ),
+                    issues,
+                )
 
     def test_signal_binding_must_stay_inside_the_stage_evidence_list(self) -> None:
         checks = self._checks("present", "direct")
@@ -1160,17 +1205,17 @@ class StageEvidenceContractTests(unittest.TestCase):
                 {key: value for key, value in s2.items() if key.startswith(role)},
                 ensure_ascii=False,
             )
-            self.assertFalse(contains_certification(role_claims), role_claims)
+            self.assertTrue(contains_certification(role_claims), role_claims)
         self.assertEqual(s2["benchmark_evidence_ids"], ["B3"])
         self.assertEqual(s2["creator_evidence_ids"], ["C3"])
         self.assertIn("产品身份清晰", s2["benchmark_summary"])
         self.assertIn("产品用途清晰", s2["creator_summary"])
-        self.assertNotIn("HALAL", s2["benchmark_quote"])
-        self.assertNotIn("HALAL", s2["creator_quote"])
+        self.assertIn("HALAL", s2["benchmark_quote"])
+        self.assertIn("HALAL", s2["creator_quote"])
 
         s5 = result["stage_analysis"][4]
-        self.assertIn("HALAL", s5["benchmark_summary"])
-        self.assertIn("HALAL", s5["benchmark_quote"])
+        self.assertNotIn("B_CERT_S5", s5.get("benchmark_evidence_ids", []))
+        self.assertIn("HALAL", s5.get("benchmark_summary", ""))
         self.assertEqual(s5["creator_evidence_ids"], [])
         self.assertNotIn("HALAL", json.dumps(
             {key: value for key, value in s5.items() if key.startswith("creator")},
@@ -5000,7 +5045,7 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(stages[2]["benchmark_quote"], "")
         self.assertEqual(stages[2]["benchmark_quote_zh"], "")
 
-    def test_non_s5_quote_skips_filtered_certification_unit(self) -> None:
+    def test_non_s5_quote_preserves_qualified_certification_unit(self) -> None:
         creator = self._segmented_active_side(
             "C",
             {"S2": ["C_CERT", "C_TEXT"]},
@@ -5029,8 +5074,13 @@ class StageEvidenceContractTests(unittest.TestCase):
 
         bind_timed_transcript_quotes(result, {})
 
-        self.assertEqual(stages[1]["creator_quote"], "介绍产品用途")
-        self.assertEqual(stages[1]["creator_quote_zh"], "介绍产品用途")
+        self.assertEqual(stages[1]["creator_quote"], "展示 HALAL 认证")
+        self.assertEqual(stages[1]["creator_quote_zh"], "展示 HALAL 认证")
+
+        projected = _segmented_qualified_units(
+            {"creator": creator}, "creator", "S2", ["C_CERT"]
+        )
+        self.assertEqual(projected[0]["voiceover"], "展示 HALAL 认证")
 
     def test_canonical_ranges_preserve_word_timed_quote_endpoint(self) -> None:
         benchmark = self._active_side("B")
@@ -5344,6 +5394,184 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertTrue(flag["exists"])
         self.assertEqual(flag["_cta_source_status"], "unknown")
 
+    def test_purchase_conditioned_soft_cta_is_retained_without_path_or_direct_order(self) -> None:
+        result = {
+            "stage_analysis": [{} for _ in range(6)],
+            "video_understanding": {
+                "benchmark": self._active_side("B", "absent"),
+                "creator": self._active_side("C", "present"),
+            },
+        }
+        creator_side = result["video_understanding"]["creator"]
+        creator_check = next(
+            item for item in creator_side["stage_evidence_checks"] if item["stage"] == "S6"
+        )
+        creator_check.update(
+            {
+                "observed_signals": ["explicit_action"],
+                "missing_signals": ["purchase_path"],
+                "signal_bindings": self._signal_bindings("S6", "C6"),
+            }
+        )
+        creator_check["signal_bindings"].pop("purchase_path")
+        creator_side["stage1_coverage_audit"]["stages"]["S6"].update(
+            {
+                "observed_signals": ["explicit_action"],
+                "missing_signals": ["purchase_path"],
+                "signal_bindings": self._signal_bindings("S6", "C6"),
+            }
+        )
+        creator_side["stage1_coverage_audit"]["stages"]["S6"]["signal_bindings"].pop("purchase_path")
+        creator_unit = result["video_understanding"]["creator"]["evidence_units"][-1]
+        creator_unit.update(
+            {
+                "information": "买就送牙刷",
+                "voiceover": "买就送牙刷",
+                "visual_fact": "结尾画面展示买就送牙刷",
+            }
+        )
+        creator_side["stage1_acquisition"]["channels"]["voiceover"] = {
+            "status": "ready",
+            "coverage": "full",
+            "count": 1,
+            "boundary_precision": "word",
+        }
+        freeze_stage_evidence(creator_side)
+        result["stage_analysis"][5] = {
+            "stage": "S6",
+            "creator_s6": {
+                "exists": True,
+                "direct_order_met": False,
+                "action_path_clear": False,
+                "soft_purchase_invitation_met": True,
+                "offer_or_incentive_clear": True,
+                "ending_position_met": True,
+                "evidence_ids": ["C6"],
+            },
+            "creator_quote": "旧的 CTA 文本",
+            "creator_evidence_ids": ["C6"],
+            "benchmark_s6": {"exists": False, "evidence_ids": []},
+            "benchmark_evidence_ids": [],
+        }
+
+        reconcile_unsupported_cta(result)
+
+        flag = result["stage_analysis"][5]["creator_s6"]
+        self.assertTrue(flag["exists"])
+        self.assertFalse(flag["direct_order_met"])
+        self.assertFalse(flag["action_path_clear"])
+        self.assertTrue(flag["soft_purchase_invitation_met"])
+        self.assertTrue(flag["offer_or_incentive_clear"])
+        self.assertEqual(flag["evidence_ids"], ["C6"])
+        self.assertEqual(result["stage_analysis"][5]["creator_evidence_ids"], ["C6"])
+        self.assertEqual(result["stage_analysis"][5]["creator_quote"], "买就送牙刷")
+        self.assertNotIn(
+            "C_NO_CTA",
+            {unit["id"] for unit in result["video_understanding"]["creator"]["evidence_units"]},
+        )
+
+    def test_ordinary_gift_offer_without_soft_invitation_is_not_cta(self) -> None:
+        result = {
+            "stage_analysis": [{} for _ in range(6)],
+            "video_understanding": {
+                "benchmark": self._active_side("B", "absent"),
+                "creator": self._active_side("C", "present"),
+            },
+        }
+        creator_side = result["video_understanding"]["creator"]
+        creator_check = next(
+            item for item in creator_side["stage_evidence_checks"] if item["stage"] == "S6"
+        )
+        creator_check.update(
+            {
+                "observed_signals": ["explicit_action"],
+                "missing_signals": ["purchase_path"],
+                "signal_bindings": self._signal_bindings("S6", "C6"),
+            }
+        )
+        creator_check["signal_bindings"].pop("purchase_path")
+        creator_side["stage1_coverage_audit"]["stages"]["S6"].update(
+            {
+                "observed_signals": ["explicit_action"],
+                "missing_signals": ["purchase_path"],
+                "signal_bindings": self._signal_bindings("S6", "C6"),
+            }
+        )
+        creator_side["stage1_coverage_audit"]["stages"]["S6"]["signal_bindings"].pop("purchase_path")
+        creator_unit = result["video_understanding"]["creator"]["evidence_units"][-1]
+        creator_unit.update(
+            {
+                "information": "赠品清单：牙刷",
+                "voiceover": "赠品清单：牙刷",
+                "visual_fact": "画面列出赠品牙刷，但未说明购买条件",
+            }
+        )
+        creator_side["stage1_acquisition"]["channels"]["voiceover"] = {
+            "status": "ready",
+            "coverage": "full",
+            "count": 1,
+            "boundary_precision": "word",
+        }
+        freeze_stage_evidence(creator_side)
+        result["stage_analysis"][5] = {
+            "stage": "S6",
+            "creator_s6": {
+                "exists": True,
+                "direct_order_met": False,
+                "action_path_clear": False,
+                "soft_purchase_invitation_met": False,
+                "offer_or_incentive_clear": True,
+                "ending_position_met": True,
+                "evidence_ids": ["C6"],
+            },
+            "creator_evidence_ids": ["C6"],
+            "benchmark_s6": {"exists": False, "evidence_ids": []},
+            "benchmark_evidence_ids": [],
+        }
+
+        reconcile_unsupported_cta(result)
+
+        flag = result["stage_analysis"][5]["creator_s6"]
+        self.assertFalse(flag["exists"])
+        self.assertEqual(flag["evidence_ids"], [])
+        self.assertEqual(result["stage_analysis"][5]["creator_evidence_ids"], [])
+        self.assertNotIn(
+            "C_NO_CTA",
+            {unit["id"] for unit in result["video_understanding"]["creator"]["evidence_units"]},
+        )
+
+    def test_closed_absent_s6_is_not_upgraded_by_cta_repair(self) -> None:
+        result = {
+            "stage_analysis": [{} for _ in range(6)],
+            "video_understanding": {
+                "benchmark": self._closed_negative_side("B", "S6"),
+                "creator": self._closed_negative_side("C", "S6"),
+            },
+        }
+        result["stage_analysis"][5] = {
+            "stage": "S6",
+            "creator_s6": {"exists": False, "evidence_ids": []},
+            "creator_evidence_ids": [],
+            "benchmark_s6": {"exists": False, "evidence_ids": []},
+            "benchmark_evidence_ids": [],
+        }
+
+        reconcile_unsupported_cta(result)
+
+        for role in ("creator", "benchmark"):
+            flag = result["stage_analysis"][5][f"{role}_s6"]
+            self.assertFalse(flag["exists"])
+            self.assertEqual(flag["evidence_ids"], [])
+            self.assertEqual(result["stage_analysis"][5][f"{role}_evidence_ids"], [])
+            self.assertIn("Stage1 已完整覆盖 S6", flag["cta_reason"])
+            self.assertNotIn(
+                f"{'C' if role == 'creator' else 'B'}_NO_CTA",
+                {
+                    unit["id"]
+                    for unit in result["video_understanding"][role]["evidence_units"]
+                },
+            )
+
     def test_active_s5_reconciliation_never_uses_unqualified_source_ids(self) -> None:
         side = self._active_side("C", "unknown")
         checks = self._checks("unknown")
@@ -5474,7 +5702,7 @@ class StageEvidenceContractTests(unittest.TestCase):
         reconcile_certification_ownership(result)
         self.assertEqual(result["stage_analysis"][1]["creator_evidence_ids"], ["C_MIX"])
 
-    def test_active_reconciliation_removes_unqualified_cert_only_id(self) -> None:
+    def test_active_reconciliation_preserves_certification_reference_without_migration(self) -> None:
         result = self._cert_projection_fixture(
             qualified_stages={"S5": ["C_CERT"]},
             stage_references={"S2": ["C_CERT"]},
@@ -5494,9 +5722,9 @@ class StageEvidenceContractTests(unittest.TestCase):
             ],
         )
         reconcile_certification_ownership(result)
-        self.assertEqual(result["stage_analysis"][1]["creator_evidence_ids"], [])
+        self.assertEqual(result["stage_analysis"][1]["creator_evidence_ids"], ["C_CERT"])
 
-    def test_active_visual_grounding_strips_only_certification_clauses_and_keeps_s5(self) -> None:
+    def test_active_visual_grounding_preserves_certification_context_and_keeps_s5(self) -> None:
         result = self._cert_projection_fixture(
             qualified_stages={"S3": ["C_MIX"], "S5": ["C_MIX"]},
             stage_references={"S3": ["C_MIX"], "S5": ["C_MIX"]},
@@ -5514,7 +5742,10 @@ class StageEvidenceContractTests(unittest.TestCase):
             ],
         )
         ground_stage_visual_evidence(result)
-        self.assertEqual(result["stage_analysis"][2]["creator_visual_evidence"], ["产品画面清晰"])
+        self.assertEqual(
+            result["stage_analysis"][2]["creator_visual_evidence"],
+            ["产品画面清晰；展示 HALAL 认证标识", "HALAL 认证标识"],
+        )
         self.assertEqual(
             result["stage_analysis"][4]["creator_visual_evidence"],
             ["产品画面清晰；展示 HALAL 认证标识", "HALAL 认证标识"],

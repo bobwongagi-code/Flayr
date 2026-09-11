@@ -333,7 +333,8 @@ def build_stage_review_payload(
         s6_contract = (
             "目标阶段包含 S6 时，stage patch 必须同时包含 creator_s6 与 benchmark_s6；"
             "S6 只判购买动作：是否明确下单/点链接/进购物车，路径是否清楚，利益/紧迫/保障是否适配本品。"
-            "没有明确路径时，若结尾同时有面向观众的购买邀请和具体利益点，soft_purchase_invitation_met=true，属于软促单而非无 CTA；仅播报促销/价格而未邀请用户行动，仍为 false。"
+            "没有明确路径时，结尾有面向观众的购买邀请和具体利益点，或有明确绑定购买条件的激励（如买就送/下单送牙刷），都复用既有 soft_purchase_invitation_met=true 与 offer_or_incentive_clear=true 的软促单组合，并将 exists=true、evidence_ids 绑定到原子事实。"
+            "普通赠品清单、只报优惠或没有购买条件的描述不能填充该组合，仍按无 CTA 处理。"
             "S6-A 记录明确价格锚定，S6-B 记录可核验限时/限量/库存，S6-C 记录具体赠品或组合利益，S6-E 记录清楚保障；"
             "不要把 S4 效果或 S5 信任回填成 CTA；达人 CTA 强于标杆时必须如实记为达人亮点。"
             "价格/优惠出现在开头时归 S1，不算 S6；S6-D 效果总结必须依赖有效 S4 输出。"

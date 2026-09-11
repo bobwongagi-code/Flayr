@@ -500,11 +500,9 @@ def align_clear_commerce_evidence(result: dict[str, Any]) -> None:
     if len(stages) != len(STAGES) or not isinstance(units, list):
         return
     assignments = {
-        # 成分/卖点信息归产品引出 S2；第三方认证按功能归信任放大 S5（不归 S2）。
-        1: find_evidence_unit(
-            [unit for unit in units if not re.search(r"KKM|KKMA|kelulusan|认证", json.dumps(unit, ensure_ascii=False), flags=re.IGNORECASE)],
-            r"vitamin|collagen|成分",
-        ),
+        # 成分/卖点信息通常归产品引出 S2；若同一事实也含认证，保留该事实，
+        # 由 S2 自己的 required signals 决定是否具备产品身份/承接资格。
+        1: find_evidence_unit(units, r"vitamin|collagen|成分"),
         3: find_evidence_unit(units, r"feedback|testimoni|评论|反馈|testimonial"),
         4: find_evidence_unit(units, r"KKM|KKMA|kelulusan|认证"),
         5: find_evidence_unit(units, r"beli|bagun|troli|cart|dekat sini|下单|购买"),

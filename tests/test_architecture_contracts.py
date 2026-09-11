@@ -191,9 +191,9 @@ class ArchitectureContractTests(unittest.TestCase):
         stages[-1]["benchmark_visual_evidence"] = ["无认证/证书等视觉背书"]
         validate_stage_ownership({"stage_analysis": stages})
 
-        stages[-1]["benchmark_visual_evidence"] = ["画面展示 KKM 认证标识"]
-        with self.assertRaises(SystemExit):
-            validate_stage_ownership({"stage_analysis": stages})
+        for stage_index in (0, 1, 5):
+            stages[stage_index]["benchmark_visual_evidence"] = ["画面展示 KKM 认证标识"]
+        validate_stage_ownership({"stage_analysis": stages})
 
     def test_segmented_stage_group_payload_carries_certification_policy_for_every_group(self) -> None:
         positive_scoped_facts = {
@@ -216,7 +216,7 @@ class ArchitectureContractTests(unittest.TestCase):
                     prompt = payload["messages"][1]["content"][0]["text"]
                     self.assertIn(CERTIFICATION_OWNERSHIP_PROMPT, prompt)
                     self.assertNotIn("本阶段组不处理第三方认证归属", prompt)
-                    self.assertIn("不得为了声明排除而复述认证", prompt)
+                    self.assertIn("按认证事实实际承担的阶段功能引用它", prompt)
 
         s5_prompt = build_stage_group_judgment_payload(
             "test", "", {}, {"videos": {}}, ["S5"]
@@ -244,9 +244,10 @@ class ArchitectureContractTests(unittest.TestCase):
         )
         positive_text = positive_payload["messages"][1]["content"][0]["text"]
         self.assertIn(CERTIFICATION_OWNERSHIP_PROMPT, positive_text)
-        self.assertIn("混合 evidence unit", positive_text)
-        self.assertIn("不得作为 S2 信号", positive_text)
-        self.assertIn("不得在其他字段复述认证", positive_text)
+        self.assertIn("已资格化 evidence unit", positive_text)
+        self.assertIn("认证词本身不自动满足当前阶段的资格门槛", positive_text)
+        self.assertNotIn("不得作为 S2 信号", positive_text)
+        self.assertNotIn("不得在其他字段复述认证", positive_text)
 
         for target in (["S3", "S4"], ["S6"], ["S5"]):
             payload = build_stage_evidence_qualification_payload(
@@ -261,7 +262,7 @@ class ArchitectureContractTests(unittest.TestCase):
         no_cert_text = no_cert_payload["messages"][1]["content"][0]["text"]
         self.assertNotIn(CERTIFICATION_OWNERSHIP_PROMPT, no_cert_text)
 
-    def test_stage1_qualification_rejects_non_s5_certification_claims_but_allows_s5_and_negative(self) -> None:
+    def test_stage1_qualification_allows_certification_in_any_stage_with_contract_checks(self) -> None:
         def check(stage: str, reason: str, binding_reason: str | None = None) -> dict[str, object]:
             item: dict[str, object] = {
                 "stage": stage,
@@ -283,30 +284,20 @@ class ArchitectureContractTests(unittest.TestCase):
                 }
             return item
 
-        with self.assertRaisesRegex(ValueError, "不得将第三方认证"):
-            pipeline._validated_stage1_qualification_response(
+        for reason, binding_reason in (
+            ("标杆展示 KKM 认证信息并承接产品身份", None),
+            ("产品引出完成并展示 KKM 认证信息", "产品身份与认证画面共同支撑产品承接"),
+        ):
+            validated = pipeline._validated_stage1_qualification_response(
                 {
                     "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
-                    "stage_evidence_checks": [
-                        check("S2", "标杆展示 KKM 认证信息")
-                    ],
+                    "stage_evidence_checks": [check("S2", reason, binding_reason)],
                 },
                 targets=["S2"],
                 valid_ids={"B1"},
                 phase_label="Stage1-B",
             )
-        with self.assertRaisesRegex(ValueError, "不得将第三方认证"):
-            pipeline._validated_stage1_qualification_response(
-                {
-                    "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
-                    "stage_evidence_checks": [
-                        check("S2", "产品引出完成", "产品展示 KKM 认证信息")
-                    ],
-                },
-                targets=["S2"],
-                valid_ids={"B1"},
-                phase_label="Stage1-B",
-            )
+            self.assertEqual(validated["S2"]["status"], "present")
 
         s5 = pipeline._validated_stage1_qualification_response(
             {
@@ -376,29 +367,17 @@ class ArchitectureContractTests(unittest.TestCase):
         )
         self.assertEqual(exclusion_only_disclaimer["S2"]["status"], "present")
 
-        with self.assertRaisesRegex(ValueError, "不得将第三方认证"):
-            pipeline._validated_stage1_qualification_response(
+        for reason in ("认证内容已严格排除", "认证信息归入S5"):
+            validated = pipeline._validated_stage1_qualification_response(
                 {
                     "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
-                    "stage_evidence_checks": [check("S2", "认证内容已严格排除")],
+                    "stage_evidence_checks": [check("S2", reason)],
                 },
                 targets=["S2"],
                 valid_ids={"B1"},
                 phase_label="Stage1-B",
             )
-
-        with self.assertRaisesRegex(ValueError, "不得将第三方认证"):
-            pipeline._validated_stage1_qualification_response(
-                {
-                    "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
-                    "stage_evidence_checks": [
-                        check("S2", "认证信息归入S5")
-                    ],
-                },
-                targets=["S2"],
-                valid_ids={"B1"},
-                phase_label="Stage1-B",
-            )
+            self.assertEqual(validated["S2"]["status"], "present")
 
         split_disclaimer = pipeline._validated_stage1_qualification_response(
             {
@@ -417,40 +396,22 @@ class ArchitectureContractTests(unittest.TestCase):
         )
         self.assertEqual(split_disclaimer["S2"]["status"], "present")
 
-        with self.assertRaisesRegex(ValueError, "不得将第三方认证"):
-            pipeline._validated_stage1_qualification_response(
+        for reason, binding_reason in (
+            ("S5 信任放大；认证信息支持当前阶段判断", None),
+            ("B3中的认证信息归入S5，同时支持当前阶段产品身份", "认证事实与产品身份共同支撑产品承接"),
+        ):
+            validated = pipeline._validated_stage1_qualification_response(
                 {
                     "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
-                    "stage_evidence_checks": [
-                        check(
-                            "S2",
-                            "S5 信任放大；认证信息支持当前阶段判断",
-                        )
-                    ],
+                    "stage_evidence_checks": [check("S2", reason, binding_reason)],
                 },
                 targets=["S2"],
                 valid_ids={"B1"},
                 phase_label="Stage1-B",
             )
+            self.assertEqual(validated["S2"]["status"], "present")
 
-        with self.assertRaisesRegex(ValueError, "不得将第三方认证"):
-            pipeline._validated_stage1_qualification_response(
-                {
-                    "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
-                    "stage_evidence_checks": [
-                        check(
-                            "S2",
-                            "B3中的认证信息归入S5，此处仅引用其非认证的产品身份与成分部分",
-                            "认证提升了S2可信度",
-                        )
-                    ],
-                },
-                targets=["S2"],
-                valid_ids={"B1"},
-                phase_label="Stage1-B",
-            )
-
-    def test_segmented_stage_group_rejects_certification_claims_outside_s5(self) -> None:
+    def test_segmented_stage_group_allows_certification_when_stage_function_is_valid(self) -> None:
         def response(**extra: object) -> dict[str, object]:
             item: dict[str, object] = {
                 "stage": "S2 产品引出",
@@ -464,29 +425,20 @@ class ArchitectureContractTests(unittest.TestCase):
             item.update(extra)
             return {"stages": [item]}
 
-        with self.assertRaisesRegex(ValueError, "不得将第三方认证"):
-            pipeline._validated_stage_group_response(
-                response(), ["S2"], label="S2"
-            )
-        with self.assertRaisesRegex(ValueError, "不得将第三方认证"):
-            pipeline._validated_stage_group_response(
-                response(
-                    judgment_reason=(
-                        "B3中的认证信息归入S5，此处仅引用其非认证的产品身份与成分部分"
-                    )
-                ),
-                ["S2"],
-                label="S2",
-            )
-        with self.assertRaisesRegex(ValueError, "不得将第三方认证"):
-            pipeline._validated_stage_group_response(
-                response(
-                    judgment_reason="标杆完成产品引出",
-                    benchmark_s2={"trust_note": "画面展示 KKM 认证标识"},
-                ),
-                ["S2"],
-                label="S2",
-            )
+        for item in (
+            response(),
+            response(
+                judgment_reason=(
+                    "B3中的认证信息归入S5，同时承担产品身份与承接功能"
+                )
+            ),
+            response(
+                judgment_reason="标杆完成产品引出",
+                benchmark_s2={"trust_note": "画面展示 KKM 认证标识"},
+            ),
+        ):
+            validated = pipeline._validated_stage_group_response(item, ["S2"], label="S2")
+            self.assertEqual(validated["S2"]["stage_state"], "completed")
 
     def test_positive_certification_clause_stripping_keeps_mixed_visual_fact(self) -> None:
         self.assertEqual(
@@ -5588,6 +5540,14 @@ class ArchitectureContractTests(unittest.TestCase):
             ["S1"],
         )
         review_text = review["messages"][1]["content"][0]["text"]
+        s6_review = build_stage_review_payload(
+            "test",
+            {"videos": {}},
+            {"benchmark": {"evidence_units": []}, "creator": {"evidence_units": []}},
+            {"stage_analysis": [{"stage": "S6 CTA", "creator_time_range": "0s - 3s", "benchmark_time_range": "0s - 3s"}]},
+            ["S6"],
+        )
+        s6_review_text = s6_review["messages"][1]["content"][0]["text"]
 
         with tempfile.TemporaryDirectory() as tmp:
             analysis_input = write_analysis_input(
@@ -5606,6 +5566,9 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertNotIn("开头的背书/认证类内容按钩子算", comparison_text)
         self.assertNotIn("只归入 S2", repair_text)
         self.assertNotIn("产品名/卖点/认证", review_text)
+        self.assertIn("买就送/下单送牙刷", s6_review_text)
+        self.assertIn("soft_purchase_invitation_met=true", s6_review_text)
+        self.assertIn("普通赠品清单", s6_review_text)
 
     def test_analysis_prompts_do_not_impose_uncontracted_evidence_count_caps(self) -> None:
         comparison = build_stage_group_judgment_payload("test", "", {}, {"videos": {}}, ["S3", "S4"])

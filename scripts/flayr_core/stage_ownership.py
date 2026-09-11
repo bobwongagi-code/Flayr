@@ -69,14 +69,18 @@ _CERTIFICATION_NON_SIGNAL_MARKER = re.compile(
     flags=re.IGNORECASE,
 )
 CERTIFICATION_OWNERSHIP_PROMPT = (
-    "第三方认证/审批/权威机构背书（如 KKM、Halal、SIRIM、检测报告）按功能唯一归入 S5 信任放大，"
-    "不归 S1 Hook 或 S2 产品引出；即使它与产品介绍同画面或出现在开头，也不得重复归因。"
-    "S2 只能说明产品身份、角色或解决方案承接，不能把认证当作 S2 证据。"
-    "只有机构的数据、实验、研究、证书或官方标识实际证明本产品价值时才算背书；"
-    "仅提到机构名字、合作 logo 或自述功效不算背书。口播提及但画面未显示时，必须标明口播声称、画面未验证。"
+    "第三方认证/审批/权威机构背书（如 KKM、Halal、SIRIM、检测报告）在信任资格上归 S5，"
+    "但认证不是独占证据对象：同一已资格化 evidence unit 如果在开头承担留人、在产品引出中承担身份/承接、"
+    "或在结尾承担购买条件激励等实际功能，可以同时被 S1/S2/S6 引用，并按各阶段功能字段记录。"
+    "不得因出现认证词拒绝、删除或强制迁移事实；也不得只凭认证词使其他阶段自动合格。"
+    "每个阶段仍须满足自己的 required signals、signal bindings、渠道和排除项；认证不能替代 S3 的真实动作或 S4 的效果证明。"
+    "跨阶段复用同一事实时，stage_evidence_links 仍按 primary/supporting 合同记录。"
+    "只有机构的数据、实验、研究、证书或官方标识实际证明本产品价值时才算 S5 背书；"
+    "仅提到机构名字、合作 logo 或自述功效不算 S5 背书。口播提及但画面未显示时，必须标明口播声称、画面未验证。"
 )
 CERTIFICATION_POSITION_EXCEPTION_PROMPT = (
-    "开头评论/粉丝提问等社会认同若以留人为主归 S1；结尾保障或承诺归 S6。"
+    "开头评论/粉丝提问等社会认同若以留人为主归 S1；结尾保障、购买条件激励或承诺归 S6；"
+    "这些阶段功能判断不改变认证在 S5 的信任资格归属。"
 )
 
 _LEGACY_POSITION_RULE = "位置优先——视频开头的此类背书内容算 S1 钩子（留人）、结尾算 S6 CTA，不要按语义把开头/结尾的背书塞进 S5；"
@@ -198,5 +202,5 @@ def certification_policy_violations(
 
 
 def is_certification_owner_stage(stage: Any) -> bool:
-    """认证主张只能由 S5 信任放大承载。"""
+    """Return whether a stage owns certification trust qualification (compatibility helper)."""
     return str(stage or "").strip().upper().startswith(CERTIFICATION_OWNER_STAGE)

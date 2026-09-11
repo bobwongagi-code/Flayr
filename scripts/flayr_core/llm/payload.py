@@ -884,15 +884,14 @@ def build_stage_evidence_qualification_payload(
     ):
         certification_policy = (
             CERTIFICATION_OWNERSHIP_PROMPT
-            + "\n当前目标阶段不拥有第三方认证归属；认证不得作为非 S5 阶段的资格信号。"
+            + "\n当前目标阶段可以按其实际功能引用已资格化认证事实；认证词本身不自动满足当前阶段的资格门槛。"
             + (
-                "混合 evidence unit 可以因其中的产品身份或问题到产品承接部分被 S2 引用；"
-                "但 reason 和 signal binding 只能依据非认证部分，认证不得作为 S2 信号。"
+                "S2 可在认证事实同时承担产品身份或问题到产品承接时引用该混合 evidence unit；"
+                "reason 和 signal binding 必须说明本阶段实际承接功能，并仍满足 S2 自己的 required signals。"
                 if "S2" in normalized_targets
-                else "reason 和 signal binding 只能依据非认证部分，认证不得作为任何非 S5 阶段信号。"
+                else "S1/S6 可在认证事实实际承担留人或促单功能时引用，但必须满足本阶段自己的 required signals 和 bindings；"
             )
-            + "若必须解释混合 evidence unit，只能明确说明认证归入 S5，且当前阶段仅引用非认证部分；"
-            "不得在其他字段复述认证或把认证作为当前阶段信号。"
+            + "不得因认证词拒绝、删除或强制迁移事实；S3/S4 仍不得用认证替代真实动作或效果证明。"
         )
     output_stages = _stage_evidence_qualification_examples(normalized_targets)
     s6_language_review = (
@@ -901,7 +900,8 @@ def build_stage_evidence_qualification_payload(
         "当某条已锁定观察被标记为 S6_cta，或完整口播包含可能的本地电商行动/路径表达时，"
         "必须结合整句、销售语境和当地平台惯用表达核对语义，不能只按一个错误 token 的字面翻译否定。"
         "例如 beg/bakul kuning、yellow bag/cart 以及 klik/tekan/tap/beli/order/checkout/link/retail 等只作为检索线索，"
-        "不是自动命中规则；只有整句至少能支持面向观众的行动或可执行购买路径时才可判 present，"
+        "不是自动命中规则；只有整句至少能支持面向观众的行动、明确购买条件激励（如买就送/下单送）或可执行购买路径时才可判 present，"
+        "其中购买条件激励属于 explicit_action；普通赠品清单、只报优惠或没有购买条件的描述不算 CTA。"
         "是否有行动与路径双重支撑属于后续强弱判断。"
         "coverage 表示相关素材范围是否已完整检查，不表示所有备选信号是否都出现。"
         "S6 是 required_signal_mode=any：explicit_action 或 purchase_path 任一项由合格证据支持，且相关范围已完整检查时，"
@@ -1742,9 +1742,9 @@ def build_stage_group_judgment_payload(
     elif has_positive_certification:
         stage_ownership_contract = (
             CERTIFICATION_OWNERSHIP_PROMPT
-            + "\n当前阶段组不拥有第三方认证归属；认证不是非 S5 阶段的合法判断信号，"
-            "不得写入 judgment_reason、任何阶段专属字段，也不得用于 relation 或 model_gap_magnitude；"
-            "认证事实只由 S5 处理。非 S5 不得为了声明排除而复述认证，直接只写非认证依据。"
+            + "\n当前阶段组可按认证事实实际承担的阶段功能引用它；认证词本身不自动满足非 S5 阶段的 required signals，"
+            "也不能替代 S3 的真实动作或 S4 的效果证明。若同一 evidence unit 同时承担多个阶段功能，"
+            "各阶段只能使用自己的证据绑定和阶段门槛判断，不得拒绝、删除或强制迁移该事实。"
         )
     else:
         # Preserve the existing request identity for groups whose locked facts

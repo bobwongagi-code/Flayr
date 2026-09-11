@@ -45,7 +45,7 @@ MULTIMODAL_CHANNEL_REQUIREMENTS = {
     "S6": {
         "level": "required_evidence_with_amplification",
         "required_signal": "explicit_purchase_action",
-        "policy": "购买邀请或行动指令是硬条件；口播、字幕、价格/赠品画面和声音节奏可组合放大，但氛围不能替代购买动作。",
+        "policy": "购买邀请、行动指令或明确绑定购买条件的激励是硬条件；普通赠品清单和无购买条件的优惠不算行动；口播、字幕、价格/赠品画面和声音节奏可组合放大，但氛围不能替代购买动作。",
     },
 }
 

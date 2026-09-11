@@ -35,7 +35,7 @@ from ..multimodal import (
     MULTIMODAL_IMPACTS,
     MULTIMODAL_RELATIONS,
 )
-from ..stage_ownership import CERTIFICATION_OWNER_STAGE, contains_certification, is_certification_owner_stage
+from ..stage_ownership import contains_certification
 from ..transcript import transcript_text_for_range
 from ..stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
@@ -1374,23 +1374,11 @@ def _coarse_transcript_window_warnings(
 
 
 def validate_stage_ownership(result: dict[str, Any]) -> None:
-    """校验共享阶段归属策略：认证只能归 S5，且不得跨阶段重复。"""
-    stages = result.get("stage_analysis", [])
-    if not stages:
-        return
-    for role, label in (("benchmark", "标杆"), ("creator", "达人")):
-        hook_text = json.dumps(_role_claim_payload(stages[0], role), ensure_ascii=False)
-        if contains_certification(hook_text):
-            raise SystemExit(f"S1 Hook 不得承载 {label}的 KKM/认证信息；第三方认证是外部背书，按功能归入 S5 信任放大，并标明画面是否验证。")
-        certification_stages = [
-            str(stage.get("stage") or f"S{index}")
-            for index, stage in enumerate(stages, start=1)
-            if contains_certification(json.dumps(_role_claim_payload(stage, role), ensure_ascii=False))
-        ]
-        if len(certification_stages) > 1:
-            raise SystemExit(
-                f"{label}认证信息不得重复归入多个阶段；请选择其主要作用阶段一次呈现。"
-                f"当前重复阶段：{', '.join(certification_stages)}。"
-            )
-        if certification_stages and not is_certification_owner_stage(certification_stages[0]):
-            raise SystemExit(f"第三方认证是外部背书，只能归入 {CERTIFICATION_OWNER_STAGE} 信任放大，不得归入其他阶段。")
+    """Compatibility hook; stage evidence and proof gates own qualification.
+
+    Certification trust qualification remains an S5 responsibility, but the
+    observed fact may support another stage's independent function.  The old
+    lexical cross-stage rejection was removed; evidence alignment and each
+    stage's contract still validate references and required signals.
+    """
+    del result

@@ -221,7 +221,7 @@ try:
     _cert_s2_rejected = False
 except SystemExit as exc:
     _cert_s2_rejected = "只能归入 S5" in str(exc)
-check("认证校验：S2 不得承载认证主张", _cert_s2_rejected)
+check("认证校验：S2 可保留具备本阶段功能的认证事实", not _cert_s2_rejected)
 
 _cert_creator_s2 = mk_cert_boundary_result("通过痛点画面建立共鸣。")
 _cert_creator_s2["stage_analysis"][1]["creator_s2"] = {
@@ -236,16 +236,15 @@ try:
     _cert_creator_s2_rejected = False
 except SystemExit as exc:
     _cert_creator_s2_rejected = "只能归入 S5" in str(exc)
-check("认证校验：达人 S2 不得承载认证主张", _cert_creator_s2_rejected)
+check("认证校验：达人 S2 可保留具备本阶段功能的认证事实", not _cert_creator_s2_rejected)
 
 reconcile_certification_ownership(_cert_creator_s2)
 _creator_s2_after_move = _cert_creator_s2["stage_analysis"][1].get("creator_s2") or {}
 _creator_s5_after_move = _cert_creator_s2["stage_analysis"][4]
 check(
-    "认证归属修复：达人认证迁移到 S5 且清理 S2 flag",
-    "KKM" not in str(_creator_s2_after_move)
-    and "C_CERT_S5" in _creator_s5_after_move.get("creator_evidence_ids", [])
-    and "认证" in str(_creator_s5_after_move),
+    "认证归属修复：不迁移或清理具备本阶段功能的 S2 事实",
+    "KKM" in str(_creator_s2_after_move)
+    and "C_CERT_S5" not in _creator_s5_after_move.get("creator_evidence_ids", []),
 )
 
 # 4. endorsement tag 两条归一化路径透传

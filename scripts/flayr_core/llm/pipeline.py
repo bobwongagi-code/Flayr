@@ -71,10 +71,6 @@ from ..stage_evidence_contracts import (
     required_stage_signals_satisfied,
 )
 from ..structure_modules import canonical_module_id
-from ..stage_ownership import (
-    certification_policy_violations,
-    is_certification_owner_stage,
-)
 from .api import (
     call_llm_api,
     extract_chat_completion_text,
@@ -731,7 +727,6 @@ def finalize_canonical_analysis_result(
         normalized,
     )
     validate_evidence_alignment(normalized)
-    validate_stage_ownership(normalized)
     audited_step("postprocess.sanitize_health_recommendations", sanitize_health_recommendations, normalized, analysis_input)
     audited_step(
         "postprocess.sanitize_child_toothpaste_recommendations",
@@ -1602,11 +1597,6 @@ def _validated_stage_group_response(
     valid_magnitudes = {"none", "small", "medium", "large", "uncertain"}
     for code in target:
         item = by_code[code]
-        if not is_certification_owner_stage(code) and certification_policy_violations(item):
-            raise ValueError(
-                f"阶段组 {label} 的 {code} 不得将第三方认证作为判断信号或阶段字段；"
-                "认证主张只能归入 S5"
-            )
         missing = sorted(required_keys - set(item))
         if missing:
             raise ValueError(

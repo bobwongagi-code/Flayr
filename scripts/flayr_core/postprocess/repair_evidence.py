@@ -32,7 +32,6 @@ from ..evidence_states import (
     s2_hard_fact_snapshot,
 )
 from ..llm.parse import S5_SOURCE_STATUSES, is_effective_voiceover, normalize_s5_source_status
-from ..stage_ownership import strip_positive_certification_clauses
 from ..stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
     qualified_stage_evidence_ids,
@@ -128,11 +127,11 @@ def bind_timed_transcript_quotes(result: dict[str, Any], analysis: dict[str, Any
                 else:
                     quote = quote_zh = ""
                     for unit in units:
-                        candidate = strip_positive_certification_clauses(unit.get("voiceover"))
+                        candidate = str(unit.get("voiceover") or "").strip()
                         if not is_effective_voiceover(candidate):
                             continue
                         quote = candidate
-                        quote_zh = strip_positive_certification_clauses(unit.get("voiceover_zh"))
+                        quote_zh = str(unit.get("voiceover_zh") or "").strip()
                         break
                 stage[f"{role}_quote"] = quote
                 stage[f"{role}_quote_zh"] = quote_zh
@@ -1297,10 +1296,6 @@ def ground_stage_visual_evidence(result: dict[str, Any]) -> None:
                 for key in ("visual_fact", "subtitle_fact"):
                     fact = str(unit.get(key) or "").strip()
                     if fact:
-                        if f"S{index}" != "S5":
-                            fact = strip_positive_certification_clauses(fact)
-                        if not fact:
-                            continue
                         facts.append(fact)
             cautions = [
                 str(value)

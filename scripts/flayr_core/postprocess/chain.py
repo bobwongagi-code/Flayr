@@ -54,10 +54,7 @@ from .repair import (
 )
 
 # MY 市场认证主张专项
-from .claims_my import (
-    discard_unreferenced_certification_claims,
-    reconcile_certification_ownership,
-)
+from .claims_my import discard_unreferenced_certification_claims
 
 # severity resolver：通过 PR-0A facade 保持既有模型默认值与 floor/ceiling 规则。
 from ..finalization import facade as finalization_facade
@@ -217,7 +214,6 @@ def apply_postprocess_chain(
     step("postprocess.bind_timed_transcript_quotes", bind_timed_transcript_quotes, normalized, analysis)
     step("postprocess.validate_transcript_attribution", validate_transcript_attribution, normalized, analysis)
     step("postprocess.align_clear_commerce_evidence", align_clear_commerce_evidence, normalized)
-    step("postprocess.reconcile_certification_ownership", reconcile_certification_ownership, normalized)
     step("postprocess.discard_unreferenced_certification_claims", discard_unreferenced_certification_claims, normalized)
     step("postprocess.align_timed_cta_from_transcript", align_timed_cta_from_transcript, normalized, analysis)
     step("postprocess.reconcile_unsupported_cta", reconcile_unsupported_cta, normalized)
