@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-failed-stream-diagnostic-2026-09-09",
-  "description": "Correctness fix: bounded failed-stream diagnostic evidence is retained for failed streaming attempts. This changes transport diagnostics only; judgment semantics, resource budgets, model routes, GT, thresholds, and promotion eligibility remain unchanged, and promotion_eligible stays false.",
+  "name": "semantic-baseline-refreeze-after-authorized-stage-function-correction-2026-09-11",
+  "description": "User-authorized semantic correction: third-party certification remains S5 trust-qualified but may be reused by S1/S2/S6 according to actual stage function, and purchase-conditioned incentives such as buy-and-get qualify under the existing S6 CTA fields while ordinary gift lists do not. This is not a claim of no semantic change. The existing baseline, GT, thresholds, model routes, and promotion eligibility remain unchanged; legacy artifact qualification, gap, and promotion statuses are not migrated, and promotion_eligible stays false.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
