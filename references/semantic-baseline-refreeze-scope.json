@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-authorized-stage-function-correction-2026-09-11",
-  "description": "User-authorized semantic correction: third-party certification remains S5 trust-qualified but may be reused by S1/S2/S6 according to actual stage function, and purchase-conditioned incentives such as buy-and-get qualify under the existing S6 CTA fields while ordinary gift lists do not. This is not a claim of no semantic change. The existing baseline, GT, thresholds, model routes, and promotion eligibility remain unchanged; legacy artifact qualification, gap, and promotion statuses are not migrated, and promotion_eligible stays false.",
+  "name": "semantic-baseline-refreeze-after-stage3-object-contract-prompt-hardening-2026-09-14",
+  "description": "User-authorized refreeze after a prompt-only Stage3 format hardening: the existing s3_s4_relationship and promise_chain object contract is made explicit without changing Stage2 judgments, qualification rules, GT, gap bands, model routes, resource budgets, or promotion eligibility. The historical authorized semantic correction remains unchanged; old failed artifacts are not migrated or rerun, and no model calls are made.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 40,
