@@ -93,7 +93,9 @@ from flayr_core.llm.parse import (
     normalize_hook_flags,
     normalize_multimodal_assessment,
     normalize_module_id,
+    normalize_promise_chain,
     normalize_s3_flags,
+    normalize_s3_s4_relationship,
     normalize_time_range_value,
     normalize_video_fact_result,
     normalize_video_understanding,
@@ -6776,6 +6778,97 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertNotIn("max_tokens", qwen_payload)
         self.assertEqual(generic_payload["max_tokens"], 8192)
         self.assertNotIn("max_completion_tokens", generic_payload)
+
+    def test_stage_synthesis_output_example_keeps_object_contracts(self) -> None:
+        payload = build_stage_synthesis_payload("qwen3.7-max", "input", {}, [], {})
+        prompt = payload["messages"][1]["content"][0]["text"]
+        example = json.loads(prompt.rsplit("## 输出 JSON\n", 1)[1])
+        self.assertIn(
+            "不得改变任何 stage 的 relation、model_gap_magnitude、stage_state、evidence_ids 或 severity。",
+            prompt,
+        )
+        self.assertIn(
+            "代码会从已锁定阶段结果补齐 gap_type、时间范围、证据 ID、evidence 和 priority",
+            prompt,
+        )
+        self.assertNotIn('"gap_type"', json.dumps(example, ensure_ascii=False))
+
+        for field in (
+            "holistic_assessment",
+            "loop_closure",
+            "s3_s4_relationship",
+            "promise_chain",
+        ):
+            self.assertIsInstance(example[field], dict)
+        self.assertEqual(
+            set(example["s3_s4_relationship"]),
+            {
+                "creator_relationship",
+                "benchmark_relationship",
+                "creator_reason",
+                "benchmark_reason",
+            },
+        )
+        self.assertEqual(
+            set(example["promise_chain"]),
+            {
+                "s1_promise",
+                "s2_answer",
+                "s3_proof_target",
+                "s4_outcome",
+                "chain_closed",
+                "broken_at",
+                "break_reason",
+            },
+        )
+        self.assertEqual(
+            example["s3_s4_relationship"]["creator_reason"],
+            "未完成 S3/S4 关系审计。",
+        )
+        self.assertEqual(
+            example["s3_s4_relationship"]["benchmark_reason"],
+            "未完成 S3/S4 关系审计。",
+        )
+        self.assertEqual(
+            example["promise_chain"]["break_reason"],
+            "未完成 S1-S4 承诺闭环审计。",
+        )
+        normalized_relationship = normalize_s3_s4_relationship(
+            example["s3_s4_relationship"]
+        )
+        normalized_chain = normalize_promise_chain(example["promise_chain"])
+        self.assertEqual(
+            normalized_relationship["creator_reason"],
+            "未完成 S3/S4 关系审计。",
+        )
+        self.assertEqual(
+            normalized_chain["break_reason"],
+            "未完成 S1-S4 承诺闭环审计。",
+        )
+        pipeline._validated_stage_synthesis_response(example)
+
+    def test_synthesis_validator_rejects_both_string_object_fields(self) -> None:
+        response = {
+            "one_line_verdict": "结论",
+            "one_line_summary": "摘要",
+            "executive_summary": "综合摘要",
+            "holistic_assessment": {},
+            "key_conclusions": ["结论"],
+            "loop_closure": {},
+            "s3_s4_relationship": "过程与结果关系。",
+            "promise_chain": "承诺链。",
+            "improvements": [],
+        }
+        self.assertIsInstance(response["s3_s4_relationship"], str)
+        self.assertIsInstance(response["promise_chain"], str)
+
+        with self.assertRaisesRegex(ValueError, "s3_s4_relationship"):
+            pipeline._validated_stage_synthesis_response(response)
+
+        response_with_first_field_fixed = dict(response)
+        response_with_first_field_fixed["s3_s4_relationship"] = {}
+        with self.assertRaisesRegex(ValueError, "promise_chain"):
+            pipeline._validated_stage_synthesis_response(response_with_first_field_fixed)
 
     def test_stage1_a_and_stage1_b_are_separate_contracts(self) -> None:
         analysis = {
