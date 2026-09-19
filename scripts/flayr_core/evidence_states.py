@@ -18,6 +18,17 @@ S5_TRUST_STATES = ("explicit_absence", "product_claim_or_offer", "credible_sourc
 EVIDENCE_STATE_STRENGTHS = ("direct", "explicit", "inferred", "absent")
 
 
+def has_s3_functional_explanation(flag: Any) -> bool:
+    """Require an explicit, referenced explanation; never infer it from prose."""
+    return (
+        isinstance(flag, dict)
+        and flag.get("functional_explanation_met") is True
+        and flag.get("exists") is True
+        and isinstance(flag.get("evidence_ids"), list)
+        and any(isinstance(item, str) and item.strip() for item in flag["evidence_ids"])
+    )
+
+
 def stage_flag_has_absent_evidence_state(stage_code: str, flag: Any) -> bool:
     """Return whether a stage flag explicitly describes no supporting evidence.
 
@@ -37,6 +48,7 @@ def stage_flag_has_absent_evidence_state(stage_code: str, flag: Any) -> bool:
         return (
             flag.get("usage_evidence_state") == "none"
             and flag.get("exists") is False
+            and flag.get("functional_explanation_met") is not True
             and flag.get("usage_process_visible") is False
             and flag.get("real_usage_met") is False
             and flag.get("core_selling_point_visible") is False

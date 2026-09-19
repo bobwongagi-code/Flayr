@@ -128,6 +128,11 @@ from flayr_core.stage_evidence_contracts import (
 )
 
 
+def _visual_fixture_signals(contract):
+    """Existing visual fixtures do not claim a spoken explanation."""
+    return [signal for signal in contract.required_signals if signal != "functional_explanation"]
+
+
 class StageEvidenceContractTests(unittest.TestCase):
     @staticmethod
     def _analysis() -> dict[str, object]:
@@ -141,7 +146,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "status": status,
                 "coverage": "complete" if status in {"present", "absent"} else "unknown",
                 "evidence_ids": ["C1"] if status == "present" else [],
-                "observed_signals": list(stage_evidence_contract(stage).required_signals)
+                "observed_signals": _visual_fixture_signals(stage_evidence_contract(stage))
                 if status == "present" else [],
                 "missing_signals": [],
                 "signal_bindings": {
@@ -151,7 +156,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                         "invalid_evidence_ids": [],
                         "reason": "fixture binding",
                     }
-                    for signal in stage_evidence_contract(stage).required_signals
+                    for signal in _visual_fixture_signals(stage_evidence_contract(stage))
                 } if status == "present" else {},
                 "evidence_strength": strength,
             }
@@ -167,7 +172,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "invalid_evidence_ids": [],
                 "reason": "fixture binding",
             }
-            for signal in stage_evidence_contract(stage).required_signals
+            for signal in _visual_fixture_signals(stage_evidence_contract(stage))
         }
 
     @staticmethod
@@ -758,11 +763,11 @@ class StageEvidenceContractTests(unittest.TestCase):
                     "status": "present",
                     "coverage": "complete",
                     "evidence_ids": ["DOES_NOT_EXIST"],
-                    "observed_signals": list(stage_evidence_contract(stage).required_signals),
+                    "observed_signals": _visual_fixture_signals(stage_evidence_contract(stage)),
                     "missing_signals": [],
                     "signal_bindings": {
                         signal: "not-an-object"
-                        for signal in stage_evidence_contract(stage).required_signals
+                        for signal in _visual_fixture_signals(stage_evidence_contract(stage))
                     },
                     "reason": {"not": "text"},
                 }
@@ -916,7 +921,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                 elif mutation == "disqualified":
                     check["observed_disqualifiers"] = ["mouth_only_or_static"]
                 else:
-                    check["observed_signals"] = list(stage_evidence_contract("S3").required_signals)
+                    check["observed_signals"] = _visual_fixture_signals(stage_evidence_contract("S3"))
                     check["signal_bindings"] = self._signal_bindings("S3", "C3")
                 freeze_stage_evidence(side)
                 self.assertEqual(stage_evidence_readiness(side, "S3"), "unknown")
@@ -944,7 +949,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "status": "present",
                 "coverage": "complete",
                 "evidence_ids": ["B3"],
-                "observed_signals": list(stage_evidence_contract("S3").required_signals),
+                "observed_signals": _visual_fixture_signals(stage_evidence_contract("S3")),
                 "missing_signals": [],
                 "signal_bindings": self._signal_bindings("S3", "B3"),
                 "evidence_strength": "direct",
@@ -1243,7 +1248,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                     "status": "present",
                     "coverage": "complete",
                     "evidence_ids": list(evidence_ids),
-                    "observed_signals": list(contract.required_signals),
+                    "observed_signals": _visual_fixture_signals(contract),
                     "missing_signals": [],
                     "signal_bindings": self._signal_bindings(stage, evidence_ids[0]),
                     "evidence_strength": "direct",
@@ -1423,6 +1428,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                     provider_flag.update(
                         {
                             "exists": True,
+                            "functional_explanation_met": False,
                             "usage_evidence_state": "partial",
                             "usage_process_visible": True,
                             "real_usage_met": True,
@@ -2028,7 +2034,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "evidence_ids": [] if stage == "S5" else [f"C{index}"],
                 "observed_signals": []
                 if stage == "S5"
-                else list(stage_evidence_contract(stage).required_signals),
+                else _visual_fixture_signals(stage_evidence_contract(stage)),
                 "missing_signals": list(stage_evidence_contract(stage).required_signals)
                 if stage == "S5"
                 else [],
@@ -2241,7 +2247,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                         "status": "present",
                         "coverage": "complete",
                         "evidence_ids": ["C7" if stage == "S4" else f"C{list(stage_codes()).index(stage) + 1}"],
-                        "observed_signals": list(stage_evidence_contract(stage).required_signals),
+                        "observed_signals": _visual_fixture_signals(stage_evidence_contract(stage)),
                         "missing_signals": [],
                         "signal_bindings": self._signal_bindings(
                             stage,
@@ -2554,7 +2560,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "status": "present",
                 "coverage": "complete",
                 "evidence_ids": [f"C{index}"],
-                "observed_signals": list(stage_evidence_contract(stage).required_signals),
+                "observed_signals": _visual_fixture_signals(stage_evidence_contract(stage)),
                 "missing_signals": [],
                 "signal_bindings": self._signal_bindings(stage, f"C{index}"),
             }
@@ -2755,7 +2761,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                     "status": "found",
                     "coverage": "complete",
                     "evidence_ids": ["C_A1"],
-                    "observed_signals": list(contract.required_signals),
+                    "observed_signals": _visual_fixture_signals(contract),
                     "missing_signals": [],
                     "signal_bindings": self._signal_bindings("S4", "C_A1"),
                 }
@@ -2824,7 +2830,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "status": "present",
             "coverage": "partial",
             "evidence_ids": ["C4"],
-            "observed_signals": list(contract.required_signals),
+            "observed_signals": _visual_fixture_signals(contract),
             "missing_signals": [],
             "signal_bindings": self._signal_bindings("S4", "C4"),
         }
@@ -2845,7 +2851,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                     "status": "found",
                     "coverage": "complete",
                     "evidence_ids": ["C_A1"],
-                    "observed_signals": list(contract.required_signals),
+                    "observed_signals": _visual_fixture_signals(contract),
                     "missing_signals": [],
                     "signal_bindings": self._signal_bindings("S4", "C_A1"),
                 }
@@ -2880,7 +2886,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "status": "present",
             "coverage": "partial",
             "evidence_ids": ["C4"],
-            "observed_signals": list(contract.required_signals),
+            "observed_signals": _visual_fixture_signals(contract),
             "missing_signals": [],
             "signal_bindings": self._signal_bindings("S4", "C4"),
         }
@@ -4143,7 +4149,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "status": "present",
             "coverage": "complete",
             "evidence_ids": ["C1"],
-            "observed_signals": list(stage_evidence_contract("S3").required_signals),
+            "observed_signals": _visual_fixture_signals(stage_evidence_contract("S3")),
             "missing_signals": [],
             "signal_bindings": self._signal_bindings("S3", "C1"),
         }
@@ -4290,7 +4296,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "evidence_units": [{"id": "C1", "evidence_strength": "direct", "voiceover": "直接口播"}],
         }
         issues = stage_evidence_contract_issues(side)
-        self.assertIn("S3:required_visual_channel_missing", issues)
+        self.assertIn("S3:signal_channel_missing:real_action", issues)
         self.assertIn("S4:required_visual_channel_missing", issues)
 
     def test_duplicate_stage_projection_is_conflict_and_recovery_target(self) -> None:
@@ -4466,7 +4472,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                         "status": "found",
                         "coverage": "complete",
                         "evidence_ids": [f"{role_code}{index}"],
-                        "observed_signals": list(stage_evidence_contract(stage).required_signals),
+                        "observed_signals": _visual_fixture_signals(stage_evidence_contract(stage)),
                         "missing_signals": [],
                         "signal_bindings": StageEvidenceContractTests._signal_bindings(stage, f"{role_code}{index}"),
                     }
@@ -4503,7 +4509,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "status": "present",
                 "coverage": "complete",
                 "evidence_ids": list(evidence_ids),
-                "observed_signals": list(stage_evidence_contract(stage).required_signals),
+                "observed_signals": _visual_fixture_signals(stage_evidence_contract(stage)),
                 "missing_signals": [],
                 "signal_bindings": self._signal_bindings(stage, evidence_ids[0]),
                 "evidence_strength": "direct",
@@ -4544,7 +4550,7 @@ class StageEvidenceContractTests(unittest.TestCase):
         side = StageEvidenceContractTests._active_side(role_code)
         evidence_id = f"{role_code}{stage[1:]}"
         contract = stage_evidence_contract(stage)
-        participation = list(contract.participation_signals)
+        participation = [signal for signal in contract.participation_signals if signal != "functional_explanation"]
         observed = [participation[0]] if stage == "S4" else participation
         check = next(item for item in side["stage_evidence_checks"] if item["stage"] == stage)
         check.update(
@@ -4776,7 +4782,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                             "evidence_ids": [],
                             "reason": "完整观察后未发现该信号",
                         }
-                        for signal in contract.required_signals
+                        for signal in _visual_fixture_signals(contract)
                     },
                     "observed_disqualifiers": [disqualifier],
                     "evidence_strength": "explicit",
@@ -4904,7 +4910,7 @@ class StageEvidenceContractTests(unittest.TestCase):
             "status": "absent",
             "coverage": "complete",
             "evidence_ids": ["B5"],
-            "observed_signals": list(contract.required_signals),
+            "observed_signals": _visual_fixture_signals(contract),
             "missing_signals": [],
             "signal_bindings": self._signal_bindings("S5", "B5"),
             "observed_disqualifiers": ["product_claim_only"],
@@ -4999,7 +5005,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                 "status": "present",
                 "coverage": "complete",
                 "evidence_ids": ["C3"],
-                "observed_signals": list(stage_evidence_contract("S3").required_signals),
+                "observed_signals": _visual_fixture_signals(stage_evidence_contract("S3")),
                 "missing_signals": [],
                 "signal_bindings": self._signal_bindings("S3", "C3"),
             }
@@ -6695,7 +6701,7 @@ class StageEvidenceContractTests(unittest.TestCase):
                     "status": "present",
                     "coverage": "complete",
                     "evidence_ids": [f"{role_code}{index}"],
-                    "observed_signals": list(stage_evidence_contract(stage).required_signals),
+                    "observed_signals": _visual_fixture_signals(stage_evidence_contract(stage)),
                     "missing_signals": [],
                     "signal_bindings": self._signal_bindings(stage, f"{role_code}{index}"),
                 }

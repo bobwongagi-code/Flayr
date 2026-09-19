@@ -524,6 +524,7 @@ def normalize_s3_flags(value: Any) -> dict[str, Any] | None:
         "exists": normalize_demo_flag(value.get("exists")),
         "module_type": normalize_s3_type(value.get("module_type")),
         "usage_evidence_state": normalize_s3_usage_evidence_state(value.get("usage_evidence_state")),
+        "functional_explanation_met": normalize_demo_flag(value.get("functional_explanation_met")),
         "usage_process_visible": usage_process_visible,
         "result_only_without_process": normalize_demo_flag(value.get("result_only_without_process")),
         "mouth_only_or_static": normalize_demo_flag(value.get("mouth_only_or_static")),
@@ -1517,7 +1518,7 @@ def normalize_analysis_result(
                 # 不做四维执行分，缺失为 None → derive 保守降级。
                 "creator_s2": normalize_s2_flags(item.get("creator_s2")),
                 "benchmark_s2": normalize_s2_flags(item.get("benchmark_s2")),
-                # S3 使用过程 flag：只判真实使用中核心卖点是否被动作演示出来。
+                # S3 separates functional explanation from actual-use facts.
                 # 缺失为 None → derive 保守降级。
                 "creator_s3": normalize_s3_flags(item.get("creator_s3")),
                 "benchmark_s3": normalize_s3_flags(item.get("benchmark_s3")),

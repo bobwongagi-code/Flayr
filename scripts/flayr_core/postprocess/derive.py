@@ -26,6 +26,7 @@ from ..evidence_states import (
     S3_USAGE_EVIDENCE_STATES,
     S4_EFFECT_EVIDENCE_STATES,
     hard_fact_fingerprint,
+    has_s3_functional_explanation,
     normalize_reason_code,
     s2_hard_fact_snapshot,
 )
@@ -251,6 +252,9 @@ def _s3_usage_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
     )
 
     def side_exec(flag: dict[str, Any]) -> float | None:
+        if has_s3_functional_explanation(flag) and flag.get("usage_process_visible") is not True:
+            # Spoken quality has no visual score; accompanying real use still does.
+            return None
         if flag.get("exists") is False:
             return 0.0
         if flag.get("exists") is not True:
@@ -1093,6 +1097,12 @@ def _collect_s3_constraints(
     creator, benchmark = _pair_flags(stage, "s3")
     creator_state = creator.get("usage_evidence_state") if isinstance(creator, dict) else None
     benchmark_state = benchmark.get("usage_evidence_state") if isinstance(benchmark, dict) else None
+
+    if any(has_s3_functional_explanation(flag) for flag in (creator, benchmark)):
+        # Retain visual diagnostics, but do not turn a modality difference into a gap floor.
+        for rule in ("S3_real_usage_floor", "S3_thin_presentation_floor"):
+            collector.skip(rule, "predicate_not_met", "S3 含具体功能讲解，不能仅凭实际使用状态推导比较档位。")
+        return
 
     rule = "S3_real_usage_floor"
     if creator is None or benchmark is None:

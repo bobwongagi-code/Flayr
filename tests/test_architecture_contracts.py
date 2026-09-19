@@ -818,7 +818,7 @@ class ArchitectureContractTests(unittest.TestCase):
     def test_channel_requirement_axis_is_canonical(self) -> None:
         self.assertEqual(channel_requirement_for("S1")["level"], "any_channel_sufficient")
         self.assertEqual(channel_requirement_for("S2")["level"], "any_channel_sufficient")
-        self.assertEqual(channel_requirement_for("S3")["required_signal"], "visible_usage_process")
+        self.assertEqual(channel_requirement_for("S3")["required_signal"], "functional_explanation_or_visible_usage")
         self.assertEqual(channel_requirement_for("S4")["required_signal"], "visible_effect")
         self.assertEqual(channel_requirement_for("S5")["level"], "source_grounded")
         self.assertEqual(channel_requirement_for("S6")["required_signal"], "explicit_purchase_action")

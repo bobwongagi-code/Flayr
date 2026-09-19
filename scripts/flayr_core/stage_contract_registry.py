@@ -11,6 +11,19 @@ import copy
 from dataclasses import dataclass
 from typing import Any
 
+S3_FACT_PROMPT = (
+    "S3 判断功能与使用表达：具体讲解或真实演示均可参与，不要求纯口播视频必须实际使用。"
+    "讲解须说清产品功能与需求、适用对象/场景、条件或步骤的具体联系；品名、泛泛好用、裸功效声称不够。"
+    "functional_explanation_met 仅在有可引用口播/字幕证据时为 true；exists 表示具体讲解或实际使用存在。"
+    "usage_evidence_state 仍只记录实际使用，讲解不得把 none 改成 partial/complete；没有实际动作时视觉动作字段保持 false。"
+)
+S3_EXPRESSION_PROMPT = S3_FACT_PROMPT + (
+    "双方口播比较具体性、相关性、清晰度与组织，不按篇幅、卖点数量或形式自动定档；实际使用也不自动高一档。"
+    "讲解双方相当可为 none，双方都没有合格讲解或使用才是不涉及；证据不足仍保留 uncertain。"
+    "建议先改善当前拍法的讲解，再可选提出真实使用镜头及其帮助理解的理由；不要求补齐六阶段，也不承诺销量。"
+    "S4 效果证明与 S5 独立来源规则不变，功能讲解不代替效果证明或背书。"
+)
+
 # These definitions keep the registry from becoming a list of names whose
 # meaning drifts between prompt authors, parsers, and reviewers.  They describe
 # what may be recorded as an observation, not how much the observation is worth.
@@ -26,6 +39,7 @@ STAGE_SIGNAL_DEFINITIONS: dict[str, str] = {
     "benefit_link": "产品与目标利益之间被明确连接的事实",
     "natural_handoff": "从前一段问题/触发到产品出现的时间或表达承接",
     "target_contact": "产品与目标对象发生接触或作用的可见画面",
+    "functional_explanation": "口播或字幕具体说明产品功能如何对应需求、适用对象/场景、条件或使用步骤；仅报品名、泛泛好用或裸功效声称不算",
     "real_action": "可追踪的真实操作动作，而非只拿着、说着或静态展示",
     "application_change": "操作对象、覆盖区域或应用状态发生的可见变化",
     "continuity": "动作关键步骤在连续或足够相邻的证据中可追踪",
@@ -60,6 +74,7 @@ STAGE_DISQUALIFIER_DEFINITIONS: dict[str, str] = {
     "product_only_without_bridge": "只展示产品身份，没有与前述问题的承接",
     "mouth_only_or_static": "只有口播、拿持或静态展示，没有真实使用动作",
     "product_only_without_target_contact": "产品出现但没有与目标对象接触",
+    "generic_product_statement_only": "只有品名、泛泛评价或裸功效声称，没有具体功能或用法解释，也没有实际使用展示",
     "staged_or_fake_action": "动作无法证明真实作用于目标对象或明显是摆拍替代",
     "claim_only_without_result": "只有功效/效果声称，没有可见结果",
     "unrelated_risk_or_warning": "画面显示的是无关风险、警示或其他对象变化",
@@ -89,10 +104,10 @@ STAGE_BOUNDARY_TESTS: dict[str, dict[str, str]] = {
         "next_stage_confusion": "真实操作动作和使用对象接触属于 S3，不因产品出现就算 S2 完成。",
     },
     "S3": {
-        "own_positive": "目标接触、真实动作和应用变化均能由可追踪画面观察。",
-        "not_own_negative": "只有拿持、口播或静态产品展示，没有真实使用动作。",
-        "previous_stage_confusion": "产品引出和解决方案说明本身不构成真实使用。",
-        "next_stage_confusion": "结果差异或功效声称不能替代使用过程证据。",
+        "own_positive": "可追踪的真实使用，或有证据支持的具体功能/用法解释，均可参与 S3。",
+        "not_own_negative": "只有拿持、品名、泛泛好用或裸功效声称，没有具体解释或真实使用。",
+        "previous_stage_confusion": "只把产品引出来属于 S2；具体解释用途、适用情境或用法才进入 S3。",
+        "next_stage_confusion": "功能解释不等于效果证明；口播不得填成已发生的使用动作或 S4 结果。",
     },
     "S4": {
         "own_positive": "可见结果差异和本品操作之间存在可追踪的对象与时间连接。",
@@ -184,14 +199,15 @@ STAGE_EVIDENCE_CONTRACTS: tuple[StageEvidenceContract, ...] = (
     ),
     StageEvidenceContract(
         "S3",
-        "使用过程",
-        ("target_contact", "real_action", "application_change"),
+        "功能与使用表达",
+        ("target_contact", "real_action", "application_change", "functional_explanation"),
         ("continuity", "selling_point_in_action", "usage_context", "multi_scene_logic"),
-        "visual_required",
-        ("visual",),
-        ("mouth_only_or_static", "product_only_without_target_contact", "staged_or_fake_action"),
-        "检查产品是否真实作用于目标对象、动作是否发生、应用前后或状态变化是否可追踪；口播不能替代视觉使用证明。",
-        participation_signals=("target_contact", "real_action"),
+        "visual_or_voiceover",
+        (),
+        ("generic_product_statement_only", "staged_or_fake_action"),
+        "真实使用的三个信号须同时满足，或有具体 functional_explanation；讲解不冒充实际动作。比较解释的具体性、相关性和清晰度，不按字数、形式或卖点数量自动定档。",
+        required_signal_mode="usage_or_explanation",
+        participation_signals=("target_contact", "real_action", "functional_explanation"),
     ),
     StageEvidenceContract(
         "S4",
@@ -256,6 +272,8 @@ def required_stage_signals_satisfied(
     """Apply the canonical all-of/any-of requirement for one stage."""
     observed = set(observed_signals)
     required = set(contract.required_signals)
+    if contract.required_signal_mode == "usage_or_explanation":
+        return "functional_explanation" in observed or {"target_contact", "real_action", "application_change"}.issubset(observed)
     if contract.required_signal_mode == "any":
         return bool(required.intersection(observed))
     return required.issubset(observed)

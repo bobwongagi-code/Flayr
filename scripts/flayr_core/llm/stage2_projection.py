@@ -18,7 +18,7 @@ from ..stage_evidence_contracts import qualified_stage_evidence_ids, stage_evide
 _SEGMENTED_STAGE_NAMES = {
     "S1": "S1 Hook",
     "S2": "S2 产品引出",
-    "S3": "S3 使用过程",
+    "S3": "S3 功能与使用表达",
     "S4": "S4 效果呈现",
     "S5": "S5 信任放大",
     "S6": "S6 CTA",
@@ -26,7 +26,7 @@ _SEGMENTED_STAGE_NAMES = {
 _SEGMENTED_STAGE_QUESTIONS = {
     "S1": "用户凭什么停下来",
     "S2": "产品是否自然承接并成为解决方案",
-    "S3": "使用过程是否把核心卖点演示出来",
+    "S3": "具体讲解或使用演示是否让用户理解产品功能与用法",
     "S4": "目标效果是否被清楚且可信地证明",
     "S5": "信任材料是否真实、相关且可追溯",
     "S6": "用户是否知道下一步如何购买或行动",
@@ -491,19 +491,29 @@ def _normalize_segmented_stage(
     )
     _attach_segmented_compatibility_fields(output, raw)
 
-    # A nested structured flag is accepted only as a complete object. Partial
-    # semantic objects are worse than an explicit unknown because the existing
-    # resolver/validators would otherwise mistake omitted booleans for facts.
+    # A nested structured flag is accepted only as a complete object on a
+    # grounded handoff. Partial semantic objects are worse than an explicit
+    # unknown because the existing resolver/validators would otherwise mistake
+    # omitted booleans for facts. Closed absence is code-owned and rebuilt from
+    # readiness so a second projection cannot create an asymmetric shape.
+    bilateral_absent = set(readiness.values()) == {"absent"}
     for role in ("benchmark", "creator"):
         key = f"{role}_{stage.lower() if stage != 'S1' else 'hook'}"
         value = raw.get(key)
-        if output.get("stage_handoff_status") == "grounded" and _segmented_complete_flag(value, stage):
-            output[key] = _sanitize_segmented_flag(value, set(role_ids[role]))
-            continue
-        if stage in {"S3", "S4"} and readiness[role] == "absent" and not _segmented_complete_flag(value, stage):
+        if (
+            stage in {"S3", "S4"}
+            and readiness[role] == "absent"
+            and (
+                output.get("stage_handoff_status") == "grounded"
+                or bilateral_absent
+            )
+        ):
             absent_flag = _segmented_explicit_absence_flag(stage, role)
             if absent_flag is not None:
                 output[key] = absent_flag
+            continue
+        if output.get("stage_handoff_status") == "grounded" and _segmented_complete_flag(value, stage):
+            output[key] = _sanitize_segmented_flag(value, set(role_ids[role]))
     return output
 
 

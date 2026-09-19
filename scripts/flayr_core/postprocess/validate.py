@@ -184,6 +184,12 @@ def _validate_structured_flag_evidence_ids(
                 f"{key}.evidence_ids 必须属于 Stage1 已资格化的 {stage_code} 证据："
                 + ", ".join(outside_qualification)
             )
+        if stage_code == "S3" and flag.get("functional_explanation_met") is True:
+            check = stage_evidence_check_map(side).get("S3") or {}
+            binding = (check.get("signal_bindings") or {}).get("functional_explanation") or {}
+            explanation_ids = set(binding.get("evidence_ids") or []) & qualified
+            if binding.get("status") != "supported" or not explanation_ids.intersection(normalized):
+                errors.append(f"{key}.functional_explanation_met 必须引用 Stage1 已支持的 functional_explanation 信号")
     if stage is not None:
         stage_references = stage.get(f"{role}_evidence_ids")
         if isinstance(stage_references, list):
@@ -765,7 +771,32 @@ def validate_s3_usage_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
         if evidence_state_required and flag.get("usage_evidence_state") not in S3_USAGE_EVIDENCE_STATES:
             errors.append(f"S3 {key}.usage_evidence_state 必须是 none/partial/complete/uncertain")
         evidence_unresolved = _stage_evidence_unresolved(result, role, "S3")
-        if evidence_state_required and not evidence_unresolved and not stage_flag_has_absent_evidence_state("S3", flag):
+        explanation = flag.get("functional_explanation_met")
+        if explanation is not None and not isinstance(explanation, bool):
+            errors.append(f"S3 {key}.functional_explanation_met 必须是 bool")
+        side = (result.get("video_understanding") or {}).get(role) or {}
+        current_stage_contract = side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
+        code_owned_absence = stage_flag_has_absent_evidence_state("S3", flag)
+        if current_stage_contract and not evidence_unresolved and not code_owned_absence and explanation is None:
+            errors.append(f"S3 {key}.functional_explanation_met 必须是 bool")
+        if explanation is True and (flag.get("exists") is not True or not flag.get("evidence_ids")):
+            errors.append(f"S3 {key} 具体功能讲解必须 exists=true 且有 evidence_ids")
+        if flag.get("usage_evidence_state") == "none" and flag.get("exists") is True and explanation is not True:
+            errors.append(f"S3 {key} 无实际使用但 exists=true 时必须有具体功能讲解")
+        if current_stage_contract and not evidence_unresolved:
+            check = stage_evidence_check_map(side).get("S3") or {}
+            binding = (check.get("signal_bindings") or {}).get("functional_explanation") or {}
+            if (
+                binding.get("status") == "supported"
+                and set(binding.get("evidence_ids") or []).intersection(qualified_stage_evidence_ids(side, "S3"))
+                and explanation is not True
+            ):
+                errors.append(f"S3 {key} 不得丢弃 Stage1 已支持的具体功能讲解")
+        if (
+            not evidence_unresolved
+            and not code_owned_absence
+            and (evidence_state_required or (current_stage_contract and explanation is True))
+        ):
             errors.extend(_validate_structured_flag_evidence_ids(result, role, "s3", flag, stage=s3))
         for bool_key in (
             "exists",

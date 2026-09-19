@@ -15,6 +15,7 @@ from ..artifacts import (
 )
 from ..multimodal import multimodal_output_example
 from ..resources import ResourceBudget
+from ..stage_contract_registry import S3_FACT_PROMPT
 from ..stage_evidence_contracts import (
     stage_analysis_evidence_view,
     stage_analysis_stage_context,
@@ -172,8 +173,8 @@ def build_stage_review_payload(
             "≤15s 且 S2/S3 不可分时 merged_with_s3=true，不因没有独立 S2 扣分。"
         )
     if "S3" in target_codes:
-        stage_update_example["stage"] = "S3 使用过程"
-        stage_update_example["core_question"] = "用户能不能看见产品如何使用并理解核心卖点"
+        stage_update_example["stage"] = "S3 功能与使用表达"
+        stage_update_example["core_question"] = "用户能不能通过具体讲解或使用演示理解产品功能与用法"
         s3_example = {
             "exists": True,
             "module_type": "A-E 或 unknown",
@@ -207,7 +208,8 @@ def build_stage_review_payload(
             "fake_or_staged": False,
             "start_seconds": 8.0,
             "end_seconds": 18.0,
-            "usage_reason": "真实使用动作中能看见核心卖点如何发生；若只口播卖点则写未被动作证明",
+            "functional_explanation_met": False,
+            "usage_reason": "分别记录具体功能讲解与实际动作；不得用讲解冒充动作",
             "evidence_ids": ["C1"],
             "proposition_ids": ["selling.1"],
         }
@@ -215,10 +217,11 @@ def build_stage_review_payload(
         stage_update_example["benchmark_s3"] = s3_example
         add_stage_patch_example("S3")
         s3_contract = (
-            "目标阶段包含 S3 时，stage patch 必须同时包含 creator_s3 与 benchmark_s3；"
-            "S3 只判真实使用过程：有没有使用过程、是否只有结果无过程、是否只口播静态、核心卖点是否在动作里可见、"
+            S3_FACT_PROMPT
+            + "目标阶段包含 S3 时，stage patch 必须同时包含 creator_s3 与 benchmark_s3；"
+            "以下视觉字段仅描述实际使用，不用于否定具体功能讲解：有没有使用过程、是否只有结果无过程、是否只口播静态、核心卖点是否在动作里可见、"
             "使用过程证据是否可接收、动作是否在同一窗口形成可复核卖点证明、产品是否实际作用于目标对象、动作是否新施加/位移/激活材料或改变目标状态、关键动作是否能追到目标状态、场景是单场景/多场景/多人/混合、场景组织是否服务卖点。"
-            "只口播/字幕说卖点但画面没演，不算 core_selling_point_visible；只有结果没有过程，S3 最高只能算弱；"
+            "只口播/字幕说卖点但画面没演，不算 core_selling_point_visible；只有结果没有过程不能冒充真实使用；"
             "process_framing_met 只判证据接收质量，合理局部特写不扣分；看不清对象/动作/证明区域时为 false。"
             "action_proof_met 不要求最终效果，但要求产品动作、作用对象、卖点的即时可观察证据同窗出现；不能靠后续效果或口播补足。"
             "action_target_contact_met 要求产品/材料实际作用到目标对象；action_application_change_visible 要求看见动作新施加/位移/激活材料或改变目标状态，不能把触碰已有材料/结果当过程；critical_action_continuity_met 要求看见关键作用动作并能追到目标状态，"

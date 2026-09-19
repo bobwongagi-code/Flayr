@@ -34,7 +34,8 @@ from .stage_contract_registry import (
 )
 from .transcript import current_transcript_segments_path, current_transcript_words_path
 
-STAGE_EVIDENCE_CONTRACT_VERSION = 6
+STAGE_EVIDENCE_CONTRACT_VERSION = 7
+# Version 7 admits evidence-bound S3 explanation without changing actual-use facts.
 # Stage1-A only records atomic observations. Version 6 moves time-windowed
 # speech binding to deterministic code and makes optional unit fields sparse;
 # old provider responses must not be replayed under the new ownership rules.
@@ -1934,14 +1935,14 @@ def _stage_check_issues(
         if status == "partial" and not (required - observed).issubset(missing):
             issues.append(f"{contract.code}:partial_without_explicit_missing_signals")
         missing_bindings: list[str] = []
-        if status == "present" and contract.required_signal_mode == "any":
+        if status == "present" and contract.required_signal_mode in {"any", "usage_or_explanation"}:
             supported_required = {
                 signal
                 for signal in required
                 if isinstance(signal_bindings.get(signal), dict)
                 and signal_bindings[signal].get("status") == "supported"
             }
-            if not supported_required:
+            if not required_stage_signals_satisfied(contract, supported_required):
                 missing_bindings = sorted(required)
         elif status == "present":
             for signal in sorted(required):
@@ -1967,6 +1968,15 @@ def _stage_check_issues(
         elif any(strength not in {"direct", "explicit"} for strength in strengths):
             issues.append(f"{contract.code}:{status}_without_explicit_strength")
         referenced_units = [units_by_id[evidence_id] for evidence_id in evidence_ids if evidence_id in units_by_id]
+        if contract.code == "S3":
+            for signal in ("target_contact", "real_action", "application_change", "functional_explanation"):
+                binding = signal_bindings.get(signal) or {}
+                if signal not in observed and binding.get("status") != "supported":
+                    continue
+                bound_units = [units_by_id[value] for value in binding.get("evidence_ids", []) if value in units_by_id]
+                channels = ("voiceover", "subtitle") if signal == "functional_explanation" else ("visual",)
+                if not any(_unit_has_channel(unit, channel) for unit in bound_units for channel in channels):
+                    issues.append(f"S3:signal_channel_missing:{signal}")
         if contract.code == "S5" and not any(
             _unit_has_typed_s5_trust_source(unit) for unit in referenced_units
         ):
@@ -2505,7 +2515,7 @@ def stage1_qualification_projection(
         }
         any_requirement_satisfied = bool(
             contract
-            and contract.required_signal_mode == "any"
+            and contract.required_signal_mode in {"any", "usage_or_explanation"}
             and required_stage_signals_satisfied(contract, check.get("observed_signals") or [])
         )
         missing_requirements = [

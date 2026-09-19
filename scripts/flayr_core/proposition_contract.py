@@ -185,7 +185,7 @@ def build_product_proposition_contract(
             ],
         },
         "S3": {
-            "relation": "在真实使用动作中演示本品核心卖点",
+            "relation": "具体解释本品功能、用法与需求的联系，或在真实使用动作中演示核心卖点",
             "allowed_ids": ids_by_kind["selling"],
         },
         "S4": {

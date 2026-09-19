@@ -32,6 +32,7 @@ from ..stage_evidence_contracts import (
     stage_codes,
 )
 from ..structure_modules import stage1_event_catalog
+from ..stage_contract_registry import S3_EXPRESSION_PROMPT
 from ..stage_ownership import (
     CERTIFICATION_OWNERSHIP_PROMPT,
     contains_certification,
@@ -198,7 +199,7 @@ def build_product_foundation_payload(model: str, analysis: dict[str, Any]) -> di
             "product_profile（产品商业 DNA，S1-S6 打分的尺子）：visualizable(yes|no 核心价值能否视觉化；no 只表示 S4 的视觉证明权重可转向信任与可信度分析，不表示 S5 必须出现、达人必须提供背书，S5 是否进入比较仍由双侧 Stage1 实际事实决定）、"
             "physical_task（解决的最直观尴尬）、hook_proposition（S1 钩子命题，类型取决于本品、不限痛点——"
             "可痛点/承诺/反差/情绪/向往/视觉吸引/身份代入/场景还原，见 structure_library S1 七型）、"
-            "core_selling_points（S3 主轴：使用过程要演示传递的核心卖点，1-6 个）、"
+            "core_selling_points（S3 主轴：具体讲解或实际演示传递的核心卖点，1-6 个）、"
             "usage_context（S3 场景层：本品典型使用场景=卖点演示的舞台）、"
             "short_video_proof_plan（短视频卖点证明计划，先列全候选卖点，再决定各自最适合在哪一阶段传递；"
             "candidates 数组 1-6 项，每项必须含 id、selling_point、visual_space(high|medium|low)、"
@@ -275,7 +276,7 @@ def build_comparison_eligibility_payload(model: str, facts: dict[str, Any]) -> d
         "阶段资格为空、unknown 或 conflict 时必须输出 uncertain/not_comparable，不能把证据未采集解释为 absent。\n"
         "stage_eligibility 对 S1-S6 每个阶段输出 status=direct|structural|not_applicable|not_comparable：同品家族全部 direct；"
         "强/部分替代只能 structural 或不比较。S1 需共享目标用户/痛点/购买任务；S2 需共享问题-解决方案角色；"
-        "S3 需共享使用任务，只比较过程表达完整度而非机制天然优劣；S4 需共享目标结果和可观察证明维度；"
+        "S3 需共享功能或使用任务，比较表达质量而非机制或表达形式天然优劣；S4 需共享目标结果和可观察证明维度；"
         "S5 按 structure_library_full.md 定义为可选的‘信任放大’：结构库的跳过条件只指导编排，不是事实先验；不根据品类先验判断达人是否必须做背书，只根据两侧 Stage1 的实际事实。"
         "双方 Stage1 覆盖完整且 S5 都是 absent 时才填 not_applicable；这只表示两条视频都没有使用 S5，不表示品类不需要信任，也不构成达人错误。"
         "一侧 present、另一侧 absent 时仍保持 direct/structural 并比较，标杆有真实背书而达人没有就是有效差距，不能用‘本品不需要背书’否定标杆事实。"
@@ -751,7 +752,7 @@ def build_video_fact_payload(
         "不得因为输入声明是某品就把视频中看不出的品牌、品类或形态填成该品。"
         "把各维度观察到的画面事实记入 visual_fact；只有当前模型确实收到可感知音轨时，才输出 audio_fact。"
         "information 只写一句简短关系摘要；不得复制口播、字幕或 visual_fact 的全文。按实记录，不做评价；"
-        "凡 functions 含 S3_usage 的证据，visual_fact 必须记录证据接收质量：使用对象/场景上下文是否足以理解产品作用对象、"
+        "凡 functions 含 S3_usage 且有实际使用的证据，visual_fact 必须记录证据接收质量：使用对象/场景上下文是否足以理解产品作用对象、"
         "关键动作是否连续可追踪、核心卖点发生区域是否清楚可见、是否只有局部特写且缺少必要上下文。"
         "局部特写本身不是问题；只有当局部镜头让用户看不清产品作用对象、关键动作或证明区域时，才写证据接收不足。"
         "每条还要标 product_visible（该时段画面里能否看到产品本体，true/false）与 product_coverage"
@@ -767,6 +768,7 @@ def build_video_fact_payload(
         "每条还要标 functions（list，多选）：这段画面支撑哪些带货功能，枚举 S1_hook/S2_intro/S3_usage/S4_effect/S5_trust/S6_cta，"
         "按信息功能判断、信道无关（口播/字幕/画面/特效综合看，无口播也能判），一段可同时支撑多个"
         "（手在操作+效果出来 → [S3_usage,S4_effect]）；这是描述这段在带货结构里干什么、不是评价好坏，没有对应功能就不标；"
+        "S3_usage 也包括有具体需求、适用对象/场景、条件或步骤的功能讲解；原话留在口播/字幕渠道，没演示的动作不得写入 visual_fact。"
         "time_range 必须对应实际观察窗口；画面看不清的时段在 visual_fact 写画面证据不足待复核；"
         "视频级商业门控只需要你补充纯观察事实，不做优劣结论："
         "selling_point_observations 列出实际占据主要画面或口播的卖点，visual_share 与 speech_share 分开估算且各自在 0-1；"
@@ -1669,7 +1671,7 @@ def _stage_group_flag_contract(stage: str) -> str:
         ),
         "S3": (
             '"creator_s3":{"exists":true,"module_type":"A-E|unknown","usage_evidence_state":"none|partial|complete|uncertain",'
-            '"usage_process_visible":false,"result_only_without_process":false,"mouth_only_or_static":false,"real_usage_met":false,'
+            '"functional_explanation_met":false,"usage_process_visible":false,"result_only_without_process":false,"mouth_only_or_static":false,"real_usage_met":false,'
             '"core_selling_point_visible":false,"process_framing_met":false,"action_proof_met":false,"action_target_contact_met":false,'
             '"action_application_change_visible":false,"critical_action_continuity_met":false,"demonstrated_selling_points":[],'
             '"missing_selling_points":[],"scene_mode":"single_scene|multi_scene|multi_person|hybrid|unknown","usage_context_fit":false,'
@@ -1677,7 +1679,7 @@ def _stage_group_flag_contract(stage: str) -> str:
             '"multi_scene_logic_met":false,"multi_scene_transition_met":false,"multi_scene_role_adaptation_met":false,"role_design_met":false,'
             '"role_interaction_met":false,"distinct_personas_met":false,"steps_clear_met":false,"pov_immersive_met":false,'
             '"presentation_overlays":[],"fake_or_staged":false,"start_seconds":0,"end_seconds":0,"usage_reason":"...","evidence_ids":[]},'
-            '"benchmark_s3":{...}'
+            '"benchmark_s3":{...}' + S3_EXPRESSION_PROMPT
         ),
         "S4": (
             '"creator_s4":{"effect_type":"before_after|split_screen|person_vs_person|product_vs_alt|quantified_test|process_visualization|aesthetic_display|none",'
@@ -1907,7 +1909,7 @@ def build_absolute_execution_shadow_payload(
             "只输出 S1-S4，每个阶段独立给 score=0|0.5|1|2：0=阶段不存在或无效；0.5=有形式但核心功能基本无效、无法有效接收或仅口头宣称；1=阶段目标完成且证据清楚，但呈现基础；2=核心机制围绕本品命题被清楚、聚焦且充分地做出来。2 不能仅因形式存在或卖点数量多获得。",
             "S1：要看开头是否形成具体对象/张力/承诺，并与本品 hook 命题相连。泛泛产品露出或无可感知承诺最高 0.5。",
             "S2：要看产品身份、解决方案角色及与 S1 的自然承接。只报产品名或只报参数最高 0.5。",
-            "S3：要看真实使用动作是否让核心卖点被看见、观众是否能接收关键过程。场景多、人物多或 ASMR 只在核心证明成立后才加分。",
+            "S3：具体功能讲解或真实使用均可参与；只评本侧表达是否具体、相关、清楚，不按形式或信息数量给分。口播不能冒充视觉动作，也不能替代 S4 效果证明。",
             "S4：只看本品 short_video_proof_plan 选定的视觉证明目标是否按对应 S4 类型有效呈现。仅有过程、口播或字幕而没有效果证据不得高分；效果要清楚、聚焦且不靠观众细看猜测才可给 2。",
             "## 输出严格 JSON",
             json.dumps(

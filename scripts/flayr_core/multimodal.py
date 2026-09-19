@@ -28,9 +28,9 @@ MULTIMODAL_CHANNEL_REQUIREMENTS = {
         "policy": "画面、口播或字幕可承担产品身份与角色说明；但最终仍须自然承接 S1，并让用户知道产品是什么、为什么出现。",
     },
     "S3": {
-        "level": "required_evidence_with_amplification",
-        "required_signal": "visible_usage_process",
-        "policy": "真实使用过程与关键动作可见是硬条件；口播、字幕、声音和节奏只能增强步骤理解、专业性和卖点证明，不能替代使用演示。",
+        "level": "any_channel_sufficient",
+        "required_signal": "functional_explanation_or_visible_usage",
+        "policy": "具体功能/用法讲解或真实使用均可参与；口播与字幕不能冒充实际动作。比较内容是否具体、相关、清晰，不按形式自动定档。",
     },
     "S4": {
         "level": "required_evidence_with_amplification",

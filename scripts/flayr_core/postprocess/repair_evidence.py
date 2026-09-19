@@ -29,6 +29,7 @@ from ..evidence_states import (
     S3_USAGE_EVIDENCE_STATES,
     S4_EFFECT_EVIDENCE_STATES,
     hard_fact_fingerprint,
+    has_s3_functional_explanation,
     s2_hard_fact_snapshot,
 )
 from ..llm.parse import S5_SOURCE_STATUSES, is_effective_voiceover, normalize_s5_source_status
@@ -667,7 +668,10 @@ def validate_s3_s4_hard_fact_consistency(result: dict[str, Any]) -> None:
             state_complete="complete",
             state_none="none",
             required_fields=s3_fields,
-            positive_fields=s3_positive_fields,
+            positive_fields=tuple(
+                field for field in s3_positive_fields
+                if field != "exists" or not has_s3_functional_explanation(s3.get(f"{role}_s3"))
+            ),
             must_be_true_fields=s3_must_be_true_fields,
             state_must_be_true={
                 "partial": ("exists", "real_usage_met"),

@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from ..evidence_states import has_s3_functional_explanation
+
 from ..proposition_contract import build_product_proposition_contract, stage_allowed_ids
 from ..stage_evidence_contracts import (
     STAGE_EVIDENCE_CONTRACT_VERSION,
@@ -630,6 +632,16 @@ def _absolute_status(stage_id: str, flag: dict[str, Any] | None) -> tuple[str, s
             return "incompatible", "S1/S2 模块组合不符合结构库矩阵"
         return "complete", "产品引出契约完成"
     if stage_id == "S3":
+        explanation = has_s3_functional_explanation(flag)
+        visual_delivery = (
+            flag.get("usage_process_visible") is True
+            and flag.get("mouth_only_or_static") is False
+            and flag.get("result_only_without_process") is False
+            and flag.get("core_selling_point_visible") is True
+            and flag.get("action_proof_met") is True
+        )
+        if explanation and not visual_delivery:
+            return "unknown", "已记录具体功能讲解；不以视觉动作规则推断讲解质量"
         if flag.get("exists") is False:
             return "missing", "未展示使用过程"
         if flag.get("mouth_only_or_static") is True:
@@ -733,6 +745,12 @@ def materialize_quality_audits(result: dict[str, Any], analysis: dict[str, Any] 
             active_evidence and evidence_readiness.get(stage_id) not in {"present", "absent"}
             for active_evidence, evidence_readiness in role_readiness.values()
         )
+        if stage_id == "S3" and any(
+            has_s3_functional_explanation(stage.get(f"{role}_s3"))
+            and absolute[stage_id][role]["status"] == "unknown"
+            for role in ("creator", "benchmark")
+        ):
+            unresolved_role = True
         delivered = {
             role: absolute[stage_id][role]["status"] in {"complete", "soft_trust"}
             for role in ("creator", "benchmark")
