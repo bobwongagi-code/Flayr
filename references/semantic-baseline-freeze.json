@@ -3,8 +3,8 @@
   "status": "frozen",
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
-  "frozen_at": "2026-09-14",
-  "production_behavior_commit": "c2ee6a1baef721f47e5ccc84f804ac306c7973b7",
+  "frozen_at": "2026-09-19",
+  "production_behavior_commit": "afe4f12caccb8f7111af4deaffa7602454e9e2ca",
   "authorized_semantic_correction": {
     "status": "applied_and_refrozen",
     "scope": "用户明确授权的阶段功能语义纠正，不宣称无语义变化",
@@ -15,14 +15,15 @@
   },
   "latest_refreeze": {
     "status": "applied_and_refrozen",
-    "scope": "仅 Stage3 现有对象结构提示加固，不改变 Stage2 判断或资格规则",
-    "stage2_semantics": "unchanged",
+    "scope": "用户授权的 S3 功能与使用表达职责修正，以及阻断状态重复投影的工程修复；不是纯格式变更",
+    "stage2_semantics": "S3 允许具体讲解参与比较，不凭口播或演示形式自动定档；其余阶段判断和档位标尺不变",
     "gt": "unchanged",
-    "qualification": "unchanged",
+    "qualification": "S3 为合格具体讲解或真实使用；讲解须绑定口播或字幕，不能冒充实际使用或 S4 效果证据",
+    "stage_evidence_contract_version": 7,
     "gap_bands": "unchanged",
     "model_route": "unchanged",
     "resource_budget": "unchanged",
-    "legacy_artifact_policy": "旧失败产物不迁移",
+    "legacy_artifact_policy": "不重跑或重标旧产物；旧 S3 GT 未经新口径确认不得直接评分；原失败状态不改为成功",
     "model_calls_made": 0
   },
   "evaluation_report_schema_version": 7,
@@ -48,7 +49,7 @@
   "artifact_identity": {
     "success_manifest": "_SUCCESS.json",
     "analysis_artifact": "analysis.json",
-    "analysis_schema_sha256": "4f29155e2c9b9aa7c7caf2e0b0873b141d7a7f1b942b66e5ea70d5a903ad7bd8",
+    "analysis_schema_sha256": "723a7b9dd0734c420d6e30fb5e66193c96c358e5e4aefa671b00d7b80140a0ba",
     "stage2_pipeline_version": "segmented_stage_v1",
     "accepted_code_commit_policy": "production_behavior_commit_or_current_source_after_freeze_verification",
     "on_mismatch": "exclude_and_inventory_without_scoring"

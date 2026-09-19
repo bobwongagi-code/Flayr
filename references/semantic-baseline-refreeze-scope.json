@@ -1,15 +1,16 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-stage3-object-contract-prompt-hardening-2026-09-14",
-  "description": "User-authorized refreeze after a prompt-only Stage3 format hardening: the existing s3_s4_relationship and promise_chain object contract is made explicit without changing Stage2 judgments, qualification rules, GT, gap bands, model routes, resource budgets, or promotion eligibility. The historical authorized semantic correction remains unchanged; old failed artifacts are not migrated or rerun, and no model calls are made.",
+  "name": "semantic-baseline-refreeze-after-s3-functional-expression-2026-09-19",
+  "description": "Bind the approved S3 qualification change and deterministic blocked-projection fix to their committed source, and record verification. This is a semantic change, not a format-only refreeze. GT snapshots, gap bands, acceptance thresholds, routes, budgets and promotion eligibility remain unchanged. Old artifacts are neither migrated nor rerun; no provider calls are made.",
   "change_scope": {
-    "max_files": 3,
-    "max_added_lines": 40,
-    "max_deleted_lines": 20,
+    "max_files": 4,
+    "max_added_lines": 80,
+    "max_deleted_lines": 40,
     "allowed_globs": [
       "references/semantic-baseline-refreeze-scope.json",
       "references/semantic-baseline-freeze.json",
-      "references/semantic-baseline-freeze.md"
+      "references/semantic-baseline-freeze.md",
+      "references/s3-functional-expression-20260919.md"
     ],
     "forbidden_globs": [
       "runs/**",
