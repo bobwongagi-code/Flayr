@@ -18,3 +18,9 @@
 当前主工作区仍有未提交的语义/prompt 候选，冻结校验在该工作区不通过；隔离树的冻结校验和质量门禁通过。[v7 资格补查清单](../runs/diagnostics/gap-calibration-20260920/qualification-live/manifest.json)的 10 次响应已完成，但[实验输入包](../runs/diagnostics/gap-calibration-20260920/ab-input-corrected/manifest.json)明确标为 `prepared_offline_corrected_not_admitted`：除 NIUMO 原生 v7 输入外，其余目标阶段将资格响应叠加在旧 v6 事实上。不能把“资格补查完成”记作“完整当前事实包已准入”。
 
 今后若重开 S4 档位实验，须先在同一当前合同下取得可核的事实与资格输入；Colorblu 的后续人工文字可作为非盲诊断来源，若要求逐格独立结构化 relation，仍需另行确认。BOTARE 的旧 S3/S4 provider 响应、Frosty/Colorblu 的旧产物不能直接成为任一实验臂。新的资格调用、同期双臂调用及生产替换均未在本次筛查中授权。
+
+## 继续执行裁决（零调用）
+
+按“两格资格可核且仅 gap 错 + 正确 medium/large 对照”重新核源视频身份、人工复核模式和事实包后，当前可直接准入的四格组数为 **0**。Aavini、BOTARE 可作内容级错档候选，但没有同合同原生 v7 完整事实包；NIUMO C1 虽有原生 v7，S4 因果桥解释未闭合；Frosty、Dr.WOW、Colorblu 均不是当前合同下的干净控制。此处的 0 是实验准入数，不是模型准确率。
+
+[旧 32 次双臂实验](../runs/diagnostics/gap-calibration-20260920/amplitude-ab-recovery/score_summary.json)已完成，gap 由 baseline `10/20` 到 candidate `11/20`，未达预设 `+2/20`；其事实主要来自旧 v6 观察加目标资格投影，不是这轮原生 v7 输入，也不能充作新实验任一臂。专为四对旧视频补原生事实的标准运行会触发多阶段调用和按条件补查；现有 CLI 没有 Stage1 后停止点，现有评估器也不是“四格、同期双臂、双重复”的执行器。因此此刻既无干净分母，也无可审计的小额调用上限；不启动定向重跑或新 A/B。后续正常样本若自然形成原生 v7 事实与人工理由，再按同一准入条件筛查，不为了凑数替换样本。
