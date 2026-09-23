@@ -4,7 +4,7 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "0fee1a2e09f43889c0b89123c015ae292f3f7fc8",
+  "production_behavior_commit": "6eefc8752d565d7139aa777f93c4af104142b8a9",
   "authorized_semantic_correction": {
     "status": "applied_and_refrozen",
     "scope": "用户明确授权的阶段功能语义纠正，不宣称无语义变化",
