@@ -695,6 +695,7 @@ class DeriveResolverTests(unittest.TestCase):
             {
                 "effect_type": "aesthetic_display",
                 "effect_evidence_state": "result_only",
+                "result_only_without_process": True,
                 "effect_reason": "只有结果主张，没有因果桥。",
                 "evidence_ids": ["B4"],
             }

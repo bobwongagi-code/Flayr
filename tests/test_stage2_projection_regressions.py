@@ -302,6 +302,51 @@ class Stage2ProjectionRegressionTests(unittest.TestCase):
                 {"s4_flags_required": False, "evidence_state_required": False},
             )
 
+    def test_result_only_requires_unlinked_effect_flags(self) -> None:
+        creator_flag = _provider_s4_flag("C")
+        creator_flag.update(
+            {
+                "effect_type": "before_after",
+                "effect_evidence_state": "result_only",
+                "effect_visible": True,
+                "effect_salience": "clear",
+                "result_only_without_process": True,
+                "process_linked_effect": False,
+            }
+        )
+        result = {
+            "video_understanding": {},
+            "stage_analysis": [
+                {},
+                {},
+                {},
+                {"creator_s4": creator_flag, "benchmark_s4": _provider_s4_flag("B")},
+            ],
+        }
+        analysis = {"s4_flags_required": True, "evidence_state_required": False}
+
+        validate_s4_effect_flags(result, analysis)
+
+        for conflict, value, error in (
+            (
+                "process_linked_effect",
+                True,
+                "S4 creator_s4.process_linked_effect 与 result_only 冲突",
+            ),
+            (
+                "result_only_without_process",
+                False,
+                "S4 creator_s4.result_only_without_process 与 result_only 冲突",
+            ),
+        ):
+            with self.subTest(conflict=conflict):
+                conflicted = copy.deepcopy(result)
+                creator = conflicted["stage_analysis"][3]["creator_s4"]
+                creator[conflict] = value
+                with self.assertRaisesRegex(SystemExit, error):
+                    validate_s4_effect_flags(conflicted, analysis)
+                self.assertEqual(creator[conflict], value)
+
     def test_bilateral_absence_keeps_code_owned_flags_across_projection(self) -> None:
         facts = {role: _side(role[0].upper(), "absent") for role in ("benchmark", "creator")}
 

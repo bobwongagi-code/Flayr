@@ -1446,6 +1446,8 @@ class StageEvidenceContractTests(unittest.TestCase):
                             "effect_evidence_state": "result_only",
                             "effect_visible": True,
                             "visual_difference_observed": True,
+                            "result_only_without_process": True,
+                            "process_linked_effect": False,
                             "evidence_ids": ["C4"],
                             "effect_reason": "provider complete flag",
                         }

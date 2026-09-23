@@ -900,6 +900,11 @@ def validate_s4_effect_flags(result: dict[str, Any], analysis: dict[str, Any]) -
         ):
             if flag.get(bool_key) not in {True, False}:
                 errors.append(f"S4 {key}.{bool_key} 必须是 bool")
+        if effect_state == "result_only":
+            if flag.get("process_linked_effect") is True:
+                errors.append(f"S4 {key}.process_linked_effect 与 result_only 冲突")
+            if flag.get("result_only_without_process") is False:
+                errors.append(f"S4 {key}.result_only_without_process 与 result_only 冲突")
         if str(flag.get("effect_type") or "").strip() not in {
             "before_after",
             "split_screen",
