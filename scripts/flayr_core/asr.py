@@ -30,6 +30,19 @@ ASR_FAILURE_PLACEHOLDER = "Online ASR failed; no transcript is available."
 ASR_REQUEST_TIMEOUT_SECONDS = 900
 ASR_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 ASR_RETRIES = 1
+_PROVIDER_ERROR_BODY_MAX_CHARS = 64 * 1024
+_PROVIDER_ERROR_FIELD_MAX_CHARS = 160
+_PROVIDER_ERROR_CODE_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
+_PROVIDER_ERROR_SENSITIVE_PATTERN = re.compile(
+    r"(?i)(?:\b(?:authorization|bearer|api[_ -]?key|access[_ -]?token|token|secret|password|base64)\b"
+    r"|\b(?:sk|ak|pk)-[a-z0-9_-]{16,}\b"
+    r"|\b(?:input_audio|input|messages|content|parameters|resources|payload|request[_ -]?body|"
+    r"format|language_hints|model|api_url)\b[\"']?\s*[:=])"
+)
+_PROVIDER_ERROR_LONG_ENCODED_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{32,}(?![A-Za-z0-9+/=_-])"
+)
+_PROVIDER_ERROR_REDACTED_MESSAGE = "[redacted provider message containing sensitive data]"
 
 
 def read_asr_api_key(args: Any) -> str:
@@ -355,9 +368,13 @@ def _call_asr_endpoint(
                     response_meta["usage"] = parsed["usage"]
                 return parsed
             diagnostic = _strip_http_status(completed.stderr).strip()
-            last_error = diagnostic or completed.stdout.strip() or "curl failed"
+            last_error = diagnostic or "curl failed"
             if status is not None:
                 last_error = f"HTTP {status}: {last_error}"
+                if not 200 <= status < 300:
+                    provider_details = _provider_error_details(completed.stdout, api_key)
+                    if provider_details:
+                        last_error = f"{last_error}; {provider_details}"
             if not _retryable_asr_error(status, last_error) or attempt >= ASR_RETRIES:
                 raise SystemExit(last_error)
             time.sleep(min(5.0 * (attempt + 1), 10.0))
@@ -383,6 +400,50 @@ def _parse_http_status(stderr: str) -> int | None:
 
 def _strip_http_status(stderr: str) -> str:
     return re.sub(r"\s*__FLAYR_HTTP_STATUS__\d{3}\s*", "\n", str(stderr or ""))
+
+
+def _provider_error_details(response_body: str, api_key: str) -> str:
+    if not isinstance(response_body, str) or len(response_body) > _PROVIDER_ERROR_BODY_MAX_CHARS:
+        return ""
+    try:
+        payload = json.loads(response_body)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+
+    nested_error = payload.get("error")
+    candidates = ([nested_error] if isinstance(nested_error, dict) else []) + [payload]
+    fields = []
+    for field in ("code", "message"):
+        for candidate in candidates:
+            value = candidate.get(field)
+            if field == "code":
+                if isinstance(value, bool) or not isinstance(value, (int, str)):
+                    continue
+                value = str(value).strip()
+                if (
+                    not _PROVIDER_ERROR_CODE_PATTERN.fullmatch(value)
+                    or (api_key and api_key in value)
+                    or value.lower().startswith(("sk-", "ak-", "pk-"))
+                    or _PROVIDER_ERROR_LONG_ENCODED_PATTERN.search(value)
+                ):
+                    continue
+            else:
+                if not isinstance(value, str):
+                    continue
+                value = " ".join(re.sub(r"[\x00-\x1f\x7f]+", " ", value).split())
+                if not value:
+                    continue
+                if (api_key and api_key in value) or _PROVIDER_ERROR_SENSITIVE_PATTERN.search(value):
+                    value = _PROVIDER_ERROR_REDACTED_MESSAGE
+                else:
+                    value = _PROVIDER_ERROR_LONG_ENCODED_PATTERN.sub(
+                        "[redacted encoded data]", value
+                    )[:_PROVIDER_ERROR_FIELD_MAX_CHARS]
+            fields.append(f"{field}={value}")
+            break
+    return "provider " + "; ".join(fields) if fields else ""
 
 
 def _retryable_asr_error(status: int | None, message: str) -> bool:

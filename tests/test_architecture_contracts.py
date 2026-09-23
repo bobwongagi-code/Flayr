@@ -6335,6 +6335,149 @@ class ArchitectureContractTests(unittest.TestCase):
                 ["example.test:443:203.0.113.10,[2001:db8::10]"],
             )
 
+    def test_online_asr_http_400_persists_only_safe_provider_error_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            role_dir = Path(tmp) / "creator"
+            role_dir.mkdir()
+            audio = role_dir / "audio.wav"
+            audio.write_bytes(b"audio")
+            api_key = "unit-test-api-key-not-to-persist"
+            response_body = json.dumps(
+                {
+                    "code": "InvalidAudio",
+                    "message": (
+                        f"invalid input_audio=data:audio/mpeg;base64,{'A' * 128}; api_key={api_key}"
+                    ),
+                    "debug": {
+                        "api_key": api_key,
+                        "parameters": {"format": "mp3"},
+                        "input_audio": {"data": "data:audio/mpeg;base64," + ("A" * 128)},
+                    },
+                }
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+                calls.append(command)
+                return SimpleNamespace(
+                    returncode=22,
+                    stdout=response_body,
+                    stderr="__FLAYR_HTTP_STATUS__400\n",
+                )
+
+            with (
+                mock.patch.object(asr, "audio_to_mp3_data_url", return_value="data:audio/mpeg;base64,AA=="),
+                mock.patch.object(
+                    asr,
+                    "validate_outbound_url",
+                    return_value=SimpleNamespace(
+                        hostname="example.test",
+                        port=443,
+                        resolved_addresses=("203.0.113.10",),
+                    ),
+                ),
+                mock.patch.object(asr.shutil, "which", return_value="/usr/bin/curl"),
+                mock.patch.object(asr, "run_command", side_effect=fake_run),
+            ):
+                result = {"errors": []}
+                asr.run_online_asr(
+                    "https://example.test/asr",
+                    "fun-asr-flash-2026-06-15",
+                    api_key,
+                    "auto",
+                    audio,
+                    role_dir,
+                    role_dir / "transcript.txt",
+                    result,
+                )
+
+            saved = json.loads((role_dir / "provider_asr.json").read_text(encoding="utf-8"))
+            serialized = json.dumps(saved)
+            self.assertEqual(result["transcription_status"], "failed")
+            self.assertEqual(saved["status"], "failed")
+            self.assertIn("HTTP 400: curl failed", saved["error"])
+            self.assertIn("provider code=InvalidAudio", saved["error"])
+            self.assertIn("message=" + asr._PROVIDER_ERROR_REDACTED_MESSAGE, saved["error"])
+            for sensitive in (api_key, "data:audio/mpeg;base64", "parameters", "input_audio", "A" * 128):
+                self.assertNotIn(sensitive, serialized)
+            self.assertNotIn(response_body, serialized)
+            self.assertEqual(len(calls), 1)
+
+    def test_online_asr_http_400_redacts_sensitive_message_and_falls_back(self) -> None:
+        api_key = "unit-test-api-key-not-to-persist"
+        details = asr._provider_error_details(
+            json.dumps(
+                {
+                    "error": {
+                        "code": "InvalidAudio",
+                        "message": f"data:audio/mpeg;base64,{'A' * 128}; api_key={api_key}",
+                    }
+                }
+            ),
+            api_key,
+        )
+        self.assertEqual(
+            details,
+            "provider code=InvalidAudio; message=" + asr._PROVIDER_ERROR_REDACTED_MESSAGE,
+        )
+        for unusable_body in (
+            "not-json response body",
+            json.dumps({"code": "unsafe code with spaces", "message": 42}),
+            "x" * (asr._PROVIDER_ERROR_BODY_MAX_CHARS + 1),
+        ):
+            self.assertEqual(asr._provider_error_details(unusable_body, api_key), "")
+        bounded = asr._provider_error_details(
+            json.dumps({"message": "provider detail " * 40}),
+            api_key,
+        )
+        self.assertEqual(len(bounded.removeprefix("provider message=")), asr._PROVIDER_ERROR_FIELD_MAX_CHARS)
+
+    def test_online_asr_http_400_never_uses_stdout_when_stderr_has_only_status_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            role_dir = Path(tmp)
+            calls = 0
+            api_key = "unit-test-api-key-not-to-persist"
+            response_body = json.dumps(
+                {"message": f"api_key={api_key}; data:audio/mpeg;base64,{'B' * 128}"}
+            )
+
+            def fake_run(_command: list[str], **_kwargs: object) -> SimpleNamespace:
+                nonlocal calls
+                calls += 1
+                return SimpleNamespace(
+                    returncode=22,
+                    stdout=response_body,
+                    stderr="__FLAYR_HTTP_STATUS__400\n",
+                )
+
+            with (
+                mock.patch.object(
+                    asr,
+                    "validate_outbound_url",
+                    return_value=SimpleNamespace(
+                        hostname="example.test",
+                        port=443,
+                        resolved_addresses=("203.0.113.10",),
+                    ),
+                ),
+                mock.patch.object(asr.shutil, "which", return_value="/usr/bin/curl"),
+                mock.patch.object(asr, "run_command", side_effect=fake_run),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                asr._call_asr_endpoint(
+                    "https://example.test/asr",
+                    api_key,
+                    {"model": "fun-asr-flash-2026-06-15"},
+                    role_dir,
+                )
+
+            error = str(raised.exception)
+            self.assertTrue(error.startswith("HTTP 400: curl failed"))
+            self.assertIn(asr._PROVIDER_ERROR_REDACTED_MESSAGE, error)
+            for sensitive in (response_body, api_key, "base64", "B" * 128):
+                self.assertNotIn(sensitive, error)
+            self.assertEqual(calls, 1)
+
     def test_online_asr_retries_common_curl_connect_failures(self) -> None:
         for diagnostic in (
             "curl: (7) Failed to connect to host port 443",
