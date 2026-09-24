@@ -4,7 +4,7 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "6eefc8752d565d7139aa777f93c4af104142b8a9",
+  "production_behavior_commit": "eec90962fc5d5c1a80e76b23b0db705c3e72b9fe",
   "authorized_semantic_correction": {
     "status": "applied_and_refrozen",
     "scope": "用户明确授权的阶段功能语义纠正，不宣称无语义变化",
@@ -15,8 +15,9 @@
   },
   "latest_refreeze": {
     "status": "applied_and_refrozen",
-    "scope": "ASR non-2xx provider diagnostic capture only; successful response handling and semantic behavior unchanged",
-    "asr_non_2xx_diagnostics": "Use stderr diagnostics or generic HTTP status plus bounded sanitized provider code/message; never persist the raw response body",
+    "date": "2026-09-24",
+    "scope": "Human-reviewed report projection and optional one-sentence approval of held actions only; Stage1 and Stage2 judgment behavior unchanged",
+    "approved_code_commits": ["b9a6538", "eec9096"],
     "stage2_semantics": "unchanged",
     "gt": "unchanged",
     "qualification": "unchanged",
@@ -24,7 +25,7 @@
     "gap_bands": "unchanged",
     "model_route": "unchanged",
     "resource_budget": "unchanged",
-    "legacy_artifact_policy": "No old artifacts rerun or rewritten; this diagnostic-only change does not alter prior sample states",
+    "legacy_artifact_policy": "No old analysis artifact rerun or rewritten; reviewed reports are separate derived outputs and prior sample states remain unchanged",
     "model_calls_made": 0
   },
   "evaluation_report_schema_version": 7,
