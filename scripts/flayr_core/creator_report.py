@@ -125,6 +125,8 @@ def build_creator_report_data(
             observation = "未涉及"
         elif review_decision == "insufficient_evidence":
             observation = "证据不足，无法比较"
+        elif review_decision == "corrected" and observation:
+            observation = f"原模型记录，未随本次人工更正复核：{observation}"
         insufficient = bool(stage.get("insufficient_evidence")) or code in low_confidence_codes
         if not observation and not units:
             insufficient = True
@@ -178,6 +180,22 @@ def build_creator_report_data(
         )
 
     highlights = _build_highlights(semantic.creator_context)
+    review_summary = semantic.get("review_summary")
+    review_delivery = _as_dict(analysis.get("review_delivery"))
+    if (
+        review_delivery.get("summary_status") == "replaced_after_stage_review"
+        and isinstance(review_summary, dict)
+    ):
+        intent = _first_text(review_summary.get("detail"), review_summary.get("verdict"))
+    else:
+        intent = _first_text(
+            semantic.creator_context.get("content_intent"),
+            semantic.creator_context.get("creator_content_intent"),
+            creator_understanding.get("content_intent"),
+            creator_understanding.get("content_summary"),
+            semantic.get("one_line_summary"),
+            semantic.get("executive_summary"),
+        )
     return {
         "brand": "Flayr · 心译复盘",
         "reviewStatus": effective_review_status,
@@ -186,15 +204,7 @@ def build_creator_report_data(
         "metadata": build_report_metadata("creator-v2", "flayr_core.creator_report"),
         "title": "这条视频，我们一起复盘",
         "context": _context_line(product),
-        "intent": _first_text(
-            semantic.creator_context.get("content_intent"),
-            semantic.creator_context.get("creator_content_intent"),
-            creator_understanding.get("content_intent"),
-            creator_understanding.get("content_summary"),
-            semantic.get("one_line_summary"),
-            semantic.get("executive_summary"),
-        )
-        or "目前还无法判断这条视频正在尝试完成什么。",
+        "intent": intent or "目前还无法判断这条视频正在尝试完成什么。",
         "highlights": highlights,
         "topExperiment": top_experiment,
         "experiments": experiments,
@@ -222,6 +232,8 @@ def _build_experiments(
     experiments: list[dict[str, Any]] = []
     for original_index, raw in ordered:
         if not isinstance(raw, dict):
+            continue
+        if _safe_text(raw.get("status")).lower() == "needs_human_confirmation":
             continue
         target_stage = _stage_code(
             _first_text(raw.get("target_stage"), raw.get("stage"), raw.get("stage_code")),

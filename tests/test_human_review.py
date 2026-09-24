@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import tempfile
@@ -278,6 +279,41 @@ class HumanReviewTests(unittest.TestCase):
         hr.update_stage(run_dir, "S5", "insufficient_evidence", note="双方信任证据不足，无法比较。")
         hr.update_stage(run_dir, "S6", "not_applicable", note="本样本不涉及明确 CTA。")
 
+    def _project_custom_analysis(
+        self,
+        run_dir: Path,
+        analysis: dict,
+        decisions: dict[str, dict],
+    ) -> dict:
+        review = hr.init_review(run_dir)
+        for code, decision in decisions.items():
+            review["stages"][code] = decision
+        review["status"] = "approved"
+        with (
+            mock.patch.object(hr, "load_analysis", return_value=analysis),
+            mock.patch.object(hr, "_validate_review_against_analysis"),
+        ):
+            return hr.project_reviewed_analysis(run_dir, review)
+
+    @staticmethod
+    def _valid_comparison_analysis() -> dict:
+        analysis = HumanReviewTests._analysis()
+        axes = [
+            ("creator_better", "small"),
+            ("tie", "none"),
+            ("benchmark_better", "medium"),
+            ("benchmark_better", "small"),
+            ("creator_better", "small"),
+            ("benchmark_better", "small"),
+        ]
+        for stage, (relation, gap) in zip(analysis["stage_analysis"], axes):
+            stage["analysis_status"] = "completed"
+            stage["relation"] = relation
+            stage["model_gap_magnitude"] = gap
+            stage["severity"] = gap
+            stage["judgment_reason"] = f"原始 {stage['stage']} 理由。"
+        return analysis
+
     def test_approved_projection_is_deterministic_and_does_not_mutate_analysis(self) -> None:
         temp, run_dir = self.fresh_run()
         self.addCleanup(temp.cleanup)
@@ -289,12 +325,12 @@ class HumanReviewTests(unittest.TestCase):
         projected = hr.project_reviewed_analysis(run_dir, review)
         self.assertEqual(projected["review_status"], "approved")
         self.assertEqual(projected["stage_analysis"][3]["severity"], "large")
-        self.assertEqual(projected["stage_analysis"][4]["gap"], "证据不足，无法比较")
-        self.assertEqual(projected["stage_analysis"][5]["gap"], "未涉及")
-        self.assertIn("人工复核已完成", projected["review_summary"]["verdict"])
+        self.assertEqual(projected["stage_analysis"][4]["gap"], "双方信任证据不足，无法比较。")
+        self.assertEqual(projected["stage_analysis"][5]["gap"], "本样本不涉及明确 CTA。")
+        self.assertIn("人工逐阶段结论", projected["review_summary"]["verdict"])
         self.assertEqual((run_dir / "analysis.json").read_bytes(), before)
 
-    def test_direction_change_removes_stage_recommendation(self) -> None:
+    def test_direction_change_demotes_stage_recommendation_to_candidate(self) -> None:
         temp, run_dir = self.fresh_run()
         self.addCleanup(temp.cleanup)
         analysis = hr.load_analysis(run_dir)
@@ -302,16 +338,21 @@ class HumanReviewTests(unittest.TestCase):
         custom["stage_analysis"][0]["relation"] = "creator_better"
         custom["stage_analysis"][0]["model_gap_magnitude"] = "medium"
         custom["stage_analysis"][0]["severity"] = "medium"
-        custom["improvements"] = [{"target_stage": "S1", "title": "旧建议"}]
+        custom["improvements"] = [{"target_stage": "S1", "title": "旧建议", "suggestion": "展示售价39.9元。"}]
         review = hr.init_review(run_dir)
         for code in hr.STAGE_CODES:
             review["stages"][code] = {"decision": "corrected", "relation": "benchmark_better", "gap": "medium", "note": "人工确认"}
         review["status"] = "approved"
         with mock.patch.object(hr, "load_analysis", return_value=custom):
             projected = hr.project_reviewed_analysis(run_dir, review)
-        self.assertEqual(projected["improvements"], [])
+        self.assertEqual(len(projected["improvements"]), 1)
+        candidate = projected["improvements"][0]
+        self.assertEqual(candidate["status"], "needs_human_confirmation")
+        self.assertEqual(candidate["suggestion"], "展示售价39.9元。")
+        self.assertNotEqual(candidate["title"], "旧建议")
+        self.assertNotIn("benchmark_reference", candidate)
 
-    def test_confirmed_tie_and_untargeted_recommendation_are_removed(self) -> None:
+    def test_confirmed_tie_recommendation_stays_and_untargeted_action_is_pending(self) -> None:
         temp, run_dir = self.fresh_run()
         self.addCleanup(temp.cleanup)
         analysis = hr.load_analysis(run_dir)
@@ -320,8 +361,8 @@ class HumanReviewTests(unittest.TestCase):
         custom["stage_analysis"][0]["model_gap_magnitude"] = "none"
         custom["stage_analysis"][0]["severity"] = "none"
         custom["improvements"] = [
-            {"target_stage": "S1", "title": "tie suggestion"},
-            {"title": "no target"},
+            {"target_stage": "S1", "title": "tie suggestion", "action": "展示使用动作。"},
+            {"title": "no target", "action": "调整画面节奏。"},
         ]
         review = hr.init_review(run_dir)
         for code in hr.STAGE_CODES:
@@ -343,9 +384,12 @@ class HumanReviewTests(unittest.TestCase):
             mock.patch.object(hr, "_validate_review_against_analysis"),
         ):
             projected = hr.project_reviewed_analysis(run_dir, review)
-        self.assertEqual(projected["improvements"], [])
+        self.assertEqual(projected["improvements"][0]["title"], "tie suggestion")
+        self.assertNotIn("status", projected["improvements"][0])
+        self.assertEqual(projected["improvements"][1]["status"], "needs_human_confirmation")
+        self.assertNotEqual(projected["improvements"][1]["title"], "no target")
 
-    def test_same_benchmark_direction_gap_change_preserves_recommendation(self) -> None:
+    def test_same_benchmark_direction_gap_change_demotes_old_recommendation(self) -> None:
         temp, run_dir = self.fresh_run()
         self.addCleanup(temp.cleanup)
         analysis = hr.load_analysis(run_dir)
@@ -353,16 +397,19 @@ class HumanReviewTests(unittest.TestCase):
         custom["stage_analysis"][0]["relation"] = "benchmark_better"
         custom["stage_analysis"][0]["model_gap_magnitude"] = "small"
         custom["stage_analysis"][0]["severity"] = "small"
-        custom["improvements"] = [{"target_stage": "S1", "title": "保留建议"}]
+        custom["improvements"] = [{"target_stage": "S1", "title": "旧建议", "actions": ["清楚展示产品操作。"]}]
         review = hr.init_review(run_dir)
         for code in hr.STAGE_CODES:
             review["stages"][code] = {"decision": "corrected", "relation": "benchmark_better", "gap": "medium", "note": "人工确认"}
         review["status"] = "approved"
         with mock.patch.object(hr, "load_analysis", return_value=custom):
             projected = hr.project_reviewed_analysis(run_dir, review)
-        self.assertEqual(projected["improvements"][0]["title"], "保留建议")
+        candidate = projected["improvements"][0]
+        self.assertEqual(candidate["status"], "needs_human_confirmation")
+        self.assertEqual(candidate["actions"], ["清楚展示产品操作。"])
+        self.assertNotEqual(candidate["title"], "旧建议")
 
-    def test_preserved_recommendations_are_sorted_by_reviewed_gap(self) -> None:
+    def test_changed_stage_recommendations_remain_pending_in_source_order(self) -> None:
         temp, run_dir = self.fresh_run()
         self.addCleanup(temp.cleanup)
         analysis = hr.load_analysis(run_dir)
@@ -372,14 +419,14 @@ class HumanReviewTests(unittest.TestCase):
             stage["model_gap_magnitude"] = "small"
             stage["severity"] = "small"
         custom["improvements"] = [
-            {"target_stage": "S1", "title": "S1"},
-            {"target_stage": "S2", "title": "S2"},
-            {"target_stage": "S3", "title": "S3"},
+            {"target_stage": "S1", "title": "S1", "action": "S1 动作"},
+            {"target_stage": "S2", "title": "S2", "action": "S2 动作"},
+            {"target_stage": "S3", "title": "S3", "action": "S3 动作"},
         ]
         custom["candidate_experiments"] = [
-            {"target_stage": "S1", "title": "C1"},
-            {"target_stage": "S2", "title": "C2"},
-            {"target_stage": "S3", "title": "C3"},
+            {"target_stage": "S1", "title": "C1", "action": "C1 动作"},
+            {"target_stage": "S2", "title": "C2", "action": "C2 动作"},
+            {"target_stage": "S3", "title": "C3", "action": "C3 动作"},
         ]
         review = hr.init_review(run_dir)
         gaps = ["medium", "large", "small"]
@@ -393,8 +440,357 @@ class HumanReviewTests(unittest.TestCase):
         review["status"] = "approved"
         with mock.patch.object(hr, "load_analysis", return_value=custom):
             projected = hr.project_reviewed_analysis(run_dir, review)
-        self.assertEqual([item["title"] for item in projected["improvements"]], ["S2", "S1", "S3"])
-        self.assertEqual([item["title"] for item in projected["candidate_experiments"]], ["C2", "C1", "C3"])
+        self.assertEqual([item["target_stage"] for item in projected["improvements"]], ["S1", "S2", "S3"])
+        self.assertTrue(all(item["status"] == "needs_human_confirmation" for item in projected["improvements"]))
+        self.assertEqual([item["target_stage"] for item in projected["candidate_experiments"]], ["S1", "S2", "S3"])
+        self.assertTrue(all(item["status"] == "needs_human_confirmation" for item in projected["candidate_experiments"]))
+
+    def test_changed_review_replaces_stale_summaries_and_demotes_bound_and_unbound_advice(self) -> None:
+        temp, run_dir = self.fresh_run()
+        self.addCleanup(temp.cleanup)
+        analysis = self._valid_comparison_analysis()
+        analysis["stage_analysis"][0]["relation"] = "benchmark_better"
+        analysis["stage_analysis"][0]["model_gap_magnitude"] = "small"
+        analysis["stage_analysis"][0]["severity"] = "small"
+        analysis["stage_analysis"][0]["judgment_reason"] = "旧方向为标杆开场更强。"
+        analysis["one_line_verdict"] = "旧商业判断。"
+        analysis["one_line_summary"] = "旧摘要。"
+        analysis["executive_summary"] = "旧详细分析。"
+        analysis["commercial_priority_summary"] = "旧商业优先级。"
+        analysis["global_diagnosis"] = {"findings": [{"summary": "旧全局结论"}]}
+        analysis["highlights"] = [{"text": "旧全局亮点"}]
+        analysis["content_intent"] = "旧内容意图"
+        analysis["retained_points"] = ["旧保留点"]
+        analysis["stage_analysis"][0].update(
+            {
+                "reference_relevance": "旧标杆相关性",
+                "reference_observation": "旧标杆观察",
+                "benchmark_reference": "旧标杆建议依据",
+                "communication_strategy": "旧沟通建议",
+                "comparison_reason": "旧模型差距理由",
+                "confidence_note": "旧置信说明",
+                "retain": "旧保留判断",
+                "creator_retain": "旧创作者保留判断",
+                "creator_retention": "旧保留理由",
+                "linked_experiment_id": "old-exp-1",
+            }
+        )
+        analysis["stage_analysis"][1]["linked_experiment_id"] = "old-exp-2"
+        analysis["stage_analysis"][3].update(
+            {
+                "reference_relevance": "旧 S4 标杆相关性",
+                "benchmark_reference": "旧 S4 标杆依据",
+                "communication_advice": "旧 S4 沟通建议",
+            }
+        )
+        analysis["improvements"] = [
+            {
+                "target_stage": "S1",
+                "title": "旧开场建议",
+                "problem": "旧差距判断",
+                "hypothesis": "旧验证假设",
+                "benchmark_reference": "旧标杆对比",
+                "benchmark_evidence_ids": ["B1"],
+                "benchmark_time_range": "00:03-00:05",
+                "expected_effect": "预计GMV提升20%",
+                "gmv_impact": "提升20%",
+                "creator_script": "旧脚本",
+                "actions": ["展示售价39.9元。"],
+            },
+            {
+                "target_stage": "S4",
+                "title": "旧效果建议",
+                "problem": "旧效果差距",
+                "benchmark_reference": "旧效果标杆证据",
+                "expected_effect": "带来更多销量",
+                "actions": ["把充电画面放到前段。", "预计点击率提升20%。"],
+            },
+            {"title": "旧未绑定建议", "suggestion": "复拍产品操作。"},
+            {"target_stage": "S2/S4", "title": "多阶段建议", "benchmark_reference": "旧对比依据", "action": "重拍关键画面。"},
+            {"target_stage": "S2", "title": "已确认同阶段建议", "action": "字幕显示原价39元。", "expected_effect": "预计销量增加3倍。"},
+        ]
+        analysis["candidate_experiments"] = [
+            {
+                "target_stage": "S1",
+                "title": "旧候选实验",
+                "observation": "旧观察",
+                "problem": "旧问题",
+                "hypothesis": "旧假设",
+                "benchmark_reference": "旧候选依据",
+                "benchmark_evidence_ids": ["B1"],
+                "expected_effect": "预计转化率提升10%",
+                "experiment_id": "stable-exp-1",
+                "action": "标注售价39元。",
+            }
+        ]
+        before = (run_dir / "analysis.json").read_bytes()
+        decisions = {
+            "S1": {"decision": "corrected", "relation": "creator_better", "gap": "medium", "note": "人工复核后达人开场更清晰。"},
+            "S2": {"decision": "confirmed", "relation": "tie", "gap": "none", "note": None},
+            "S3": {"decision": "confirmed", "relation": "benchmark_better", "gap": "medium", "note": None},
+            "S4": {"decision": "not_applicable", "relation": None, "gap": None, "note": "本轮不比较效果呈现。"},
+            "S5": {"decision": "confirmed", "relation": "creator_better", "gap": "small", "note": None},
+            "S6": {"decision": "confirmed", "relation": "benchmark_better", "gap": "small", "note": None},
+        }
+
+        projected = self._project_custom_analysis(run_dir, analysis, decisions)
+
+        self.assertEqual(projected["review_delivery"]["summary_status"], "replaced_after_stage_review")
+        self.assertEqual(projected["review_delivery"]["changed_stages"], ["S1", "S4"])
+        self.assertEqual(projected["one_line_verdict"], projected["review_summary"]["verdict"])
+        self.assertEqual(projected["executive_summary"], projected["review_summary"]["detail"])
+        self.assertNotIn("旧商业", projected["one_line_verdict"])
+        self.assertNotIn("one_line_summary", projected)
+        self.assertNotIn("commercial_priority_summary", projected)
+        self.assertNotIn("global_diagnosis", projected)
+        self.assertIn("原商业总结未随确认更新，已停用", projected["executive_summary"])
+        self.assertIn("原有建议并未随阶段确认自动获批", projected["executive_summary"])
+        self.assertIn("人工复核后达人开场更清晰", projected["one_line_verdict"])
+        self.assertIn("本轮不比较效果呈现", projected["one_line_verdict"])
+        self.assertEqual(projected["stage_analysis"][0]["relation"], "creator_better")
+        self.assertNotIn("comparison_reason", projected["stage_analysis"][0])
+        for key in ("reference_relevance", "reference_observation", "benchmark_reference", "communication_strategy", "confidence_note"):
+            self.assertNotIn(key, projected["stage_analysis"][0])
+        for key in ("retain", "creator_retain", "creator_retention", "linked_experiment_id"):
+            self.assertNotIn(key, projected["stage_analysis"][0])
+        self.assertNotIn("linked_experiment_id", projected["stage_analysis"][1])
+        for key in ("reference_relevance", "benchmark_reference", "communication_advice"):
+            self.assertNotIn(key, projected["stage_analysis"][3])
+
+        opening, effect, unbound, ambiguous, unchanged = projected["improvements"]
+        self.assertEqual(opening["status"], "needs_human_confirmation")
+        self.assertEqual(opening["actions"], ["展示售价39.9元。"])
+        self.assertNotEqual(opening["title"], "旧开场建议")
+        self.assertNotIn("旧", opening["observation"])
+        for key in ("hypothesis", "benchmark_reference", "benchmark_evidence_ids", "benchmark_time_range", "expected_effect", "gmv_impact", "creator_script"):
+            self.assertNotIn(key, opening)
+        self.assertNotEqual(opening["problem"], "旧差距判断")
+        self.assertEqual(effect["actions"], ["把充电画面放到前段。"])
+        self.assertEqual(effect["status"], "needs_human_confirmation")
+        self.assertEqual(unbound["status"], "needs_human_confirmation")
+        self.assertEqual(unbound["suggestion"], "复拍产品操作。")
+        self.assertEqual(ambiguous["status"], "needs_human_confirmation")
+        self.assertNotIn("target_stage", ambiguous)
+        self.assertNotIn("benchmark_reference", ambiguous)
+        self.assertNotEqual(ambiguous["title"], "多阶段建议")
+        self.assertEqual(unchanged["title"], "已确认同阶段建议")
+        self.assertNotIn("expected_effect", unchanged)
+        nested = projected["candidate_experiments"][0]
+        self.assertEqual(nested["status"], "needs_human_confirmation")
+        self.assertEqual(nested["action"], "标注售价39元。")
+        self.assertEqual(nested["experiment_id"], "stable-exp-1")
+        self.assertNotIn("benchmark_reference", nested)
+        self.assertNotIn("expected_effect", nested)
+        self.assertNotIn("creator_highlights", projected)
+        self.assertNotIn("content_intent", projected)
+        self.assertNotIn("retained_points", projected)
+        self.assertEqual((run_dir / "analysis.json").read_bytes(), before)
+
+    def test_all_unchanged_confirmations_preserve_body_tie_advice_and_model_summary(self) -> None:
+        temp, run_dir = self.fresh_run()
+        self.addCleanup(temp.cleanup)
+        analysis = self._valid_comparison_analysis()
+        s6 = analysis["stage_analysis"][5]
+        s6["relation"] = None
+        s6["model_gap_magnitude"] = None
+        s6["severity"] = None
+        s6["comparison_status"] = "not_applicable"
+        s6["analysis_status"] = "not_applicable"
+        s6["stage_evidence_gate"] = {
+            "status": "not_applicable",
+            "reason_code": "bilateral_stage_absent",
+            "source": "code",
+        }
+        analysis["one_line_verdict"] = "原始整句总结。"
+        analysis["one_line_summary"] = "原始一句话摘要。"
+        analysis["executive_summary"] = "原始执行摘要。"
+        analysis["commercial_priority_summary"] = "原商业优先级。"
+        analysis["global_diagnosis"] = {"findings": [{"id": "old", "summary": "旧 finding"}]}
+        analysis["improvements"] = [{"target_stage": "S2", "title": "tie 建议", "action": "保留旧 tie 建议。"}]
+        decisions = {
+            "S1": {"decision": "confirmed", "relation": "creator_better", "gap": "small", "note": None},
+            "S2": {"decision": "confirmed", "relation": "tie", "gap": "none", "note": None},
+            "S3": {"decision": "confirmed", "relation": "benchmark_better", "gap": "medium", "note": None},
+            "S4": {"decision": "confirmed", "relation": "benchmark_better", "gap": "small", "note": None},
+            "S5": {"decision": "confirmed", "relation": "creator_better", "gap": "small", "note": None},
+            "S6": {"decision": "not_applicable", "relation": None, "gap": None, "note": "人工确认阶段不适用。"},
+        }
+
+        projected = self._project_custom_analysis(run_dir, analysis, decisions)
+
+        self.assertEqual(projected["review_delivery"]["summary_status"], "preserved_after_no_semantic_change")
+        self.assertEqual(projected["review_delivery"]["changed_stages"], [])
+        self.assertEqual(projected["review_summary"]["detail"], "阶段结论已确认，保留原稿；未逐条审核建议。")
+        self.assertEqual(projected["one_line_verdict"], analysis["one_line_verdict"])
+        self.assertEqual(projected["one_line_summary"], analysis["one_line_summary"])
+        self.assertEqual(projected["executive_summary"], analysis["executive_summary"])
+        self.assertEqual(projected["commercial_priority_summary"], analysis["commercial_priority_summary"])
+        self.assertEqual(projected["global_diagnosis"], analysis["global_diagnosis"])
+        self.assertEqual(projected["improvements"], analysis["improvements"])
+
+        from scripts.flayr_core.bd_report import build_bd_report_data
+        from scripts.flayr_core.creator_report import build_creator_report_data
+        from scripts.flayr_core.report import ReportAssetContext
+
+        baseline_views = (
+            build_bd_report_data(analysis),
+            build_creator_report_data(analysis, ReportAssetContext(run_dir)),
+        )
+        reviewed_views = (
+            build_bd_report_data(projected),
+            build_creator_report_data(projected, ReportAssetContext(run_dir)),
+        )
+        metadata_keys = {"reviewStatus", "reviewMode", "reviewSummary", "metadata"}
+        for baseline, reviewed in zip(baseline_views, reviewed_views):
+            self.assertEqual(
+                {key: value for key, value in baseline.items() if key not in metadata_keys},
+                {key: value for key, value in reviewed.items() if key not in metadata_keys},
+            )
+
+        body = copy.deepcopy(projected)
+        body.pop("review_delivery")
+        body.pop("review_status")
+        body.pop("review_mode")
+        body.pop("review_summary")
+        for stage in body["stage_analysis"]:
+            stage.pop("review_decision", None)
+            stage.pop("review_note", None)
+        self.assertEqual(body, analysis)
+
+    def test_corrected_code_owned_na_stage_emits_human_axes_without_rewriting_gate(self) -> None:
+        temp, run_dir = self.fresh_run()
+        self.addCleanup(temp.cleanup)
+        analysis = self._valid_comparison_analysis()
+        stage = analysis["stage_analysis"][3]
+        stage["relation"] = None
+        stage["model_gap_magnitude"] = None
+        stage["severity"] = None
+        stage["comparison_status"] = "not_applicable"
+        stage["analysis_status"] = "not_applicable"
+        stage["stage_evidence_gate"] = {
+            "status": "not_applicable",
+            "reason_code": "bilateral_stage_absent",
+            "source": "code",
+        }
+        original_gate = copy.deepcopy(stage["stage_evidence_gate"])
+        decisions = {
+            "S1": {"decision": "confirmed", "relation": "creator_better", "gap": "small", "note": None},
+            "S2": {"decision": "confirmed", "relation": "tie", "gap": "none", "note": None},
+            "S3": {"decision": "confirmed", "relation": "benchmark_better", "gap": "medium", "note": None},
+            "S4": {"decision": "corrected", "relation": "benchmark_better", "gap": "small", "note": "人工确认此阶段可比较。"},
+            "S5": {"decision": "confirmed", "relation": "creator_better", "gap": "small", "note": None},
+            "S6": {"decision": "confirmed", "relation": "benchmark_better", "gap": "small", "note": None},
+        }
+
+        projected = self._project_custom_analysis(run_dir, analysis, decisions)
+
+        projected_stage = projected["stage_analysis"][3]
+        self.assertEqual(projected_stage["review_decision"], "corrected")
+        self.assertEqual(projected_stage["relation"], "benchmark_better")
+        self.assertEqual(projected_stage["severity"], "small")
+        self.assertEqual(projected_stage["stage_evidence_gate"], original_gate)
+        self.assertEqual(projected_stage["comparison_status"], "not_applicable")
+        self.assertEqual(projected["review_delivery"]["changed_stages"], ["S4"])
+
+    def test_changed_review_removes_only_quantified_performance_sentences(self) -> None:
+        temp, run_dir = self.fresh_run()
+        self.addCleanup(temp.cleanup)
+        analysis = self._valid_comparison_analysis()
+        analysis["improvements"] = [
+            {
+                "target_stage": "S1",
+                "title": "原建议",
+                "actions": [
+                    "展示39.9元售价，预计完播率提高10-15%。",
+                    "展示售价39.9元并预计GMV提升20%。",
+                    "Display the $39.9 price and expect GMV to grow 20%.",
+                    "预计转化率提高2倍。",
+                    "标出500毫升容量。",
+                ],
+            }
+        ]
+        decisions = {
+            "S1": {"decision": "corrected", "relation": "benchmark_better", "gap": "large", "note": "人工修正为明显差距。"},
+            "S2": {"decision": "confirmed", "relation": "tie", "gap": "none", "note": None},
+            "S3": {"decision": "confirmed", "relation": "benchmark_better", "gap": "medium", "note": None},
+            "S4": {"decision": "confirmed", "relation": "benchmark_better", "gap": "small", "note": None},
+            "S5": {"decision": "confirmed", "relation": "creator_better", "gap": "small", "note": None},
+            "S6": {"decision": "confirmed", "relation": "benchmark_better", "gap": "small", "note": None},
+        }
+
+        projected = self._project_custom_analysis(run_dir, analysis, decisions)
+
+        self.assertEqual(
+            projected["improvements"][0]["actions"],
+            ["展示39.9元售价", "展示售价39.9元", "Display the $39.9 price", "标出500毫升容量。"],
+        )
+
+    def test_insufficient_evidence_replaces_unavailable_model_conclusion(self) -> None:
+        temp, run_dir = self.fresh_run()
+        self.addCleanup(temp.cleanup)
+        analysis = self._valid_comparison_analysis()
+        stage = analysis["stage_analysis"][3]
+        stage["relation"] = None
+        stage["model_gap_magnitude"] = None
+        stage["severity"] = None
+        stage["judgment_reason"] = "模型没有输出可比较结论。"
+        analysis["one_line_verdict"] = "旧摘要结论。"
+        decisions = {
+            "S1": {"decision": "confirmed", "relation": "creator_better", "gap": "small", "note": None},
+            "S2": {"decision": "confirmed", "relation": "tie", "gap": "none", "note": None},
+            "S3": {"decision": "confirmed", "relation": "benchmark_better", "gap": "medium", "note": None},
+            "S4": {"decision": "insufficient_evidence", "relation": None, "gap": None, "note": "本轮人工确认效果证据不足。"},
+            "S5": {"decision": "confirmed", "relation": "creator_better", "gap": "small", "note": None},
+            "S6": {"decision": "confirmed", "relation": "benchmark_better", "gap": "small", "note": None},
+        }
+
+        projected = self._project_custom_analysis(run_dir, analysis, decisions)
+
+        self.assertTrue(hr.model_stage_values(stage)["prediction_unavailable"])
+        self.assertEqual(projected["review_delivery"]["changed_stages"], ["S4"])
+        self.assertEqual(projected["stage_analysis"][3]["gap"], "本轮人工确认效果证据不足。")
+        self.assertNotIn("旧摘要", projected["one_line_verdict"])
+        self.assertEqual(projected["review_summary"]["detail"], "阶段结论已确认；原商业总结未随确认更新，已停用；原有建议并未随阶段确认自动获批，待确认候选需单独核实。")
+
+    def test_pending_candidates_stay_in_bd_review_but_not_creator_actions(self) -> None:
+        temp, run_dir = self.fresh_run()
+        self.addCleanup(temp.cleanup)
+        analysis = self._valid_comparison_analysis()
+        analysis["one_line_verdict"] = "旧商业总结不得复用。"
+        analysis["stage_analysis"][0].pop("creator_evidence_ids", None)
+        analysis["improvements"] = [
+            {"target_stage": "S1", "title": "旧建议", "benchmark_reference": "旧对比依据", "action": "重新拍摄关键操作。"}
+        ]
+        analysis["candidate_experiments"] = [
+            {"target_stage": "S1", "title": "旧实验", "benchmark_evidence_ids": ["B1"], "action": "重新拍摄关键操作。"}
+        ]
+        decisions = {
+            "S1": {"decision": "corrected", "relation": "creator_better", "gap": "medium", "note": "人工确认开场差距已修正。"},
+            "S2": {"decision": "confirmed", "relation": "tie", "gap": "none", "note": None},
+            "S3": {"decision": "confirmed", "relation": "benchmark_better", "gap": "medium", "note": None},
+            "S4": {"decision": "confirmed", "relation": "benchmark_better", "gap": "small", "note": None},
+            "S5": {"decision": "confirmed", "relation": "creator_better", "gap": "small", "note": None},
+            "S6": {"decision": "confirmed", "relation": "benchmark_better", "gap": "small", "note": None},
+        }
+
+        projected = self._project_custom_analysis(run_dir, analysis, decisions)
+
+        from scripts.flayr_core.bd_report import build_bd_report_data
+        from scripts.flayr_core.creator_report import build_creator_report_data
+        from scripts.flayr_core.report import ReportAssetContext
+
+        bd_view = build_bd_report_data(projected)
+        creator_view = build_creator_report_data(projected, ReportAssetContext(run_dir))
+        self.assertEqual(len(projected["improvements"]), 1)
+        self.assertEqual(projected["improvements"][0]["status"], "needs_human_confirmation")
+        self.assertEqual(bd_view["improvements"][0]["priorityLabel"], "待人工确认")
+        self.assertEqual(bd_view["improvements"][0]["impactDirection"], "未核实")
+        self.assertEqual(bd_view["improvements"][0]["planB"], "理想方向候选，不能作为已确认的标杆示范。")
+        self.assertEqual(creator_view["experiments"], [])
+        self.assertIsNone(creator_view["topExperiment"])
+        self.assertIn("原商业总结未随确认更新，已停用", creator_view["intent"])
+        creator_stage = next(stage for stage in creator_view["stages"] if stage["code"] == "S1")
+        self.assertIn("原模型记录，未随本次人工更正复核：", creator_stage["observation"])
 
     def test_reviewed_reports_have_distinct_names_and_badges(self) -> None:
         temp, run_dir = self.fresh_run()

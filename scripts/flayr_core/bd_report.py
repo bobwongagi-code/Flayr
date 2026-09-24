@@ -155,6 +155,8 @@ def _stage_payload(
         severity = "skip"
     elif review_decision == "insufficient_evidence":
         severity = "unknown"
+    elif review_decision == "corrected" and reviewed_gap in {"none", "small", "medium", "large"}:
+        severity = "skip" if reviewed_gap == "none" else reviewed_gap
     elif skipped:
         severity = "skip"
     elif analysis_state in {"degraded", "not_run"}:
@@ -182,6 +184,10 @@ def _stage_payload(
         severity_label = _SEVERITY_LABELS["insufficient"]
     creator_text = _side_text(stage, "creator", creator_units)
     benchmark_text = _side_text(stage, "benchmark", benchmark_units)
+    if review_decision == "corrected":
+        stale_prefix = "原模型记录，未随本次人工更正复核："
+        creator_text = f"{stale_prefix}{creator_text}" if creator_text else creator_text
+        benchmark_text = f"{stale_prefix}{benchmark_text}" if benchmark_text else benchmark_text
     communication = _first_text(
         stage.get("communication_strategy"),
         stage.get("communication_advice"),
@@ -212,44 +218,54 @@ def _stage_payload(
 
 
 def _improvement_payload(item: dict[str, Any], rank: int, benchmark_understanding: dict[str, Any]) -> dict[str, Any]:
-    impact_direction = _impact_direction(item.get("gmv_impact"))
-    priority_label, priority_class = _priority_from_improvement(item)
-    gap_type = _GAP_TYPES.get(_safe_text(item.get("gap_type")), "待确认")
+    needs_confirmation = _safe_text(item.get("status")).lower() == "needs_human_confirmation"
     action = _first_text(_join_text(item.get("actions")), item.get("suggestion"), item.get("expected_effect"))
     script = _safe_text(item.get("creator_script_zh"))
-    if script and action:
+    if script and action and not needs_confirmation:
         action = f"{action} 建议话术：{script}"
-    benchmark = _first_text(item.get("benchmark_reference"))
-    benchmark_range = _safe_text(item.get("benchmark_time_range"))
-    units = referenced_evidence_units(
-        item.get("benchmark_evidence_ids"),
-        benchmark_understanding,
-        item.get("target_stage"),
-    )
-    facts = _join_text(
-        [
-            _first_text(unit.get("information"), unit.get("visual_fact"), unit.get("subtitle_fact"))
-            for unit in units
-        ]
-    )
-    if benchmark_range and benchmark:
-        plan_b = f"标杆片段 {benchmark_range}：{benchmark}"
-    elif benchmark:
-        plan_b = benchmark
-    elif benchmark_range and facts:
-        plan_b = f"标杆片段 {benchmark_range}：{facts}"
-    elif facts:
-        plan_b = facts
+    if needs_confirmation:
+        priority_label, priority_class = "待人工确认", "priority-low"
+        impact_direction = "未核实"
+        confidence = "待确认"
+        evidence_strength = "待核实"
+        gap_type = "理想方向候选"
+        plan_b = "理想方向候选，不能作为已确认的标杆示范。"
     else:
-        plan_b = "暂无明确标杆对应镜头。"
+        impact_direction = _impact_direction(item.get("gmv_impact"))
+        priority_label, priority_class = _priority_from_improvement(item)
+        confidence = _confidence_label(item.get("confidence"))
+        gap_type = _GAP_TYPES.get(_safe_text(item.get("gap_type")), "待确认")
+        benchmark = _first_text(item.get("benchmark_reference"))
+        benchmark_range = _safe_text(item.get("benchmark_time_range"))
+        units = referenced_evidence_units(
+            item.get("benchmark_evidence_ids"),
+            benchmark_understanding,
+            item.get("target_stage"),
+        )
+        facts = _join_text(
+            [
+                _first_text(unit.get("information"), unit.get("visual_fact"), unit.get("subtitle_fact"))
+                for unit in units
+            ]
+        )
+        if benchmark_range and benchmark:
+            plan_b = f"标杆片段 {benchmark_range}：{benchmark}"
+        elif benchmark:
+            plan_b = benchmark
+        elif benchmark_range and facts:
+            plan_b = f"标杆片段 {benchmark_range}：{facts}"
+        elif facts:
+            plan_b = facts
+        else:
+            plan_b = "暂无明确标杆对应镜头。"
     return {
         "rank": rank,
         "title": _safe_text(item.get("title")) or "待确认提升点",
         "priorityLabel": priority_label,
         "priorityClass": priority_class,
         "impactDirection": impact_direction,
-        "confidence": _confidence_label(item.get("confidence")),
-        "evidenceStrength": _report_evidence_label(item, units),
+        "confidence": confidence,
+        "evidenceStrength": evidence_strength if needs_confirmation else _report_evidence_label(item, units),
         "gapType": gap_type,
         "planA": action or "暂无明确拍摄或执行方案。",
         "planB": plan_b,

@@ -438,10 +438,43 @@ def invalidate_reviewed_reports(run_dir: Path) -> tuple[Path, ...]:
 
 
 def _stage_target(value: Any) -> str:
-    return _stage_code(value)
+    matches = re.findall(r"(?<![A-Z0-9])S([1-6])(?![0-9])", _safe_text(value).upper())
+    return f"S{matches[0]}" if len(set(matches)) == 1 else ""
 
 
-def _project_summary(stages: list[Mapping[str, Any]]) -> dict[str, str]:
+def _item_stage_target(item: Mapping[str, Any]) -> str:
+    targets: list[str] = []
+    for key in ("target_stage", "targetStage", "stage", "stage_code"):
+        value = item.get(key)
+        if not _safe_text(value):
+            continue
+        target = _stage_target(value)
+        if not target:
+            return ""
+        targets.append(target)
+    if not targets or len(set(targets)) != 1:
+        return ""
+    return targets[0]
+
+
+def _stage_review_changed(decision: Mapping[str, Any], model_values: Mapping[str, Any]) -> bool:
+    state = _safe_text(decision.get("decision"))
+    if state == "corrected":
+        return (
+            decision.get("relation") != model_values.get("relation")
+            or decision.get("gap") != model_values.get("gap")
+            or _safe_text(decision.get("note")) != _safe_text(model_values.get("reason"))
+        )
+    if state == "not_applicable":
+        return not bool(model_values.get("not_applicable"))
+    if state == "insufficient_evidence":
+        # A missing model conclusion can reflect technical unavailability, not
+        # a human-verified lack of evidence. The sidecar has no stronger proof.
+        return True
+    return False
+
+
+def _review_summary(review: Mapping[str, Any], *, changed: bool) -> dict[str, str]:
     gap_labels = {"none": "无明显差距", "small": "小差距", "medium": "中等差距", "large": "明显差距"}
     relation_labels = {
         "tie": "双方相近",
@@ -449,28 +482,166 @@ def _project_summary(stages: list[Mapping[str, Any]]) -> dict[str, str]:
         "creator_better": "达人更强",
     }
     parts: list[str] = []
-    for index, stage in enumerate(stages, start=1):
-        code = _stage_code(stage.get("stage"), index)
-        decision = _safe_text(stage.get("review_decision"))
+    for code in STAGE_CODES:
+        item = review["stages"][code]
+        decision = _safe_text(item.get("decision"))
         if decision == "not_applicable":
-            text = "未涉及"
+            text = "本阶段未纳入比较"
         elif decision == "insufficient_evidence":
             text = "证据不足，无法比较"
         else:
-            relation = _normalize_relation(stage.get("relation"))
-            gap = _normalize_gap(stage.get("severity"))
-            if gap is None and decision in {"confirmed", "corrected"}:
-                if _normalize_gap(stage.get("model_gap_magnitude")) == "none":
-                    gap = "none"
-            if gap is None and _safe_text(stage.get("analysis_status", stage.get("stage_state"))).lower() in {"completed", "grounded"}:
-                if _normalize_gap(stage.get("model_gap_magnitude")) == "none":
-                    gap = "none"
+            relation = _normalize_relation(item.get("relation"))
+            gap = _normalize_gap(item.get("gap"))
             text = f"{relation_labels.get(relation, '待确认')}，{gap_labels.get(gap, '待确认')}"
-        parts.append(f"{code}{text}")
+        note = _safe_text(item.get("note"))
+        if note:
+            text += f"（人工备注：{note}）"
+        parts.append(f"{code} {text}")
     return {
-        "verdict": "人工复核已完成：" + "；".join(parts),
-        "detail": "以上结论来自逐阶段人工确认；原始模型分析与证据引用保留在本运行目录中。",
+        "verdict": "人工逐阶段结论：" + "；".join(parts),
+        "detail": (
+            "阶段结论已确认；原商业总结未随确认更新，已停用；原有建议并未随阶段确认自动获批，待确认候选需单独核实。"
+            if changed
+            else "阶段结论已确认，保留原稿；未逐条审核建议。"
+        ),
     }
+
+
+_PERFORMANCE_FORECAST_RE = re.compile(
+    r"(?ix)(?:"
+    r"(?:点击率|完播率|转化率|GMV|销量|CTR|CVR|completion\s+rate|conversion\s+rate|sales)"
+    r".{0,24}(?:提升|提高|增加|增长|预计|预期|改善|翻倍|increase|improve|grow|boost|expect|project)"
+    r".{0,16}(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:\s*(?:-|至|到|~|～)\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)?\s*(?:%|％|倍|x|×)"
+    r"|"
+    r"(?:提升|提高|增加|增长|预计|预期|改善|翻倍|increase|improve|grow|boost|expect|project)"
+    r".{0,24}(?:点击率|完播率|转化率|GMV|销量|CTR|CVR|completion\s+rate|conversion\s+rate|sales)"
+    r".{0,16}(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:\s*(?:-|至|到|~|～)\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)?\s*(?:%|％|倍|x|×)"
+    r")"
+)
+_EXPLICIT_FORECAST_BOUNDARY_RE = re.compile(
+    r"\s*(?:as\s+well\s+as|并且|并|同时|而且|以及|且|和|及|and|also)\s*"
+    r"(?=(?:预计|预期|预估|估计|expect(?:ed)?|project(?:ed)?))",
+    re.IGNORECASE,
+)
+
+
+def _split_explicit_forecast_clauses(value: str) -> list[str]:
+    pieces: list[str] = []
+    cursor = 0
+    for boundary in _EXPLICIT_FORECAST_BOUNDARY_RE.finditer(value):
+        if boundary.start() < cursor:
+            continue
+        tail = value[boundary.end() :]
+        sentence_end = re.search(r"[。！？!?；;\n]", tail)
+        candidate = tail[: sentence_end.start()] if sentence_end else tail
+        if not _PERFORMANCE_FORECAST_RE.search(candidate):
+            continue
+        pieces.append(value[cursor : boundary.start()])
+        cursor = boundary.end()
+    pieces.append(value[cursor:])
+    return pieces
+
+
+def _remove_performance_forecast_sentences(value: Any) -> Any:
+    if isinstance(value, str):
+        clauses = _split_explicit_forecast_clauses(value)
+        parts = [
+            part
+            for clause in clauses
+            for part in re.split(r"(?<!\d)(?<=[，,。！？!?；;\n])(?!\d)", clause)
+        ]
+        removed = any(_PERFORMANCE_FORECAST_RE.search(part) for part in parts)
+        retained = "".join(part for part in parts if not _PERFORMANCE_FORECAST_RE.search(part))
+        if removed:
+            retained = re.sub(r"[，,；;]+(?=[。！？!?]?\s*$)", "", retained)
+        return retained.strip()
+    if isinstance(value, list):
+        return [
+            cleaned
+            for item in value
+            if (cleaned := _remove_performance_forecast_sentences(item)) not in (None, "", [])
+        ]
+    if isinstance(value, Mapping):
+        return {
+            key: cleaned
+            for key, item in value.items()
+            if (cleaned := _remove_performance_forecast_sentences(item)) not in (None, "", [])
+        }
+    return copy.deepcopy(value)
+
+
+def _has_action(item: Mapping[str, Any]) -> bool:
+    def has_text(value: Any) -> bool:
+        if isinstance(value, list):
+            return any(has_text(entry) for entry in value)
+        return bool(_safe_text(value))
+
+    return any(has_text(item.get(key)) for key in ("actions", "action", "suggestion"))
+
+
+def _needs_confirmation_candidate(item: Mapping[str, Any]) -> dict[str, Any] | None:
+    if not _has_action(item):
+        return None
+    actions: dict[str, Any] = {}
+    for key in ("actions", "action", "suggestion"):
+        if key not in item:
+            continue
+        value = _remove_performance_forecast_sentences(item[key])
+        if value not in (None, "", []):
+            actions[key] = value
+    if not any(_safe_text(value) or isinstance(value, list) and any(_safe_text(entry) for entry in value) for value in actions.values()):
+        return None
+    target = _item_stage_target(item)
+    candidate: dict[str, Any] = {
+        "title": f"{target} 动作候选（待人工确认）" if target else "动作候选（待人工确认）",
+        "problem": "原建议尚未依据本轮人工结论重新核验。",
+        "observation": "此动作仅保留为待确认候选，必要性、方向与预期效果尚未重新核实。",
+        "suggestion_basis": "待人工确认阶段依据；不表示方向或商业效果已验证。",
+        "status": "needs_human_confirmation",
+    }
+    experiment_id = _safe_text(item.get("experiment_id"))
+    if experiment_id:
+        candidate["experiment_id"] = experiment_id
+    if target:
+        candidate["target_stage"] = target
+    candidate.update(actions)
+    return candidate
+
+
+def _review_suggestions(items: Any, changed_codes: set[str]) -> list[dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+    output: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        target = _item_stage_target(item)
+        if not target or target in changed_codes:
+            candidate = _needs_confirmation_candidate(item)
+            if candidate is not None:
+                output.append(candidate)
+        else:
+            output.append(_remove_performance_forecast_sentences(dict(item)))
+    return output
+
+
+_CHANGED_STAGE_CONTEXT_FIELDS = (
+    "comparison_reason",
+    "reference_relevance",
+    "reference_observation",
+    "benchmark_reference",
+    "communication_strategy",
+    "communication_advice",
+    "talking_point",
+    "communication",
+    "_communication",
+    "confidence_note",
+    "confidence_notes",
+    "evidence_confidence",
+    "retain",
+    "creator_retain",
+    "creator_retention",
+)
 
 
 def project_reviewed_analysis(run_dir: Path, review: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -485,8 +656,7 @@ def project_reviewed_analysis(run_dir: Path, review: Mapping[str, Any] | None = 
     analysis = load_analysis(root)
     projected = copy.deepcopy(analysis)
     stage_map = analysis_stage_map(projected, copy_values=False)
-    removed_codes: set[str] = set()
-    preserved_review_gaps: dict[str, str] = {}
+    changed_codes: set[str] = set()
     for code in STAGE_CODES:
         stage = stage_map.get(code)
         if stage is None:
@@ -494,25 +664,13 @@ def project_reviewed_analysis(run_dir: Path, review: Mapping[str, Any] | None = 
         decision = review["stages"][code]
         state = _safe_text(decision.get("decision"))
         model_values = model_stage_values(stage)
-        model_relation = model_values["relation"]
-        current_relation = decision.get("relation")
-        if state in {"not_applicable", "insufficient_evidence"}:
-            removed_codes.add(code)
-        elif state == "corrected":
-            # A recommendation remains valid only when the original and
-            # reviewed direction both say the benchmark is stronger.  A gap
-            # correction alone is safe; any direction change invalidates the
-            # old recommendation rather than letting it survive by stage ID.
-            if model_relation == "benchmark_better" and current_relation == "benchmark_better":
-                preserved_review_gaps[code] = str(decision.get("gap"))
-            else:
-                removed_codes.add(code)
-        elif state == "confirmed" and model_relation == "benchmark_better":
-            model_gap = model_values.get("gap")
-            if model_gap in GAPS:
-                preserved_review_gaps[code] = model_gap
-        stage["review_decision"] = state
-        stage["review_note"] = decision.get("note")
+        changed = _stage_review_changed(decision, model_values)
+        if changed:
+            changed_codes.add(code)
+        if not changed:
+            continue
+        for key in _CHANGED_STAGE_CONTEXT_FIELDS:
+            stage.pop(key, None)
         if state == "corrected":
             stage["relation"] = decision.get("relation")
             stage["model_gap_magnitude"] = decision.get("gap")
@@ -525,63 +683,55 @@ def project_reviewed_analysis(run_dir: Path, review: Mapping[str, Any] | None = 
             stage["model_gap_magnitude"] = None
             stage["severity"] = None
             stage["comparison_status"] = "not_applicable"
-            stage["gap"] = "未涉及"
-            stage["gap_summary"] = ["未涉及"]
-            stage["judgment_reason"] = "未涉及"
+            stage["gap"] = decision.get("note")
+            stage["gap_summary"] = [decision.get("note")]
+            stage["judgment_reason"] = decision.get("note")
         elif state == "insufficient_evidence":
             stage["relation"] = None
             stage["model_gap_magnitude"] = None
             stage["severity"] = None
             stage["comparison_status"] = "not_comparable"
-            stage["gap"] = "证据不足，无法比较"
-            stage["gap_summary"] = ["证据不足，无法比较"]
-            stage["judgment_reason"] = "证据不足，无法比较"
-        else:
-            stage["review_decision"] = "confirmed"
-
-    def keep_item(item: Any) -> bool:
-        if not isinstance(item, Mapping):
-            return False
-        target = _stage_target(
-            item.get("target_stage")
-            or item.get("targetStage")
-            or item.get("stage")
-            or item.get("stage_code")
-        )
-        # Recommendations/experiments are review-derived output.  They may
-        # survive only for an explicit S1-S6 target whose original and final
-        # relation both establish benchmark_better.
-        return target in preserved_review_gaps and target not in removed_codes
-
-    def reorder_reviewed(items: Any) -> list[Any]:
-        original = [item for item in items or [] if keep_item(item)] if isinstance(items, list) else []
-        indexed = list(enumerate(original))
-        gap_rank = {"large": 0, "medium": 1, "small": 2, "none": 3}
-
-        def sort_key(pair: tuple[int, Any]) -> tuple[int, int, int]:
-            index, item = pair
-            target = (
-                _stage_target(
-                    item.get("target_stage")
-                    or item.get("targetStage")
-                    or item.get("stage")
-                    or item.get("stage_code")
-                )
-                if isinstance(item, Mapping)
-                else ""
+            stage["gap"] = decision.get("note")
+            stage["gap_summary"] = [decision.get("note")]
+            stage["judgment_reason"] = decision.get("note")
+    delivery_changed = bool(changed_codes)
+    if delivery_changed:
+        for code in STAGE_CODES:
+            stage = stage_map[code]
+            decision = review["stages"][code]
+            stage["review_decision"] = _safe_text(decision.get("decision"))
+            stage["review_note"] = _safe_text(decision.get("note")) or None
+            stage.pop("linked_experiment_id", None)
+    projected["review_delivery"] = {
+        "summary_status": "replaced_after_stage_review" if delivery_changed else "preserved_after_no_semantic_change",
+        "changed_stages": [code for code in STAGE_CODES if code in changed_codes],
+    }
+    projected["review_summary"] = _review_summary(review, changed=delivery_changed)
+    if delivery_changed:
+        projected["improvements"] = _review_suggestions(projected.get("improvements"), changed_codes)
+        if "candidate_experiments" in projected:
+            projected["candidate_experiments"] = _review_suggestions(
+                projected.get("candidate_experiments"), changed_codes
             )
-            if target in preserved_review_gaps:
-                return (0, gap_rank.get(preserved_review_gaps[target], 9), index)
-            return (1, 9, index)
-
-        return [item for _, item in sorted(indexed, key=sort_key)]
-
-    projected["improvements"] = reorder_reviewed(projected.get("improvements"))
-    if isinstance(projected.get("candidate_experiments"), list):
-        projected["candidate_experiments"] = reorder_reviewed(projected["candidate_experiments"])
+        for key in (
+            "one_line_summary",
+            "commercial_priority_summary",
+            "global_diagnosis",
+            "commercial_priorities",
+            "key_conclusions",
+            "holistic_assessment",
+            "highlights",
+            "creator_highlights",
+            "content_intent",
+            "creator_content_intent",
+            "retained_points",
+            "creator_retain",
+        ):
+            projected.pop(key, None)
+        projected["one_line_verdict"] = projected["review_summary"]["verdict"]
+        projected["executive_summary"] = projected["review_summary"]["detail"]
     projected["review_status"] = "approved"
     projected["review_mode"] = REVIEW_MODE
-    projected["review_summary"] = _project_summary(list(stage_map.values()))
     return projected
 
 
