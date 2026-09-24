@@ -23,9 +23,12 @@ from flayr_core.human_review import (  # noqa: E402
     load_analysis,
     load_review,
     model_stage_values,
+    normalize_action_sentence,
     priority_key,
+    reviewable_suggestion_actions,
     review_status,
     update_stage,
+    update_suggestion_review,
     write_reviewed_reports,
 )
 
@@ -134,6 +137,56 @@ def _apply_decision(run_dir: Path, code: str, decision: Mapping[str, Any], *, ap
     return True
 
 
+def _prompt_suggestion_decision(item: Mapping[str, Any]) -> dict[str, Any] | None:
+    print(f"\n[{item['key']}] {item['title']}")
+    print(f"当前状态：{item.get('decision', 'pending')}")
+    print(f"原候选动作：{item['action']}")
+    if item.get("reviewed_action"):
+        print(f"当前交付动作：{item['reviewed_action']}")
+    while True:
+        choice = input("动作：c同意 e改一句 s保留待确认 q退出：").strip().lower()
+        if choice == "q":
+            return None
+        if choice == "s":
+            return {"decision": "pending", "action": None}
+        if choice == "c":
+            return {"decision": "approved", "action": None}
+        if choice == "e":
+            try:
+                action = normalize_action_sentence(input("最终动作句：").strip())
+            except HumanReviewError as exc:
+                print(f"未保存：{exc}")
+                continue
+            return {"decision": "edited", "action": action}
+        print("请输入 c、e、s 或 q。")
+
+
+def _review_pending_suggestions(run_dir: Path) -> bool:
+    review = load_review(run_dir)
+    pending = reviewable_suggestion_actions(run_dir, review)
+    if not pending:
+        print("当前没有因阶段更正而待确认的动作。")
+        return False
+    report_changed = False
+    for item in pending:
+        decision = _prompt_suggestion_decision(item)
+        if decision is None:
+            print("已退出，未处理的动作继续保持待确认。")
+            break
+        try:
+            changed = update_suggestion_review(
+                run_dir,
+                item["key"],
+                str(decision["decision"]),
+                action=decision.get("action"),
+            )
+        except HumanReviewError as exc:
+            print(f"未保存：{exc}")
+            continue
+        report_changed = report_changed or changed
+    return report_changed
+
+
 def _status(run_dir: Path) -> int:
     review = init_review(run_dir)
     print(f"status: {review_status(review)}")
@@ -150,11 +203,20 @@ def _review(run_dir: Path) -> int:
 
     if review_status(review) == "approved":
         while True:
-            code = input("已完成审核。输入 S1-S6 修订，或 q 退出：").strip().upper()
-            if code == "Q" or not code:
+            command = input("已完成审核。输入 S1-S6 修订，a审核待确认动作，或 q 退出：").strip()
+            if command.lower() == "q" or not command:
                 return 0
+            if command.lower() == "a":
+                try:
+                    if _review_pending_suggestions(run_dir):
+                        paths = write_reviewed_reports(run_dir)
+                        print(f"动作审核完成，已重新生成：{paths[0].name}、{paths[1].name}")
+                except HumanReviewError as exc:
+                    print(f"未保存：{exc}")
+                continue
+            code = command.upper()
             if code not in STAGE_CODES:
-                print("阶段必须是 S1-S6。")
+                print("阶段必须是 S1-S6，或输入 a 审核动作。")
                 continue
             decision = _prompt_decision(code, stages.get(code, {}), review["stages"][code])
             if decision is None or decision.get("skip"):
@@ -195,6 +257,10 @@ def _review(run_dir: Path) -> int:
     if review_status(review) != "approved":
         print("审核尚未完成，未生成 reviewed 报告。")
         return 0
+    if reviewable_suggestion_actions(run_dir, review):
+        choice = input("阶段结论已通过。输入 a 审核待确认动作，或回车保留待确认：").strip().lower()
+        if choice == "a" and _review_pending_suggestions(run_dir):
+            print("动作审核结果已保存，将一并生成 reviewed 报告。")
     paths = write_reviewed_reports(run_dir)
     print(f"审核完成，已生成：{paths[0].name}、{paths[1].name}")
     return 0

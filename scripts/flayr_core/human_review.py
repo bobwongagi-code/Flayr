@@ -32,6 +32,8 @@ DECISIONS = {"pending", "confirmed", "corrected", "not_applicable", "insufficien
 RELATIONS = {"tie", "benchmark_better", "creator_better"}
 GAPS = {"none", "small", "medium", "large"}
 FINAL_DECISIONS = DECISIONS - {"pending"}
+SUGGESTION_DECISIONS = {"pending", "approved", "edited"}
+_SUGGESTION_KEY_RE = re.compile(r"^(improvements|candidate_experiments):(\d+)$")
 
 
 class HumanReviewError(ValueError):
@@ -200,6 +202,7 @@ def _empty_sidecar(source: Mapping[str, Any]) -> dict[str, Any]:
             }
             for code in STAGE_CODES
         },
+        "suggestion_reviews": {},
         "history": [],
     }
 
@@ -266,6 +269,38 @@ def _validate_review_shape(review: Mapping[str, Any]) -> None:
         if gap is not None and gap not in GAPS:
             raise HumanReviewError(f"{code} gap 非法")
         _validate_stage_decision(decision, relation, gap, item.get("note"), model_values={"prediction_unavailable": False})
+    suggestion_reviews = review.get("suggestion_reviews", {})
+    if not isinstance(suggestion_reviews, Mapping):
+        raise HumanReviewError("suggestion_reviews 必须是对象")
+    for key, item in suggestion_reviews.items():
+        if not isinstance(key, str) or not _SUGGESTION_KEY_RE.fullmatch(key):
+            raise HumanReviewError(f"建议审核键非法：{key!r}")
+        if not isinstance(item, Mapping):
+            raise HumanReviewError(f"{key} 建议审核记录必须是对象")
+        decision = _safe_text(item.get("decision"))
+        action = _safe_text(item.get("action"))
+        if decision not in SUGGESTION_DECISIONS:
+            raise HumanReviewError(f"{key} 建议审核决定非法")
+        if decision in {"approved", "edited"}:
+            _normalize_action_sentence(action)
+        elif action:
+            raise HumanReviewError(f"{key} pending 建议不能携带已批准动作")
+        if not _safe_text(item.get("timestamp")):
+            raise HumanReviewError(f"{key} 建议审核必须记录时间")
+        history = item.get("history")
+        if not isinstance(history, list):
+            raise HumanReviewError(f"{key} 建议审核 history 必须是数组")
+        for event in history:
+            if not isinstance(event, Mapping):
+                raise HumanReviewError(f"{key} 建议审核 history 项必须是对象")
+            event_decision = _safe_text(event.get("decision"))
+            event_action = _safe_text(event.get("action"))
+            if event_decision not in SUGGESTION_DECISIONS or not _safe_text(event.get("timestamp")):
+                raise HumanReviewError(f"{key} 建议审核 history 项非法")
+            if event_decision in {"approved", "edited"}:
+                _normalize_action_sentence(event_action)
+            elif event_action:
+                raise HumanReviewError(f"{key} pending history 项不能携带动作")
     if review.get("status") not in {None, "pending", "approved"}:
         raise HumanReviewError("审核状态非法")
     stored_status = review.get("status")
@@ -284,6 +319,27 @@ def _validate_review_against_analysis(review: Mapping[str, Any], analysis: Mappi
         _validate_stage_decision(decision, relation, gap, item.get("note"), model_values)
         if decision == "confirmed" and (relation != model_values.get("relation") or gap != model_values.get("gap")):
             raise HumanReviewError(f"{code} confirmed 必须保持模型原始 relation/gap")
+    for key in review.get("suggestion_reviews", {}):
+        match = _SUGGESTION_KEY_RE.fullmatch(str(key))
+        if match is None:
+            raise HumanReviewError(f"建议审核键非法：{key!r}")
+        collection, raw_index = match.groups()
+        items = analysis.get(collection)
+        index = int(raw_index)
+        if not isinstance(items, list) or index >= len(items) or not isinstance(items[index], Mapping):
+            raise HumanReviewError(f"{key} 不对应当前 analysis 中的建议候选")
+        item = items[index]
+        candidate = _needs_confirmation_candidate(item)
+        if candidate is None:
+            raise HumanReviewError(f"{key} 没有可审核的动作")
+        record = review["suggestion_reviews"][key]
+        if record["decision"] in {"approved", "edited"}:
+            target = _item_stage_target(item)
+            changed_codes = _changed_stage_codes(analysis, review)
+            if not changed_codes or target and target not in changed_codes:
+                raise HumanReviewError(f"{key} 未被本轮阶段更正降级，不能批准交付")
+            if record["decision"] == "approved" and record["action"] != _candidate_action_sentence(item):
+                raise HumanReviewError(f"{key} approved 必须使用原候选首条动作句")
 
 
 def load_analysis(run_dir: Path) -> dict[str, Any]:
@@ -403,8 +459,9 @@ def update_stage(
     if previous == current:
         return review
     was_approved = review_status(review) == "approved"
+    invalidate_reviewed_reports(run_dir)
+    _clear_suggestion_approvals(review)
     if was_approved:
-        invalidate_reviewed_reports(run_dir)
         # A post-approval edit begins a new review pass.  Reset the edited
         # stage first so status remains derived from stage decisions; the
         # reviewer applies the new decision on the next invocation.
@@ -435,6 +492,27 @@ def invalidate_reviewed_reports(run_dir: Path) -> tuple[Path, ...]:
             path.unlink()
             removed.append(path)
     return tuple(removed)
+
+
+def _clear_suggestion_approvals(review: dict[str, Any]) -> None:
+    records = review.get("suggestion_reviews")
+    if not isinstance(records, dict):
+        return
+    for record in records.values():
+        if not isinstance(record, dict) or record.get("decision") not in {"approved", "edited"}:
+            continue
+        timestamp = _now()
+        record["decision"] = "pending"
+        record["action"] = None
+        record["timestamp"] = timestamp
+        record.setdefault("history", []).append(
+            {
+                "timestamp": timestamp,
+                "decision": "pending",
+                "action": None,
+                "reason": "stage_edit",
+            }
+        )
 
 
 def _stage_target(value: Any) -> str:
@@ -608,17 +686,193 @@ def _needs_confirmation_candidate(item: Mapping[str, Any]) -> dict[str, Any] | N
     return candidate
 
 
-def _review_suggestions(items: Any, changed_codes: set[str]) -> list[dict[str, Any]]:
+def _first_action_sentence(value: Any) -> str:
+    text = _safe_text(value)
+    if not text:
+        return ""
+    cleaned = _remove_performance_forecast_sentences(text)
+    if not isinstance(cleaned, str):
+        return ""
+    match = re.search(r"[。！？!?;；\n]", cleaned)
+    return cleaned[: match.end()].strip() if match else cleaned.strip()
+
+
+def _candidate_action_sentence(item: Mapping[str, Any]) -> str:
+    candidate = _needs_confirmation_candidate(item)
+    if candidate is None:
+        return ""
+    for key in ("action", "suggestion", "actions"):
+        value = candidate.get(key)
+        values = value if isinstance(value, list) else [value]
+        for entry in values:
+            sentence = _first_action_sentence(entry)
+            if sentence:
+                return sentence
+    return ""
+
+
+def _normalize_action_sentence(value: Any) -> str:
+    """Validate and sanitize the one action sentence approved for delivery."""
+    text = _safe_text(value)
+    cleaned = _remove_performance_forecast_sentences(text)
+    if not isinstance(cleaned, str) or not cleaned.strip():
+        raise HumanReviewError("动作句不能为空或仅包含业绩预测")
+    sentences = [
+        part.strip()
+        for part in re.split(r"[。！？!?;；\n]+|(?<!\d)\.(?!\d)", cleaned)
+        if part.strip()
+    ]
+    if len(sentences) != 1:
+        raise HumanReviewError("只能填写一句动作")
+    return cleaned.strip()
+
+
+def normalize_action_sentence(value: Any) -> str:
+    return _normalize_action_sentence(value)
+
+
+def _changed_stage_codes(analysis: Mapping[str, Any], review: Mapping[str, Any]) -> set[str]:
+    stages = analysis_stage_map(analysis)
+    return {
+        code
+        for code in STAGE_CODES
+        if _stage_review_changed(review["stages"][code], model_stage_values(stages[code]))
+    }
+
+
+def reviewable_suggestion_actions(
+    run_dir: Path,
+    review: Mapping[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    """Return action candidates that stage review actually demoted."""
+    root = run_dir.expanduser().resolve()
+    current_review = dict(review or load_review(root))
+    _assert_source_current(current_review, _source_fingerprint(root))
+    analysis = load_analysis(root)
+    _validate_review_shape(current_review)
+    _validate_review_against_analysis(current_review, analysis)
+    if review_status(current_review) != "approved":
+        return []
+    changed_codes = _changed_stage_codes(analysis, current_review)
+    if not changed_codes:
+        return []
+
+    reviewed = current_review.get("suggestion_reviews", {})
+    pending: list[dict[str, str]] = []
+    for collection in ("improvements", "candidate_experiments"):
+        items = analysis.get(collection)
+        if not isinstance(items, list):
+            continue
+        for index, item in enumerate(items):
+            if not isinstance(item, Mapping):
+                continue
+            target = _item_stage_target(item)
+            if target and target not in changed_codes:
+                continue
+            candidate = _needs_confirmation_candidate(item)
+            action = _candidate_action_sentence(item)
+            if candidate is None or not action:
+                continue
+            key = f"{collection}:{index}"
+            record = reviewed.get(key, {}) if isinstance(reviewed, Mapping) else {}
+            current_decision = _safe_text(record.get("decision")) if isinstance(record, Mapping) else "pending"
+            pending.append(
+                {
+                    "key": key,
+                    "collection": collection,
+                    "title": _safe_text(item.get("title") or item.get("name")) or f"{target or '未绑定'} 动作候选",
+                    "target_stage": target,
+                    "action": action,
+                    "decision": current_decision or "pending",
+                    "reviewed_action": _safe_text(record.get("action")) if isinstance(record, Mapping) else "",
+                }
+            )
+    return pending
+
+
+def update_suggestion_review(
+    run_dir: Path,
+    key: str,
+    decision: str,
+    *,
+    action: str | None = None,
+) -> bool:
+    """Record a candidate action review; return whether a report projection changed."""
+    if decision not in SUGGESTION_DECISIONS:
+        raise HumanReviewError(f"未知建议审核决定：{decision}")
+    review = load_review(run_dir)
+    eligible = {item["key"]: item for item in reviewable_suggestion_actions(run_dir, review)}
+    candidate = eligible.get(key)
+    if candidate is None:
+        raise HumanReviewError(f"{key} 不是本轮被降级的待确认动作")
+
+    if decision == "approved":
+        final_action = candidate["action"]
+    elif decision == "edited":
+        final_action = normalize_action_sentence(action)
+    else:
+        if _safe_text(action):
+            raise HumanReviewError("pending 建议不能携带动作")
+        final_action = ""
+
+    records = review.setdefault("suggestion_reviews", {})
+    previous = records.get(key)
+    previous_decision = previous.get("decision") if isinstance(previous, Mapping) else None
+    previous_action = _safe_text(previous.get("action")) if isinstance(previous, Mapping) else ""
+    if previous_decision == decision and previous_action == final_action:
+        return False
+
+    timestamp = _now()
+    record = dict(previous) if isinstance(previous, Mapping) else {}
+    history = list(record.get("history") or [])
+    record.update({"decision": decision, "action": final_action or None, "timestamp": timestamp})
+    history.append({"timestamp": timestamp, "decision": decision, "action": final_action or None})
+    record["history"] = history
+    records[key] = record
+
+    report_changed = decision in {"approved", "edited"} or previous_decision in {"approved", "edited"}
+    if report_changed:
+        invalidate_reviewed_reports(run_dir)
+    save_review(run_dir, review)
+    return report_changed
+
+
+def _review_suggestions(
+    items: Any,
+    changed_codes: set[str],
+    review: Mapping[str, Any],
+    collection: str,
+) -> list[dict[str, Any]]:
     if not isinstance(items, list):
         return []
     output: list[dict[str, Any]] = []
-    for item in items:
+    decisions = review.get("suggestion_reviews")
+    decisions = decisions if isinstance(decisions, Mapping) else {}
+    for index, item in enumerate(items):
         if not isinstance(item, Mapping):
             continue
         target = _item_stage_target(item)
         if not target or target in changed_codes:
             candidate = _needs_confirmation_candidate(item)
             if candidate is not None:
+                record = decisions.get(f"{collection}:{index}")
+                if isinstance(record, Mapping) and record.get("decision") in {"approved", "edited"}:
+                    final_action = _normalize_action_sentence(record.get("action"))
+                    candidate["status"] = "human_approved_action"
+                    candidate["title"] = (
+                        f"{target} 人工确认的拍摄动作" if target else "人工确认的拍摄动作"
+                    )
+                    candidate["problem"] = "原模型的问题描述未经过人工确认。"
+                    candidate["observation"] = "拍摄动作已人工确认；视频依据和商业效果仍需核实。"
+                    candidate["suggestion_basis"] = "仅拍摄动作经人工确认，不证明标杆示范或效果。"
+                    if collection == "improvements":
+                        candidate["suggestion"] = final_action
+                        candidate.pop("action", None)
+                        candidate.pop("actions", None)
+                    else:
+                        candidate["action"] = final_action
+                        candidate.pop("suggestion", None)
+                        candidate.pop("actions", None)
                 output.append(candidate)
         else:
             output.append(_remove_performance_forecast_sentences(dict(item)))
@@ -708,10 +962,15 @@ def project_reviewed_analysis(run_dir: Path, review: Mapping[str, Any] | None = 
     }
     projected["review_summary"] = _review_summary(review, changed=delivery_changed)
     if delivery_changed:
-        projected["improvements"] = _review_suggestions(projected.get("improvements"), changed_codes)
+        projected["improvements"] = _review_suggestions(
+            projected.get("improvements"), changed_codes, review, "improvements"
+        )
         if "candidate_experiments" in projected:
             projected["candidate_experiments"] = _review_suggestions(
-                projected.get("candidate_experiments"), changed_codes
+                projected.get("candidate_experiments"),
+                changed_codes,
+                review,
+                "candidate_experiments",
             )
         for key in (
             "one_line_summary",

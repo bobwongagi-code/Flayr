@@ -222,23 +222,62 @@ def _build_experiments(
     creator_understanding: dict[str, Any],
 ) -> list[dict[str, Any]]:
     raw_candidates = semantic.creator_context.get("candidate_experiments")
-    if not isinstance(raw_candidates, list):
+    if isinstance(raw_candidates, list):
+        raw_candidates = list(raw_candidates) + [
+            item.data
+            for item in semantic.improvements
+            if _safe_text(item.data.get("status")).lower() == "human_approved_action"
+        ]
+    else:
         raw_candidates = [item.data for item in semantic.improvements]
-    if not isinstance(raw_candidates, list):
-        return []
 
     ordered = list(enumerate(raw_candidates))
-    ordered.sort(key=lambda pair: _priority_key(pair[1], pair[0]))
+    ordered.sort(
+        key=lambda pair: (
+            0
+            if isinstance(pair[1], dict)
+            and _safe_text(pair[1].get("status")).lower() == "human_approved_action"
+            else 1,
+            *_priority_key(pair[1], pair[0]),
+        )
+    )
     experiments: list[dict[str, Any]] = []
+    approved_actions: set[tuple[str, str]] = set()
     for original_index, raw in ordered:
         if not isinstance(raw, dict):
             continue
-        if _safe_text(raw.get("status")).lower() == "needs_human_confirmation":
+        action_status = _safe_text(raw.get("status")).lower()
+        if action_status == "needs_human_confirmation":
             continue
         target_stage = _stage_code(
             _first_text(raw.get("target_stage"), raw.get("stage"), raw.get("stage_code")),
             0,
         )
+        if action_status == "human_approved_action":
+            action = _first_text(raw.get("action"), raw.get("suggestion"))
+            action_key = (target_stage, action)
+            if not action or action_key in approved_actions:
+                continue
+            approved_actions.add(action_key)
+            experiments.append(
+                {
+                    "id": _safe_text(raw.get("experiment_id")) or f"reviewed-{original_index + 1}",
+                    "title": f"{target_stage} 人工确认的拍摄建议" if target_stage else "人工确认的拍摄建议",
+                    "targetStage": target_stage,
+                    "observation": "",
+                    "hypothesis": "",
+                    "action": action,
+                    "demonstration": "",
+                    "verification": "下次核对是否完成这条拍摄动作。",
+                    "why": "这条拍摄动作已由人工确认，实际效果仍需观察。",
+                    "confidence": "",
+                    "status": action_status,
+                    "sourceIndex": original_index,
+                }
+            )
+            if len(experiments) >= 3:
+                break
+            continue
         source_stage = stage_by_code.get(target_stage, {})
         source_units = referenced_evidence_units(
             source_stage.get("creator_evidence_ids"),

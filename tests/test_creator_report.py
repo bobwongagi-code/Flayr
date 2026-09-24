@@ -136,6 +136,53 @@ class CreatorReportTests(unittest.TestCase):
             self.assertEqual(data["stages"][1]["statusLabel"], "证据不足，无法比较")
             self.assertEqual(data["stages"][1]["observation"], "证据不足，无法比较")
 
+    def test_reviewed_action_shows_only_the_human_approved_sentence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            analysis = self._analysis(root / "run")
+            analysis["improvements"] = [
+                {
+                    "target_stage": "S4",
+                    "status": "human_approved_action",
+                    "suggestion": "补拍真实充电过程，不用动画证明快充。",
+                    "observation": "旧模型误以为动画证明了快充。",
+                    "expected_effect": "预计点击率提升10%。",
+                }
+            ]
+
+            data = build_creator_report_data(analysis, ReportAssetContext(root / "run"))
+
+            self.assertEqual(len(data["experiments"]), 1)
+            action = data["experiments"][0]
+            self.assertEqual(action["status"], "human_approved_action")
+            self.assertEqual(action["action"], "补拍真实充电过程，不用动画证明快充。")
+            self.assertEqual(action["observation"], "")
+            self.assertEqual(action["hypothesis"], "")
+            self.assertNotIn("预计点击率提升", json.dumps(data, ensure_ascii=False))
+
+    def test_reviewed_improvement_is_visible_beside_candidate_experiments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            analysis = self._analysis(root / "run")
+            analysis["candidate_experiments"] = [
+                {
+                    "target_stage": "S4",
+                    "status": "needs_human_confirmation",
+                    "action": "旧候选动作",
+                }
+            ]
+            analysis["improvements"] = [
+                {
+                    "target_stage": "S4",
+                    "status": "human_approved_action",
+                    "suggestion": "补拍真实充电过程。",
+                }
+            ]
+
+            data = build_creator_report_data(analysis, ReportAssetContext(root / "run"))
+
+            self.assertEqual([item["action"] for item in data["experiments"]], ["补拍真实充电过程。"])
+
 
 if __name__ == "__main__":
     unittest.main()

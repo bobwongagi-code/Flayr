@@ -142,6 +142,12 @@ class HumanReviewTests(unittest.TestCase):
         transition_run_state(run_dir, COMPLETED)
         write_success_manifest(run_dir, {"input.mp4": input_video}, analysis)
 
+    def _replace_run_analysis(self, temp: tempfile.TemporaryDirectory, run_dir: Path, analysis: dict) -> None:
+        write_json(run_dir / "analysis.json", analysis)
+        write_bd_report(run_dir, analysis)
+        write_creator_report(run_dir, analysis)
+        write_success_manifest(run_dir, {"input.mp4": Path(temp.name) / "input.mp4"}, analysis)
+
     def test_init_binds_sources_and_keeps_pending_status(self) -> None:
         temp, run_dir = self.fresh_run()
         self.addCleanup(temp.cleanup)
@@ -792,6 +798,164 @@ class HumanReviewTests(unittest.TestCase):
         creator_stage = next(stage for stage in creator_view["stages"] if stage["code"] == "S1")
         self.assertIn("原模型记录，未随本次人工更正复核：", creator_stage["observation"])
 
+    def _approve_and_change_s1(self, run_dir: Path) -> None:
+        self._approve_all(run_dir)
+        correction = {
+            "decision": "corrected",
+            "relation": "benchmark_better",
+            "gap": "medium",
+            "note": "人工确认开场建议需要重新核实。",
+        }
+        hr.update_stage(run_dir, "S1", **{
+            "decision": correction["decision"],
+            "relation": correction["relation"],
+            "gap": correction["gap"],
+            "note": correction["note"],
+        })
+        hr.update_stage(run_dir, "S1", **{
+            "decision": correction["decision"],
+            "relation": correction["relation"],
+            "gap": correction["gap"],
+            "note": correction["note"],
+        })
+
+    def test_suggestion_review_approves_or_edits_demoted_actions_in_projected_copy(self) -> None:
+        temp, run_dir = self.fresh_run()
+        self.addCleanup(temp.cleanup)
+        analysis = hr.load_analysis(run_dir)
+        analysis["candidate_experiments"] = [
+            {"target_stage": "S1", "title": "旧候选实验", "action": "补拍真实充电过程。"}
+        ]
+        self._replace_run_analysis(temp, run_dir, analysis)
+        before = (run_dir / "analysis.json").read_bytes()
+        hr.init_review(run_dir)
+        self._approve_and_change_s1(run_dir)
+
+        candidates = hr.reviewable_suggestion_actions(run_dir)
+        self.assertEqual([item["key"] for item in candidates], ["improvements:0", "candidate_experiments:0"])
+        self.assertTrue(hr.update_suggestion_review(run_dir, "improvements:0", "approved"))
+        self.assertTrue(
+            hr.update_suggestion_review(
+                run_dir,
+                "candidate_experiments:0",
+                "edited",
+                action="补拍真实充电过程，不用动画证明快充。",
+            )
+        )
+
+        review = hr.load_review(run_dir)
+        self.assertEqual(hr.review_status(review), "approved")
+        self.assertEqual(review["suggestion_reviews"]["improvements:0"]["decision"], "approved")
+        self.assertEqual(review["suggestion_reviews"]["candidate_experiments:0"]["decision"], "edited")
+        self.assertTrue(review["suggestion_reviews"]["improvements:0"]["history"])
+        self.assertTrue(review["suggestion_reviews"]["candidate_experiments:0"]["timestamp"])
+
+        projected = hr.project_reviewed_analysis(run_dir, review)
+        improvement = projected["improvements"][0]
+        candidate_experiment = projected["candidate_experiments"][0]
+        self.assertEqual(improvement["status"], "human_approved_action")
+        self.assertEqual(improvement["suggestion"], "补充开场。")
+        self.assertEqual(improvement["title"], "S1 人工确认的拍摄动作")
+        self.assertNotIn("待人工确认", improvement["observation"])
+        self.assertNotIn("actions", improvement)
+        self.assertEqual(candidate_experiment["status"], "human_approved_action")
+        self.assertEqual(candidate_experiment["action"], "补拍真实充电过程，不用动画证明快充。")
+        self.assertNotIn("actions", candidate_experiment)
+        self.assertEqual((run_dir / "analysis.json").read_bytes(), before)
+
+    def test_pending_suggestion_review_keeps_candidate_unapproved(self) -> None:
+        temp, run_dir = self.fresh_run()
+        self.addCleanup(temp.cleanup)
+        hr.init_review(run_dir)
+        self._approve_and_change_s1(run_dir)
+        self.assertFalse(hr.update_suggestion_review(run_dir, "improvements:0", "pending"))
+
+        review = hr.load_review(run_dir)
+        projected = hr.project_reviewed_analysis(run_dir, review)
+        self.assertEqual(review["suggestion_reviews"]["improvements:0"]["decision"], "pending")
+        self.assertEqual(projected["improvements"][0]["status"], "needs_human_confirmation")
+        self.assertNotEqual(projected["improvements"][0]["status"], "human_approved_action")
+
+    def test_suggestion_action_can_be_corrected_and_revoked(self) -> None:
+        temp, run_dir = self.fresh_run()
+        self.addCleanup(temp.cleanup)
+        hr.init_review(run_dir)
+        self._approve_and_change_s1(run_dir)
+        hr.update_suggestion_review(run_dir, "improvements:0", "approved")
+
+        listed = hr.reviewable_suggestion_actions(run_dir)
+        self.assertEqual(listed[0]["decision"], "approved")
+        self.assertTrue(
+            hr.update_suggestion_review(
+                run_dir,
+                "improvements:0",
+                "edited",
+                action="改为补拍真实操作过程。",
+            )
+        )
+        self.assertTrue(hr.update_suggestion_review(run_dir, "improvements:0", "pending"))
+
+        review = hr.load_review(run_dir)
+        record = review["suggestion_reviews"]["improvements:0"]
+        self.assertEqual(record["decision"], "pending")
+        self.assertIsNone(record["action"])
+        self.assertEqual(
+            [event["decision"] for event in record["history"]],
+            ["approved", "edited", "pending"],
+        )
+        projected = hr.project_reviewed_analysis(run_dir, review)
+        self.assertEqual(projected["improvements"][0]["status"], "needs_human_confirmation")
+
+    def test_stage_edit_clears_suggestion_approval_and_invalidates_reports(self) -> None:
+        temp, run_dir = self.fresh_run()
+        self.addCleanup(temp.cleanup)
+        hr.init_review(run_dir)
+        self._approve_and_change_s1(run_dir)
+        hr.update_suggestion_review(run_dir, "improvements:0", "approved")
+        (run_dir / hr.REVIEWED_BD_REPORT_NAME).write_text("reviewed", encoding="utf-8")
+        (run_dir / hr.REVIEWED_CREATOR_REPORT_NAME).write_text("reviewed", encoding="utf-8")
+
+        hr.update_stage(
+            run_dir,
+            "S1",
+            "corrected",
+            relation="creator_better",
+            gap="large",
+            note="再次调整人工判断。",
+        )
+        review = hr.load_review(run_dir)
+        suggestion = review["suggestion_reviews"]["improvements:0"]
+        self.assertEqual(review["stages"]["S1"]["decision"], "pending")
+        self.assertEqual(suggestion["decision"], "pending")
+        self.assertIsNone(suggestion["action"])
+        self.assertEqual(suggestion["history"][-1]["reason"], "stage_edit")
+        self.assertFalse((run_dir / hr.REVIEWED_BD_REPORT_NAME).exists())
+        self.assertFalse((run_dir / hr.REVIEWED_CREATOR_REPORT_NAME).exists())
+
+    def test_all_unchanged_stage_confirmations_do_not_expose_suggestions_for_review(self) -> None:
+        temp, run_dir = self.fresh_run()
+        self.addCleanup(temp.cleanup)
+        analysis = self._valid_comparison_analysis()
+        review = hr.init_review(run_dir)
+        axes = [
+            ("creator_better", "small"),
+            ("tie", "none"),
+            ("benchmark_better", "medium"),
+            ("benchmark_better", "small"),
+            ("creator_better", "small"),
+            ("benchmark_better", "small"),
+        ]
+        for code, (relation, gap) in zip(hr.STAGE_CODES, axes):
+            review["stages"][code] = {
+                "decision": "confirmed",
+                "relation": relation,
+                "gap": gap,
+                "note": None,
+            }
+        review["status"] = "approved"
+        with mock.patch.object(hr, "load_analysis", return_value=analysis):
+            self.assertEqual(hr.reviewable_suggestion_actions(run_dir, review), [])
+
     def test_reviewed_reports_have_distinct_names_and_badges(self) -> None:
         temp, run_dir = self.fresh_run()
         self.addCleanup(temp.cleanup)
@@ -896,6 +1060,25 @@ class HumanReviewTests(unittest.TestCase):
         self.assertEqual(hr.review_status(hr.load_review(run_dir)), "approved")
         self.assertTrue((run_dir / hr.REVIEWED_BD_REPORT_NAME).exists())
 
+    def test_cli_a_entry_can_edit_a_pending_action_and_regenerates_reports(self) -> None:
+        temp, run_dir = self.fresh_run()
+        self.addCleanup(temp.cleanup)
+        hr.init_review(run_dir)
+        self._approve_and_change_s1(run_dir)
+
+        with mock.patch(
+            "builtins.input",
+            side_effect=["a", "e", "补拍真实充电过程，不用动画证明快充。", "q"],
+        ):
+            self.assertEqual(review_analysis.main([str(run_dir)]), 0)
+
+        review = hr.load_review(run_dir)
+        self.assertEqual(review["suggestion_reviews"]["improvements:0"]["decision"], "edited")
+        self.assertTrue((run_dir / hr.REVIEWED_BD_REPORT_NAME).exists())
+        self.assertTrue((run_dir / hr.REVIEWED_CREATOR_REPORT_NAME).exists())
+        projected = hr.project_reviewed_analysis(run_dir, review)
+        self.assertEqual(projected["improvements"][0]["suggestion"], "补拍真实充电过程，不用动画证明快充。")
+
     def test_rerun_cleanup_keeps_sidecar_and_removes_reviewed_reports(self) -> None:
         temp, run_dir = self.fresh_run()
         self.addCleanup(temp.cleanup)
@@ -937,6 +1120,8 @@ class HumanReviewTests(unittest.TestCase):
         temp, run_dir = self.fresh_run()
         self.addCleanup(temp.cleanup)
         hr.init_review(run_dir)
+        self._approve_and_change_s1(run_dir)
+        self.assertTrue(hr.update_suggestion_review(run_dir, "improvements:0", "approved"))
         analysis_path = run_dir / "analysis.json"
         analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
         analysis["one_line_summary"] = "changed after review"

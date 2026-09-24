@@ -218,18 +218,26 @@ def _stage_payload(
 
 
 def _improvement_payload(item: dict[str, Any], rank: int, benchmark_understanding: dict[str, Any]) -> dict[str, Any]:
-    needs_confirmation = _safe_text(item.get("status")).lower() == "needs_human_confirmation"
+    action_status = _safe_text(item.get("status")).lower()
+    needs_confirmation = action_status in {"needs_human_confirmation", "human_approved_action"}
+    action_approved = action_status == "human_approved_action"
     action = _first_text(_join_text(item.get("actions")), item.get("suggestion"), item.get("expected_effect"))
     script = _safe_text(item.get("creator_script_zh"))
     if script and action and not needs_confirmation:
         action = f"{action} 建议话术：{script}"
     if needs_confirmation:
-        priority_label, priority_class = "待人工确认", "priority-low"
+        priority_label, priority_class = (
+            ("人工确认动作", "priority-low") if action_approved else ("待人工确认", "priority-low")
+        )
         impact_direction = "未核实"
         confidence = "待确认"
         evidence_strength = "待核实"
-        gap_type = "理想方向候选"
-        plan_b = "理想方向候选，不能作为已确认的标杆示范。"
+        gap_type = "人工确认的拍摄动作" if action_approved else "理想方向候选"
+        plan_b = (
+            "拍摄动作已由人工确认；标杆示范与商业效果仍未核实。"
+            if action_approved
+            else "理想方向候选，不能作为已确认的标杆示范。"
+        )
     else:
         impact_direction = _impact_direction(item.get("gmv_impact"))
         priority_label, priority_class = _priority_from_improvement(item)

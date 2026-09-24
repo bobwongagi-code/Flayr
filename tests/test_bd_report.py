@@ -89,6 +89,27 @@ class BdReportTests(unittest.TestCase):
         self.assertNotIn("gmvClass", serialized)
         self.assertNotIn('"level"', serialized)
 
+    def test_human_approved_action_does_not_validate_old_benchmark_or_impact(self) -> None:
+        analysis = self._analysis()
+        analysis["improvements"] = [
+            {
+                "target_stage": "S4",
+                "status": "human_approved_action",
+                "suggestion": "补拍真实充电过程，不用动画证明快充。",
+                "benchmark_reference": "旧模型误判的标杆示范。",
+                "gmv_impact": "预计点击率提升10%。",
+            }
+        ]
+
+        item = build_bd_report_data(analysis)["improvements"][0]
+
+        self.assertEqual(item["priorityLabel"], "人工确认动作")
+        self.assertEqual(item["planA"], "补拍真实充电过程，不用动画证明快充。")
+        self.assertEqual(item["impactDirection"], "未核实")
+        self.assertEqual(item["evidenceStrength"], "待核实")
+        self.assertNotIn("旧模型误判", json.dumps(item, ensure_ascii=False))
+        self.assertNotIn("预计点击率", json.dumps(item, ensure_ascii=False))
+
     def test_template_is_runtime_bound_and_escapes_script_data(self) -> None:
         template = Path("assets/bd_report.html").read_text(encoding="utf-8")
         self.assertIn("{{bd_report_data}}", template)
