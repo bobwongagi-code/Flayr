@@ -4,7 +4,7 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "eec90962fc5d5c1a80e76b23b0db705c3e72b9fe",
+  "production_behavior_commit": "bb8fd257358cc8f690943dba62fb35dc944c98f7",
   "authorized_semantic_correction": {
     "status": "applied_and_refrozen",
     "scope": "用户明确授权的阶段功能语义纠正，不宣称无语义变化",
@@ -15,9 +15,9 @@
   },
   "latest_refreeze": {
     "status": "applied_and_refrozen",
-    "date": "2026-09-24",
-    "scope": "Human-reviewed report projection and optional one-sentence approval of held actions only; Stage1 and Stage2 judgment behavior unchanged",
-    "approved_code_commits": ["b9a6538", "eec9096"],
+    "date": "2026-09-27",
+    "scope": "Human-reviewed report synopsis and preservation of human NA reasons only; no Stage1 or Stage2 judgment changes. Beijing cohort routing is separately authorized and recorded in the batch manifest, not a baseline model comparison.",
+    "approved_code_commits": ["b9a6538", "eec9096", "bb8fd25"],
     "stage2_semantics": "unchanged",
     "gt": "unchanged",
     "qualification": "unchanged",
