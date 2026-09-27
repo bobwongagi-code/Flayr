@@ -122,7 +122,8 @@ def build_creator_report_data(
         review_decision = _safe_text(stage.get("review_decision"))
         observation = _stage_observation(stage, units)
         if review_decision == "not_applicable":
-            observation = "未涉及"
+            review_note = _safe_text(stage.get("review_note"))
+            observation = f"未纳入比较：{review_note}" if review_note else "未纳入比较"
         elif review_decision == "insufficient_evidence":
             observation = "证据不足，无法比较"
         elif review_decision == "corrected" and observation:
@@ -154,7 +155,7 @@ def build_creator_report_data(
         reference = _reference_payload(stage, linked)
         if review_decision == "not_applicable":
             linked_id = ""
-            status, status_label = "not_applicable", "未涉及"
+            status, status_label = "not_applicable", "未纳入比较"
         elif review_decision == "insufficient_evidence":
             linked_id = ""
             status, status_label = "insufficient_evidence", "证据不足，无法比较"
@@ -186,7 +187,7 @@ def build_creator_report_data(
         review_delivery.get("summary_status") == "replaced_after_stage_review"
         and isinstance(review_summary, dict)
     ):
-        intent = _first_text(review_summary.get("detail"), review_summary.get("verdict"))
+        intent = _first_text(review_summary.get("verdict"), review_summary.get("detail"))
     else:
         intent = _first_text(
             semantic.creator_context.get("content_intent"),

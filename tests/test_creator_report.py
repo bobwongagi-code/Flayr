@@ -130,8 +130,8 @@ class CreatorReportTests(unittest.TestCase):
             ]
             data = build_creator_report_data(analysis, ReportAssetContext(root / "run"))
             self.assertEqual(data["stages"][0]["status"], "not_applicable")
-            self.assertEqual(data["stages"][0]["statusLabel"], "未涉及")
-            self.assertEqual(data["stages"][0]["observation"], "未涉及")
+            self.assertEqual(data["stages"][0]["statusLabel"], "未纳入比较")
+            self.assertEqual(data["stages"][0]["observation"], "未纳入比较")
             self.assertEqual(data["stages"][1]["status"], "insufficient_evidence")
             self.assertEqual(data["stages"][1]["statusLabel"], "证据不足，无法比较")
             self.assertEqual(data["stages"][1]["observation"], "证据不足，无法比较")

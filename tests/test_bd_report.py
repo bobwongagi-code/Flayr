@@ -174,8 +174,8 @@ class BdReportTests(unittest.TestCase):
         self.assertEqual(data["gates"][0]["text"], "主卖点路线：主卖点路线需要先处理。")
         self.assertEqual(data["stages"][0]["severityLabel"], "无差距")
         self.assertEqual(data["stages"][0]["gap"], "无差距")
-        self.assertEqual(data["stages"][1]["severityLabel"], "未涉及")
-        self.assertEqual(data["stages"][1]["gap"], "未涉及")
+        self.assertEqual(data["stages"][1]["severityLabel"], "未纳入比较")
+        self.assertEqual(data["stages"][1]["gap"], "未纳入比较")
         self.assertEqual(data["stages"][2]["severityLabel"], "证据不足，无法比较")
         self.assertEqual(data["stages"][2]["gap"], "证据不足，无法比较")
 

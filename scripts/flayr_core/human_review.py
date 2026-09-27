@@ -28,6 +28,14 @@ REVIEWED_CREATOR_REPORT_NAME = "creator_report.reviewed.html"
 REVIEW_SCHEMA_VERSION = 1
 REVIEW_MODE = "draft_visible"
 STAGE_CODES = tuple(f"S{index}" for index in range(1, 7))
+_STAGE_LABELS = {
+    "S1": "吸引注意",
+    "S2": "产品引出",
+    "S3": "功能与使用",
+    "S4": "效果呈现",
+    "S5": "信任放大",
+    "S6": "促购引导",
+}
 DECISIONS = {"pending", "confirmed", "corrected", "not_applicable", "insufficient_evidence"}
 RELATIONS = {"tie", "benchmark_better", "creator_better"}
 GAPS = {"none", "small", "medium", "large"}
@@ -559,24 +567,58 @@ def _review_summary(review: Mapping[str, Any], *, changed: bool) -> dict[str, st
         "benchmark_better": "标杆更强",
         "creator_better": "达人更强",
     }
-    parts: list[str] = []
-    for code in STAGE_CODES:
-        item = review["stages"][code]
-        decision = _safe_text(item.get("decision"))
-        if decision == "not_applicable":
-            text = "本阶段未纳入比较"
-        elif decision == "insufficient_evidence":
-            text = "证据不足，无法比较"
-        else:
-            relation = _normalize_relation(item.get("relation"))
-            gap = _normalize_gap(item.get("gap"))
-            text = f"{relation_labels.get(relation, '待确认')}，{gap_labels.get(gap, '待确认')}"
-        note = _safe_text(item.get("note"))
-        if note:
-            text += f"（人工备注：{note}）"
-        parts.append(f"{code} {text}")
+    if not changed:
+        parts: list[str] = []
+        for code in STAGE_CODES:
+            item = review["stages"][code]
+            decision = _safe_text(item.get("decision"))
+            if decision == "not_applicable":
+                text = "本阶段未纳入比较"
+            elif decision == "insufficient_evidence":
+                text = "证据不足，无法比较"
+            else:
+                relation = _normalize_relation(item.get("relation"))
+                gap = _normalize_gap(item.get("gap"))
+                text = f"{relation_labels.get(relation, '待确认')}，{gap_labels.get(gap, '待确认')}"
+            note = _safe_text(item.get("note"))
+            if note:
+                text += f"（人工备注：{note}）"
+            parts.append(f"{code} {text}")
+        verdict = "人工逐阶段结论：" + "；".join(parts)
+    else:
+        gap_labels = {"small": "小差距", "medium": "中等差距", "large": "明显差距"}
+        ties: list[str] = []
+        directional: dict[tuple[str, str], list[str]] = {}
+        not_applicable: list[str] = []
+        insufficient: list[str] = []
+        for code in STAGE_CODES:
+            item = review["stages"][code]
+            decision = _safe_text(item.get("decision"))
+            if decision == "not_applicable":
+                not_applicable.append(_STAGE_LABELS[code])
+            elif decision == "insufficient_evidence":
+                insufficient.append(_STAGE_LABELS[code])
+            else:
+                relation = _normalize_relation(item.get("relation"))
+                gap = _normalize_gap(item.get("gap"))
+                if relation == "tie" and gap == "none":
+                    ties.append(_STAGE_LABELS[code])
+                elif relation in {"benchmark_better", "creator_better"} and gap in gap_labels:
+                    direction = "标杆更强" if relation == "benchmark_better" else "达人更强"
+                    directional.setdefault((direction, gap), []).append(_STAGE_LABELS[code])
+
+        parts = []
+        if ties:
+            parts.append(f"{'、'.join(ties)}双方相近")
+        for (direction, gap), stages in directional.items():
+            parts.append(f"{'、'.join(stages)}：{direction}（{gap_labels[gap]}）")
+        if not_applicable:
+            parts.append(f"{'、'.join(not_applicable)}：未纳入比较")
+        if insufficient:
+            parts.append(f"{'、'.join(insufficient)}：证据不足，无法比较")
+        verdict = "；".join(parts)
     return {
-        "verdict": "人工逐阶段结论：" + "；".join(parts),
+        "verdict": verdict,
         "detail": (
             "阶段结论已确认；原商业总结未随确认更新，已停用；原有建议并未随阶段确认自动获批，待确认候选需单独核实。"
             if changed

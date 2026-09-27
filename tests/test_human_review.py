@@ -333,7 +333,8 @@ class HumanReviewTests(unittest.TestCase):
         self.assertEqual(projected["stage_analysis"][3]["severity"], "large")
         self.assertEqual(projected["stage_analysis"][4]["gap"], "双方信任证据不足，无法比较。")
         self.assertEqual(projected["stage_analysis"][5]["gap"], "本样本不涉及明确 CTA。")
-        self.assertIn("人工逐阶段结论", projected["review_summary"]["verdict"])
+        self.assertIn("吸引注意", projected["review_summary"]["verdict"])
+        self.assertNotIn("S1", projected["review_summary"]["verdict"])
         self.assertEqual((run_dir / "analysis.json").read_bytes(), before)
 
     def test_direction_change_demotes_stage_recommendation_to_candidate(self) -> None:
@@ -546,13 +547,30 @@ class HumanReviewTests(unittest.TestCase):
         self.assertEqual(projected["one_line_verdict"], projected["review_summary"]["verdict"])
         self.assertEqual(projected["executive_summary"], projected["review_summary"]["detail"])
         self.assertNotIn("旧商业", projected["one_line_verdict"])
+        self.assertIn("吸引注意：达人更强（中等差距）", projected["one_line_verdict"])
+        self.assertIn("效果呈现：未纳入比较", projected["one_line_verdict"])
+        self.assertNotIn("S1", projected["one_line_verdict"])
         self.assertNotIn("one_line_summary", projected)
         self.assertNotIn("commercial_priority_summary", projected)
         self.assertNotIn("global_diagnosis", projected)
         self.assertIn("原商业总结未随确认更新，已停用", projected["executive_summary"])
         self.assertIn("原有建议并未随阶段确认自动获批", projected["executive_summary"])
-        self.assertIn("人工复核后达人开场更清晰", projected["one_line_verdict"])
-        self.assertIn("本轮不比较效果呈现", projected["one_line_verdict"])
+        self.assertNotIn("人工复核后达人开场更清晰", projected["one_line_verdict"])
+        self.assertEqual(projected["stage_analysis"][0]["judgment_reason"], "人工复核后达人开场更清晰。")
+        self.assertEqual(projected["stage_analysis"][3]["judgment_reason"], "本轮不比较效果呈现。")
+        from scripts.flayr_core.bd_report import build_bd_report_data
+
+        bd_stages = {stage["code"]: stage for stage in build_bd_report_data(projected)["stages"]}
+        self.assertEqual(bd_stages["S1"]["gap"], "人工复核后达人开场更清晰。")
+        self.assertEqual(bd_stages["S4"]["gap"], "未纳入比较：本轮不比较效果呈现。")
+        from scripts.flayr_core.creator_report import build_creator_report_data
+        from scripts.flayr_core.report import ReportAssetContext
+
+        creator_stages = {
+            stage["code"]: stage
+            for stage in build_creator_report_data(projected, ReportAssetContext(run_dir))["stages"]
+        }
+        self.assertEqual(creator_stages["S4"]["observation"], "未纳入比较：本轮不比较效果呈现。")
         self.assertEqual(projected["stage_analysis"][0]["relation"], "creator_better")
         self.assertNotIn("comparison_reason", projected["stage_analysis"][0])
         for key in ("reference_relevance", "reference_observation", "benchmark_reference", "communication_strategy", "confidence_note"):
@@ -592,6 +610,55 @@ class HumanReviewTests(unittest.TestCase):
         self.assertNotIn("retained_points", projected)
         self.assertEqual((run_dir / "analysis.json").read_bytes(), before)
 
+    def test_na_and_direction_flip_appear_in_short_review_summary(self) -> None:
+        temp, run_dir = self.fresh_run()
+        self.addCleanup(temp.cleanup)
+        analysis = self._valid_comparison_analysis()
+        decisions = {
+            "S1": {"decision": "confirmed", "relation": "creator_better", "gap": "small", "note": None},
+            "S2": {"decision": "confirmed", "relation": "tie", "gap": "none", "note": None},
+            "S3": {"decision": "confirmed", "relation": "benchmark_better", "gap": "medium", "note": None},
+            "S4": {"decision": "not_applicable", "relation": None, "gap": None, "note": "两侧的效果比较目标不同。"},
+            "S5": {"decision": "confirmed", "relation": "creator_better", "gap": "small", "note": None},
+            "S6": {"decision": "corrected", "relation": "creator_better", "gap": "small", "note": "人工确认达人促购表达更直接。"},
+        }
+
+        projected = self._project_custom_analysis(run_dir, analysis, decisions)
+        verdict = projected["review_summary"]["verdict"]
+
+        self.assertEqual(projected["review_delivery"]["changed_stages"], ["S4", "S6"])
+        self.assertEqual(
+            verdict,
+            "产品引出双方相近；吸引注意、信任放大、促购引导：达人更强（小差距）；"
+            "功能与使用：标杆更强（中等差距）；效果呈现：未纳入比较",
+        )
+        self.assertNotIn("双方未涉及", verdict)
+        self.assertNotIn("人工确认达人促购表达更直接", verdict)
+        self.assertEqual(projected["stage_analysis"][3]["judgment_reason"], "两侧的效果比较目标不同。")
+        self.assertEqual(projected["stage_analysis"][5]["judgment_reason"], "人工确认达人促购表达更直接。")
+
+    def test_pure_downgrade_summary_uses_confirmed_gap_tier(self) -> None:
+        temp, run_dir = self.fresh_run()
+        self.addCleanup(temp.cleanup)
+        analysis = self._valid_comparison_analysis()
+        analysis["stage_analysis"][3]["model_gap_magnitude"] = "large"
+        analysis["stage_analysis"][3]["severity"] = "large"
+        decisions = {
+            "S1": {"decision": "confirmed", "relation": "creator_better", "gap": "small", "note": None},
+            "S2": {"decision": "confirmed", "relation": "tie", "gap": "none", "note": None},
+            "S3": {"decision": "confirmed", "relation": "benchmark_better", "gap": "medium", "note": None},
+            "S4": {"decision": "corrected", "relation": "benchmark_better", "gap": "small", "note": "人工确认差距较小。"},
+            "S5": {"decision": "confirmed", "relation": "creator_better", "gap": "small", "note": None},
+            "S6": {"decision": "confirmed", "relation": "benchmark_better", "gap": "small", "note": None},
+        }
+
+        projected = self._project_custom_analysis(run_dir, analysis, decisions)
+
+        self.assertEqual(projected["review_delivery"]["changed_stages"], ["S4"])
+        self.assertIn("效果呈现、促购引导：标杆更强（小差距）", projected["review_summary"]["verdict"])
+        self.assertNotIn("效果呈现：标杆更强（明显差距）", projected["review_summary"]["verdict"])
+        self.assertIn("人工确认差距较小。", projected["stage_analysis"][3]["judgment_reason"])
+
     def test_all_unchanged_confirmations_preserve_body_tie_advice_and_model_summary(self) -> None:
         temp, run_dir = self.fresh_run()
         self.addCleanup(temp.cleanup)
@@ -627,6 +694,11 @@ class HumanReviewTests(unittest.TestCase):
         self.assertEqual(projected["review_delivery"]["summary_status"], "preserved_after_no_semantic_change")
         self.assertEqual(projected["review_delivery"]["changed_stages"], [])
         self.assertEqual(projected["review_summary"]["detail"], "阶段结论已确认，保留原稿；未逐条审核建议。")
+        self.assertEqual(
+            projected["review_summary"]["verdict"],
+            "人工逐阶段结论：S1 达人更强，小差距；S2 双方相近，无明显差距；S3 标杆更强，中等差距；"
+            "S4 标杆更强，小差距；S5 达人更强，小差距；S6 本阶段未纳入比较（人工备注：人工确认阶段不适用。）",
+        )
         self.assertEqual(projected["one_line_verdict"], analysis["one_line_verdict"])
         self.assertEqual(projected["one_line_summary"], analysis["one_line_summary"])
         self.assertEqual(projected["executive_summary"], analysis["executive_summary"])
@@ -758,7 +830,7 @@ class HumanReviewTests(unittest.TestCase):
         self.assertNotIn("旧摘要", projected["one_line_verdict"])
         self.assertEqual(projected["review_summary"]["detail"], "阶段结论已确认；原商业总结未随确认更新，已停用；原有建议并未随阶段确认自动获批，待确认候选需单独核实。")
 
-    def test_pending_candidates_stay_in_bd_review_but_not_creator_actions(self) -> None:
+    def test_stage_review_without_action_approval_keeps_candidates_off_creator_report(self) -> None:
         temp, run_dir = self.fresh_run()
         self.addCleanup(temp.cleanup)
         analysis = self._valid_comparison_analysis()
@@ -794,7 +866,10 @@ class HumanReviewTests(unittest.TestCase):
         self.assertEqual(bd_view["improvements"][0]["planB"], "理想方向候选，不能作为已确认的标杆示范。")
         self.assertEqual(creator_view["experiments"], [])
         self.assertIsNone(creator_view["topExperiment"])
-        self.assertIn("原商业总结未随确认更新，已停用", creator_view["intent"])
+        self.assertIn("吸引注意：达人更强（中等差距）", creator_view["intent"])
+        self.assertNotIn("旧商业总结", creator_view["intent"])
+        self.assertNotIn("重新拍摄关键操作", creator_view["intent"])
+        self.assertIn("原有建议并未随阶段确认自动获批", creator_view["reviewSummary"]["detail"])
         creator_stage = next(stage for stage in creator_view["stages"] if stage["code"] == "S1")
         self.assertIn("原模型记录，未随本次人工更正复核：", creator_stage["observation"])
 

@@ -166,7 +166,8 @@ def _stage_payload(
     creator_units = referenced_evidence_units(stage.get("creator_evidence_ids"), creator_understanding, code)
     benchmark_units = referenced_evidence_units(stage.get("benchmark_evidence_ids"), benchmark_understanding, code)
     if review_decision == "not_applicable":
-        gap = "未涉及"
+        reason = _safe_text(stage.get("review_note"))
+        gap = f"未纳入比较：{reason}" if reason else "未纳入比较"
     elif review_decision == "insufficient_evidence":
         gap = "证据不足，无法比较"
     elif review_decision in {"confirmed", "corrected"} and relation == "tie" and reviewed_gap == "none":
@@ -178,7 +179,9 @@ def _stage_payload(
             stage.get("comparison_reason"),
         ) or "暂无明确差距描述。"
     severity_label = _SEVERITY_LABELS[severity]
-    if review_decision in {"confirmed", "corrected"} and relation == "tie" and reviewed_gap == "none":
+    if review_decision == "not_applicable":
+        severity_label = "未纳入比较"
+    elif review_decision in {"confirmed", "corrected"} and relation == "tie" and reviewed_gap == "none":
         severity_label = _SEVERITY_LABELS["tie"]
     elif review_decision == "insufficient_evidence":
         severity_label = _SEVERITY_LABELS["insufficient"]
