@@ -4,7 +4,7 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "bb8fd257358cc8f690943dba62fb35dc944c98f7",
+  "production_behavior_commit": "d354a44410a2bc7e883a05dd41cd63d59eafa25d",
   "authorized_semantic_correction": {
     "status": "applied_and_refrozen",
     "scope": "用户明确授权的阶段功能语义纠正，不宣称无语义变化",
@@ -15,13 +15,13 @@
   },
   "latest_refreeze": {
     "status": "applied_and_refrozen",
-    "date": "2026-09-27",
-    "scope": "Human-reviewed report synopsis and preservation of human NA reasons only; no Stage1 or Stage2 judgment changes. Beijing cohort routing is separately authorized and recorded in the batch manifest, not a baseline model comparison.",
-    "approved_code_commits": ["b9a6538", "eec9096", "bb8fd25"],
+    "date": "2026-09-28",
+    "scope": "Exact-source human no-product-speech attestation can replace ASR only for explicitly attested inputs; Stage1 acquisition and qualification are versioned, positive voiceover evidence remains blocked, and Stage2 judgment rules are unchanged. Singapore cohort routing is separately authorized and recorded in the batch manifest.",
+    "approved_code_commits": ["b9a6538", "eec9096", "bb8fd25", "d354a44"],
     "stage2_semantics": "unchanged",
     "gt": "unchanged",
-    "qualification": "unchanged",
-    "stage_evidence_contract_version": 7,
+    "qualification": "source-bound no-product-speech negative evidence only; positive voiceover evidence remains blocked",
+    "stage_evidence_contract_version": 8,
     "gap_bands": "unchanged",
     "model_route": "unchanged",
     "resource_budget": "unchanged",
@@ -51,7 +51,7 @@
   "artifact_identity": {
     "success_manifest": "_SUCCESS.json",
     "analysis_artifact": "analysis.json",
-    "analysis_schema_sha256": "723a7b9dd0734c420d6e30fb5e66193c96c358e5e4aefa671b00d7b80140a0ba",
+    "analysis_schema_sha256": "6ac5f0fb8da09a4c3054b387f51b35620acd653f725c838aedc2f5dfd7f1310c",
     "stage2_pipeline_version": "segmented_stage_v1",
     "accepted_code_commit_policy": "production_behavior_commit_or_current_source_after_freeze_verification",
     "on_mismatch": "exclude_and_inventory_without_scoring"
