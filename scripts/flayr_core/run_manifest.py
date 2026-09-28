@@ -14,6 +14,7 @@ from typing import Any, Mapping
 
 from .report_metadata import extract_variant_report_metadata
 from .run_state import COMPLETED, read_run_state
+from .speech_attestation import VERIFIED_NO_PRODUCT_SPEECH, has_verified_no_product_speech
 from .utils import write_json
 
 
@@ -90,6 +91,34 @@ def _input_metadata(path: Path) -> dict[str, Any]:
     }
 
 
+def _transcription_contract_complete(
+    analysis: Mapping[str, Any],
+    input_metadata: Mapping[str, Any],
+) -> bool:
+    videos = analysis.get("videos")
+    if not isinstance(videos, dict) or not videos:
+        return True
+    for role, info in videos.items():
+        if not isinstance(info, dict):
+            return False
+        status = str(info.get("transcription_status") or "").strip().lower()
+        if status == "completed":
+            continue
+        attestation = info.get("no_product_speech_attestation")
+        expected_input = input_metadata.get(f"{role}_video")
+        if (
+            status != VERIFIED_NO_PRODUCT_SPEECH
+            or not has_verified_no_product_speech(info)
+            or not isinstance(expected_input, dict)
+            or str(attestation.get("source_sha256") or "") != str(expected_input.get("sha256") or "")
+            or info.get("transcript_path") is not None
+            or info.get("transcript_segments_path") is not None
+            or info.get("transcript_words_path") is not None
+        ):
+            return False
+    return True
+
+
 def build_success_manifest(
     run_dir: Path,
     inputs: Mapping[str, Path],
@@ -108,26 +137,19 @@ def build_success_manifest(
         artifacts[relative] = _artifact_metadata(candidate)
     if not _has_complete_field_sources(run_dir / "final_derived_result.json"):
         raise ValueError("final_derived_result.json must contain complete field source coverage")
-    videos = analysis.get("videos")
-    if isinstance(videos, dict) and videos:
-        incomplete_transcription = [
-            str(role)
-            for role, info in videos.items()
-            if not isinstance(info, dict)
-            or str(info.get("transcription_status") or "").strip().lower() != "completed"
-        ]
-        if incomplete_transcription:
-            raise ValueError(
-                "completed success manifest requires completed online ASR for: "
-                + ", ".join(incomplete_transcription)
-            )
+    input_metadata = {name: _input_metadata(path) for name, path in sorted(inputs.items())}
+    if not _transcription_contract_complete(analysis, input_metadata):
+        raise ValueError(
+            "completed success manifest requires completed online ASR or a source-hash-bound "
+            "verified no-product-speech attestation"
+        )
     report_metadata = extract_variant_report_metadata(run_dir, required_artifacts)
     return {
         "schema_version": SUCCESS_MANIFEST_SCHEMA_VERSION,
         "status": "completed",
         "analysis_run_state": "completed",
         "required_artifacts": list(required_artifacts),
-        "inputs": {name: _input_metadata(path) for name, path in sorted(inputs.items())},
+        "inputs": input_metadata,
         "artifacts": artifacts,
         "report_metadata": report_metadata,
         "provenance": dict(provenance or {}),
@@ -246,6 +268,8 @@ def validate_success_manifest(
 
     recorded_inputs = manifest.get("inputs")
     if not isinstance(recorded_inputs, dict):
+        return False
+    if not _transcription_contract_complete(analysis, recorded_inputs):
         return False
     for name, expected in (expected_inputs or {}).items():
         try:

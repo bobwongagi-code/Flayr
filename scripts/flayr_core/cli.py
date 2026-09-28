@@ -104,6 +104,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Speech language hint passed to online Fun-ASR. Default: auto.",
     )
     parser.add_argument(
+        "--verified-no-product-speech-attestation-file",
+        type=Path,
+        help=(
+            "JSON manifest of human-confirmed no-product-speech attestations, each bound to an exact source SHA-256."
+        ),
+    )
+    parser.add_argument(
         "--asr-api-url",
         default=DEFAULT_FUN_ASR_API_URL,
         help="Online Fun-ASR endpoint. Defaults to the approved Beijing MaaS endpoint.",

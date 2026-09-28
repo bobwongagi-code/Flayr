@@ -20,6 +20,7 @@ from ..proposition_contract import build_product_proposition_contract
 from ..market import render_market_knowledge
 from ..shot_track import render_shot_track_markdown
 from ..speech_mode import speech_mode_prompt
+from ..speech_attestation import has_verified_no_product_speech
 from ..stage_evidence_contracts import (
     STAGE1_OBSERVATION_CONTRACT_VERSION,
     STAGE_EVIDENCE_CONTRACT_VERSION,
@@ -492,6 +493,11 @@ def build_video_fact_payload(
     code = "B" if role == "benchmark" else "C"
     role_dir = Path(str(info.get("work_dir") or ""))
     mode_prompt = speech_mode_prompt(info.get("speech_mode") if isinstance(info.get("speech_mode"), dict) else {})
+    transcript_context = (
+        "人工已确认绑定 source SHA-256 的完整源视频没有产品口播；ASR/翻译未请求，不存在转写文本或口播时间戳。"
+        if has_verified_no_product_speech(info)
+        else read_text_if_exists(role_dir / "transcript.txt")
+    )
     direct_audio_supported = (
         include_standalone_audio
         and can_analyze_native_audio(api_url, model)
@@ -599,7 +605,7 @@ def build_video_fact_payload(
             "stage1_acquisition、stage1_qualification、evidence_set_* 和 stage1_recovery 是代码拥有的采集/冻结元数据，模型不得输出或覆盖；"
             "这些字段属于后续 Judgment/Resolution/Report，出现时必须拒绝，不得由代码静默丢弃。",
             "## 本地语言转写（语义参考；不提供精确窗口边界）",
-            read_text_if_exists(role_dir / "transcript.txt"),
+            transcript_context,
             "",
             "## 口播时间精度合同",
             json.dumps(transcript_timing_contract(info), ensure_ascii=False),
@@ -857,6 +863,17 @@ def build_stage_evidence_qualification_payload(
         if isinstance(facts.get("stage1_acquisition"), dict)
         else {}
     )
+    if has_verified_no_product_speech(info):
+        attestation = info["no_product_speech_attestation"]
+        voiceover_context = (
+            "## 全片口播人工确认\n"
+            f"人工确认绑定 source_sha256={attestation['source_sha256']} 的完整源视频没有产品口播。"
+            f"确认清单 SHA-256={attestation['attestation_file']['sha256']}。"
+            "这是全片无产品口播的负向证据，不是转写；ASR 未请求，不提供文本或时间戳。"
+            "不得把音乐歌词当作产品口播，也不得伪造 voiceover evidence。"
+        )
+    else:
+        voiceover_context = ""
     # Technical replay changes only the transport provenance. Preserve the
     # frozen live request identity instead of feeding "replay" back into the
     # next semantic request. Removing this legacy audit block entirely would
@@ -942,6 +959,7 @@ def build_stage_evidence_qualification_payload(
             stage_evidence_contract_prompt(normalized_targets),
             "## 输出时必须遵守的阶段信号白名单",
             _stage_evidence_signal_codebook(normalized_targets),
+            *([voiceover_context] if voiceover_context else []),
             *([s5_independence_review] if s5_independence_review else []),
             *([certification_policy] if certification_policy else []),
             s6_language_review,

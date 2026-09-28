@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .transcript import current_transcript_segments_path
+from .speech_attestation import has_verified_no_product_speech
 
 
 NON_SPEECH_LABELS = {
@@ -55,6 +56,17 @@ def classify_speech_mode(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]
             "mode": "subtitle_driven",
             "primary_evidence": ["subtitle_track", "timeline_views", "selection_report", "visual_frames"],
             "reason": f"未检测到有效口播，但 OCR 字幕轨有 {subtitle_segments} 段。",
+            "has_effective_speech": False,
+            "srt_segment_count": srt_segments,
+            "subtitle_segment_count": subtitle_segments,
+            "audio_exists": audio_exists,
+        }
+
+    if has_verified_no_product_speech(info):
+        return {
+            "mode": "music_driven",
+            "primary_evidence": ["timeline_views", "audio_waveform", "selection_report", "visual_frames"],
+            "reason": "人工已确认完整源视频不存在产品口播；歌词不作为产品转写。",
             "has_effective_speech": False,
             "srt_segment_count": srt_segments,
             "subtitle_segment_count": subtitle_segments,

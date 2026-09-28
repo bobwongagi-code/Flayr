@@ -28,6 +28,7 @@ from .artifacts import (
 from .market import render_market_knowledge as render_market_context
 from .shot_track import render_shot_track_markdown
 from .speech_mode import speech_mode_prompt
+from .speech_attestation import has_verified_no_product_speech
 from .stage_contract_registry import S3_EXPRESSION_PROMPT
 from .stage_ownership import CERTIFICATION_OWNERSHIP_PROMPT, apply_certification_ownership_policy
 from .subtitle_track import render_subtitle_track_markdown
@@ -181,8 +182,7 @@ def write_analysis_input(run_dir: Path, analysis: dict[str, Any]) -> Path:
                 "### 模型消费口播输入",
                 "",
                 "模型只消费上方的视频证据索引中的窗口安全口播时间线；完整转写和原始时间索引不随本请求发送。",
-                f"- 原始转写审计产物：{role_dir / 'transcript.txt'}；{current_transcript_segments_path(info) or role_dir / 'transcript.srt'}",
-                f"- 原始词级时间索引审计产物：{current_transcript_words_path(info) or role_dir / 'transcript.words.json'}",
+                *_transcript_audit_lines(role_dir, info),
                 "",
                 "### 权威字幕轨（OCR 识别，卖点/价格/年龄段叠字以此为准，胜过画面认字）",
                 "",
@@ -217,17 +217,56 @@ def render_market_knowledge(analysis: dict[str, Any]) -> str:
 
 def speech_status(role_dir: Path, info: dict[str, Any]) -> str:
     """根据转写文本和语言置信度判断口播状态，仅供 prompt 装配显示用。"""
+    if has_verified_no_product_speech(info):
+        attestation = info["no_product_speech_attestation"]
+        return (
+            "人工已确认绑定源 SHA-256 的完整视频没有产品口播 "
+            f"(source_sha256={attestation['source_sha256']})"
+        )
+    status = str(info.get("transcription_status") or "missing").strip().lower()
+    if status != "completed":
+        return f"口播状态未知（transcription_status={status}）；转写未完成，不能据此判定无口播"
     transcript = read_optional_text(role_dir / "transcript.txt").strip()
     lowered = transcript.lower()
     non_speech_labels = {"*outro music*", "[music]", "(music)", "music", "（音乐渐弱）"}
     if lowered in non_speech_labels or transcript in non_speech_labels:
-        return "未检测到有效口播，仅有音乐或环境声"
+        return "ASR 返回音乐标签；未获人工全片无产品口播确认，不构成口播缺失结论"
     confidence = info.get("detected_language_confidence")
     if isinstance(confidence, (int, float)) and confidence < 0.5:
         return "语言识别置信度较低，话术语言需结合标杆市场判断"
     if transcript in {"（缺失）", "（空）"}:
-        return "未检测到有效口播"
+        return "ASR 未返回可用转写；口播状态不能据此判定为无"
+    if not transcript:
+        return "ASR 状态为 completed 但转写为空；口播状态未知"
     return "已检测到有效口播"
+
+
+def _transcript_audit_lines(role_dir: Path, info: dict[str, Any]) -> list[str]:
+    if has_verified_no_product_speech(info):
+        attestation = info["no_product_speech_attestation"]
+        source_sha256 = attestation["source_sha256"]
+        file_sha256 = attestation["attestation_file"]["sha256"]
+        return [
+            f"- 人工无产品口播确认：source_sha256={source_sha256}; attestation_file_sha256={file_sha256}",
+            "- ASR/翻译未请求；无转写文本、分段或口播时间戳。",
+        ]
+
+    artifacts: list[str] = []
+    transcript_path = role_dir / "transcript.txt"
+    if transcript_path.is_file():
+        artifacts.append(f"原始转写：{transcript_path}")
+    segments_path = current_transcript_segments_path(info)
+    if segments_path is not None:
+        artifacts.append(f"原始分段索引：{segments_path}")
+    words_path = current_transcript_words_path(info)
+    if words_path is not None:
+        artifacts.append(f"原始词级时间索引：{words_path}")
+    if artifacts:
+        return [f"- {item}" for item in artifacts]
+    status = str(info.get("transcription_status") or "missing").strip().lower()
+    return [
+        f"- 转写审计产物未生成（transcription_status={status}）；口播状态未知，不能据此判定无口播。"
+    ]
 
 
 def speech_mode_label(info: dict[str, Any]) -> str:
@@ -307,15 +346,11 @@ def render_video_evidence_markdown(role_dir: Path, info: dict[str, Any]) -> str:
             end = item.get("end_seconds")
             path = item.get("path") or ""
             lines.append(f"  - {label}: {start}s-{end}s {path}")
-    packed = evidence.get("transcript_pack_path") if isinstance(evidence, dict) else None
-    segments_path = current_transcript_segments_path(info) or role_dir / "transcript.srt"
-    words_path = current_transcript_words_path(info) or role_dir / "transcript.words.json"
     lines.extend(
         [
             "",
             "#### 原始口播审计产物（不发送模型）",
-            f"- 原始分段索引：{packed or segments_path}",
-            f"- 原始词级索引：{words_path}",
+            *_transcript_audit_lines(role_dir, info),
         ]
     )
     windowed = evidence.get("transcript_windowed_path") if isinstance(evidence, dict) else None

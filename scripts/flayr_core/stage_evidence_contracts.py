@@ -11,6 +11,7 @@ import copy
 import hashlib
 import json
 import math
+import re
 from typing import Any
 
 from .artifacts import (
@@ -33,8 +34,10 @@ from .stage_contract_registry import (
     stage_evidence_contract_prompt,  # noqa: F401 - explicit facade re-export
 )
 from .transcript import current_transcript_segments_path, current_transcript_words_path
+from .speech_attestation import has_verified_no_product_speech
 
-STAGE_EVIDENCE_CONTRACT_VERSION = 7
+STAGE_EVIDENCE_CONTRACT_VERSION = 8
+# Version 8 admits source-hash-bound human confirmation of no product speech.
 # Version 7 admits evidence-bound S3 explanation without changing actual-use facts.
 # Stage1-A only records atomic observations. Version 6 moves time-windowed
 # speech binding to deterministic code and makes optional unit fields sparse;
@@ -42,7 +45,7 @@ STAGE_EVIDENCE_CONTRACT_VERSION = 7
 STAGE1_OBSERVATION_CONTRACT_VERSION = 6
 STAGE_EVIDENCE_SNAPSHOT_VERSION = 1
 STAGE_EVIDENCE_GATE_VERSION = 2
-STAGE1_ACQUISITION_VERSION = 5
+STAGE1_ACQUISITION_VERSION = 6
 STAGE1_COVERAGE_AUDIT_VERSION = 2
 STAGE1_PROJECTION_VERSION = "stage1_qualification_projection_v2"
 STAGE_EVIDENCE_STATES = (
@@ -459,6 +462,16 @@ def normalize_stage1_acquisition(value: Any) -> dict[str, Any]:
         "status": status,
         "input_mode": input_mode,
         "speech_mode": str(value.get("speech_mode") or "unknown").strip().lower(),
+        "voiceover_attestation_sha256": (
+            str(value.get("voiceover_attestation_sha256") or "").strip().lower()
+            if re.fullmatch(r"[0-9a-f]{64}", str(value.get("voiceover_attestation_sha256") or "").strip().lower())
+            else None
+        ),
+        "voiceover_attestation_file_sha256": (
+            str(value.get("voiceover_attestation_file_sha256") or "").strip().lower()
+            if re.fullmatch(r"[0-9a-f]{64}", str(value.get("voiceover_attestation_file_sha256") or "").strip().lower())
+            else None
+        ),
         "duration_seconds": raw_duration,
         "channels": normalized_channels,
         "visual_input_timestamps": visual_input_timestamps,
@@ -703,6 +716,7 @@ def build_stage1_acquisition_manifest(
     )
 
     transcription_status = str(info.get("transcription_status") or "unknown").strip().lower()
+    no_product_speech_verified = has_verified_no_product_speech(info)
     segment_ready = transcription_status == "completed" and current_transcript_segments_path(info) is not None
     words_ready = current_transcript_words_path(info) is not None
     windowed_transcript_ready = (
@@ -719,12 +733,22 @@ def build_stage1_acquisition_manifest(
     # window-safe artifact exists.
     word_window_ready = words_ready and windowed_transcript_ready
     voiceover_channel = _acquisition_channel(
-        "ready" if segment_ready else "failed" if transcription_status in {"failed", "placeholder"} else "unknown",
-        coverage="full" if segment_ready else "none",
+        "ready" if segment_ready or no_product_speech_verified else "failed" if transcription_status in {"failed", "placeholder"} else "unknown",
+        coverage="full" if segment_ready or no_product_speech_verified else "none",
         count=1 if segment_ready else 0,
-        boundary_precision="word" if word_window_ready else "segment" if segment_ready else "unknown",
+        boundary_precision=(
+            "word"
+            if word_window_ready
+            else "human_attested_full_video"
+            if no_product_speech_verified
+            else "segment"
+            if segment_ready
+            else "unknown"
+        ),
         reason=(
-            "在线 ASR 已完成并提供分段时间戳。"
+            "人工已对绑定 SHA-256 的完整源视频确认不存在产品口播；ASR 和转写未请求。"
+            if no_product_speech_verified
+            else "在线 ASR 已完成并提供分段时间戳。"
             + (
                 "已提供词级边界和窗口安全转写。"
                 if word_window_ready
@@ -772,7 +796,7 @@ def build_stage1_acquisition_manifest(
     # If an audio track exists but transcription did not complete, the absence
     # of a spoken signal is not observable. Keep the spine unknown so a model
     # cannot turn an ASR failure into an explicit negative claim.
-    if audio_ready and transcription_status not in {"completed"}:
+    if audio_ready and transcription_status not in {"completed"} and not no_product_speech_verified:
         mode = "unknown"
     required_channels = ["visual"]
     if mode == "spoken":
@@ -821,6 +845,16 @@ def build_stage1_acquisition_manifest(
             "status": overall_status,
             "input_mode": "native_video" if native_video else "canonical_frames",
             "speech_mode": mode,
+            "voiceover_attestation_sha256": (
+                info["no_product_speech_attestation"].get("source_sha256")
+                if no_product_speech_verified
+                else None
+            ),
+            "voiceover_attestation_file_sha256": (
+                info["no_product_speech_attestation"].get("attestation_file", {}).get("sha256")
+                if no_product_speech_verified
+                else None
+            ),
             "duration_seconds": duration,
             "channels": channels,
             "stage_coverage": stage_coverage,
@@ -2123,7 +2157,14 @@ def stage1_acquisition_issues(side: Any, stage: Any) -> list[str]:
             # between samples. This is deliberately generic for S1-S6; the
             # stage registry decides which channels are non-substitutable.
             issues.append(f"{code}:acquisition_channel_coverage_incomplete:{channel}")
-        if channel == "voiceover" and channel_info.get("boundary_precision") != "word":
+        voiceover_attested = (
+            manifest.get("voiceover_attestation_sha256")
+            and manifest.get("voiceover_attestation_file_sha256")
+            and check.get("status") == "absent"
+        )
+        if channel == "voiceover" and channel_info.get("boundary_precision") != "word" and not (
+            channel_info.get("boundary_precision") == "human_attested_full_video" and voiceover_attested
+        ):
             # A coarse ASR segment may overlap a stage while containing speech
             # from several stages. It can remain an audit artifact, but it
             # cannot qualify either a positive or a negative stage claim.
