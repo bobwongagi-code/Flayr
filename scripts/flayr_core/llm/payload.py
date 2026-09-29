@@ -1705,7 +1705,10 @@ def _stage_group_flag_contract(stage: str) -> str:
             '"effect_proposition_matched":false,"comparison_control_met":false,"closeup_or_focus_met":false,"visual_difference_observed":false,'
             '"module_constraints_met":false,"effect_maximized":false,"requires_close_inspection":false,"effect_attribution_supported":false,'
             '"result_only_without_process":false,"process_linked_effect":false,"tamper_or_cut_risk":false,"effect_reason":"...","evidence_ids":[]},'
-            '"benchmark_s4":{...}'
+            '"benchmark_s4":{...}。effect_evidence_state 四态定义：none=没有效果证据；result_only=只有结果图或结果叙述没有因果桥；'
+            'verified=效果可见且归因/过程可信；uncertain=证据冲突或不足。'
+            '当 effect_evidence_state=result_only 时，result_only_without_process 必须为 true，process_linked_effect 必须为 false。'
+            '这是当前 S4 效果与产品操作之间的因果关系，不能用 S3 有动作替代。'
         ),
         "S5": (
             '"creator_s5":{"exists":false,"module_type":"A-E|unknown","trust_evidence_type":"hard|soft|mixed|none|unknown",'

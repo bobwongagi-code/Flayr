@@ -15,6 +15,7 @@ from flayr_core.llm.stage2_projection import (  # noqa: E402
     _SEGMENTED_FLAG_REQUIRED_KEYS,
     _normalize_segmented_stage,
 )
+from flayr_core.llm.payload import build_stage_group_judgment_payload  # noqa: E402
 from flayr_core.postprocess.validate import validate_s4_effect_flags  # noqa: E402
 from flayr_core.stage_evidence_contracts import (  # noqa: E402
     STAGE1_ACQUISITION_VERSION,
@@ -258,6 +259,27 @@ def _mark_absent(side: dict[str, object], stage: str) -> dict[str, object]:
 
 
 class Stage2ProjectionRegressionTests(unittest.TestCase):
+    def test_stage_group_prompt_defines_s4_effect_evidence_state(self) -> None:
+        s4_payload = build_stage_group_judgment_payload("test", "", {}, {}, ["S4"])
+        s4_text = s4_payload["messages"][1]["content"][0]["text"]
+
+        self.assertIn(
+            "effect_evidence_state 四态定义：none=没有效果证据；result_only=只有结果图或结果叙述没有因果桥；"
+            "verified=效果可见且归因/过程可信；uncertain=证据冲突或不足",
+            s4_text,
+        )
+        self.assertIn(
+            "当 effect_evidence_state=result_only 时，result_only_without_process 必须为 true，"
+            "process_linked_effect 必须为 false",
+            s4_text,
+        )
+        self.assertIn("当前 S4 效果与产品操作之间的因果关系，不能用 S3 有动作替代", s4_text)
+
+        s3_payload = build_stage_group_judgment_payload("test", "", {}, {}, ["S3"])
+        s3_text = s3_payload["messages"][1]["content"][0]["text"]
+        self.assertNotIn("当前 S4 效果与产品操作之间的因果关系，不能用 S3 有动作替代", s3_text)
+        self.assertNotIn("effect_evidence_state 四态定义：", s3_text)
+
     def test_blocked_absent_unknown_is_idempotent_without_either_flag(self) -> None:
         for absent_role in ("benchmark", "creator"):
             with self.subTest(absent_role=absent_role):
