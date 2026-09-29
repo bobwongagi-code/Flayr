@@ -62,3 +62,10 @@ Phase C 初始模板虽有 gap/severity 等键，实际发送前由字段白名�
 三处凭据格式匹配核实为 ASR 脱敏单测使用的占位字符串，已替换为短 dummy；三个脱敏用例通过。
 未改扫描规则或增加白名单。冻结校验通过，GT/manifest/schema 哈希、资格门槛、路由、预算与晋级状态未变。
 下面的完整门禁结果须以干净提交上的实际运行为准，不以提交前局部测试代替。
+
+在干净提交 `94fe6e2` 上完成验证：
+
+- `FLAYR_COVERAGE=1 FLAYR_SCOPE_SPEC=references/stage-instruction-consistency-scope.json FLAYR_SCOPE_BASE_REF=c88d982 bash scripts/run-tests.sh`：退出码 0，1033 项测试通过，冻结、变更范围、Prompt 可达性、分析合同和字段所有权检查通过。
+- `bash scripts/run-quality-gates.sh`：退出码 0，静态检查、依赖漏洞检查、凭据扫描、媒体工具烟测与覆盖率门禁通过；总体覆盖率 79%。
+- 冻结 JSON 相对 `c88d982` 仅 `production_behavior_commit`、`latest_refreeze` 两项变化；GT 与 manifest 实际 SHA256 均匹配原冻结值，`promotion_eligible=false`。
+- 未重跑视频、未调用 provider、未推送远端。主仓库工作区未动，修正仍在独立分支 `oxy-no-product-speech-20260928`。技术收口完成，不代表业务准确率改善；上列未决语义问题继续保留。
