@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "name": "small-eligibility-consistency-20260929",
+  "description": "Remove the contradictory both-sides-executed prerequisite for small, align active copies and refreeze. No medium/large redesign, GT changes, qualification changes or model calls.",
+  "change_scope": {
+    "max_files": 9,
+    "max_added_lines": 230,
+    "max_deleted_lines": 40,
+    "allowed_globs": [
+      "structure_library_full.md",
+      "references/expert-gap-calibration.json",
+      "references/semantic-baseline-freeze.json",
+      "references/semantic-baseline-freeze.md",
+      "references/ground-truth-labels.md",
+      "references/model-selection-evaluation-protocol.md",
+      "references/gap-boundary-consistency-20260929.md",
+      "references/gap-boundary-consistency-scope.json",
+      "tests/test_gap_semantics_consistency.py"
+    ],
+    "forbidden_globs": ["runs/**", "outputs/**", "jobs*.json"]
+  }
+}
