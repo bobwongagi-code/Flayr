@@ -6341,7 +6341,7 @@ class ArchitectureContractTests(unittest.TestCase):
             role_dir.mkdir()
             audio = role_dir / "audio.wav"
             audio.write_bytes(b"audio")
-            api_key = "unit-test-api-key-not-to-persist"
+            api_key = "dummy-api-key"
             response_body = json.dumps(
                 {
                     "code": "InvalidAudio",
@@ -6404,7 +6404,7 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
 
     def test_online_asr_http_400_redacts_sensitive_message_and_falls_back(self) -> None:
-        api_key = "unit-test-api-key-not-to-persist"
+        api_key = "dummy-api-key"
         details = asr._provider_error_details(
             json.dumps(
                 {
@@ -6436,7 +6436,7 @@ class ArchitectureContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             role_dir = Path(tmp)
             calls = 0
-            api_key = "unit-test-api-key-not-to-persist"
+            api_key = "dummy-api-key"
             response_body = json.dumps(
                 {"message": f"api_key={api_key}; data:audio/mpeg;base64,{'B' * 128}"}
             )

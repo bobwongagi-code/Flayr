@@ -169,7 +169,8 @@ def build_stage_review_payload(
         s2_contract = (
             "目标阶段包含 S2 时，stage patch 必须同时包含 creator_s2 与 benchmark_s2；"
             "S2 只判 S1→S2 衔接契约：是否承接 S1、产品身份是否清楚、产品是否成为解决方案/答案。"
-            "产品露出不等于产品引出完成；卖点细节/成分/认证/选购建议不要当作 S2 加分，归 S3/S4/S5。"
+            "产品露出不等于产品引出完成；卖点细节、成分、认证、选购建议及数量本身不替代 S2 的 S1 承接与产品身份/解决方案角色，也不单独给 S2 加分；"
+            "同一事实若实际支持产品身份或问题到产品承接，可按 S2 功能引用；引用认证事实不改变其 S5 信任资格。"
             "≤15s 且 S2/S3 不可分时 merged_with_s3=true，不因没有独立 S2 扣分。"
         )
     if "S3" in target_codes:
@@ -226,7 +227,7 @@ def build_stage_review_payload(
             "action_proof_met 不要求最终效果，但要求产品动作、作用对象、卖点的即时可观察证据同窗出现；不能靠后续效果或口播补足。"
             "action_target_contact_met 要求产品/材料实际作用到目标对象；action_application_change_visible 要求看见动作新施加/位移/激活材料或改变目标状态，不能把触碰已有材料/结果当过程；critical_action_continuity_met 要求看见关键作用动作并能追到目标状态，"
             "准备镜头跳到成品、空中比划、只拿产品都必须为 false。"
-            "单场景连续展示只算合格，不能自动判出色；只有核心卖点清楚可见、证据可接收且过程被做厚时才给高执行。"
+            "单场景连续展示只记录连续性、核心卖点可见性和过程充分性等事实字段；本层不判执行分。"
             "多人使用时记录角色是否清楚、互动是否服务卖点、人物是否有可辨识差异；步骤/第一视角只记录实际做到了什么。"
             "场景丰富、ASMR、第一视角、步骤拆解都不能补偿核心卖点没落地。效果结果归 S4，背书归 S5，不要回填到 S3。"
         )
@@ -260,7 +261,8 @@ def build_stage_review_payload(
             "目标阶段包含 S4 时，stage patch 必须同时包含 creator_s4 与 benchmark_s4；"
             "两侧都必须输出 effect_evidence_state=none/result_only/verified/uncertain（none=没有效果证据，result_only=只有结果图或结果叙述没有因果桥，verified=效果可见且归因/过程可信，uncertain=证据冲突或不足；result_only 不得写成 verified）；"
             "S4 只判效果是否可见、效果是否显著、是否命中核心视觉命题、是否可信地由产品造成。"
-            "只有结果没有过程不能直接高分；需要仔细看才有变化时 requires_close_inspection=true 且 effect_salience=subtle；"
+            "只有结果且没有因果桥时不得标记 verified，应按 effect_evidence_state、effect_attribution_supported 和 result_only_without_process 如实记录；"
+            "需要仔细看才有变化时 requires_close_inspection=true 且 effect_salience=subtle；"
             "没有因果桥时 effect_attribution_supported=false，有跳剪/换物/光线变化风险时 tamper_or_cut_risk=true。"
             "必须按 structure_library_full.md 的 S4-A~F 硬约束判 module_constraints_met：A/B 要同对象同光线同构图或同细节区域，"
             "C 要两组人物条件可比，D 要本品与替代方案对照，E 要有日常参照物量化，F 要用特写/慢镜/微距把过程可视化。"
@@ -295,13 +297,14 @@ def build_stage_review_payload(
         s5_contract = (
             "目标阶段包含 S5 时，stage patch 必须同时包含 creator_s5 与 benchmark_s5；"
             "S5 只判独立信任材料：数据背书、权威背书、用户证言、场景广度、过程透明。"
-            "硬信任可到 2，软信任封顶 1，口播孤证封顶 0.5；"
+            "本层只修正信任材料及来源的事实字段，不判执行分或 severity；"
             + CERTIFICATION_OWNERSHIP_PROMPT
             + CERTIFICATION_POSITION_EXCEPTION_PROMPT
             + "产品数量、使用时长、参数、价格、赠品、套餐不是独立信任；没有外部来源时填 product_claim 或 offer_or_spec，且 exists=false。"
             + "social_consensus 必须同时有明确目标群体/社区和该群体已表达的共同看法；耐用、数量、时长、价格或泛泛“大家会喜欢”均不得填 social_consensus。"
             + "traceable_data 必须带报告编号、官方/平台页面、可辨识认证或来源截图；产品包装或达人自行报出的数字不算。S5-D 必须真实列出至少两类不同人群/场景来证明适用范围。"
-            + "S5-C 开头评论/粉丝问答归 S1；S5-D 不得重复 S3/S4 多场景；S5-E 只认探厂/原料/生产/质检/供应链。"
+            + "S5-C 开头评论/粉丝问答若承担留人功能，可另作 S1 支持；是否同时支持 S5 只看其独立信任来源和实际功能，不因开头位置自动排除或强制迁移。"
+            + "S5-D 不得重复 S3/S4 多场景；S5-E 只认探厂/原料/生产/质检/供应链。"
             + "保健/美妆等高风险品类不得把无来源疗效承诺判为可信信任。"
         )
     if "S6" in target_codes:
@@ -336,11 +339,13 @@ def build_stage_review_payload(
         s6_contract = (
             "目标阶段包含 S6 时，stage patch 必须同时包含 creator_s6 与 benchmark_s6；"
             "S6 只判购买动作：是否明确下单/点链接/进购物车，路径是否清楚，利益/紧迫/保障是否适配本品。"
-            "没有明确路径时，结尾有面向观众的购买邀请和具体利益点，或有明确绑定购买条件的激励（如买就送/下单送牙刷），都复用既有 soft_purchase_invitation_met=true 与 offer_or_incentive_clear=true 的软促单组合，并将 exists=true、evidence_ids 绑定到原子事实。"
+            "没有明确路径时，结尾或可识别收束位置有面向观众的购买邀请和具体利益点，或有明确绑定购买条件的激励（如买就送/下单送牙刷），都复用既有 soft_purchase_invitation_met=true 与 offer_or_incentive_clear=true 的软促单组合，并将 exists=true、evidence_ids 绑定到原子事实。"
             "普通赠品清单、只报优惠或没有购买条件的描述不能填充该组合，仍按无 CTA 处理。"
             "S6-A 记录明确价格锚定，S6-B 记录可核验限时/限量/库存，S6-C 记录具体赠品或组合利益，S6-E 记录清楚保障；"
             "不要把 S4 效果或 S5 信任回填成 CTA；达人 CTA 强于标杆时必须如实记为达人亮点。"
-            "价格/优惠出现在开头时归 S1，不算 S6；S6-D 效果总结必须依赖有效 S4 输出。"
+            "开头价格/优惠本身不自动构成 S6；若它作为吸引继续看的开场钩子，按 S1 的实际功能记录。"
+            "若同时出现明确购买行动/路径，仍按实际功能记录 S6 事实，并按是否处于结尾或可识别收束位置填写 ending_position_met；不要求固定在末几秒，也不要仅因价格/优惠出现位置机械地改归 S1。"
+            "S6-D 效果总结必须依赖有效 S4 输出。"
         )
     content: list[dict[str, Any]] = [
         {

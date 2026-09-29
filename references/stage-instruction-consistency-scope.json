@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "name": "stage-instruction-consistency-20260929",
+  "description": "Approved stage instruction clarification, focused regression tests, dummy test credential cleanup and source-bound refreeze. No GT, rubric, qualification gates, routes or budgets changed; no model calls.",
+  "change_scope": {
+    "max_files": 12,
+    "max_added_lines": 350,
+    "max_deleted_lines": 80,
+    "allowed_globs": [
+      "scripts/flayr_core/llm/payload.py",
+      "scripts/flayr_core/llm/phase_c_payload.py",
+      "scripts/flayr_core/stage_contract_registry.py",
+      "structure_library_full.md",
+      "tests/test_architecture_contracts.py",
+      "tests/test_phase_c_patches.py",
+      "tests/test_stage2_projection_regressions.py",
+      "tests/test_stage_prompt_boundaries.py",
+      "references/stage-instruction-consistency-audit-20260929.md",
+      "references/stage-instruction-consistency-scope.json",
+      "references/semantic-baseline-freeze.json",
+      "references/semantic-baseline-freeze.md"
+    ],
+    "forbidden_globs": ["runs/**", "outputs/**", "jobs*.json"]
+  }
+}

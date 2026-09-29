@@ -1685,7 +1685,11 @@ def _stage_group_flag_contract(stage: str) -> str:
         "S2": (
             '"creator_s2":{"exists":true,"merged_with_s3":false,"module_type":"A-D|unknown","handoff_met":false,'
             '"s1_s2_compatible":false,"product_identity_clear":false,"product_role_clear":false,"excluded_or_risky_module":false,'
-            '"start_seconds":0,"end_seconds":0,"handoff_reason":"...","evidence_ids":[]},"benchmark_s2":{...}'
+            '"start_seconds":0,"end_seconds":0,"handoff_reason":"...","evidence_ids":[]},"benchmark_s2":{...}。'
+            'S2 只判断产品身份、它回应前面问题的承接，以及产品角色是否清晰；不得因后续 S3 使用演示、S4 效果或参数/卖点信息丰富而自动给 S2 加分。'
+            '只有内容在 S2 窗口内、通过 S2 qualified_evidence 资格且实际承担 S2 承接、身份或角色功能时，才可作为 S2 判断依据。'
+            '同一已资格化事实可按不同阶段各自实际承担的功能分别支持判断；每阶段只能使用自己的 qualified_evidence，不得借用其他阶段资格或未资格化证据。'
+            '认证不一律排除；只有认证事实本身在 S2 窗口内通过 S2 资格且承担上述 S2 功能时才可计入，认证词本身不自动加分。'
         ),
         "S3": (
             '"creator_s3":{"exists":true,"module_type":"A-E|unknown","usage_evidence_state":"none|partial|complete|uncertain",'
