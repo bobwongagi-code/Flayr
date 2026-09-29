@@ -4,7 +4,7 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "8300799b7a4f3bb407b1b94e7b81773e73f570e3",
+  "production_behavior_commit": "cb10bb1d5ca3bfc86b2b5ee478860cba85aa7b84",
   "authorized_semantic_correction": {
     "status": "applied_and_refrozen",
     "scope": "用户明确授权的阶段功能语义纠正，不宣称无语义变化",
@@ -16,9 +16,9 @@
   "latest_refreeze": {
     "status": "applied_and_refrozen",
     "date": "2026-09-29",
-    "scope": "Stage2 S4 prompt now includes the existing four-state effect-evidence definitions and validator constraints: result_only requires result_only_without_process=true and process_linked_effect=false. This clarifies the causal classification for the current S4 effect; S3 actions cannot substitute for missing S4 process evidence. The prompt changed, so shared S3_S4 outputs may change; this is not a format-only refreeze and does not claim improved accuracy. GT, qualification gates, evidence thresholds, model route, and resource budget are unchanged. Prior artifacts, including the pair10 failure, remain untouched.",
-    "approved_code_commits": ["b9a6538", "eec9096", "bb8fd25", "d354a44", "8300799"],
-    "stage2_semantics": "existing S4 effect-evidence schema and validator contract clarified in the prompt; no judgment rules changed",
+    "scope": "Approved stage instruction consistency corrections: S3 compares overall functional explanation and demonstration gains without automatic upgrades; S2 excludes borrowing later-stage detail as introduction quality. Phase C records facts rather than execution scores and handles evidence by actual function without mechanical opening/ending reassignment. Existing S4 causal constraints remain. Prompt behavior may change; this is not format-only and does not demonstrate improved accuracy. No failed rubric candidate, qualification gate, GT, model route or budget change is included. Historical artifacts remain bound to their original source.",
+    "approved_code_commits": ["b9a6538", "eec9096", "bb8fd25", "d354a44", "8300799", "cb10bb1"],
+    "stage2_semantics": "S2 and S3 comparison scope clarified; Phase C fact-only boundaries aligned; gap band definitions unchanged",
     "gt": "unchanged",
     "qualification": "source-bound no-product-speech negative evidence only; positive voiceover evidence remains blocked",
     "stage_evidence_contract_version": 8,
