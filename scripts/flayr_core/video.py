@@ -99,6 +99,15 @@ def probe_duration_seconds(video_path: Path) -> float | None:
 
 
 _SHOWINFO_PTS_RE = re.compile(r"pts_time:(-?(?:\d+(?:\.\d*)?|\.\d+))")
+_AUDIO_STREAM_MAPPING_RE = re.compile(r"Stream #\d+:(\d+)\s+->\s+#\d+:\d+\b")
+
+
+def _selected_audio_stream_index(stderr: str) -> int | None:
+    """Return the input stream index only when FFmpeg reports one unambiguous mapping."""
+    if "command output exceeded " in (stderr or ""):
+        return None
+    matches = _AUDIO_STREAM_MAPPING_RE.findall(stderr or "")
+    return int(matches[0]) if len(matches) == 1 else None
 
 
 def _showinfo_timestamps(stderr: str, expected_count: int, offset: float = 0.0) -> list[float | None]:
@@ -470,6 +479,7 @@ def _collect_anchor_times(result: dict[str, Any], duration: float) -> list[tuple
 def extract_audio(video_path: Path, audio_path: Path, result: dict[str, Any]) -> None:
     budget = current_budget() or ResourceBudget()
     audio_path.unlink(missing_ok=True)
+    result["audio_stream_index"] = None
     try:
         duration = finite_nonnegative(
             result.get("duration_seconds"),
@@ -483,7 +493,8 @@ def extract_audio(video_path: Path, audio_path: Path, result: dict[str, Any]) ->
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
-        "error",
+        "info",
+        "-nostats",
         "-y",
         "-i",
         str(video_path),
@@ -511,3 +522,4 @@ def extract_audio(video_path: Path, audio_path: Path, result: dict[str, Any]) ->
     if not _reserve_artifacts([audio_path], budget, result, "audio"):
         return
     result["audio_path"] = str(audio_path)
+    result["audio_stream_index"] = _selected_audio_stream_index(completed.stderr)

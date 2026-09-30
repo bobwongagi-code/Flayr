@@ -40,6 +40,15 @@ def classify_speech_mode(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]
     transcription_status = str(info.get("transcription_status") or "").strip()
 
     effective_speech = has_effective_speech(transcript, srt_segments, transcription_status)
+    diagnostics = {
+        "transcription_status": info.get("transcription_status"),
+        "speech_evidence_status": speech_evidence_status(
+            effective_speech,
+            transcript_lower,
+            audio_exists,
+            info,
+        ),
+    }
     if effective_speech:
         return {
             "mode": "spoken",
@@ -49,6 +58,7 @@ def classify_speech_mode(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]
             "srt_segment_count": srt_segments,
             "subtitle_segment_count": subtitle_segments,
             "audio_exists": audio_exists,
+            **diagnostics,
         }
 
     if subtitle_segments > 0:
@@ -60,6 +70,7 @@ def classify_speech_mode(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]
             "srt_segment_count": srt_segments,
             "subtitle_segment_count": subtitle_segments,
             "audio_exists": audio_exists,
+            **diagnostics,
         }
 
     if has_verified_no_product_speech(info):
@@ -71,6 +82,7 @@ def classify_speech_mode(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]
             "srt_segment_count": srt_segments,
             "subtitle_segment_count": subtitle_segments,
             "audio_exists": audio_exists,
+            **diagnostics,
         }
 
     if audio_exists and transcript_lower in NON_SPEECH_LABELS:
@@ -82,6 +94,7 @@ def classify_speech_mode(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]
             "srt_segment_count": srt_segments,
             "subtitle_segment_count": subtitle_segments,
             "audio_exists": audio_exists,
+            **diagnostics,
         }
 
     return {
@@ -92,7 +105,23 @@ def classify_speech_mode(role_dir: Path, info: dict[str, Any]) -> dict[str, Any]
         "srt_segment_count": srt_segments,
         "subtitle_segment_count": subtitle_segments,
         "audio_exists": audio_exists,
+        **diagnostics,
     }
+
+
+def speech_evidence_status(
+    effective_speech: bool,
+    transcript_lower: str,
+    audio_exists: bool,
+    info: dict[str, Any],
+) -> str:
+    if effective_speech:
+        return "present"
+    if has_verified_no_product_speech(info):
+        return "verified_absent"
+    if audio_exists and transcript_lower in NON_SPEECH_LABELS:
+        return "non_speech_label"
+    return "unknown"
 
 
 def has_effective_speech(transcript: str, srt_segments: int, transcription_status: str) -> bool:
