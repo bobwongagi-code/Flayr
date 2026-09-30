@@ -6,11 +6,11 @@
   "frozen_at": "2026-09-23",
   "production_behavior_commit": "81595297e3317f3035772bba823ad8bfb5c840c3",
   "execution_readiness": {
-    "status": "candidate_removed_pending_verification",
+    "status": "candidate_removed_quality_audit_incomplete",
     "scope": "isolated_checkout_only",
     "reason": "8159529 removes unvalidated S2/S3 additions from runtime while retaining approved Phase C cleanup, the original voiceover qualifier and small consistency correction. Source identity freeze is not accuracy validation or authorization for new model calls.",
     "baseline_code_commit": "c88d9827a29c6024b4d36ed98f06bbbcf4ed439d",
-    "required_before_new_runs": "Complete technical verification and existing delivery acceptance; any new model experiment requires separate authorization. Candidate hunks remain in cb10bb1 and references/stage-judgment-candidate-20260930.md."
+    "required_before_new_runs": "Clean 52df4cd passed 1036 tests and local static, secret and media checks; dependency vulnerability audit remains incomplete after the prior same-configuration PyPI timeout. Complete that gate and existing delivery acceptance; any new model experiment requires separate authorization. Candidate hunks remain in cb10bb1 and references/stage-judgment-candidate-20260930.md."
   },
   "authorized_semantic_correction": {
     "status": "applied_and_refrozen",
