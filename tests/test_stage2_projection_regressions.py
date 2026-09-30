@@ -20,6 +20,7 @@ from flayr_core.llm.payload import (  # noqa: E402
     build_stage_group_judgment_payload,
 )
 from flayr_core.postprocess.validate import validate_s4_effect_flags  # noqa: E402
+from flayr_core.stage_contract_registry import S3_EXPRESSION_PROMPT  # noqa: E402
 from flayr_core.stage_evidence_contracts import (  # noqa: E402
     STAGE1_ACQUISITION_VERSION,
     STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
@@ -262,11 +263,11 @@ def _mark_absent(side: dict[str, object], stage: str) -> dict[str, object]:
 
 
 class Stage2ProjectionRegressionTests(unittest.TestCase):
-    def test_s3_prompt_compares_overall_expression_in_reachable_payloads(self) -> None:
-        required = (
+    def test_s3_candidate_wording_is_not_injected_and_baseline_is_reachable(self) -> None:
+        candidate_only = (
             "S3 比较功能与使用表达的整体效果",
             "双方讲解相当不代表整体相当",
-            "判断演示是否清楚增加了对产品功能、用法、适用情境或操作过程的理解",
+            "演示是否清楚增加了对产品功能、用法、适用情境或操作过程的理解",
             "没有有效理解增益不加档",
             "有证据支持的增益按其实际作用判断差距",
             "演示形式或动作的存在本身不自动更优，也不自动触发 medium/large",
@@ -275,18 +276,15 @@ class Stage2ProjectionRegressionTests(unittest.TestCase):
             with self.subTest(stages=stages):
                 payload = build_stage_group_judgment_payload("test", "", {}, {}, stages)
                 text = payload["messages"][1]["content"][0]["text"]
-                for clause in required:
-                    self.assertIn(clause, text)
-
-        s2_payload = build_stage_group_judgment_payload("test", "", {}, {}, ["S2"])
-        s2_text = s2_payload["messages"][1]["content"][0]["text"]
-        self.assertNotIn("双方讲解相当不代表整体相当", s2_text)
-        self.assertNotIn("没有有效理解增益不加档", s2_text)
+                self.assertIn(S3_EXPRESSION_PROMPT, text)
+                for clause in candidate_only:
+                    self.assertNotIn(clause, text)
 
         full_payload = build_llm_payload("test", "input", [])
         full_text = full_payload["messages"][0]["content"]
-        for clause in required:
-            self.assertIn(clause, full_text)
+        self.assertIn(S3_EXPRESSION_PROMPT, full_text)
+        for clause in candidate_only:
+            self.assertNotIn(clause, full_text)
 
     def test_stage_group_prompt_defines_s4_effect_evidence_state(self) -> None:
         s4_payload = build_stage_group_judgment_payload("test", "", {}, {}, ["S4"])

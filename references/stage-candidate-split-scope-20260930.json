@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "name": "stage-candidate-split-20260930",
+  "description": "Restore original S2/S3 judgment wording while preserving the original voiceover qualifier; keep approved Phase C cleanup and small consistency correction. Archive candidate provenance, refreeze source, no model calls or GT changes.",
+  "change_scope": {
+    "max_files": 10,
+    "max_added_lines": 240,
+    "max_deleted_lines": 100,
+    "allowed_globs": [
+      "scripts/flayr_core/llm/payload.py",
+      "scripts/flayr_core/stage_contract_registry.py",
+      "structure_library_full.md",
+      "tests/test_stage_prompt_boundaries.py",
+      "tests/test_stage2_projection_regressions.py",
+      "references/stage-instruction-consistency-audit-20260929.md",
+      "references/stage-judgment-candidate-20260930.md",
+      "references/semantic-baseline-freeze.json",
+      "references/semantic-baseline-freeze.md",
+      "references/stage-candidate-split-scope-20260930.json"
+    ],
+    "forbidden_globs": ["runs/**", "outputs/**", "jobs*.json"]
+  }
+}
