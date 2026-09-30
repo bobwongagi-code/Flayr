@@ -1,0 +1,37 @@
+# 交付闭环核对
+
+2026-09-30，核验源码 `9d0e8275444bfbb9fcb3a4faafbae02abeb657fd`。
+普通子 agent 使用 gpt-6-luna/max 做只读盘点及内存投影，主 agent 审核状态与呈现。
+没有新模型调用、HTML 生成、sidecar 写入或历史标记修补。
+
+## Yoodex
+
+来源是主仓库 `runs/diagnostics/delivery-beijing-20260927/yoodex-reviewed-delivery`。
+manifest、load_review 和 project_reviewed_analysis 均通过；analysis 与 SUCCESS 的
+核验前后哈希一致，且与已有审核 sidecar 指纹匹配。此结论仅适用于该派生包。
+
+原分析代码 `5677d1e8f1085b4d7e49669b23fa9d8d0e0645d3`；已有 9 月 27 日 HTML
+渲染代码 `759a360cf42f4d0477c023f362c7cbc1cc4dc698`；本次只读投影代码见本文首行。
+不能把三个身份当成一次同版本模型运行，不能把派生包的成功状态回写原草稿。
+
+最终人工结论为 S1 none、S2 none、S3 达人更好 small、S4 NA、S5 NA、S6 标杆更好 small。
+当前摘要与这些结论一致。S5 的原始低层 relation 仍可保留 uncertain，
+其 comparison_status 和人工 sidecar 均为不适用，不用原始字段覆盖人工结论。
+
+已编辑的建议为“补拍真实充电画面，让受众看见设备连接及充电状态。”，待处理建议数为 0。
+9 月 24 日“建议尚待放行”的记录已被 9 月 27 日处理更新，不能再作为现状。
+用户曾认可主要建议方向；本次尚需确认实际摘要和动作句可直接交给达人。
+历史人工审核耗时没有记录，省时收益未知，不以技术执行的 0.746 秒替代。
+
+## Careleaf
+
+主运行 `runs/20260910-similar-format/careleaf-pair-02` 仍为 PROCESSING，
+completed_at 为空、没有 SUCCESS 或正式审核 sidecar；旧分析源码为 `6b993367b2e1b8b6dcb1a21e13c8fd51afac4026`。
+已有六阶段普通反馈及局部事实核对不变，不能补成功标记或冒充正式交付验收。
+建议能否放行、是否重看和真实审核耗时尚无记录；不让用户重新填写六阶段或补估过去时间。
+
+## 下一项
+
+仅向用户呈现 Yoodex 的实际总结与最终建议，允许同意或改一句；不要求重做逐阶段判断。
+可读性确认只能补充交付证据，不能证明模型准确率提升，也不能补齐原三组验收或时间收益。
+依赖安全审计仍未完成，候选实验保持关闭。
