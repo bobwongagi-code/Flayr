@@ -4,13 +4,13 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "5c4d4b04c25656cf936a0f549776986811296239",
+  "production_behavior_commit": "81595297e3317f3035772bba823ad8bfb5c840c3",
   "execution_readiness": {
-    "status": "blocked_pending_candidate_split",
+    "status": "candidate_removed_pending_verification",
     "scope": "isolated_checkout_only",
-    "reason": "cb10bb1 combines Phase C cleanup with unvalidated S2/S3 model-visible wording. Source identity freeze is not candidate promotion or authorization for new runs.",
+    "reason": "8159529 removes unvalidated S2/S3 additions from runtime while retaining approved Phase C cleanup, the original voiceover qualifier and small consistency correction. Source identity freeze is not accuracy validation or authorization for new model calls.",
     "baseline_code_commit": "c88d9827a29c6024b4d36ed98f06bbbcf4ed439d",
-    "required_before_new_runs": "Separate approved cleanup from the S2/S3 candidate and refreeze the approved source; preserve candidate and original wording for any separately authorized contemporaneous comparison."
+    "required_before_new_runs": "Complete technical verification and existing delivery acceptance; any new model experiment requires separate authorization. Candidate hunks remain in cb10bb1 and references/stage-judgment-candidate-20260930.md."
   },
   "authorized_semantic_correction": {
     "status": "applied_and_refrozen",
@@ -22,10 +22,10 @@
   },
   "latest_refreeze": {
     "status": "applied_and_refrozen",
-    "date": "2026-09-29",
-    "scope": "Remove the contradictory both-sides-executed prerequisite from small in the active structure library and four documentation/metadata copies. Existing Stage2 instructions and validators already allow one-sided present/partial versus absent to receive small, medium or large. Limited execution does not automatically imply small; evidence qualification and actual functional difference still govern. Prior stage instruction corrections remain. This changes the model-visible definition, is not format-only, and does not demonstrate accuracy gains. No medium/large candidate, historical GT rewrite, qualification gate, route or budget change is included.",
-    "approved_code_commits": ["b9a6538", "eec9096", "bb8fd25", "d354a44", "8300799", "cb10bb1", "5c4d4b0"],
-    "stage2_semantics": "small eligibility reconciled with existing one-sided comparison allowance; other band definitions unchanged",
+    "date": "2026-09-30",
+    "scope": "Remove unvalidated S2/S3 explanatory additions introduced in cb10bb1 from active judgment prompts and the S3 structure-library section. Preserve its approved Phase C fact-review cleanup, the original both-voiceover condition in the shared S3 prompt, and the independently committed small eligibility consistency correction. Candidate source remains archived in Git; no new band mapping, qualification gate, GT, route, budget or model call change.",
+    "approved_code_commits": ["b9a6538", "eec9096", "bb8fd25", "d354a44", "8300799", "cb10bb1", "5c4d4b0", "8159529"],
+    "stage2_semantics": "S2 original field contract and S3 original comparison wording restored; both-voiceover qualifier retained; small eligibility reconciliation retained",
     "gt": "unchanged",
     "qualification": "source-bound no-product-speech negative evidence only; positive voiceover evidence remains blocked",
     "stage_evidence_contract_version": 8,
