@@ -36,6 +36,7 @@ from flayr_core import frame_selection as frame_selection_core
 from flayr_core import motion as motion_core
 from flayr_core import network as network_core
 from flayr_core import resources as resources_core
+from flayr_core import speech_attestation as speech_attestation_core
 from flayr_core import shot_track as shot_track_core
 from flayr_core import speech_mode as speech_mode_core
 from flayr_core import subtitle_track as subtitle_track_core
@@ -186,13 +187,75 @@ def _record_run_failure(
 
 
 def _transcription_issues(videos: dict[str, dict[str, Any]]) -> list[str]:
-    """Return stable, non-sensitive reasons for videos without completed ASR."""
+    """Return stable reasons for videos without ASR or an exact-source attestation."""
     issues: list[str] = []
     for role, info in videos.items():
         status = str(info.get("transcription_status") or "missing").strip().lower()
-        if status != "completed":
+        if status != "completed" and not speech_attestation_core.has_verified_no_product_speech(info):
             issues.append(f"{role}: online Fun-ASR transcription_status={status}")
     return issues
+
+
+def _load_verified_no_product_speech_attestations(
+    manifest_path: Path | None,
+    inputs: dict[str, Path],
+) -> dict[str, dict[str, Any]]:
+    if manifest_path is None:
+        return {}
+    path = manifest_path.expanduser().resolve()
+    if not path.is_file():
+        raise SystemExit(f"no-product-speech attestation manifest does not exist: {path}")
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"no-product-speech attestation manifest is unreadable: {path}") from exc
+    records = manifest.get("verified_no_product_speech_attestations") if isinstance(manifest, dict) else None
+    if not isinstance(records, list) or not records:
+        raise SystemExit("attestation manifest must contain verified_no_product_speech_attestations")
+    file_metadata = _file_metadata(path, include_sha256=True)
+    if not isinstance(file_metadata, dict):
+        raise SystemExit(f"no-product-speech attestation manifest is unreadable: {path}")
+    input_hashes = {
+        role: str((_file_metadata(video_path, include_sha256=True) or {}).get("sha256") or "")
+        for role, video_path in inputs.items()
+    }
+    result: dict[str, dict[str, Any]] = {}
+    seen_hashes: set[str] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            raise SystemExit("no-product-speech attestation entries must be objects")
+        attestation = {
+            **record,
+            "attestation_file": {"path": str(path), "sha256": file_metadata["sha256"]},
+        }
+        source_sha256 = str(record.get("source_sha256") or "").strip().lower()
+        if source_sha256 in seen_hashes or not speech_attestation_core.valid_no_product_speech_attestation(attestation):
+            raise SystemExit("no-product-speech attestation is invalid or duplicated")
+        seen_hashes.add(source_sha256)
+        for role, actual_sha256 in input_hashes.items():
+            if actual_sha256 == source_sha256:
+                result[role] = attestation
+    if not result:
+        raise SystemExit("no-product-speech attestation does not match any exact input SHA-256")
+    return result
+
+
+def _verified_no_product_speech_for_video(
+    role: str,
+    video_path: Path,
+    args: argparse.Namespace,
+) -> dict[str, Any] | None:
+    attestations = getattr(args, "_verified_no_product_speech_attestations", {})
+    attestation = attestations.get(role) if isinstance(attestations, dict) else None
+    if attestation is None:
+        return None
+    source_sha256 = str((_file_metadata(video_path, include_sha256=True) or {}).get("sha256") or "")
+    if not speech_attestation_core.valid_no_product_speech_attestation(
+        attestation,
+        source_sha256=source_sha256,
+    ):
+        raise ValueError(f"{role}: no-product-speech attestation does not match the current input SHA-256")
+    return dict(attestation)
 
 
 def _mark_analysis_degraded(run_dir: Path, analysis: dict[str, Any], reasons: list[str]) -> None:
@@ -234,6 +297,12 @@ def main() -> int:
 
     deps = check_dependencies(args)
     inputs = validate_inputs(args)
+    if args.legacy_import and getattr(args, "verified_no_product_speech_attestation_file", None):
+        raise SystemExit("legacy import cannot be combined with current no-product-speech attestations")
+    args._verified_no_product_speech_attestations = _load_verified_no_product_speech_attestations(
+        getattr(args, "verified_no_product_speech_attestation_file", None),
+        inputs,
+    )
     if args.verification_stage:
         if args.verification_stage != "production":
             assert_verification_order(args.verification_root, args.verification_stage)
@@ -849,6 +918,7 @@ def _preprocess_implementation_sha256() -> str:
         motion_core,
         network_core,
         resources_core,
+        speech_attestation_core,
         shot_track_core,
         speech_mode_core,
         subtitle_track_core,
@@ -883,6 +953,7 @@ def build_preprocess_fingerprint(
     args: argparse.Namespace,
     *,
     cached_info: dict[str, Any] | None = None,
+    no_product_speech_attestation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """缓存只在源视频与所有会改变预处理产物的配置完全一致时命中。"""
     cached_fingerprint = cached_info.get("preprocess_fingerprint") if isinstance(cached_info, dict) else None
@@ -913,6 +984,7 @@ def build_preprocess_fingerprint(
             "model": str(getattr(args, "asr_model", DEFAULT_FUN_ASR_MODEL) or DEFAULT_FUN_ASR_MODEL),
             "requested_language": str(getattr(args, "asr_language", "auto") or "auto"),
         },
+        "verified_no_product_speech_attestation": no_product_speech_attestation,
         "translation": {
             "enabled": bool(getattr(args, "translate_with_llm", False)),
             "model": str(getattr(args, "translation_model", "") or judgment_model(args)),
@@ -1009,20 +1081,37 @@ def load_existing_video_result(
         return None
     role_root = {"work_dir": str(role_dir)}
     frames_dir = resolve_artifact_path(role_root, info.get("frames_dir"), require_root=True)
-    transcript = resolve_artifact_path(
-        role_root,
-        info.get("transcript_path"),
-        require_file=True,
-        require_root=True,
-    )
-    if frames_dir is None or transcript is None:
+    if frames_dir is None or not frames_dir.is_dir():
         return None
-    if not frames_dir.is_dir():
-        return None
-    if str(info.get("transcription_status") or "").strip().lower() != "completed":
-        return None
-    if not transcript.is_file() or _is_stale_placeholder(transcript):
-        return None
+    expected_attestation = expected_fingerprint.get("verified_no_product_speech_attestation")
+    if expected_attestation is not None:
+        if (
+            not speech_attestation_core.valid_no_product_speech_attestation(expected_attestation)
+            or info.get("transcription_status") != speech_attestation_core.VERIFIED_NO_PRODUCT_SPEECH
+            or info.get("no_product_speech_attestation") != expected_attestation
+            or info.get("transcript_path") is not None
+            or info.get("transcript_segments_path") is not None
+            or info.get("transcript_words_path") is not None
+            or any((role_dir / name).exists() for name in (
+                "transcript.txt",
+                "transcript.srt",
+                "transcript.words.json",
+            ))
+        ):
+            return None
+    else:
+        transcript = resolve_artifact_path(
+            role_root,
+            info.get("transcript_path"),
+            require_file=True,
+            require_root=True,
+        )
+        if transcript is None:
+            return None
+        if str(info.get("transcription_status") or "").strip().lower() != "completed":
+            return None
+        if not transcript.is_file() or _is_stale_placeholder(transcript):
+            return None
     segment_value = str(info.get("transcript_segments_path") or "").strip()
     if segment_value:
         segment_path = _current_role_artifact(info, "transcript_segments_path", role_dir)
@@ -1274,6 +1363,7 @@ def process_video(
 ) -> dict[str, Any]:
     role_dir = run_dir / role
     budget = budget or getattr(args, "_resource_budget", None)
+    no_product_speech_attestation = _verified_no_product_speech_for_video(role, video_path, args)
     if getattr(args, "reuse_preprocessing", False):
         cached_info = None
         cache_path = role_dir / "_preprocess.json"
@@ -1283,7 +1373,13 @@ def process_video(
                 cached_info = loaded if isinstance(loaded, dict) else None
             except (OSError, json.JSONDecodeError):
                 cached_info = None
-        fingerprint = build_preprocess_fingerprint(video_path, deps, args, cached_info=cached_info)
+        fingerprint = build_preprocess_fingerprint(
+            video_path,
+            deps,
+            args,
+            cached_info=cached_info,
+            no_product_speech_attestation=no_product_speech_attestation,
+        )
         cached = load_existing_video_result(role_dir, fingerprint, cached_info=cached_info)
         if cached is not None:
             if cached.get("path") != str(video_path):
@@ -1306,7 +1402,15 @@ def process_video(
     staging_dir = run_dir / f".{role}.generation-{uuid.uuid4().hex}"
     staging_dir.mkdir(parents=True, exist_ok=False)
     try:
-        result = _process_video_generation(role, video_path, staging_dir, deps, args, budget=budget)
+        result = _process_video_generation(
+            role,
+            video_path,
+            staging_dir,
+            deps,
+            args,
+            budget=budget,
+            no_product_speech_attestation=no_product_speech_attestation,
+        )
         return _promote_preprocess_generation(staging_dir, role_dir, result)
     except Exception:
         shutil.rmtree(staging_dir, ignore_errors=True)
@@ -1320,6 +1424,7 @@ def _process_video_generation(
     deps: dict[str, Any],
     args: argparse.Namespace,
     budget: ResourceBudget | None = None,
+    no_product_speech_attestation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one isolated role generation; callers publish it only after completion."""
     legacy_import = bool(getattr(args, "legacy_import", False))
@@ -1391,6 +1496,10 @@ def _process_video_generation(
         write_text(transcript_path, ASR_AUDIO_PLACEHOLDER + "\n")
         result["transcription_status"] = "not_requested_legacy_import"
         result["errors"].append("online ASR skipped for legacy import")
+    elif no_product_speech_attestation:
+        result["transcription_status"] = speech_attestation_core.VERIFIED_NO_PRODUCT_SPEECH
+        result["no_product_speech_attestation"] = no_product_speech_attestation
+        result["translation_status"] = "not_requested_no_product_speech"
     elif result["audio_path"]:
         run_online_asr(
             args.asr_api_url,
@@ -1413,11 +1522,13 @@ def _process_video_generation(
         result["errors"].append("online ASR skipped because audio extraction failed")
 
     result["transcript_path"] = str(transcript_path)
-    if legacy_import:
+    if no_product_speech_attestation:
+        result["transcript_path"] = None
+    elif legacy_import:
         result["translation_status"] = "not_requested_legacy_import"
     else:
         sync_chinese_translation(role_dir, result)
-    if args.translate_with_llm and not legacy_import:
+    if args.translate_with_llm and not legacy_import and not no_product_speech_attestation:
         translate_transcript_with_llm(args, role, role_dir, result)
 
     # 晃动信号：本地 ffmpeg vmafmotion 确定性指标（零成本）。severe 时 derive 对
@@ -1460,12 +1571,17 @@ def _process_video_generation(
     # short cuts and subtitle transitions are not forced onto the nearest
     # sampled second.
     extract_anchor_frames(video_path, frames_dir, result, budget=budget)
+    result["preprocess_fingerprint"] = build_preprocess_fingerprint(
+        video_path,
+        deps,
+        args,
+        no_product_speech_attestation=no_product_speech_attestation,
+    )
     result["speech_mode"] = classify_speech_mode(role_dir, result)
 
     # 证据索引与视图：canonical analysis frames、去重审计、联系表、转写包、timeline view。
     # 这些产物改变模型可见输入，但不直接改写业务评分。
     result["video_evidence"] = build_video_evidence_artifacts(role_dir, result)
-    result["preprocess_fingerprint"] = build_preprocess_fingerprint(video_path, deps, args)
     result["preprocess_source_commit"] = _git_commit_sha()
     result["preprocess_source_dirty"] = _git_worktree_dirty()
     result["preprocess_source_probe"] = _file_probe_from_stat(video_path.stat()) if video_path.is_file() else None

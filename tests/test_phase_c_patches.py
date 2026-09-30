@@ -489,6 +489,54 @@ class PhaseCPatchTests(unittest.TestCase):
         self.assertNotIn('"stage_updates"', text)
         self.assertIn("不得输出或修改 severity", text)
 
+    def test_s2_review_payload_preserves_same_fact_functional_reuse(self) -> None:
+        payload = build_stage_review_payload(
+            "test",
+            {"videos": {}},
+            self.facts,
+            {"stage_analysis": [{"stage": "S2 产品引出", "creator_time_range": "0s - 2s", "benchmark_time_range": "0s - 2s"}]},
+            ["S2"],
+        )
+        text = payload["messages"][1]["content"][0]["text"]
+        self.assertIn("同一事实若实际支持产品身份或问题到产品承接，可按 S2 功能引用", text)
+        self.assertIn("引用认证事实不改变其 S5 信任资格", text)
+        self.assertNotIn("卖点细节/成分/认证/选购建议不要当作 S2 加分，归 S3/S4/S5", text)
+
+    def test_s5_s6_review_contract_keeps_fact_and_position_boundaries(self) -> None:
+        payload = build_stage_review_payload(
+            "test",
+            {"videos": {}},
+            self.facts,
+            {
+                "stage_analysis": [
+                    {"stage": "S5 信任放大", "creator_time_range": "0s - 2s", "benchmark_time_range": "0s - 2s"},
+                    {"stage": "S6 CTA", "creator_time_range": "0s - 2s", "benchmark_time_range": "0s - 2s"},
+                ]
+            },
+            ["S5", "S6"],
+        )
+        text = payload["messages"][1]["content"][0]["text"]
+        self.assertIn("本层只修正信任材料及来源的事实字段，不判执行分或 severity", text)
+        self.assertNotIn("硬信任可到 2，软信任封顶 1，口播孤证封顶 0.5", text)
+        self.assertIn("若承担留人功能，可另作 S1 支持", text)
+        self.assertIn("不因开头位置自动排除或强制迁移", text)
+        self.assertNotIn("S5-C 开头评论/粉丝问答归 S1", text)
+        self.assertIn("结尾或可识别收束位置", text)
+        self.assertIn("按是否处于结尾或可识别收束位置填写 ending_position_met", text)
+        self.assertIn("不要求固定在末几秒", text)
+        self.assertNotIn("价格/优惠出现在开头时归 S1，不算 S6", text)
+
+    def test_s3_review_contract_records_observation_fields_without_execution_score(self) -> None:
+        payload = build_stage_review_payload(
+            "test",
+            {"videos": {}},
+            self.facts,
+            {"stage_analysis": [{"stage": "S3 功能与使用表达", "creator_time_range": "0s - 2s", "benchmark_time_range": "0s - 2s"}]},
+            ["S3"],
+        )
+        text = payload["messages"][1]["content"][0]["text"]
+        self.assertIn("单场景连续展示只记录连续性、核心卖点可见性和过程充分性等事实字段；本层不判执行分", text)
+
     def test_s4_review_payload_requires_effect_evidence_state(self) -> None:
         payload = build_stage_review_payload(
             "test",
@@ -508,6 +556,7 @@ class PhaseCPatchTests(unittest.TestCase):
         text = payload["messages"][1]["content"][0]["text"]
         self.assertIn('"effect_evidence_state": "none|result_only|verified|uncertain"', text)
         self.assertIn("两侧都必须输出 effect_evidence_state", text)
+        self.assertIn("只有结果且没有因果桥时不得标记 verified", text)
 
     def test_phase_c_detects_unreferenced_visual_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -4,7 +4,14 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "bb8fd257358cc8f690943dba62fb35dc944c98f7",
+  "production_behavior_commit": "5748467ede21b4c17e16a9666b01786cd52df5e3",
+  "execution_readiness": {
+    "status": "engineering_verified_delivery_pending",
+    "scope": "isolated_checkout_only",
+    "reason": "Engineering-only diagnostics and read-only reviewed-case lookup are committed as 5748467. Repository quality gates passed, including the dependency audit and 79% coverage. Existing delivery acceptance remains an independent pending gate; this is not accuracy promotion or authorization for model/video calls.",
+    "baseline_code_commit": "c88d9827a29c6024b4d36ed98f06bbbcf4ed439d",
+    "required_before_new_runs": "Complete existing delivery acceptance as a separate gate. Any model/video call or accuracy promotion requires separate explicit authorization. Candidate hunks remain in cb10bb1 and references/stage-judgment-candidate-20260930.md."
+  },
   "authorized_semantic_correction": {
     "status": "applied_and_refrozen",
     "scope": "用户明确授权的阶段功能语义纠正，不宣称无语义变化",
@@ -15,14 +22,15 @@
   },
   "latest_refreeze": {
     "status": "applied_and_refrozen",
-    "date": "2026-09-27",
-    "scope": "Human-reviewed report synopsis and preservation of human NA reasons only; no Stage1 or Stage2 judgment changes. Beijing cohort routing is separately authorized and recorded in the batch manifest, not a baseline model comparison.",
-    "approved_code_commits": ["b9a6538", "eec9096", "bb8fd25"],
-    "stage2_semantics": "unchanged",
+    "date": "2026-10-01",
+    "scope": "Engineering-only source-identity refreeze for speech/audio diagnostics and the read-only lookup of explicitly selected human-reviewed stages. Speech routing priorities, provider-facing prompts, Stage1/Stage2 judgment, GT, qualification, gap semantics and thresholds, model route and resource budget are unchanged. Existing artifacts, labels, reviews and sample states are not rewritten; no model/video calls or accuracy promotion. Main integration remains pending.",
+    "previous_production_behavior_commit": "81595297e3317f3035772bba823ad8bfb5c840c3",
+    "approved_code_commits": ["b9a6538", "eec9096", "bb8fd25", "d354a44", "8300799", "cb10bb1", "5c4d4b0", "8159529", "5748467"],
+    "stage2_semantics": "S2 original field contract and S3 original comparison wording restored; both-voiceover qualifier retained; small eligibility reconciliation retained",
     "gt": "unchanged",
-    "qualification": "unchanged",
-    "stage_evidence_contract_version": 7,
-    "gap_bands": "unchanged",
+    "qualification": "source-bound no-product-speech negative evidence only; positive voiceover evidence remains blocked",
+    "stage_evidence_contract_version": 8,
+    "gap_bands": "small both-sides-executed prerequisite removed; none, medium/large, NA and uncertain unchanged; no automatic action-count mapping",
     "model_route": "unchanged",
     "resource_budget": "unchanged",
     "legacy_artifact_policy": "No old analysis artifact rerun or rewritten; reviewed reports are separate derived outputs and prior sample states remain unchanged",
@@ -51,7 +59,7 @@
   "artifact_identity": {
     "success_manifest": "_SUCCESS.json",
     "analysis_artifact": "analysis.json",
-    "analysis_schema_sha256": "723a7b9dd0734c420d6e30fb5e66193c96c358e5e4aefa671b00d7b80140a0ba",
+    "analysis_schema_sha256": "6ac5f0fb8da09a4c3054b387f51b35620acd653f725c838aedc2f5dfd7f1310c",
     "stage2_pipeline_version": "segmented_stage_v1",
     "accepted_code_commit_policy": "production_behavior_commit_or_current_source_after_freeze_verification",
     "on_mismatch": "exclude_and_inventory_without_scoring"
@@ -72,7 +80,7 @@
   "shared_gap_semantics": {
     "not_applicable": "双方覆盖完整且都没有执行该阶段功能，或该阶段按专家协议不涉及；不设置方向，不进入gap分母",
     "none": "双方都执行了该阶段功能，且实际表现基本相同",
-    "small": "双方都执行了该阶段功能，存在可见但较小的差距",
+    "small": "本阶段存在有证据支持、可辨认但较小的差距；不以双方都执行为前提",
     "one_sided_execution": "仍然可比；方向指向执行更强的一侧，幅度为small、medium或large",
     "uncertain": "事实不完整、冲突或无法稳定判断；不能代替none或not_applicable"
   },

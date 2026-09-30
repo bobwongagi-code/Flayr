@@ -6,7 +6,7 @@
   "shared_gap_semantics": {
     "not_applicable": "双方覆盖完整且都没有执行该阶段功能；不设置方向，不进入差距分母",
     "none": "双方都执行了该阶段功能，且实际表现基本相同",
-    "small": "双方都执行了该阶段功能，存在可见但较小的差距",
+    "small": "本阶段存在有证据支持、可辨认但较小的差距；不以双方都执行为前提",
     "one_sided_execution": "仍然可比；方向指向执行侧，幅度为 small、medium 或 large",
     "uncertain": "事实不完整、冲突或无法稳定判断；不能代替 none 或 not_applicable"
   },

@@ -37,6 +37,7 @@ from ..multimodal import (
     MULTIMODAL_RELATIONS,
 )
 from ..stage_catalog import stage_tuples
+from ..speech_attestation import has_verified_no_product_speech
 from ..stage_evidence_contracts import (
     STAGE1_OBSERVATION_CONTRACT_VERSION,
     STAGE_EVIDENCE_CONTRACT_VERSION,
@@ -1792,6 +1793,8 @@ def normalize_video_fact_result(
         "stage1_recovery": {},
     }
     duration = analysis.get("videos", {}).get(role, {}).get("duration_seconds")
+    video_info = analysis.get("videos", {}).get(role, {})
+    verified_no_product_speech = has_verified_no_product_speech(video_info)
     raw_gate_status = result.get("gate_observation_status")
     used_ids: set[str] = set()
     for index, unit in enumerate(units, start=1):
@@ -1805,7 +1808,11 @@ def normalize_video_fact_result(
                 text
                 for text in (
                     str(unit.get("visual_fact") or "").strip(),
-                    str(unit.get("voiceover_zh") or unit.get("voiceover") or "").strip(),
+                    (
+                        ""
+                        if verified_no_product_speech
+                        else str(unit.get("voiceover_zh") or unit.get("voiceover") or "").strip()
+                    ),
                     str(unit.get("subtitle_fact") or "").strip(),
                     str(unit.get("audio_fact") or "").strip(),
                 )
@@ -1882,6 +1889,13 @@ def _bind_authoritative_stage1_voiceover(
         if isinstance(videos, dict) and isinstance(videos.get(role), dict)
         else {}
     )
+    if has_verified_no_product_speech(info):
+        for unit in facts.get("evidence_units") or []:
+            if not isinstance(unit, dict):
+                continue
+            unit["voiceover"] = ""
+            unit["voiceover_zh"] = ""
+        return
     words = load_transcript_words(info)
     duration = info.get("duration_seconds")
     for unit in facts.get("evidence_units") or []:
