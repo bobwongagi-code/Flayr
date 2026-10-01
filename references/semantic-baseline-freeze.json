@@ -7,7 +7,7 @@
   "production_behavior_commit": "5748467ede21b4c17e16a9666b01786cd52df5e3",
   "execution_readiness": {
     "status": "engineering_verified_delivery_pending",
-    "scope": "isolated_checkout_only",
+    "scope": "local_main_integrated",
     "reason": "Engineering-only diagnostics and read-only reviewed-case lookup are committed as 5748467. Repository quality gates passed, including the dependency audit and 79% coverage. Existing delivery acceptance remains an independent pending gate; this is not accuracy promotion or authorization for model/video calls.",
     "baseline_code_commit": "c88d9827a29c6024b4d36ed98f06bbbcf4ed439d",
     "required_before_new_runs": "Complete existing delivery acceptance as a separate gate. Any model/video call or accuracy promotion requires separate explicit authorization. Candidate hunks remain in cb10bb1 and references/stage-judgment-candidate-20260930.md."
@@ -23,7 +23,7 @@
   "latest_refreeze": {
     "status": "applied_and_refrozen",
     "date": "2026-10-01",
-    "scope": "Engineering-only source-identity refreeze for speech/audio diagnostics and the read-only lookup of explicitly selected human-reviewed stages. Speech routing priorities, provider-facing prompts, Stage1/Stage2 judgment, GT, qualification, gap semantics and thresholds, model route and resource budget are unchanged. Existing artifacts, labels, reviews and sample states are not rewritten; no model/video calls or accuracy promotion. Main integration remains pending.",
+    "scope": "Engineering-only source-identity refreeze for speech/audio diagnostics and the read-only lookup of explicitly selected human-reviewed stages. Speech routing priorities, provider-facing prompts, Stage1/Stage2 judgment, GT, qualification, gap semantics and thresholds, model route and resource budget are unchanged. Existing artifacts, labels, reviews and sample states are not rewritten; no model/video calls or accuracy promotion. Local main integration completed as 498a4b6; unapproved working changes remain separately archived, not enabled.",
     "previous_production_behavior_commit": "81595297e3317f3035772bba823ad8bfb5c840c3",
     "approved_code_commits": ["b9a6538", "eec9096", "bb8fd25", "d354a44", "8300799", "cb10bb1", "5c4d4b0", "8159529", "5748467"],
     "stage2_semantics": "S2 original field contract and S3 original comparison wording restored; both-voiceover qualifier retained; small eligibility reconciliation retained",

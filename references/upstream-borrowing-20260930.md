@@ -2,10 +2,13 @@
 
 ## State and Scope
 
-Implemented locally on the clean delivery checkout based on `de21928`. The
-upcoming commit is engineering-only; mechanical refreeze and main integration
-are pending, and no accuracy promotion is claimed. The mixed main working tree
-and existing review artifacts remain unchanged.
+Implemented as `5748467`, mechanically refrozen as `a01feb2`, and integrated
+into local main as `498a4b6` on 2026-10-01. No accuracy promotion is claimed.
+The 24 pre-existing working files (semantic candidates and historical notes)
+are preserved in local branch `archive/main-wip-20261001` at `fc086e99`;
+content and file modes matched 24/24 before removal from the active worktree.
+They are not included in the integrated runtime. Existing review artifacts
+and ignored diagnostic directories remain unchanged. No push was performed.
 No new dependencies, services, provider requests, video-analysis runs, model
 routes, qualification thresholds, or gap definitions were introduced.
 
@@ -61,22 +64,23 @@ The command validates each completion manifest and hash-bound human-review sidec
 
 ## Limitations
 
-- This implementation lives in the diagnostics clean checkout at baseline `de21928`; it is not deployed production code. Run the script from this checkout and provide each run directory explicitly.
+- This implementation is available in local main; integration is not production deployment or accuracy acceptance. Provide each run directory explicitly.
 - Every run must be named explicitly; the command does not recursively scan directories. Any stale, malformed, or otherwise invalid run fails the lookup with a path-specific error rather than being skipped.
 - `--query` is literal substring filtering over displayed fields. It does not perform fuzzy search, relevance scoring, ranking, or automatic exemplar selection.
 - The lookup does not display performance metrics, compare case performance, infer which case is best, promote a human-reviewed judgment to model-accuracy evidence, modify reviews, rerun analysis, or call a model.
 
 ## Verification
 
-- 91 related tests passed across lookup, human review, video extraction, speech
-  diagnostics, no-product-speech attestation, frame evidence, audio layers, and
-  acquisition windows.
-- Changed-scope Ruff checks using the existing CI rule selection and
-  `git diff --check` passed. Full quality/dependency gates were not rerun.
-- Real Yoodex S4 lookup returned model `benchmark_better / small` separately
-  from human `not_applicable`, with the existing note and evidence IDs.
-- The frozen-source verifier rejects `speech_mode.py` and `video.py` drift as
-  expected. The old freeze record was not rewritten; these changes must not
-  claim its source identity.
+- At engineering commit `5748467`, the full quality gate passed, including
+  dependency audit, secret scan and media-tool smoke; coverage was 79%.
+- After mechanical refreeze, all 1,046 unit tests and the frozen-source
+  verifier passed. The earlier pre-refreeze identity mismatch remains in
+  history; it was not reclassified as a passing check.
+- On integrated main `498a4b6`, the existing `scripts/run-tests.sh` project
+  checks and the frozen-source verifier passed. No dependency audit was repeated.
+- Real read-only Yoodex S4 lookup on main returned model
+  `benchmark_better / small` separately from human `not_applicable`.
+  SHA256 values of analysis, completion manifest and review sidecar were
+  identical before and after lookup.
 - No model-accuracy gain, no-speech detector accuracy, or production acceptance
   is claimed.
