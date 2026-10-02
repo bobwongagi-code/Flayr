@@ -16,7 +16,12 @@ from urllib.parse import urlsplit
 
 from .llm.api import audio_to_mp3_data_url, read_llm_api_key
 from .llm.provider_artifacts import provider_call_with_artifact, provider_role_replay_root
-from .network import DEFAULT_QWEN_API_HOSTS, OutboundURLPolicyError, validate_outbound_url
+from .network import (
+    DEFAULT_ALLOWED_ASR_API_HOSTS,
+    DEFAULT_QWEN_API_HOSTS,
+    OutboundURLPolicyError,
+    validate_outbound_url,
+)
 from .resources import ResourceBudgetExceeded, current_budget
 from .utils import run_command, write_json, write_text
 
@@ -260,7 +265,10 @@ def _call_asr_endpoint(
     response_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
-        validated = validate_outbound_url(api_url)
+        validated = validate_outbound_url(
+            api_url,
+            allowed_hosts=DEFAULT_ALLOWED_ASR_API_HOSTS,
+        )
     except OutboundURLPolicyError as exc:
         raise SystemExit(str(exc)) from exc
     if not shutil.which("curl"):

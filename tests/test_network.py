@@ -13,7 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from flayr_core.network import (
+    DEFAULT_ALLOWED_API_HOSTS,
+    DEFAULT_ALLOWED_ASR_API_HOSTS,
     DEFAULT_ALLOWED_LLM_API_HOSTS,
+    FUN_ASR_SINGAPORE_API_HOST,
     ROOTIFY_COMPANY_LLM_API_HOST,
     OutboundURLPolicyError,
     validate_outbound_url,
@@ -73,6 +76,11 @@ class NetworkPolicyTests(unittest.TestCase):
                 f"https://subdomain.{ROOTIFY_COMPANY_LLM_API_HOST}/v1/chat/completions",
                 allowed_hosts=DEFAULT_ALLOWED_LLM_API_HOSTS,
             )
+
+    def test_singapore_maas_host_is_allowlisted_only_for_asr(self) -> None:
+        self.assertIn(FUN_ASR_SINGAPORE_API_HOST, DEFAULT_ALLOWED_ASR_API_HOSTS)
+        self.assertNotIn(FUN_ASR_SINGAPORE_API_HOST, DEFAULT_ALLOWED_API_HOSTS)
+        self.assertNotIn(FUN_ASR_SINGAPORE_API_HOST, DEFAULT_ALLOWED_LLM_API_HOSTS)
 
 
 if __name__ == "__main__":

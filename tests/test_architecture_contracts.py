@@ -6309,6 +6309,72 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertEqual(transcript.read_text(encoding="utf-8").strip(), "new transcript")
             self.assertIn("new transcript", (role_dir / "transcript.srt").read_text(encoding="utf-8"))
 
+    def test_online_asr_allows_exact_singapore_maas_host(self) -> None:
+        host = "llm-ltudqs3p2y3jjvo5.ap-southeast-1.maas.aliyuncs.com"
+        url = f"https://{host}/api/v1/services/aigc/multimodal-generation/generation"
+        answer = [(2, 1, 6, "", ("8.8.8.8", 443))]
+        response = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"output": {}}),
+            stderr="__FLAYR_HTTP_STATUS__200\n",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch("flayr_core.network.socket.getaddrinfo", return_value=answer),
+                mock.patch.object(asr.shutil, "which", return_value="/usr/bin/curl"),
+                mock.patch.object(asr, "run_command", return_value=response) as transport,
+            ):
+                result = asr._call_asr_endpoint(
+                    url,
+                    "test-key",
+                    {"model": "fun-asr-flash-2026-06-15"},
+                    Path(tmp),
+                )
+
+        self.assertEqual(result, {"output": {}})
+        transport.assert_called_once()
+        command = transport.call_args.args[0]
+        self.assertEqual(command[-1], url)
+        self.assertEqual(command[command.index("--resolve") + 1], f"{host}:443:8.8.8.8")
+
+    def test_online_asr_rejects_unknown_host_before_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch("flayr_core.network.socket.getaddrinfo") as resolve,
+                mock.patch.object(asr.shutil, "which") as find_curl,
+                mock.patch.object(asr, "run_command") as transport,
+                self.assertRaises(SystemExit),
+            ):
+                asr._call_asr_endpoint(
+                    "https://unlisted.example/asr",
+                    "test-key",
+                    {"model": "fun-asr-flash-2026-06-15"},
+                    Path(tmp),
+                )
+
+        resolve.assert_not_called()
+        find_curl.assert_not_called()
+        transport.assert_not_called()
+
+    def test_online_asr_rejects_company_llm_host_before_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch("flayr_core.network.socket.getaddrinfo") as resolve,
+                mock.patch.object(asr.shutil, "which") as find_curl,
+                mock.patch.object(asr, "run_command") as transport,
+                self.assertRaises(SystemExit),
+            ):
+                asr._call_asr_endpoint(
+                    "https://rootifyaiapi.rootifyglobal.com/asr",
+                    "test-key",
+                    {"model": "fun-asr-flash-2026-06-15"},
+                    Path(tmp),
+                )
+
+        resolve.assert_not_called()
+        find_curl.assert_not_called()
+        transport.assert_not_called()
+
     def test_online_asr_transport_is_direct_and_preserves_all_pinned_addresses(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             role_dir = Path(tmp)

@@ -19,6 +19,7 @@ DEFAULT_TRANSCRIPT_ONLY_QWEN_HOSTS = frozenset({
 })
 
 ROOTIFY_COMPANY_LLM_API_HOST = "rootifyaiapi.rootifyglobal.com"
+FUN_ASR_SINGAPORE_API_HOST = "llm-ltudqs3p2y3jjvo5.ap-southeast-1.maas.aliyuncs.com"
 
 DEFAULT_ALLOWED_API_HOSTS = frozenset({
     "api.openai.com",
@@ -28,6 +29,11 @@ DEFAULT_ALLOWED_API_HOSTS = frozenset({
 DEFAULT_ALLOWED_LLM_API_HOSTS = frozenset({
     *DEFAULT_ALLOWED_API_HOSTS,
     ROOTIFY_COMPANY_LLM_API_HOST,
+})
+
+DEFAULT_ALLOWED_ASR_API_HOSTS = frozenset({
+    *DEFAULT_ALLOWED_API_HOSTS,
+    FUN_ASR_SINGAPORE_API_HOST,
 })
 
 
