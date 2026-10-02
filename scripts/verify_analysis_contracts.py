@@ -2255,19 +2255,26 @@ with tempfile.TemporaryDirectory() as tmp:
         llm_dry_run=False,
         llm_api_url="https://example.invalid",
     )
-    original_key_reader = translation_module.read_llm_api_key
+    original_key_reader = translation_module.read_provider_api_key
     original_call = translation_module.call_llm_api
-    translation_module.read_llm_api_key = lambda _args: "test-key"
+    translation_key_roles = []
+
+    def fake_provider_key_reader(_args, role):
+        translation_key_roles.append(role)
+        return "test-key"
+
+    translation_module.read_provider_api_key = fake_provider_key_reader
     translation_module.call_llm_api = lambda *_args, **_kwargs: (_ for _ in ()).throw(SystemExit("network failed"))
     try:
         translation_module.translate_transcript_with_llm(translation_args, "creator", translation_dir, translation_result)
     finally:
-        translation_module.read_llm_api_key = original_key_reader
+        translation_module.read_provider_api_key = original_key_reader
         translation_module.call_llm_api = original_call
     check(
-        "LLM 翻译失败：记录错误且不中断主流程",
+        "LLM 翻译失败：使用判断线路且记录错误、不打断主流程",
         translation_result.get("translation_status") == "failed"
-        and any("network failed" in str(item) for item in translation_result.get("errors", [])),
+        and any("network failed" in str(item) for item in translation_result.get("errors", []))
+        and translation_key_roles == ["judgment"],
     )
 
 from collections import Counter  # noqa: E402

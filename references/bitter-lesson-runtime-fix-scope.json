@@ -50,6 +50,7 @@
       "scripts/flayr_core/stage_ownership.py",
       "scripts/flayr_core/translation.py",
       "scripts/review_analysis.py",
+      "scripts/verify_analysis_contracts.py",
       "scripts/web_app.py",
       "tests/test_architecture_contracts.py",
       "tests/test_batch_analyze.py",
