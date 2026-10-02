@@ -24,6 +24,7 @@ from scripts.web_app import (
     WEB_ALLOWED_HOSTS_ENV,
     WEB_AUTH_TOKEN_ENV,
     _resolve_web_security,
+    _llm_configuration_from_env,
     _signed_client_cookie,
     cleanup_upload_files,
     estimated_remaining_seconds,
@@ -40,6 +41,10 @@ from scripts.flayr_core.run_state import (
     initialize_run_state,
     read_run_state,
     transition_run_state,
+)
+from scripts.flayr_core.llm.api import (
+    DEFAULT_COMPANY_LLM_API_URL,
+    provider_route_configuration_error,
 )
 
 
@@ -454,8 +459,10 @@ class WebAppHelpersTests(unittest.TestCase):
                     "FLAYR_VISION_MODEL": "qwen3-vl-plus",
                     "FLAYR_LLM_MODEL": "qwen3.6-plus",
                     "FLAYR_LLM_API_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+                    "FLAYR_VISION_API_URL": "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
+                    "FLAYR_VISION_API_KEY_ENV": "DASHSCOPE_API_KEY",
                 },
-                clear=False,
+                clear=True,
             ):
                 command = store._command(job)
             store.shutdown()
@@ -464,8 +471,71 @@ class WebAppHelpersTests(unittest.TestCase):
             self.assertIn("--vision-model", command)
             self.assertIn("qwen3-vl-plus", command)
             self.assertNotIn("--llm-model", command)
+            self.assertIn("--vision-api-url", command)
+            self.assertIn(
+                "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
+                command,
+            )
+            self.assertIn("--vision-api-key-env", command)
+            self.assertIn("DASHSCOPE_API_KEY", command)
 
-    def test_web_worker_rejects_configured_models_without_endpoint(self) -> None:
+    def test_web_worker_uses_company_defaults_when_no_model_route_is_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            job = {
+                "benchmark_path": "/tmp/benchmark.mp4",
+                "creator_path": "/tmp/creator.mp4",
+                "product_name": "product",
+                "category": "category",
+                "price": "1",
+                "market_code": "my",
+                "selling_point": "point",
+                "run_dir": str(Path(tmp) / "run"),
+            }
+            with mock.patch.dict(os.environ, {}, clear=True):
+                command = store._command(job)
+            store.shutdown()
+            self.assertIn("--judgment-model", command)
+            self.assertIn("gpt-6-sol", command)
+            self.assertIn("--vision-model", command)
+            self.assertIn("qwen3-vl-plus", command)
+            self.assertIn(
+                "https://rootifyaiapi.rootifyglobal.com/v1/chat/completions",
+                command,
+            )
+            self.assertIn("--vision-api-url", command)
+            self.assertIn(
+                "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
+                command,
+            )
+            self.assertIn("--llm-api-key-env", command)
+            self.assertIn("FLAYR_LLM_API_KEY", command)
+            self.assertIn("--vision-api-key-env", command)
+            self.assertIn("DASHSCOPE_API_KEY", command)
+
+    def test_web_worker_keeps_explicit_legacy_route_without_default_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            job = {
+                "benchmark_path": "/tmp/benchmark.mp4",
+                "creator_path": "/tmp/creator.mp4",
+                "product_name": "product",
+                "category": "category",
+                "price": "1",
+                "market_code": "my",
+                "selling_point": "point",
+                "run_dir": str(Path(tmp) / "run"),
+            }
+            with mock.patch.dict(os.environ, {"FLAYR_LLM_MODEL": "qwen3.6-plus"}, clear=True):
+                command = store._command(job)
+            store.shutdown()
+            self.assertIn("--llm-model", command)
+            self.assertIn("qwen3.6-plus", command)
+            self.assertNotIn("--judgment-model", command)
+            self.assertNotIn("--vision-model", command)
+            self.assertNotIn("--vision-api-url", command)
+
+    def test_web_worker_preserves_explicit_shared_endpoint_for_default_pair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = JobStore(Path(tmp))
             job = {
@@ -481,15 +551,45 @@ class WebAppHelpersTests(unittest.TestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "FLAYR_JUDGMENT_MODEL": "qwen3.7-plus",
-                    "FLAYR_VISION_MODEL": "qwen3-vl-plus",
+                    "FLAYR_LLM_API_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
                 },
-                clear=False,
+                clear=True,
             ):
-                os.environ.pop("FLAYR_LLM_API_URL", None)
-                with self.assertRaisesRegex(RuntimeError, "FLAYR_LLM_API_URL"):
-                    store._command(job)
+                command = store._command(job)
             store.shutdown()
+            self.assertIn(
+                "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+                command,
+            )
+            self.assertNotIn("--vision-api-url", command)
+
+    def test_web_custom_vision_endpoint_does_not_inherit_dashscope_key_env(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "FLAYR_VISION_API_URL": (
+                    "https://llm-nlx73tfv3mm6w67e.cn-singapore.maas.aliyuncs.com/"
+                    "compatible-mode/v1/chat/completions"
+                )
+            },
+            clear=True,
+        ):
+            route_args, _, _ = _llm_configuration_from_env()
+        self.assertEqual(route_args.vision_api_key_env, "")
+        self.assertRegex(
+            provider_route_configuration_error(route_args, "vision") or "",
+            "vision-api-key-env",
+        )
+
+    def test_web_company_vision_endpoint_reuses_company_key_env(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"FLAYR_VISION_API_URL": DEFAULT_COMPANY_LLM_API_URL},
+            clear=True,
+        ):
+            route_args, _, _ = _llm_configuration_from_env()
+        self.assertEqual(route_args.vision_api_key_env, "")
+        self.assertIsNone(provider_route_configuration_error(route_args, "vision"))
 
     def test_estimated_remaining_time_uses_coarse_phase_buckets(self) -> None:
         self.assertEqual(estimated_remaining_seconds(0), 30 * 60)

@@ -30,13 +30,27 @@ from ..resources import (
     finite_nonnegative,
 )
 from ..network import (
+    DEFAULT_ALLOWED_LLM_API_HOSTS,
     DEFAULT_QWEN_API_HOSTS,
     DEFAULT_TRANSCRIPT_ONLY_QWEN_HOSTS,
+    ROOTIFY_COMPANY_LLM_API_HOST,
     OutboundURLPolicyError,
     ValidatedOutboundURL,
     validate_outbound_url,
 )
 from ..utils import cleanup_stale_temp_entries, run_command, write_text
+
+DEFAULT_COMPANY_LLM_API_URL = (
+    f"https://{ROOTIFY_COMPANY_LLM_API_HOST}/v1/chat/completions"
+)
+DEFAULT_COMPANY_JUDGMENT_MODEL = "gpt-6-sol"
+DEFAULT_COMPANY_VISION_MODEL = "qwen3-vl-plus"
+DEFAULT_LLM_API_KEY_ENV = "FLAYR_LLM_API_KEY"
+DEFAULT_BEIJING_MAAS_LLM_API_URL = (
+    "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/"
+    "compatible-mode/v1/chat/completions"
+)
+DEFAULT_VISION_API_KEY_ENV = "DASHSCOPE_API_KEY"
 
 LLM_CURL_MAX_TIME_SECONDS = 1800
 LLM_CURL_LOW_SPEED_LIMIT_BYTES_PER_SECOND = 1
@@ -112,6 +126,14 @@ def provider_capabilities(api_url: str, model: str = "") -> ProviderCapabilities
         hostname = (urlsplit(str(api_url or "")).hostname or "").lower()
     except ValueError:
         hostname = ""
+    if hostname == ROOTIFY_COMPANY_LLM_API_HOST:
+        return ProviderCapabilities(
+            profile="rootify_company_gateway",
+            confidence="approved_matrix",
+            native_video_input=normalized_model == DEFAULT_COMPANY_VISION_MODEL,
+            standalone_audio_input=False,
+            native_audio_analysis=False,
+        )
     if hostname in DEFAULT_TRANSCRIPT_ONLY_QWEN_HOSTS and normalized_model.startswith("qwen"):
         return ProviderCapabilities(
             profile="beijing_maas_qwen_transcript_visual",
@@ -239,11 +261,122 @@ def _write_completion_response(
 
 def read_llm_api_key(args: argparse.Namespace) -> str:
     """优先从环境变量读取 API key，回退到 macOS Keychain。"""
-    # env 与 keychain 两条路径都 strip：尾换行混进 Authorization 头会把请求体顶空（400 Request body is required）
-    env_key = os.environ.get(args.llm_api_key_env, "").strip()
+    return _read_api_key(
+        str(getattr(args, "llm_api_key_env", DEFAULT_LLM_API_KEY_ENV) or DEFAULT_LLM_API_KEY_ENV),
+        str(getattr(args, "llm_api_key_keychain_service", "") or ""),
+        str(getattr(args, "llm_api_key_keychain_account", "API_KEY") or "API_KEY"),
+    )
+
+
+def provider_route(args: argparse.Namespace, role: str) -> tuple[str, str, str, str]:
+    """Return (endpoint, key env, Keychain service, Keychain account) for a task role."""
+    role = str(role or "").strip().lower()
+    if role not in {"judgment", "vision"}:
+        raise ValueError(f"unknown LLM route role: {role!r}")
+    llm_url = str(getattr(args, "llm_api_url", "") or "").strip()
+    llm_key_env = str(
+        getattr(args, "llm_api_key_env", DEFAULT_LLM_API_KEY_ENV) or DEFAULT_LLM_API_KEY_ENV
+    ).strip()
+    llm_service = str(getattr(args, "llm_api_key_keychain_service", "") or "").strip()
+    llm_account = str(getattr(args, "llm_api_key_keychain_account", "API_KEY") or "API_KEY").strip()
+    if role == "judgment":
+        return llm_url, llm_key_env, llm_service, llm_account
+
+    vision_url = str(getattr(args, "vision_api_url", "") or "").strip()
+    vision_key_env = str(getattr(args, "vision_api_key_env", "") or "").strip()
+    if not vision_url:
+        return (
+            llm_url,
+            vision_key_env or llm_key_env,
+            "" if vision_key_env else llm_service,
+            llm_account,
+        )
+    if vision_key_env:
+        return vision_url, vision_key_env, "", "API_KEY"
+    if vision_url == DEFAULT_BEIJING_MAAS_LLM_API_URL:
+        return vision_url, DEFAULT_VISION_API_KEY_ENV, "", "API_KEY"
+    if vision_url == llm_url:
+        return llm_url, llm_key_env, llm_service, llm_account
+    return vision_url, "", "", "API_KEY"
+
+
+def provider_route_configuration_error(args: argparse.Namespace, role: str) -> str | None:
+    api_url, key_env, _, _ = provider_route(args, role)
+    if role == "vision" and api_url and not key_env:
+        return (
+            "a separate --vision-api-url requires --vision-api-key-env "
+            "or FLAYR_VISION_API_KEY_ENV"
+        )
+    return None
+
+
+def provider_api_url(args: argparse.Namespace, role: str) -> str:
+    return provider_route(args, role)[0]
+
+
+def provider_api_key_env(args: argparse.Namespace, role: str) -> str:
+    return provider_route(args, role)[1]
+
+
+def provider_run_metadata(args: argparse.Namespace) -> dict[str, str]:
+    """Expose configured route identities without reading or serializing secrets."""
+    judgment_url = provider_api_url(args, "judgment")
+    return {
+        # Keep the legacy field as an explicit alias for the judgment route.
+        "llm_api_url": judgment_url,
+        "judgment_api_url": judgment_url,
+        "vision_api_url": provider_api_url(args, "vision"),
+        "judgment_api_key_env": provider_api_key_env(args, "judgment"),
+        "vision_api_key_env": provider_api_key_env(args, "vision"),
+    }
+
+
+def read_provider_api_key(args: argparse.Namespace, role: str) -> str:
+    cached_keys = getattr(args, "_provider_api_keys", {})
+    if isinstance(cached_keys, dict) and isinstance(cached_keys.get(role), str):
+        return cached_keys[role]
+    _, key_env, service, account = provider_route(args, role)
+    return _read_api_key(key_env, service, account)
+
+
+def preflight_provider_api_keys(args: argparse.Namespace) -> dict[str, str]:
+    """Resolve both live route credentials before preprocessing can call a provider."""
+    if (
+        getattr(args, "llm_dry_run", False)
+        or getattr(args, "provider_replay_from", None)
+        or getattr(args, "analysis_result_json", None)
+    ):
+        args._provider_api_keys = {}
+        return {}
+    cached_keys = getattr(args, "_provider_api_keys", {})
+    if isinstance(cached_keys, dict) and all(
+        isinstance(cached_keys.get(role), str) and cached_keys[role]
+        for role in ("judgment", "vision")
+    ):
+        return cached_keys
+    for role in ("judgment", "vision"):
+        route_error = provider_route_configuration_error(args, role)
+        if route_error:
+            raise SystemExit(route_error)
+    keys: dict[str, str] = {}
+    for role in ("judgment", "vision"):
+        key = read_provider_api_key(args, role).strip()
+        if not key:
+            _, key_env, service, _ = provider_route(args, role)
+            hint = f"${key_env}" if key_env else "the configured vision key environment variable"
+            if role == "judgment" and service:
+                hint += f" or macOS Keychain service {service}"
+            raise SystemExit(f"Missing {role} API key: set {hint}.")
+        keys[role] = key
+    args._provider_api_keys = keys
+    return keys
+
+
+def _read_api_key(key_env: str, service: str, account: str) -> str:
+    # Strip both sources: trailing newlines in Authorization can invalidate the request body.
+    env_key = os.environ.get(key_env, "").strip()
     if env_key:
         return env_key
-    service = args.llm_api_key_keychain_service
     if not service:
         return ""
     command = [
@@ -252,7 +385,7 @@ def read_llm_api_key(args: argparse.Namespace) -> str:
         "-s",
         service,
         "-a",
-        args.llm_api_key_keychain_account,
+        account,
         "-w",
     ]
     completed = run_command(command)
@@ -1032,7 +1165,10 @@ def call_llm_api(
             payload_path.unlink(missing_ok=True)
         raise SystemExit("LLM streaming 需要 curl，但系统未找到 curl。")
     try:
-        validated_url = validate_outbound_url(api_url)
+        validated_url = validate_outbound_url(
+            api_url,
+            allowed_hosts=DEFAULT_ALLOWED_LLM_API_HOSTS,
+        )
     except OutboundURLPolicyError as exc:
         if cleanup_payload:
             payload_path.unlink(missing_ok=True)

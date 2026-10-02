@@ -49,7 +49,16 @@ from pathlib import Path
 from typing import Any
 
 try:  # works both as ``python scripts/batch_analyze.py`` and as a test module
-    from flayr_core.llm.api import llm_provider_configuration_error
+    from flayr_core.llm.api import (
+        DEFAULT_BEIJING_MAAS_LLM_API_URL,
+        DEFAULT_COMPANY_JUDGMENT_MODEL,
+        DEFAULT_COMPANY_LLM_API_URL,
+        DEFAULT_COMPANY_VISION_MODEL,
+        DEFAULT_LLM_API_KEY_ENV,
+        llm_provider_configuration_error,
+        provider_api_url,
+        provider_route_configuration_error,
+    )
     from flayr_core.run_manifest import (
         SUCCESS_MANIFEST_NAME,
         command_digest,
@@ -58,7 +67,16 @@ try:  # works both as ``python scripts/batch_analyze.py`` and as a test module
     from flayr_core.run_state import COMPLETED, read_run_state
     from flayr_core.utils import process_group_popen_kwargs
 except ModuleNotFoundError:  # pragma: no cover - package import path in test runners
-    from scripts.flayr_core.llm.api import llm_provider_configuration_error
+    from scripts.flayr_core.llm.api import (
+        DEFAULT_BEIJING_MAAS_LLM_API_URL,
+        DEFAULT_COMPANY_JUDGMENT_MODEL,
+        DEFAULT_COMPANY_LLM_API_URL,
+        DEFAULT_COMPANY_VISION_MODEL,
+        DEFAULT_LLM_API_KEY_ENV,
+        llm_provider_configuration_error,
+        provider_api_url,
+        provider_route_configuration_error,
+    )
     from scripts.flayr_core.run_manifest import (
         SUCCESS_MANIFEST_NAME,
         command_digest,
@@ -82,6 +100,8 @@ RUNNER_OWNED_FLAGS = frozenset({
     "--vision-model",
     "--llm-api-url",
     "--llm-api-key-env",
+    "--vision-api-url",
+    "--vision-api-key-env",
     "--llm-api-key-keychain-service",
     "--llm-api-key-keychain-account",
     "--translation-model",
@@ -191,17 +211,91 @@ def _runner_provider_configuration_error(
     *,
     require_endpoint: bool = True,
 ) -> str | None:
-    models = (
-        str(getattr(args, "llm_model", "") or "").strip(),
-        str(getattr(args, "judgment_model", "") or "").strip(),
-        str(getattr(args, "vision_model", "") or "").strip(),
-        str(getattr(args, "translation_model", "") or "").strip(),
+    legacy_model = str(getattr(args, "llm_model", "") or "").strip()
+    judgment_model = str(getattr(args, "judgment_model", "") or "").strip()
+    vision_model = str(getattr(args, "vision_model", "") or "").strip()
+    translation_model = str(getattr(args, "translation_model", "") or "").strip()
+    explicit_model_route = bool(legacy_model or judgment_model or vision_model)
+    env_legacy = os.environ.get("FLAYR_LLM_MODEL", "").strip()
+    env_judgment = os.environ.get("FLAYR_JUDGMENT_MODEL", "").strip()
+    env_vision = os.environ.get("FLAYR_VISION_MODEL", "").strip()
+    explicit_shared_endpoint = bool(
+        str(getattr(args, "llm_api_url", "") or "").strip()
+        or os.environ.get("FLAYR_LLM_API_URL", "").strip()
     )
-    return llm_provider_configuration_error(
-        str(getattr(args, "llm_api_url", "") or "").strip(),
-        models,
-        require_endpoint=require_endpoint,
+    default_hybrid_route = (
+        not explicit_model_route
+        and not (env_legacy or env_judgment or env_vision)
+        and not explicit_shared_endpoint
+        and require_endpoint
     )
+    if not explicit_model_route and require_endpoint:
+        if env_legacy:
+            legacy_model = env_legacy
+        elif env_judgment or env_vision:
+            judgment_model = env_judgment
+            vision_model = env_vision
+        else:
+            judgment_model = DEFAULT_COMPANY_JUDGMENT_MODEL
+            vision_model = DEFAULT_COMPANY_VISION_MODEL
+    if bool(judgment_model) != bool(vision_model):
+        return "FLAYR_JUDGMENT_MODEL and FLAYR_VISION_MODEL must be configured together."
+    endpoint = (
+        str(getattr(args, "llm_api_url", "") or "").strip()
+        or os.environ.get("FLAYR_LLM_API_URL", "").strip()
+    )
+    route_models_configured = bool(
+        legacy_model or judgment_model or vision_model or translation_model
+    )
+    if not endpoint and require_endpoint and route_models_configured:
+        endpoint = DEFAULT_COMPANY_LLM_API_URL
+    vision_endpoint = (
+        str(getattr(args, "vision_api_url", "") or "").strip()
+        or os.environ.get("FLAYR_VISION_API_URL", "").strip()
+    )
+    if default_hybrid_route and not vision_endpoint:
+        vision_endpoint = DEFAULT_BEIJING_MAAS_LLM_API_URL
+    route_args = argparse.Namespace(
+        llm_api_url=endpoint,
+        llm_api_key_env=(
+            str(getattr(args, "llm_api_key_env", "") or "").strip()
+            or os.environ.get("FLAYR_LLM_API_KEY_ENV", "").strip()
+            or DEFAULT_LLM_API_KEY_ENV
+        ),
+        llm_api_key_keychain_service=str(
+            getattr(args, "llm_api_key_keychain_service", "") or ""
+        ).strip(),
+        llm_api_key_keychain_account=str(
+            getattr(args, "llm_api_key_keychain_account", "API_KEY") or "API_KEY"
+        ).strip(),
+        vision_api_url=vision_endpoint,
+        vision_api_key_env=(
+            str(getattr(args, "vision_api_key_env", "") or "").strip()
+            or os.environ.get("FLAYR_VISION_API_KEY_ENV", "").strip()
+        ),
+    )
+    judgment_models = [legacy_model or judgment_model]
+    if translation_model:
+        judgment_models.append(translation_model)
+    role_models = {
+        "judgment": tuple(model for model in judgment_models if model),
+        "vision": ((legacy_model or vision_model,) if legacy_model or vision_model else ()),
+    }
+    for role, models in role_models.items():
+        if not models:
+            continue
+        configuration_error = llm_provider_configuration_error(
+            provider_api_url(route_args, role),
+            models,
+            require_endpoint=require_endpoint,
+        )
+        if configuration_error:
+            return configuration_error
+        if require_endpoint:
+            route_error = provider_route_configuration_error(route_args, role)
+            if route_error:
+                return route_error
+    return None
 
 
 def _job_uses_live_llm(common_args: list[str], job: dict) -> bool:
@@ -209,7 +303,11 @@ def _job_uses_live_llm(common_args: list[str], job: dict) -> bool:
     return not any(
         value == option or value.startswith(f"{option}=")
         for value in effective_args
-        for option in ("--llm-dry-run", "--provider-replay-from")
+        for option in (
+            "--llm-dry-run",
+            "--provider-replay-from",
+            "--analysis-result-json",
+        )
     )
 
 
@@ -453,6 +551,14 @@ def main() -> int:
     parser.add_argument("--vision-model")
     parser.add_argument("--llm-api-url", default=os.environ.get("FLAYR_LLM_API_URL", "").strip())
     parser.add_argument("--llm-api-key-env")
+    parser.add_argument(
+        "--vision-api-url",
+        default=os.environ.get("FLAYR_VISION_API_URL", "").strip(),
+    )
+    parser.add_argument(
+        "--vision-api-key-env",
+        default=os.environ.get("FLAYR_VISION_API_KEY_ENV", "").strip(),
+    )
     parser.add_argument("--llm-api-key-keychain-service")
     parser.add_argument("--llm-api-key-keychain-account")
     parser.add_argument("--translation-model")
@@ -505,6 +611,8 @@ def _trusted_runner_args(args: argparse.Namespace) -> list[str]:
         "vision_model",
         "llm_api_url",
         "llm_api_key_env",
+        "vision_api_url",
+        "vision_api_key_env",
         "llm_api_key_keychain_service",
         "llm_api_key_keychain_account",
         "translation_model",

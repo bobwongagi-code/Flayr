@@ -93,6 +93,20 @@ class StageFactArtifactTests(unittest.TestCase):
                 api_url="https://example.test/v1/chat/completions",
             )
 
+    def test_replay_artifact_is_bound_to_the_actual_provider_endpoint(self) -> None:
+        artifact = self._artifact()
+        expected_endpoint = "https://example.test/v1/chat/completions"
+        self.assertEqual(artifact["request_identity"]["api_url"], expected_endpoint)
+        with self.assertRaisesRegex(StageFactArtifactError, "request identity mismatch"):
+            reusable_stage_fact_response(
+                artifact,
+                role="creator",
+                phase="A",
+                payload=self.payload,
+                model="qwen-test",
+                api_url="https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
+            )
+
     def test_identity_ignores_only_run_local_paths_for_both_artifact_types(self) -> None:
         payload_a = {"messages": [{"content": [{"type": "text", "text": "本地路径：/tmp/run-a/video.mp4"}]}]}
         payload_b = {"messages": [{"content": [{"type": "text", "text": "本地路径：/tmp/run-b/video.mp4"}]}]}

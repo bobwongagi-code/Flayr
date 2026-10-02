@@ -12,7 +12,12 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from flayr_core.network import OutboundURLPolicyError, validate_outbound_url
+from flayr_core.network import (
+    DEFAULT_ALLOWED_LLM_API_HOSTS,
+    ROOTIFY_COMPANY_LLM_API_HOST,
+    OutboundURLPolicyError,
+    validate_outbound_url,
+)
 
 
 class NetworkPolicyTests(unittest.TestCase):
@@ -53,6 +58,21 @@ class NetworkPolicyTests(unittest.TestCase):
         with mock.patch("flayr_core.network.socket.getaddrinfo", return_value=answer):
             validated = validate_outbound_url(url)
         self.assertEqual(validated.hostname, "llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com")
+
+    def test_company_gateway_is_exactly_allowlisted_for_llm_only(self) -> None:
+        answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]
+        url = f"https://{ROOTIFY_COMPANY_LLM_API_HOST}/v1/chat/completions"
+        with mock.patch("flayr_core.network.socket.getaddrinfo", return_value=answer):
+            validated = validate_outbound_url(url, allowed_hosts=DEFAULT_ALLOWED_LLM_API_HOSTS)
+        self.assertEqual(validated.hostname, ROOTIFY_COMPANY_LLM_API_HOST)
+
+        with self.assertRaises(OutboundURLPolicyError):
+            validate_outbound_url(url)
+        with self.assertRaises(OutboundURLPolicyError):
+            validate_outbound_url(
+                f"https://subdomain.{ROOTIFY_COMPANY_LLM_API_HOST}/v1/chat/completions",
+                allowed_hosts=DEFAULT_ALLOWED_LLM_API_HOSTS,
+            )
 
 
 if __name__ == "__main__":

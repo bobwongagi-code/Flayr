@@ -115,7 +115,16 @@ class Stage1QualificationBindingNormalizationTests(unittest.TestCase):
         args = self._args()
         analysis = {"videos": {"benchmark": {}, "creator": {}}}
 
-        def provider_call(_args, _key, _request_path, response_path, *, response_meta):
+        def provider_call(
+            _args,
+            _key,
+            _request_path,
+            response_path,
+            *,
+            response_meta,
+            route_role,
+        ):
+            self.assertEqual(route_role, "judgment")
             response_meta.update(
                 {
                     "logical_request_id": "fixture-request",

@@ -14,9 +14,15 @@ from scripts.batch_analyze import (
     _runner_provider_configuration_error,
     _success_manifest_valid,
     _trusted_runner_args,
+    _job_uses_live_llm,
     acquire_lock,
     build_command,
     validate_spec,
+)
+from scripts.flayr_core.llm.api import (
+    DEFAULT_BEIJING_MAAS_LLM_API_URL,
+    DEFAULT_COMPANY_LLM_API_URL,
+    provider_api_url,
 )
 from scripts.flayr_core.run_manifest import (
     command_digest,
@@ -94,6 +100,8 @@ class BatchAnalyzeValidationTests(unittest.TestCase):
                 "--asr-api-key-env=WORKER_SECRET",
                 "--asr-model=untrusted-model",
                 "--asr-language=xx",
+                "--vision-api-url=https://attacker.invalid",
+                "--vision-api-key-env=WORKER_SECRET",
             ):
                 with self.subTest(flag=flag), self.assertRaisesRegex(ValueError, "不得覆盖 runner 参数"):
                     validate_spec({"common_args": [flag], "jobs": [self._job()]}, runs_dir, 1)
@@ -112,6 +120,8 @@ class BatchAnalyzeValidationTests(unittest.TestCase):
                 llm_api_key_env=None,
                 llm_api_key_keychain_service=None,
                 llm_api_key_keychain_account=None,
+                vision_api_url="https://vision.example.test/v1/chat/completions",
+                vision_api_key_env="VISION_KEY",
                 translation_model=None,
             )
         )
@@ -119,29 +129,107 @@ class BatchAnalyzeValidationTests(unittest.TestCase):
         self.assertIn("qwen3.7-plus", values)
         self.assertIn("--vision-model", values)
         self.assertIn("qwen3-vl-plus", values)
+        self.assertIn("--vision-api-url", values)
+        self.assertIn("https://vision.example.test/v1/chat/completions", values)
+        self.assertIn("--vision-api-key-env", values)
+        self.assertIn("VISION_KEY", values)
 
-    def test_runner_rejects_live_qwen_models_without_endpoint(self) -> None:
-        error = _runner_provider_configuration_error(
-            Namespace(
-                llm_model=None,
-                judgment_model="qwen3.7-plus",
-                vision_model="qwen3-vl-plus",
-                llm_api_url="",
-                translation_model=None,
+    def test_runner_uses_company_endpoint_when_live_endpoint_is_omitted(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            error = _runner_provider_configuration_error(
+                Namespace(
+                    llm_model=None,
+                    judgment_model="qwen3.7-plus",
+                    vision_model="qwen3-vl-plus",
+                    llm_api_url="",
+                    translation_model=None,
+                )
             )
+        self.assertIsNone(error)
+
+    def test_runner_validates_the_default_pair_for_live_jobs(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch(
+                "scripts.batch_analyze.provider_api_url",
+                wraps=provider_api_url,
+            ) as resolve_url:
+                error = _runner_provider_configuration_error(
+                    Namespace(
+                        llm_model=None,
+                        judgment_model=None,
+                        vision_model=None,
+                        llm_api_url="",
+                        translation_model=None,
+                    )
+                )
+        self.assertIsNone(error)
+        route_args = {call.args[1]: call.args[0] for call in resolve_url.call_args_list}
+        self.assertEqual(
+            provider_api_url(route_args["judgment"], "judgment"),
+            DEFAULT_COMPANY_LLM_API_URL,
         )
-        self.assertRegex(error or "", "FLAYR_LLM_API_URL")
+        self.assertEqual(
+            provider_api_url(route_args["vision"], "vision"),
+            DEFAULT_BEIJING_MAAS_LLM_API_URL,
+        )
+
+    def test_runner_preserves_explicit_single_route_endpoint(self) -> None:
+        endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch(
+                "scripts.batch_analyze.provider_api_url",
+                wraps=provider_api_url,
+            ) as resolve_url:
+                error = _runner_provider_configuration_error(
+                    Namespace(
+                        llm_model="qwen3.6-plus",
+                        judgment_model=None,
+                        vision_model=None,
+                        llm_api_url=endpoint,
+                        vision_api_url="",
+                        translation_model=None,
+                    )
+                )
+        self.assertIsNone(error)
+        self.assertEqual(
+            [provider_api_url(*call.args) for call in resolve_url.call_args_list],
+            [endpoint, endpoint],
+        )
+
+    def test_runner_requires_key_env_for_custom_vision_endpoint(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            error = _runner_provider_configuration_error(
+                Namespace(
+                    llm_model=None,
+                    judgment_model="gpt-6-sol",
+                    vision_model="qwen3-vl-plus",
+                    llm_api_url=DEFAULT_COMPANY_LLM_API_URL,
+                    vision_api_url="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+                    vision_api_key_env="",
+                    translation_model=None,
+                )
+            )
+        self.assertRegex(error or "", "vision-api-key-env")
+
+    def test_batch_analysis_json_and_provider_replay_are_offline_routes(self) -> None:
+        self.assertFalse(
+            _job_uses_live_llm(["--analysis-result-json", "result.json"], self._job())
+        )
+        self.assertFalse(
+            _job_uses_live_llm(["--provider-replay-from", "source"], self._job())
+        )
 
     def test_runner_rejects_qwen_models_on_unknown_provider_endpoint(self) -> None:
-        error = _runner_provider_configuration_error(
-            Namespace(
-                llm_model=None,
-                judgment_model="qwen3.7-plus",
-                vision_model="qwen3-vl-plus",
-                llm_api_url="https://api.openai.com/v1/chat/completions",
-                translation_model=None,
+        with mock.patch.dict(os.environ, {}, clear=True):
+            error = _runner_provider_configuration_error(
+                Namespace(
+                    llm_model=None,
+                    judgment_model="qwen3.7-plus",
+                    vision_model="qwen3-vl-plus",
+                    llm_api_url="https://api.openai.com/v1/chat/completions",
+                    translation_model=None,
+                )
             )
-        )
         self.assertRegex(error or "", "approved Qwen endpoint")
 
     def test_runner_allows_non_live_jobs_without_endpoint(self) -> None:

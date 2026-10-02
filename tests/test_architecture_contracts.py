@@ -2545,6 +2545,26 @@ class ArchitectureContractTests(unittest.TestCase):
             pipeline._video_fact_cache_key(args, changed, "creator"),
         )
 
+    def test_video_fact_cache_key_binds_judgment_and_vision_endpoints(self) -> None:
+        args = SimpleNamespace(
+            llm_model="test",
+            llm_api_url="https://company.example/v1/chat/completions",
+            vision_api_url="https://vision.example/v1/chat/completions",
+        )
+        analysis = {"videos": {"creator": {}}, "product_foundation": {}}
+        initial = pipeline._video_fact_cache_key(args, analysis, "creator")
+        self.assertEqual(initial["judgment_api_url"], args.llm_api_url)
+        self.assertEqual(initial["vision_api_url"], args.vision_api_url)
+
+        args.vision_api_url = "https://vision-alt.example/v1/chat/completions"
+        changed_vision = pipeline._video_fact_cache_key(args, analysis, "creator")
+        self.assertNotEqual(initial, changed_vision)
+
+        args.vision_api_url = "https://vision.example/v1/chat/completions"
+        args.llm_api_url = "https://company-alt.example/v1/chat/completions"
+        changed_judgment = pipeline._video_fact_cache_key(args, analysis, "creator")
+        self.assertNotEqual(initial, changed_judgment)
+
     def test_cache_migration_keeps_new_c_and_d_artifact_provenance(self) -> None:
         cached = {
             "stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
@@ -7660,7 +7680,7 @@ class ArchitectureContractTests(unittest.TestCase):
                 translation_model="test-model", llm_model="", product_name="", product_notes="",
                 llm_dry_run=False, llm_api_url="https://example.invalid",
             )
-            with mock.patch.object(translation, "read_llm_api_key", return_value="test-key"), mock.patch.object(
+            with mock.patch.object(translation, "read_provider_api_key", return_value="test-key"), mock.patch.object(
                 translation, "call_llm_api", side_effect=SystemExit("network failed")
             ) as call:
                 translation.translate_transcript_with_llm(args, "creator", role_dir, result)

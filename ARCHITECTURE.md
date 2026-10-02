@@ -27,7 +27,7 @@
 
 ### 0.2 Step-0 + 分层分析架构 + Phase C
 
-模型路由只有一份：`qwen3-vl-plus` 写入 Stage1-A/C 视觉观察并承担 Phase C 定向视频复核，`qwen3.7-plus` 负责产品合同、Stage1-B/D 资格投影、Stage2/Stage3、综合与世界知识判断。路由只改变 provider 执行者，不改变 ADR-007 的字段所有权、Evidence Ledger、resolver 或 Phase C 合同。`qwen3.6-plus` 只能显式替代 judgment 角色并继续与 `qwen3-vl-plus` 配对，不是自动 fallback；旧单模型参数仅服务历史严格回放，`qwen3-vl-flash` 已退役。
+默认混合路由按任务角色固定：文本判断走公司批准的 Chat Completions 网关；图片、OCR、MP4 和定向视觉回看走原北京 MaaS 视觉端点。公司网关的完整/大视频 MP4 路径曾失败且未验收，因此默认视觉请求不发往公司网关；这条历史失败不改变其小视频协议能力声明。视觉与文本端点、密钥来源分开记录，产物不包含密钥值。显式旧单路配置仍保持原路由，不自动跨线路fallback。路由只改变 provider 执行者，不改变 ADR-007 的字段所有权、Evidence Ledger、resolver 或 Phase C 合同。Fun-ASR 保留独立 endpoint 与 key 配置，不使用 LLM 网关 key。
 
 - **Step-0（产品合同）**：只吃运营产品信息与品类知识，先生成卖点分流计划和 `proof_contract`；
   `observable_dimension` 是 S4 单一主证明的硬边界，`consumer_outcome` 只负责自然语言表达结果。
@@ -392,7 +392,7 @@ scripts/
 
 职责：
 
-- 通过批准的北京 MaaS Fun-ASR endpoint 发送本地音频 Data URI。
+- 通过独立配置的批准北京 MaaS Fun-ASR endpoint 发送本地音频 Data URI；ASR key 与 LLM 网关 key 分开读取。
 - 保留 `transcript.txt`、`transcript.srt` 和 `transcript.words.json` 作为审计/兼容产物；下游阶段归属唯一消费接口是词级时间线生成的 `transcript_windowed`。
 - 直接归一化句级与词级时间戳，不在本地运行 ASR 模型。
 - 输出本地语言 `transcript.txt`。
@@ -439,7 +439,7 @@ scripts/
 
 | 子模块 | 职责 |
 |------|------|
-| `llm/api.py` | HTTP 调用底层 + 三个 data URL 工具：`video_to_data_url`（原生视频 ffmpeg 重编码 fps=3+降分辨率含音轨，支持 start/duration 切片）/ `audio_to_mp3_data_url`（整条或按 start/duration 切片）/ `image_to_data_url`（关键帧）。不含业务规则。 |
+| `llm/api.py` | 按 judgment/vision 角色解析 endpoint 与 key source，提供 HTTP 调用底层及三个 data URL 工具：`video_to_data_url`（原生视频 ffmpeg 重编码 fps=3+降分辨率含音轨，支持 start/duration 切片）/ `audio_to_mp3_data_url`（整条或按 start/duration 切片）/ `image_to_data_url`（关键帧）。不含业务规则。 |
 | `analysis_model.py` | 读取模型 schema，定义结果字段组、runtime projection、契约版本和 raw/normalized/final 生命周期；不承载业务判断。 |
 | `llm/analysis_contract.py` | 结果外壳与标准化结果骨架的边界校验；不承载阶段业务规则，也不复制字段清单。 |
 | `llm/json_codec.py` | LLM JSON fence、尾逗号和未转义引号的容错解析；不承载 schema 或业务规则。 |
@@ -469,7 +469,7 @@ ffmpeg 不可用时定向原生视频复核失败并保持 `unknown`，不得回
 
 - 构建多模态分析请求。
 - 使用 Keychain/env 读取 API key。
-- 调 OpenAI-compatible endpoint。
+- 文本判断走公司批准的 OpenAI-compatible endpoint；默认视觉任务走原北京 MaaS endpoint，按 provider capability matrix 决定可发送的图像/视频载荷。公司 gateway 的完整/大视频 MP4 路径未验收，不得把该历史失败解释为已支持的生产输入。
 - 请求体和临时响应只存在于短生命周期临时目录；不把认证材料或完整请求写入运行产物。
 - 解析和修复 JSON。
 - 规范化 `analysis_result.json`。

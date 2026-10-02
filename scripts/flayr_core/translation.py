@@ -10,7 +10,12 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .llm.api import call_llm_api, extract_chat_completion_text, read_llm_api_key
+from .llm.api import (
+    call_llm_api,
+    extract_chat_completion_text,
+    provider_api_url,
+    read_provider_api_key,
+)
 from .llm.provider_artifacts import provider_call_with_artifact, provider_role_replay_root
 from .utils import read_optional_text, write_json, write_text
 
@@ -109,7 +114,7 @@ def translate_transcript_with_llm(
 
     try:
         replay_requested = getattr(args, "provider_replay_from", None) is not None
-        api_key = read_llm_api_key(args).strip() if not replay_requested else ""
+        api_key = read_provider_api_key(args, "judgment").strip() if not replay_requested else ""
         if not api_key and not replay_requested:
             result["translation_status"] = "failed"
             result["errors"].append("translation skipped: LLM API key missing")
@@ -126,12 +131,12 @@ def translate_transcript_with_llm(
             call_kind=f"translation:{role}",
             payload=payload,
             model=model,
-            api_url=args.llm_api_url,
+            api_url=provider_api_url(args, "judgment"),
             response_meta=live_meta,
             call=lambda: (
                 json.loads(
                     call_llm_api(
-                        args.llm_api_url,
+                        provider_api_url(args, "judgment"),
                         api_key,
                         payload_path,
                         raw_path,

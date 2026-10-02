@@ -27,6 +27,7 @@ from ..stage_evidence_contracts import (
 )
 from ..utils import write_json
 from .artifact_identity import identity_value
+from .api import provider_api_url
 from .parse import normalize_video_fact_result
 from .stage_fact_artifacts import (
     StageFactArtifactError,
@@ -36,8 +37,8 @@ from .stage_fact_artifacts import (
 
 # These versions are part of the persisted cache contract.  Keep them stable
 # across a structural extraction; callers still expose the old pipeline names.
-VIDEO_FACT_CACHE_SCHEMA_VERSION = 31
-PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION = 3
+VIDEO_FACT_CACHE_SCHEMA_VERSION = 32
+PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION = 4
 CACHE_RECORD_SCHEMA_VERSION = 1
 
 
@@ -360,8 +361,8 @@ def _product_foundation_cache_key(
     payload = payload_builder(model, analysis)
     return {
         "cache_schema_version": PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION,
-        "llm_model": model,
-        "llm_api_url": str(args.llm_api_url or ""),
+        "judgment_model": model,
+        "judgment_api_url": provider_api_url(args, "judgment"),
         "temperature": 0.0,
         "product_context_digest": _product_context_digest(analysis),
         "request_payload_sha256": _stable_digest(identity_value(payload)),
@@ -390,7 +391,8 @@ def _video_fact_cache_key(
         "role": role,
         "judgment_model": judgment_model_fn(args),
         "vision_model": vision_model_fn(args),
-        "llm_api_url": str(args.llm_api_url or ""),
+        "judgment_api_url": provider_api_url(args, "judgment"),
+        "vision_api_url": provider_api_url(args, "vision"),
         "foundation_digest": _stable_digest(foundation),
         "product_context_digest": _product_context_digest(analysis),
         "code_commit": git_commit_sha_fn(),

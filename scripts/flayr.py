@@ -49,8 +49,12 @@ from flayr_core.llm import api as llm_api_core
 from flayr_core.llm.api import (
     can_analyze_native_audio,
     llm_provider_configuration_error,
+    provider_api_url,
     provider_capabilities,
-    read_llm_api_key,
+    provider_run_metadata,
+    preflight_provider_api_keys,
+    read_provider_api_key,
+    provider_route_configuration_error,
     reject_retired_model,
 )
 from flayr_core.llm.provider_artifacts import ProviderCallError, ProviderReplayError
@@ -297,6 +301,9 @@ def main() -> int:
 
     deps = check_dependencies(args)
     inputs = validate_inputs(args)
+    args._provider_api_keys = (
+        preflight_provider_api_keys(args) if judgment_model(args) else {}
+    )
     if args.legacy_import and getattr(args, "verified_no_product_speech_attestation_file", None):
         raise SystemExit("legacy import cannot be combined with current no-product-speech attestations")
     args._verified_no_product_speech_attestations = _load_verified_no_product_speech_attestations(
@@ -463,7 +470,7 @@ def _generate_reports_and_publish(
                     "llm_model": judgment_model(args),
                     "judgment_model": judgment_model(args),
                     "vision_model": vision_model(args),
-                    "llm_api_url": str(args.llm_api_url or ""),
+                    **provider_run_metadata(args),
                 },
             )
             transition_run_state(
@@ -660,6 +667,50 @@ def check_dependencies(args: argparse.Namespace) -> dict[str, Any]:
 def validate_inputs(args: argparse.Namespace) -> dict[str, Path]:
     inputs: dict[str, Path] = {}
 
+    explicit_model_route = any(
+        str(getattr(args, name, "") or "").strip()
+        for name in ("llm_model", "judgment_model", "vision_model")
+    )
+    env_legacy = os.environ.get("FLAYR_LLM_MODEL", "").strip()
+    env_judgment = os.environ.get("FLAYR_JUDGMENT_MODEL", "").strip()
+    env_vision = os.environ.get("FLAYR_VISION_MODEL", "").strip()
+    explicit_shared_endpoint = bool(
+        str(getattr(args, "llm_api_url", "") or "").strip()
+        or os.environ.get("FLAYR_LLM_API_URL", "").strip()
+    )
+    offline_analysis = bool(
+        getattr(args, "analysis_result_json", None)
+        or getattr(args, "provider_replay_from", None)
+    )
+    if not explicit_model_route and not offline_analysis:
+        if env_legacy:
+            args.llm_model = env_legacy
+        elif env_judgment or env_vision:
+            args.judgment_model = env_judgment
+            args.vision_model = env_vision
+        else:
+            args.judgment_model = llm_api_core.DEFAULT_COMPANY_JUDGMENT_MODEL
+            args.vision_model = llm_api_core.DEFAULT_COMPANY_VISION_MODEL
+
+    if (
+        not str(getattr(args, "llm_api_url", "") or "").strip()
+        and not offline_analysis
+        and any(
+            str(getattr(args, name, "") or "").strip()
+            for name in ("llm_model", "judgment_model", "vision_model")
+        )
+    ):
+        args.llm_api_url = llm_api_core.DEFAULT_COMPANY_LLM_API_URL
+
+    default_hybrid_route = (
+        not explicit_model_route
+        and not (env_legacy or env_judgment or env_vision)
+        and not explicit_shared_endpoint
+        and not offline_analysis
+    )
+    if default_hybrid_route and not str(getattr(args, "vision_api_url", "") or "").strip():
+        args.vision_api_url = llm_api_core.DEFAULT_BEIJING_MAAS_LLM_API_URL
+
     explicit_judgment = str(getattr(args, "judgment_model", "") or "").strip()
     explicit_vision = str(getattr(args, "vision_model", "") or "").strip()
     legacy_model = str(getattr(args, "llm_model", "") or "").strip()
@@ -676,17 +727,38 @@ def validate_inputs(args: argparse.Namespace) -> dict[str, Path]:
         if configured_model:
             reject_retired_model(configured_model)
 
-    configured_models = [legacy_model, explicit_judgment, explicit_vision]
-    if getattr(args, "translate_with_llm", False):
-        configured_models.append(str(getattr(args, "translation_model", "") or "").strip())
-    configuration_error = llm_provider_configuration_error(
-        str(getattr(args, "llm_api_url", "") or "").strip(),
-        tuple(configured_models),
-        require_endpoint=not getattr(args, "llm_dry_run", False)
-        and not getattr(args, "provider_replay_from", None),
+    require_live_route = (
+        not getattr(args, "llm_dry_run", False)
+        and not getattr(args, "provider_replay_from", None)
+        and not getattr(args, "analysis_result_json", None)
     )
-    if configuration_error:
-        raise SystemExit(configuration_error)
+    route_model_pairs = (
+        ("judgment", legacy_model or explicit_judgment),
+        ("vision", legacy_model or explicit_vision),
+    )
+    for route_role, route_model in route_model_pairs:
+        configuration_error = llm_provider_configuration_error(
+            provider_api_url(args, route_role),
+            (route_model,),
+            require_endpoint=require_live_route and bool(route_model),
+        )
+        if configuration_error:
+            raise SystemExit(configuration_error)
+        if require_live_route and route_model:
+            route_error = provider_route_configuration_error(args, route_role)
+            if route_error:
+                raise SystemExit(route_error)
+    if getattr(args, "translate_with_llm", False):
+        translation_model = str(
+            getattr(args, "translation_model", "") or judgment_model(args)
+        ).strip()
+        configuration_error = llm_provider_configuration_error(
+            provider_api_url(args, "judgment"),
+            (translation_model,),
+            require_endpoint=require_live_route,
+        )
+        if configuration_error:
+            raise SystemExit(configuration_error)
 
     if args.mode in {"breakdown", "compare", "improve", "scope"}:
         if not args.benchmark_video:
@@ -988,7 +1060,7 @@ def build_preprocess_fingerprint(
         "translation": {
             "enabled": bool(getattr(args, "translate_with_llm", False)),
             "model": str(getattr(args, "translation_model", "") or judgment_model(args)),
-            "api_url": str(getattr(args, "llm_api_url", "") or ""),
+            "api_url": provider_api_url(args, "judgment"),
             "product_name": str(getattr(args, "product_name", "") or ""),
             "product_notes": str(getattr(args, "product_notes", "") or ""),
         },
@@ -1003,7 +1075,7 @@ def build_preprocess_fingerprint(
             # whose configured provider can perform OCR.
             "runtime_status": "enabled" if ocr_enabled else (ocr_disabled_reason or "disabled"),
             "model": vision_model(args),
-            "api_url": str(getattr(args, "llm_api_url", "") or ""),
+            "api_url": provider_api_url(args, "vision"),
         },
         "frame_strategy": "base-adaptive-2fps-focus-2fps-canonical-analysis-manifest-v4-anchor-frames",
     }
@@ -1554,7 +1626,7 @@ def _process_video_generation(
             role_dir,
             result,
             ocr_key,
-            api_url=args.llm_api_url,
+            api_url=provider_api_url(args, "vision"),
             model=vision_model(args),
             budget=budget,
             provider_replay_from=getattr(args, "provider_replay_from", None),
@@ -1699,7 +1771,7 @@ def resolve_ocr_policy(args: argparse.Namespace) -> tuple[bool, str, str]:
         # The artifact identity still binds the replay to the exact model and
         # endpoint, so this does not weaken provider selection.
         return True, "", ""
-    api_key = read_llm_api_key(args).strip()
+    api_key = read_provider_api_key(args, "vision").strip()
     if not api_key:
         return False, "", "disabled_no_ocr_key"
     if not looks_like_vision_config(args):
@@ -1711,7 +1783,8 @@ def resolve_ocr_policy(args: argparse.Namespace) -> tuple[bool, str, str]:
 
 def looks_like_vision_config(args: argparse.Namespace) -> bool:
     values = [
-        str(getattr(args, "llm_api_url", "") or "").lower(),
+        provider_api_url(args, "vision").lower(),
+        str(getattr(args, "vision_api_key_env", "") or "").lower(),
         str(getattr(args, "llm_api_key_keychain_service", "") or "").lower(),
         vision_model(args).lower(),
     ]
@@ -1742,8 +1815,9 @@ def build_analysis(
     #   llm_completed   —— LLM 分析已成功合并（由 merge_analysis_result 改写）
     improvements_status = "not_applicable" if args.mode == "breakdown" else "llm_unavailable"
 
-    capabilities = provider_capabilities(args.llm_api_url, vision_model(args))
-    native_audio = can_analyze_native_audio(args.llm_api_url, vision_model(args))
+    vision_api_url = provider_api_url(args, "vision")
+    capabilities = provider_capabilities(vision_api_url, vision_model(args))
+    native_audio = can_analyze_native_audio(vision_api_url, vision_model(args))
     return {
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "mode": args.mode,

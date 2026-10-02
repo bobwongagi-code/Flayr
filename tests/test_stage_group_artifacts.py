@@ -781,7 +781,7 @@ class StageGroupPipelineReplayTests(unittest.TestCase):
             analysis_input.write_text("locked input", encoding="utf-8")
             analysis = {"videos": {}, "comparison_contract": {}}
             with (
-                patch.object(pipeline, "read_llm_api_key", return_value="secret"),
+                patch("flayr_core.llm.api._read_api_key", return_value="secret") as read_key,
                 patch.object(pipeline, "load_brand_proposition", return_value=None),
                 patch.object(pipeline, "establish_product_foundation", return_value=None),
                 patch.object(pipeline, "run_video_fact_extraction", return_value=facts),
@@ -799,6 +799,7 @@ class StageGroupPipelineReplayTests(unittest.TestCase):
                     analysis_input,
                     run_dir,
                 )
+            self.assertEqual(read_key.call_count, 2)
             self.assertEqual(result_path, run_dir / "analysis_result.json")
             self.assertEqual(result["stage2_pipeline_status"], "completed")
             process.assert_called_once()

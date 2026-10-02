@@ -15,6 +15,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from flayr_core.llm.api import (  # noqa: E402
+    DEFAULT_COMPANY_JUDGMENT_MODEL,
+    DEFAULT_COMPANY_LLM_API_URL,
+    DEFAULT_COMPANY_VISION_MODEL,
+    DEFAULT_BEIJING_MAAS_LLM_API_URL,
+    DEFAULT_LLM_API_KEY_ENV,
+    DEFAULT_VISION_API_KEY_ENV,
     IncrementalSSEParser,
     can_analyze_native_audio,
     can_analyze_native_video,
@@ -24,18 +30,27 @@ from flayr_core.llm.api import (  # noqa: E402
     is_retryable_error,
     llm_provider_configuration_error,
     parse_curl_http_status,
+    preflight_provider_api_keys,
+    provider_api_key_env,
+    provider_api_url,
     provider_capabilities,
+    provider_route,
+    provider_route_configuration_error,
+    provider_run_metadata,
+    read_provider_api_key,
     reject_retired_model,
     strip_curl_http_status,
     video_to_data_url,
 )
 from flayr_core.llm.media import build_evidence_sensory_inputs  # noqa: E402
 from flayr_core.llm.payload import build_video_fact_payload  # noqa: E402
+from flayr_core.asr import read_asr_api_key  # noqa: E402
 from flayr_core.llm.pipeline import (  # noqa: E402
     _deterministic_product_visibility,
     run_segmented_stage_pipeline,
     run_video_fact_extraction,
 )
+from flayr_core.llm import pipeline as pipeline_core  # noqa: E402
 from flayr_core.resources import ResourceBudget, ResourceLimits  # noqa: E402
 from flayr_core.llm.parse import (  # noqa: E402
     adapt_misnested_analysis_result,
@@ -62,10 +77,184 @@ from flayr_core.llm.parse import (  # noqa: E402
     normalize_variant_decision_rule,
     normalize_variant_unit_fields,
 )
-from flayr_core.llm.stage_fact_artifacts import StageFactArtifactError  # noqa: E402
+from flayr_core.llm.stage_fact_artifacts import (  # noqa: E402
+    StageFactArtifactError,
+    stage_fact_artifact_path,
+)
 
 
 class LlmApiContractTests(unittest.TestCase):
+    def test_provider_routes_keep_endpoints_and_key_sources_separate(self) -> None:
+        args = Namespace(
+            llm_api_url=DEFAULT_COMPANY_LLM_API_URL,
+            llm_api_key_env="FLAYR_COMPANY_TEST_KEY",
+            llm_api_key_keychain_service="company-test-service",
+            llm_api_key_keychain_account="company-account",
+            vision_api_url=DEFAULT_BEIJING_MAAS_LLM_API_URL,
+            vision_api_key_env="",
+        )
+        self.assertEqual(provider_api_url(args, "judgment"), DEFAULT_COMPANY_LLM_API_URL)
+        self.assertEqual(provider_api_key_env(args, "judgment"), "FLAYR_COMPANY_TEST_KEY")
+        self.assertEqual(
+            provider_route(args, "vision"),
+            (DEFAULT_BEIJING_MAAS_LLM_API_URL, DEFAULT_VISION_API_KEY_ENV, "", "API_KEY"),
+        )
+        with mock.patch(
+            "flayr_core.llm.api._read_api_key",
+            side_effect=lambda env, _service, _account: {
+                "FLAYR_COMPANY_TEST_KEY": "company-secret",
+                DEFAULT_VISION_API_KEY_ENV: "vision-secret",
+            }.get(env, ""),
+        ) as read_key:
+            keys = preflight_provider_api_keys(args)
+        self.assertEqual(keys, {"judgment": "company-secret", "vision": "vision-secret"})
+        self.assertEqual(
+            [call.args[0] for call in read_key.call_args_list],
+            ["FLAYR_COMPANY_TEST_KEY", DEFAULT_VISION_API_KEY_ENV],
+        )
+
+    def test_explicit_vision_key_env_never_falls_back_to_judgment_keychain(self) -> None:
+        args = Namespace(
+            llm_api_url=DEFAULT_COMPANY_LLM_API_URL,
+            llm_api_key_env=DEFAULT_LLM_API_KEY_ENV,
+            llm_api_key_keychain_service="judgment-keychain-service",
+            llm_api_key_keychain_account="API_KEY",
+            vision_api_url=DEFAULT_COMPANY_LLM_API_URL,
+            vision_api_key_env="FLAYR_VISION_TEST_KEY",
+        )
+        with mock.patch("flayr_core.llm.api._read_api_key", return_value="vision-secret") as read_key:
+            self.assertEqual(read_provider_api_key(args, "vision"), "vision-secret")
+        read_key.assert_called_once_with("FLAYR_VISION_TEST_KEY", "", "API_KEY")
+
+    def test_run_metadata_contains_both_routes_and_key_source_names_only(self) -> None:
+        args = Namespace(
+            llm_api_url=DEFAULT_COMPANY_LLM_API_URL,
+            llm_api_key_env="FLAYR_COMPANY_TEST_KEY",
+            llm_api_key_keychain_service="company-service",
+            llm_api_key_keychain_account="API_KEY",
+            vision_api_url=DEFAULT_BEIJING_MAAS_LLM_API_URL,
+            vision_api_key_env="",
+            _provider_api_keys={"judgment": "company-secret", "vision": "vision-secret"},
+        )
+        metadata = provider_run_metadata(args)
+        self.assertEqual(metadata["judgment_api_url"], DEFAULT_COMPANY_LLM_API_URL)
+        self.assertEqual(metadata["vision_api_url"], DEFAULT_BEIJING_MAAS_LLM_API_URL)
+        self.assertEqual(metadata["judgment_api_key_env"], "FLAYR_COMPANY_TEST_KEY")
+        self.assertEqual(metadata["vision_api_key_env"], DEFAULT_VISION_API_KEY_ENV)
+        self.assertNotIn("company-secret", json.dumps(metadata))
+        self.assertNotIn("vision-secret", json.dumps(metadata))
+
+    def test_preflight_blocks_when_either_live_route_key_is_missing(self) -> None:
+        args = Namespace(
+            llm_api_url=DEFAULT_COMPANY_LLM_API_URL,
+            llm_api_key_env="FLAYR_COMPANY_TEST_KEY",
+            llm_api_key_keychain_service="",
+            llm_api_key_keychain_account="API_KEY",
+            vision_api_url=DEFAULT_BEIJING_MAAS_LLM_API_URL,
+            vision_api_key_env="",
+        )
+        with mock.patch(
+            "flayr_core.llm.api._read_api_key",
+            side_effect=lambda env, _service, _account: "company-secret" if env == "FLAYR_COMPANY_TEST_KEY" else "",
+        ) as read_key:
+            with self.assertRaisesRegex(SystemExit, "Missing vision API key"):
+                preflight_provider_api_keys(args)
+        self.assertEqual(read_key.call_count, 2)
+
+    def test_offline_modes_do_not_read_provider_keys(self) -> None:
+        modes = (
+            {"llm_dry_run": True},
+            {"provider_replay_from": Path("/replay")},
+            {"analysis_result_json": Path("/legacy.json")},
+        )
+        for flags in modes:
+            args = Namespace(**flags)
+            with self.subTest(flags=flags), mock.patch(
+                "flayr_core.llm.api._read_api_key", side_effect=AssertionError("key read")
+            ) as read_key:
+                self.assertEqual(preflight_provider_api_keys(args), {})
+            read_key.assert_not_called()
+
+    def test_stage1_a_offline_failure_preserves_error_without_reading_or_redacting_empty_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            replay = root / "replay"
+            replay.mkdir()
+            args = Namespace(
+                llm_api_url=DEFAULT_COMPANY_LLM_API_URL,
+                llm_api_key_env=DEFAULT_LLM_API_KEY_ENV,
+                llm_api_key_keychain_service="",
+                llm_api_key_keychain_account="API_KEY",
+            )
+            with (
+                mock.patch.object(
+                    pipeline_core,
+                    "_read_replayable_stage_fact",
+                    side_effect=StageFactArtifactError("useful replay identity mismatch"),
+                ),
+                mock.patch.object(
+                    pipeline_core,
+                    "read_provider_api_key",
+                    side_effect=AssertionError("offline error handling must not read keys"),
+                ) as read_key,
+                self.assertRaisesRegex(StageFactArtifactError, "useful replay identity mismatch"),
+            ):
+                pipeline_core._run_stage1_a_extraction(
+                    args=args,
+                    analysis={},
+                    run_dir=root,
+                    api_key="",
+                    role="creator",
+                    payload={"model": "vision-test", "messages": []},
+                    replay_source=replay,
+                    provider_fallback_allowed=False,
+                )
+            read_key.assert_not_called()
+            artifact = json.loads(
+                stage_fact_artifact_path(root, "creator", "A").read_text(encoding="utf-8")
+            )
+            self.assertEqual(artifact["error"], "useful replay identity mismatch")
+
+    def test_completion_dispatch_uses_visual_endpoint_and_cached_visual_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload_path = root / "request.json"
+            response_path = root / "response.json"
+            payload_path.write_text('{"model":"vision-test","messages":[]}', encoding="utf-8")
+            args = Namespace(
+                llm_api_url=DEFAULT_COMPANY_LLM_API_URL,
+                llm_api_key_env=DEFAULT_LLM_API_KEY_ENV,
+                llm_api_key_keychain_service="",
+                llm_api_key_keychain_account="API_KEY",
+                vision_api_url=DEFAULT_BEIJING_MAAS_LLM_API_URL,
+                vision_api_key_env=DEFAULT_VISION_API_KEY_ENV,
+                _provider_api_keys={"judgment": "company-secret", "vision": "vision-secret"},
+            )
+            with mock.patch.object(
+                pipeline_core,
+                "call_llm_api",
+                return_value='{"choices":[{"message":{"content":"{}"}}]}',
+            ) as call_api:
+                result = pipeline_core.fetch_json_completion(
+                    args,
+                    "company-secret",
+                    payload_path,
+                    response_path,
+                    route_role="vision",
+                )
+        self.assertEqual(result, "{}")
+        self.assertEqual(call_api.call_args.args[0:2], (DEFAULT_BEIJING_MAAS_LLM_API_URL, "vision-secret"))
+
+    def test_custom_vision_endpoint_requires_its_own_key_environment(self) -> None:
+        args = Namespace(
+            llm_api_url=DEFAULT_COMPANY_LLM_API_URL,
+            llm_api_key_env=DEFAULT_LLM_API_KEY_ENV,
+            vision_api_url="https://custom.example/v1/chat/completions",
+            vision_api_key_env="",
+        )
+        self.assertIsNotNone(provider_route_configuration_error(args, "vision"))
+        self.assertEqual(provider_api_key_env(args, "vision"), "")
+
     def test_stage_type_ranges_are_not_silently_coerced_to_module_a(self) -> None:
         self.assertEqual(normalize_hook_type("A-G"), "unknown")
         self.assertEqual(normalize_s3_type("A-E"), "unknown")
@@ -1087,6 +1276,50 @@ class LlmApiContractTests(unittest.TestCase):
         self.assertFalse(vision.standalone_audio_input)
         self.assertFalse(vision.native_audio_analysis)
         self.assertTrue(can_analyze_native_video(qwen_url, "qwen3-vl-plus"))
+
+    def test_company_gateway_profiles_keep_visual_and_text_capabilities_separate(self) -> None:
+        vision = provider_capabilities(DEFAULT_COMPANY_LLM_API_URL, DEFAULT_COMPANY_VISION_MODEL)
+        self.assertEqual(vision.profile, "rootify_company_gateway")
+        self.assertEqual(vision.confidence, "approved_matrix")
+        self.assertTrue(vision.native_video_input)
+        self.assertFalse(vision.standalone_audio_input)
+        self.assertFalse(vision.native_audio_analysis)
+        self.assertTrue(can_analyze_native_video(DEFAULT_COMPANY_LLM_API_URL, DEFAULT_COMPANY_VISION_MODEL))
+
+        judgment = provider_capabilities(DEFAULT_COMPANY_LLM_API_URL, DEFAULT_COMPANY_JUDGMENT_MODEL)
+        self.assertEqual(judgment.profile, "rootify_company_gateway")
+        self.assertFalse(judgment.native_video_input)
+        self.assertFalse(can_analyze_native_audio(DEFAULT_COMPANY_LLM_API_URL, DEFAULT_COMPANY_VISION_MODEL))
+        self.assertFalse(can_send_standalone_audio(DEFAULT_COMPANY_LLM_API_URL, DEFAULT_COMPANY_VISION_MODEL))
+
+    def test_company_gateway_key_is_not_reused_for_asr(self) -> None:
+        args = Namespace(
+            asr_api_key_env="FLAYR_TEST_MISSING_ASR_KEY",
+            llm_api_url=DEFAULT_COMPANY_LLM_API_URL,
+            llm_api_key_env="FLAYR_LLM_API_KEY",
+            llm_api_key_keychain_service="",
+            llm_api_key_keychain_account="API_KEY",
+        )
+        with mock.patch.dict("os.environ", {"FLAYR_LLM_API_KEY": "llm-secret"}, clear=False), mock.patch(
+            "flayr_core.asr.read_llm_api_key"
+        ) as read_llm_key:
+            self.assertEqual(read_asr_api_key(args), "")
+        read_llm_key.assert_not_called()
+
+    def test_company_gateway_keeps_independent_asr_key(self) -> None:
+        args = Namespace(
+            asr_api_key_env="FLAYR_TEST_ASR_KEY",
+            llm_api_url=DEFAULT_COMPANY_LLM_API_URL,
+            llm_api_key_env="FLAYR_LLM_API_KEY",
+            llm_api_key_keychain_service="",
+            llm_api_key_keychain_account="API_KEY",
+        )
+        with mock.patch.dict(
+            "os.environ",
+            {"FLAYR_LLM_API_KEY": "llm-secret", "FLAYR_TEST_ASR_KEY": "asr-secret"},
+            clear=False,
+        ):
+            self.assertEqual(read_asr_api_key(args), "asr-secret")
 
     def test_maas_comparison_omits_unsupported_input_audio(self) -> None:
         qwen_url = "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions"

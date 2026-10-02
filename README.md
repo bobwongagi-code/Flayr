@@ -84,22 +84,29 @@ python3 -m pip install --requirement requirements-dev.lock
 
 ## 配置
 
-密钥通过环境变量或 macOS Keychain 读取，不要写入命令、仓库或运行产物。下面的值均为占位符，需要替换为已批准服务的实际配置：
+常规分析按职责固定分路：文本判断走公司网关；图片、OCR、MP4 和定向回看走原北京 MaaS 视觉端点。ASR 继续使用独立配置。默认无需手工设置模型名或端点，但两路实时调用都必须有各自可用的密钥来源：文本默认读取 `FLAYR_LLM_API_KEY`，视觉默认读取 `DASHSCOPE_API_KEY`。自定义视觉端点必须同时指定 `FLAYR_VISION_API_KEY_ENV`。显式旧单路模型或旧共享端点配置仍按原单路执行。不要把密钥写入命令、仓库或运行产物；运行元数据只记录端点和密钥环境变量名，不记录密钥值。
 
 ```bash
-export FLAYR_JUDGMENT_MODEL="<judgment-model-id>"
-export FLAYR_VISION_MODEL="<vision-model-id>"
-export FLAYR_LLM_API_URL="<approved-chat-completions-url>"
+# Optional role model and endpoint overrides.
+# export FLAYR_JUDGMENT_MODEL="<judgment-model-id>"
+# export FLAYR_VISION_MODEL="<vision-model-id>"
+# export FLAYR_LLM_API_URL="<approved-chat-completions-url>"
+# export FLAYR_VISION_API_URL="<approved-vision-chat-completions-url>"
+# export FLAYR_VISION_API_KEY_ENV="<vision-key-environment-variable>"
 export FLAYR_LLM_API_KEY="<secret>"
-export FLAYR_LLM_API_KEY_ENV="FLAYR_LLM_API_KEY"
+# Set the vision key in its own configured environment variable (default: DASHSCOPE_API_KEY).
+export DASHSCOPE_API_KEY="<secret>"
+# Optional: set this only when the text key uses a different environment-variable name.
+# export FLAYR_LLM_API_KEY_ENV="<llm-key-environment-variable>"
 
+# ASR keeps its own endpoint, model, and key; the LLM gateway key is not used for ASR.
 export FLAYR_ASR_API_URL="<approved-asr-url>"
 export FLAYR_ASR_MODEL="<asr-model-id>"
 export FLAYR_ASR_API_KEY="<secret>"
 export FLAYR_ASR_API_KEY_ENV="FLAYR_ASR_API_KEY"
 ```
 
-视觉模型和判断模型必须同时配置。系统不会在调用失败后静默切换模型。ASR 失败时，`compare` 和 `improve` 默认返回非零；只有显式使用 `--allow-degraded` 才会继续生成带降级状态的报告。
+系统不会在调用失败后静默切换线路。公司网关的长视频原生 MP4 路径曾失败，未通过验收；默认视觉任务保持在原北京 MaaS 线路，不代表其他长度视频已完成验收。LLM 与 ASR 使用独立密钥配置；ASR 不会借用公司网关密钥。ASR 失败时，`compare` 和 `improve` 默认返回非零；只有显式使用 `--allow-degraded` 才会继续生成带降级状态的报告。
 
 ## CLI 用法
 
@@ -112,10 +119,6 @@ python3 scripts/flayr.py improve \
   --product-name "产品名称" \
   --target-market auto \
   --core-selling-points "已确认的核心卖点" \
-  --judgment-model "$FLAYR_JUDGMENT_MODEL" \
-  --vision-model "$FLAYR_VISION_MODEL" \
-  --llm-api-url "$FLAYR_LLM_API_URL" \
-  --llm-api-key-env FLAYR_LLM_API_KEY \
   --asr-api-url "$FLAYR_ASR_API_URL" \
   --asr-model "$FLAYR_ASR_MODEL" \
   --asr-api-key-env FLAYR_ASR_API_KEY \
@@ -142,10 +145,12 @@ CLI 提供四种模式：
 | `--product-category` | 结构库中的产品类别 |
 | `--target-market` | `auto`、`sea` 或两位市场代码 |
 | `--core-selling-points` | 已核实的产品卖点和差异点 |
-| `--judgment-model` | 资格、比较、汇总和文本判断所用模型 ID |
-| `--vision-model` | OCR、事实观察和定向视频复核所用模型 ID；必须与判断模型同时提供 |
-| `--llm-api-url` | 已批准的 Chat Completions 兼容端点 |
-| `--llm-api-key-env` | 保存分析服务密钥的环境变量名 |
+| `--judgment-model` | 资格、比较、汇总和文本判断所用模型 ID；默认路由可覆盖 |
+| `--vision-model` | OCR、事实观察和定向视频复核所用模型 ID；覆盖时必须与判断模型同时提供 |
+| `--llm-api-url` | 文本判断或显式旧单路使用的 Chat Completions 端点 |
+| `--vision-api-url` | 可选的独立视觉 Chat Completions 端点；默认使用原北京 MaaS 线路 |
+| `--llm-api-key-env` | 保存 LLM 服务密钥的环境变量名；默认 `FLAYR_LLM_API_KEY` |
+| `--vision-api-key-env` | 独立视觉密钥的环境变量名；默认视觉线路使用 `DASHSCOPE_API_KEY` |
 | `--asr-api-url` | 在线 ASR 服务端点 |
 | `--asr-model` | 在线 ASR 模型 ID |
 | `--asr-language` | ASR 语言提示，默认 `auto` |
@@ -164,7 +169,7 @@ python3 scripts/flayr.py --help
 
 ## Web 用法
 
-Web worker 读取上一节的 `FLAYR_*` 配置。判断模型和视觉模型只设置一个时，任务会在启动分析前失败。
+Web worker 在未指定模型时使用与 CLI 相同的固定混合线路。覆盖时读取上一节的 `FLAYR_*` 配置；判断模型和视觉模型只设置一个时，任务会在启动分析前失败。
 
 ```bash
 python3 scripts/web_app.py --host 127.0.0.1 --port 8787

@@ -74,6 +74,11 @@ from ..structure_modules import canonical_module_id
 from .api import (
     call_llm_api,
     extract_chat_completion_text,
+    provider_api_url,
+    provider_run_metadata,
+    provider_route,
+    preflight_provider_api_keys,
+    read_provider_api_key,
     read_llm_api_key,
     can_analyze_native_audio,
 )
@@ -219,6 +224,30 @@ def vision_model(args: argparse.Namespace) -> str:
 
 def _stage1_model(args: argparse.Namespace, phase: str) -> str:
     return judgment_model(args) if str(phase).upper() in {"B", "D"} else vision_model(args)
+
+
+def _stage1_route_role(phase: str) -> str:
+    return "judgment" if str(phase).upper() in {"B", "D"} else "vision"
+
+
+def _provider_api_key(args: argparse.Namespace, role: str, fallback: str = "") -> str:
+    cached_key = _cached_provider_api_key(args, role, fallback)
+    if cached_key:
+        return cached_key
+    if role == "judgment":
+        return fallback or read_llm_api_key(args).strip()
+    return read_provider_api_key(args, role).strip()
+
+
+def _cached_provider_api_key(args: argparse.Namespace, role: str, fallback: str = "") -> str:
+    cached = getattr(args, "_provider_api_keys", {})
+    if isinstance(cached, dict):
+        value = cached.get(role)
+        if isinstance(value, str) and value:
+            return value
+    if fallback and provider_route(args, role) == provider_route(args, "judgment"):
+        return fallback
+    return ""
 
 
 class AnalysisPipelineError(RuntimeError):
@@ -478,7 +507,8 @@ def run_comparison_scope_preflight(
     资格判断只依赖锁定的双侧产品身份，不应为它支付阶段对比、Phase C 或提升点的成本。
     事实与资格文件仍按完整链路同名落盘，因此后续可在同一目录继续运行完整分析。
     """
-    api_key = read_llm_api_key(args).strip()
+    api_keys = preflight_provider_api_keys(args)
+    api_key = api_keys.get("judgment", "")
     if not api_key and not args.llm_dry_run and not getattr(args, "provider_replay_from", None):
         raise SystemExit("比较资格预检需要 LLM API key。")
     facts = run_video_identity_extraction(args, analysis, run_dir, api_key)
@@ -1132,6 +1162,8 @@ def fetch_json_completion(
     request_max_time_seconds: int | None = None,
     request_retries: int | None = None,
     response_meta: dict[str, Any] | None = None,
+    *,
+    route_role: str = "judgment",
 ) -> str:
     """调用 LLM 并校验 JSON；默认不重复已完成但格式错误的语义请求。
 
@@ -1140,6 +1172,8 @@ def fetch_json_completion(
     默认一次，避免对 temperature=0 的同一合同盲目重复付费。
     """
     last_text = ""
+    api_key = _provider_api_key(args, route_role, api_key)
+    api_url = provider_api_url(args, route_role)
     logical_request_id = uuid.uuid4().hex
     outer_retry_reason = ""
     retry_reasons: list[str] = []
@@ -1161,7 +1195,7 @@ def fetch_json_completion(
             write_text(ephemeral_payload, payload_text)
             try:
                 raw_text = call_llm_api(
-                    args.llm_api_url,
+                    api_url,
                     api_key,
                     ephemeral_payload,
                     raw_path,
@@ -1748,7 +1782,7 @@ def _read_replayable_stage_fact(
         group=group,
         payload=payload,
         model=_stage1_model(args, phase),
-        api_url=args.llm_api_url,
+        api_url=provider_api_url(args, _stage1_route_role(phase)),
     )
     return response, response_meta, path
 
@@ -1769,7 +1803,7 @@ def _read_replayable_stage_group(
             group=group,
             payload=payload,
             model=judgment_model(args),
-            api_url=args.llm_api_url,
+            api_url=provider_api_url(args, "judgment"),
         )
     else:
         response = reusable_stage_group_response(
@@ -1777,7 +1811,7 @@ def _read_replayable_stage_group(
             group=group,
             payload=payload,
             model=judgment_model(args),
-            api_url=args.llm_api_url,
+            api_url=provider_api_url(args, "judgment"),
         )
     response_meta = artifact.get("response_meta")
     meta = copy.deepcopy(response_meta) if isinstance(response_meta, dict) else {}
@@ -1883,7 +1917,7 @@ def _run_segmented_stage_group(
             facts,
             analysis,
             target,
-            api_url=args.llm_api_url,
+            api_url=provider_api_url(args, "judgment"),
             budget=getattr(args, "_resource_budget", None),
         )
         if replay_source is not None:
@@ -1912,6 +1946,7 @@ def _run_segmented_stage_group(
                 request_path,
                 response_path,
                 response_meta=response_meta,
+                route_role="judgment",
             )
             parsed = parse_json_text(response_text)
         by_code = _validated_stage_group_response(parsed, target, label=label, facts=facts)
@@ -1922,7 +1957,7 @@ def _run_segmented_stage_group(
                 payload=payload,
                 response=parsed,
                 model=judgment_model(args),
-                api_url=args.llm_api_url,
+                api_url=provider_api_url(args, "judgment"),
                 response_meta=response_meta,
             ),
         )
@@ -1962,7 +1997,7 @@ def _run_segmented_stage_group(
             group=target,
             payload=payload,
             model=judgment_model(args),
-            api_url=args.llm_api_url,
+            api_url=provider_api_url(args, "judgment"),
             error=str(exc),
             response_meta=response_meta,
             response=parsed,
@@ -2067,6 +2102,7 @@ def _run_segmented_synthesis(
                 request_path,
                 response_path,
                 response_meta=response_meta,
+                route_role="judgment",
             )
             parsed = parse_json_text(response_text)
         parsed = _validated_stage_synthesis_response(parsed)
@@ -2083,7 +2119,7 @@ def _run_segmented_synthesis(
                 payload=payload,
                 response=parsed,
                 model=judgment_model(args),
-                api_url=args.llm_api_url,
+                api_url=provider_api_url(args, "judgment"),
                 response_meta=response_meta,
             ),
         )
@@ -2104,7 +2140,7 @@ def _run_segmented_synthesis(
             group=("SYNTHESIS",),
             payload=payload,
             model=judgment_model(args),
-            api_url=args.llm_api_url,
+            api_url=provider_api_url(args, "judgment"),
             error=str(exc),
             response_meta=response_meta,
             response=parsed,
@@ -2321,7 +2357,8 @@ def run_large_model_analysis(
             "旧的 text-only LLM 路径已移除；请删除 --no-llm-include-images，"
             "生产分析必须使用 Stage1 + segmented Stage2/Stage3 多模态链路。"
         )
-    api_key = read_llm_api_key(args).strip()
+    api_keys = preflight_provider_api_keys(args)
+    api_key = api_keys.get("judgment", "")
     if not api_key and not args.llm_dry_run and not _full_provider_replay_requested(args):
         keychain_hint = ""
         if args.llm_api_key_keychain_service:
@@ -2399,7 +2436,7 @@ def run_large_model_analysis(
         "llm_model": judgment_model(args),
         "judgment_model": judgment_model(args),
         "vision_model": vision_model(args),
-        "llm_api_url": str(args.llm_api_url or ""),
+        **provider_run_metadata(args),
         "multimodal_input": True,
         "pipeline": "segmented_stage_v1",
     }
@@ -2470,7 +2507,7 @@ def maybe_run_absolute_execution_shadow(
                 call_kind=f"absolute_execution_shadow:{role}",
                 payload=payload,
                 model=judgment_model(args),
-                api_url=args.llm_api_url,
+                api_url=provider_api_url(args, "judgment"),
                 response_meta=live_meta,
                 call=lambda: (
                     parse_json_text(
@@ -2480,6 +2517,7 @@ def maybe_run_absolute_execution_shadow(
                             request_path,
                             response_path,
                             response_meta=live_meta,
+                            route_role="judgment",
                         )
                     ),
                     live_meta,
@@ -2735,13 +2773,13 @@ def maybe_reconcile_final_improvements(
             call_kind="improvement_reconciliation",
             payload=payload,
             model=judgment_model(args),
-            api_url=args.llm_api_url,
+            api_url=provider_api_url(args, "judgment"),
             response_meta=live_meta,
             call=lambda: (
                 json.loads(
                     call_llm_api(
-                        args.llm_api_url,
-                        api_key,
+                        provider_api_url(args, "judgment"),
+                        _provider_api_key(args, "judgment", api_key),
                         request_path,
                         response_path,
                         budget=getattr(args, "_resource_budget", None),
@@ -2853,7 +2891,7 @@ def maybe_refine_low_confidence_stages(
         result,
         stage_codes,
         budget=getattr(args, "_resource_budget", None),
-        api_url=args.llm_api_url,
+        api_url=provider_api_url(args, "vision"),
     )
     review_stages = [
         stage
@@ -2901,13 +2939,13 @@ def maybe_refine_low_confidence_stages(
             call_kind="phase_c_review",
             payload=review_payload,
             model=vision_model(args),
-            api_url=args.llm_api_url,
+            api_url=provider_api_url(args, "vision"),
             response_meta=live_meta,
             call=lambda: (
                 json.loads(
                     call_llm_api(
-                        args.llm_api_url,
-                        api_key,
+                        provider_api_url(args, "vision"),
+                        _provider_api_key(args, "vision", api_key),
                         review_request_path,
                         review_response_path,
                         budget=getattr(args, "_resource_budget", None),
@@ -3639,7 +3677,7 @@ def establish_product_foundation(
             call_kind="product_foundation",
             payload=payload,
             model=judgment_model(args),
-            api_url=args.llm_api_url,
+            api_url=provider_api_url(args, "judgment"),
             response_meta=provider_meta["initial"],
             call=lambda: (
                 parse_json_text(
@@ -3650,6 +3688,7 @@ def establish_product_foundation(
                         response_path,
                         request_max_time_seconds=240,
                         response_meta=provider_meta["initial"],
+                        route_role="judgment",
                     )
                 ),
                 provider_meta["initial"],
@@ -3680,7 +3719,7 @@ def establish_product_foundation(
                 call_kind="product_foundation_repair",
                 payload=repair_payload,
                 model=judgment_model(args),
-                api_url=args.llm_api_url,
+                api_url=provider_api_url(args, "judgment"),
                 response_meta=provider_meta["repair"],
                 call=lambda: (
                     parse_json_text(
@@ -3691,6 +3730,7 @@ def establish_product_foundation(
                             repair_response_path,
                             request_max_time_seconds=240,
                             response_meta=provider_meta["repair"],
+                            route_role="judgment",
                         )
                     ),
                     provider_meta["repair"],
@@ -3776,7 +3816,7 @@ def establish_comparison_eligibility(
         call_kind="comparison_eligibility",
         payload=payload,
         model=judgment_model(args),
-        api_url=args.llm_api_url,
+        api_url=provider_api_url(args, "judgment"),
         response_meta=response_meta,
         call=lambda: (
             parse_json_text(
@@ -3786,6 +3826,7 @@ def establish_comparison_eligibility(
                     request_path,
                     response_path,
                     response_meta=response_meta,
+                    route_role="judgment",
                 )
             ),
             response_meta,
@@ -4099,6 +4140,7 @@ def _run_stage1_qualification(
                     request_path,
                     response_path,
                     response_meta=response_meta,
+                    route_role=_stage1_route_role(provider_phase),
                 )
                 response = parse_json_text(response_text)
             if normalized_by_stage is None:
@@ -4128,7 +4170,7 @@ def _run_stage1_qualification(
                 payload=payload,
                 response=response,
                 model=judgment_model(args),
-                api_url=args.llm_api_url,
+                api_url=provider_api_url(args, _stage1_route_role(provider_phase)),
                 response_meta=response_meta,
                 artifact_name=artifact_path.name,
             )
@@ -4184,7 +4226,7 @@ def _run_stage1_qualification(
                     group=targets,
                     payload=payload,
                     model=judgment_model(args),
-                    api_url=args.llm_api_url,
+                    api_url=provider_api_url(args, _stage1_route_role(provider_phase)),
                     error=safe_error or type(exc).__name__,
                     artifact_name=artifact_path.name,
                     response_meta=response_meta,
@@ -4272,7 +4314,7 @@ def _load_cached_video_facts(
     if not current_contract:
         sanitize_audio_observations(
             {"video_understanding": {role: cached}, "stage_analysis": []},
-            can_analyze_native_audio(args.llm_api_url, vision_model(args)),
+            can_analyze_native_audio(provider_api_url(args, "vision"), vision_model(args)),
         )
     qualification = cached.get("stage1_qualification")
     if (
@@ -4352,6 +4394,7 @@ def _run_stage1_a_extraction(
                 request_max_time_seconds=STAGE1_A_REQUEST_TIMEOUT_SECONDS,
                 request_retries=STAGE1_A_REQUEST_RETRIES,
                 response_meta=response_meta,
+                route_role="vision",
             )
             parsed_response = parse_json_text(result_text)
         if not isinstance(parsed_response, dict):
@@ -4364,20 +4407,24 @@ def _run_stage1_a_extraction(
             payload=payload,
             response=parsed_response,
             model=vision_model(args),
-            api_url=args.llm_api_url,
+            api_url=provider_api_url(args, "vision"),
             response_meta=response_meta,
             artifact_name=artifact_path.name,
         )
         write_json(artifact_path, artifact)
         resume_failure_path.unlink(missing_ok=True)
     except (OSError, ValueError, RuntimeError, SystemExit) as exc:
-        safe_error = str(exc).replace(api_key, "[REDACTED]")[:1000]
+        vision_key = _cached_provider_api_key(args, "vision", api_key)
+        safe_error = str(exc)
+        if vision_key:
+            safe_error = safe_error.replace(vision_key, "[REDACTED]")
+        safe_error = safe_error[:1000]
         failure_artifact = failed_stage_fact_artifact(
             role=role,
             phase="A",
             payload=payload,
             model=vision_model(args),
-            api_url=args.llm_api_url,
+            api_url=provider_api_url(args, "vision"),
             error=safe_error or type(exc).__name__,
             artifact_name=artifact_path.name,
             response_meta=response_meta,
@@ -4478,7 +4525,7 @@ def _finalize_extracted_video_facts(
     fact_result["evidence_budget_exceeded"] = response_meta.get("finish_reason") == "length"
     direct_audio = payload_has_direct_audio(
         payload,
-        api_url=args.llm_api_url,
+        api_url=provider_api_url(args, "vision"),
         model=vision_model(args),
     )
     sanitize_audio_observations(
@@ -4508,7 +4555,7 @@ def _finalize_extracted_video_facts(
     recovery_media_mode = str(recovery.get("media_mode") or "")
     recovery_direct_audio = (
         recovery_media_mode in {"focused_native_video", "focused_audio"}
-        and can_analyze_native_audio(args.llm_api_url, vision_model(args))
+        and can_analyze_native_audio(provider_api_url(args, "vision"), vision_model(args))
     )
     sanitize_audio_observations(
         {"video_understanding": {role: fact_result}, "stage_analysis": []},
@@ -4570,7 +4617,7 @@ def run_video_fact_extraction(
             role,
             analysis,
             visual_inputs,
-            api_url=args.llm_api_url,
+            api_url=provider_api_url(args, "vision"),
             budget=getattr(args, "_resource_budget", None),
         )
         if args.llm_dry_run:
@@ -4959,6 +5006,7 @@ def _mark_video_fact_coverage_audit_failed(
     budget_flag: bool,
     error: BaseException,
     api_key: str,
+    extra_redaction_keys: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Persist a failed audit as a Stage1 block instead of losing the run.
 
@@ -4969,8 +5017,9 @@ def _mark_video_fact_coverage_audit_failed(
     successful negative observation or as an unstructured process crash.
     """
     safe_error = str(error).strip()
-    if api_key and safe_error:
-        safe_error = safe_error.replace(api_key, "[REDACTED]")
+    for secret in (api_key, *extra_redaction_keys):
+        if secret and safe_error:
+            safe_error = safe_error.replace(secret, "[REDACTED]")
     safe_error = safe_error[:500] or type(error).__name__
     _block_stage_qualifications(
         facts,
@@ -5032,6 +5081,7 @@ def _mark_video_fact_recovery_failed(
     budget_flag: bool,
     error: BaseException,
     api_key: str,
+    extra_redaction_keys: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Record a failed focused recovery without losing primary observations."""
     failed = _mark_video_fact_coverage_audit_failed(
@@ -5042,6 +5092,7 @@ def _mark_video_fact_recovery_failed(
         budget_flag=budget_flag,
         error=error,
         api_key=api_key,
+        extra_redaction_keys=extra_redaction_keys,
     )
     failed["stage1_coverage_audit"] = _materialize_stage_recovery_audit(
         failed,
@@ -5345,7 +5396,7 @@ def _prepare_stage1_recovery_request(
         visual_inputs,
         stage_analysis_evidence_view(facts, targets),
         targets,
-        api_url=args.llm_api_url,
+        api_url=provider_api_url(args, "vision"),
         budget=getattr(args, "_resource_budget", None),
         media_windows=media_windows,
     )
@@ -5417,6 +5468,7 @@ def _obtain_stage1_recovery_response(
             request_path,
             response_path,
             response_meta=response_meta,
+            route_role="vision",
         )
         recovery = parse_json_text(recovery_text)
     recovery = _validate_stage1_recovery_response(recovery, targets)
@@ -5427,7 +5479,7 @@ def _obtain_stage1_recovery_response(
         payload=payload,
         response=recovery,
         model=vision_model(args),
-        api_url=args.llm_api_url,
+        api_url=provider_api_url(args, "vision"),
         response_meta=response_meta,
         artifact_name=artifact_path.name,
     )
@@ -5460,6 +5512,10 @@ def _mark_stage1_recovery_execution_failed(
 ) -> dict[str, Any]:
     failure_artifact: dict[str, Any] | None = None
     recorded_artifact_path = artifact_path
+    vision_key = _cached_provider_api_key(args, "vision", api_key)
+    safe_error = str(error)
+    if vision_key:
+        safe_error = safe_error.replace(vision_key, "[REDACTED]")
     if payload:
         failure_artifact = failed_stage_fact_artifact(
             role=role,
@@ -5467,8 +5523,8 @@ def _mark_stage1_recovery_execution_failed(
             group=targets,
             payload=payload,
             model=vision_model(args),
-            api_url=args.llm_api_url,
-            error=str(error) or type(error).__name__,
+            api_url=provider_api_url(args, "vision"),
+            error=safe_error or type(error).__name__,
             artifact_name=artifact_path.name,
             response_meta=response_meta,
             response=recovery,
@@ -5487,6 +5543,7 @@ def _mark_stage1_recovery_execution_failed(
         budget_flag=budget_flag,
         error=error,
         api_key=api_key,
+        extra_redaction_keys=(vision_key,) if vision_key else (),
     )
     failure_meta = (
         failed.get("stage1_recovery")
@@ -5548,7 +5605,7 @@ def _merge_stage1_recovery_observations(
     recovery_for_merge = copy.deepcopy(recovery)
     direct_audio = payload_has_direct_audio(
         payload,
-        api_url=args.llm_api_url,
+        api_url=provider_api_url(args, "vision"),
         model=vision_model(args),
     )
     recovery_base = copy.deepcopy(facts)
@@ -6040,7 +6097,7 @@ def run_video_identity_extraction(
             call_kind=f"video_identity:{role}",
             payload=payload,
             model=vision_model(args),
-            api_url=args.llm_api_url,
+            api_url=provider_api_url(args, "vision"),
             response_meta=live_meta,
             call=lambda: (
                 parse_json_text(
@@ -6050,6 +6107,7 @@ def run_video_identity_extraction(
                         request_path,
                         response_path,
                         response_meta=live_meta,
+                        route_role="vision",
                     )
                 ),
                 live_meta,

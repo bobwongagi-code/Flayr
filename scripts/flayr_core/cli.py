@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 from .asr import DEFAULT_FUN_ASR_API_URL, DEFAULT_FUN_ASR_MODEL
+from .llm.api import DEFAULT_LLM_API_KEY_ENV
 from .market import normalize_target_market
 from .resources import ResourceLimits
 
@@ -189,12 +190,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--llm-api-url",
         default=os.environ.get("FLAYR_LLM_API_URL", "").strip(),
-        help="Approved-provider Chat Completions endpoint; only allowlisted official domains are accepted.",
+        help="Judgment/legacy Chat Completions endpoint; defaults to the company gateway for live LLM routes.",
+    )
+    parser.add_argument(
+        "--vision-api-url",
+        default=os.environ.get("FLAYR_VISION_API_URL", "").strip(),
+        help="Independent visual-evidence endpoint; defaults to the original Beijing route in hybrid mode.",
     )
     parser.add_argument(
         "--llm-api-key-env",
-        default="OPENAI_API_KEY",
+        default=os.environ.get("FLAYR_LLM_API_KEY_ENV", DEFAULT_LLM_API_KEY_ENV),
         help="Environment variable that contains the LLM API key.",
+    )
+    parser.add_argument(
+        "--vision-api-key-env",
+        default=os.environ.get("FLAYR_VISION_API_KEY_ENV", "").strip(),
+        help="Environment variable for the vision key; default Beijing route uses DASHSCOPE_API_KEY.",
     )
     parser.add_argument(
         "--llm-api-key-keychain-service",
