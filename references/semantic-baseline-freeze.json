@@ -4,11 +4,11 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "531309b3615f541df90c4edc8ff4fbc8b679e2d2",
+  "production_behavior_commit": "44496c34eb5bf5b22a31937e52bdf02d46a40f18",
   "execution_readiness": {
     "status": "engineering_route_acceptance_pending",
     "scope": "approved_hybrid_provider_route",
-    "reason": "Source identity is bound to 531309b3615f541df90c4edc8ff4fbc8b679e2d2. The approved runtime route now separates judgment and vision providers; the historical 12-sample evaluation route, prompts, schemas, qualification, GT, gap bands and thresholds remain unchanged. Full project tests, quality gates and the separately authorized single-sample route acceptance are pending; no accuracy or production-readiness claim is made.",
+    "reason": "Source identity is bound to 44496c34eb5bf5b22a31937e52bdf02d46a40f18. The prior 71bb287 engineering gates passed, but its Yoodex preparation was locally blocked before any HTTP request because the retained Singapore ASR host was not allowlisted. The fix permits that exact host for ASR only. Full project tests, quality gates and a separate new-directory single-sample acceptance are pending for this source; historical evaluation rules and semantic contracts remain unchanged.",
     "baseline_code_commit": "c88d9827a29c6024b4d36ed98f06bbbcf4ed439d",
     "required_before_new_runs": "After the full project tests and quality gates pass, run only the separately authorized one-sample Yoodex hybrid-route workflow acceptance in runs/diagnostics/company-gateway-migration-20261002. Keep it separate from the historical cohort; do not run broader requests or claim accuracy promotion."
   },
@@ -23,9 +23,9 @@
   "latest_refreeze": {
     "status": "applied_and_refrozen",
     "date": "2026-10-02",
-    "scope": "Engineering-only source-identity refreeze for the approved hybrid provider route: judgment defaults to gpt-6-sol through the company gateway and vision defaults to qwen3-vl-plus through Beijing MaaS, with route-specific credential sources and no automatic fallback. The new runtime route does not replace the historical model_route for the frozen 12-sample evaluation cohort. Prompts, schemas, qualification, GT, gap bands, acceptance thresholds and resource budget are unchanged. Existing artifacts, labels, reviews and sample states are not rewritten or rescored; no provider/video calls were made as part of this mechanical refreeze. A separately authorized one-sample Yoodex workflow acceptance remains pending and is not accuracy promotion or production acceptance.",
-    "previous_production_behavior_commit": "5748467ede21b4c17e16a9666b01786cd52df5e3",
-    "approved_code_commits": ["b9a6538", "eec9096", "bb8fd25", "d354a44", "8300799", "cb10bb1", "5c4d4b0", "8159529", "5748467", "531309b"],
+    "scope": "Engineering-only source-identity refreeze after the approved hybrid provider route: allow the already authorized exact Singapore ASR host through an ASR-only allowlist. Judgment remains gpt-6-sol through the company gateway, vision remains qwen3-vl-plus through Beijing MaaS, ASR default remains Beijing, and the Yoodex acceptance explicitly preserves its Singapore ASR route with a separate credential source. No automatic fallback, global host-policy expansion, semantic change or resource-budget change. Prior failed preparation and historical artifacts remain intact; no provider HTTP calls were made before this refreeze. A new-directory single-sample workflow acceptance remains pending and is not accuracy promotion or production acceptance.",
+    "previous_production_behavior_commit": "531309b3615f541df90c4edc8ff4fbc8b679e2d2",
+    "approved_code_commits": ["b9a6538", "eec9096", "bb8fd25", "d354a44", "8300799", "cb10bb1", "5c4d4b0", "8159529", "5748467", "531309b", "71bb287", "44496c3"],
     "stage2_semantics": "S2 original field contract and S3 original comparison wording restored; both-voiceover qualifier retained; small eligibility reconciliation retained",
     "gt": "unchanged",
     "qualification": "source-bound no-product-speech negative evidence only; positive voiceover evidence remains blocked",
