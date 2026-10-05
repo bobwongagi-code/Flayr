@@ -10,7 +10,7 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
-from .parse import _FACT_QUALITY_VALUES
+from .parse import _FACT_QUALITY_VALUES, _S5_SOURCE_SIGNALS
 
 
 def build_observation_schema(example: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
@@ -32,6 +32,11 @@ def build_observation_schema(example: dict[str, Any], analysis: dict[str, Any]) 
     schema = shape(example)
     unit = schema["properties"]["evidence_units"]["items"]
     unit["required"] = ["id", "time_range", "fact_quality"]
+    # Sparse fields are in the observation contract but absent from its example.
+    unit["properties"]["trust_source_signals"] = {
+        "type": "ARRAY", "items": {"type": "STRING", "enum": sorted(_S5_SOURCE_SIGNALS)},
+    }
+    unit["properties"]["trust_source_reference"] = {"type": "STRING"}
     quality = unit["properties"]["fact_quality"]
     quality["required"] = list(_FACT_QUALITY_VALUES)
     for field, values in _FACT_QUALITY_VALUES.items():

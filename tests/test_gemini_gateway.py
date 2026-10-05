@@ -56,6 +56,27 @@ def test_native_json_only_removes_complete_outer_fence():
             normalize_native_json(invalid)
 
 
+def test_observation_schema_allows_existing_optional_trust_source_fields():
+    payload = build_video_fact_payload("test", "creator", {}, [])
+    text = payload["messages"][1]["content"][0]["text"]
+    example = json.JSONDecoder().raw_decode(text.split("## 输出 JSON", 1)[1].lstrip())[0]
+    before = copy.deepcopy(example)
+    schema = build_observation_schema(example, {})
+    unit = schema["properties"]["evidence_units"]["items"]
+    properties = unit["properties"]
+    assert properties["trust_source_signals"] == {
+        "type": "ARRAY", "items": {"type": "STRING", "enum": [
+            "authority", "independent_user", "process_transparency",
+            "social_consensus", "traceable_data",
+        ]},
+    }
+    assert properties["trust_source_reference"] == {"type": "STRING"}
+    assert "trust_source_signals" not in unit["required"]
+    assert "trust_source_reference" not in unit["required"]
+    assert unit["required"] == ["id", "time_range", "fact_quality"]
+    assert example == before
+
+
 def test_native_request_preserves_business_text_and_media():
     payload = {"messages": [
         {"role": "system", "content": "locked rules"},
