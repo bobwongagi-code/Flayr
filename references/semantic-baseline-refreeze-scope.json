@@ -1,16 +1,15 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-s5-source-consistency-2026-10-05",
-  "description": "Bind the approved negative S5 source-consistency guard to d4c009e and record fixed-source verification. Negative acceptance is tightened; positive thresholds, GT, gap bands, routes, budgets and promotion eligibility remain unchanged. No old artifact migration or provider calls.",
+  "name": "semantic-baseline-refreeze-after-product-identity-alignment-2026-10-05",
+  "description": "Bind the approved product identity template alignment to 06b6e9e. Full observation now requests the existing twelve-field video-only preflight identity; unknown values remain empty and legacy normalization is unchanged. Eligibility thresholds, GT, gap bands, routes, budgets and promotion eligibility remain unchanged. No old artifact migration or provider calls.",
   "change_scope": {
-    "max_files": 4,
-    "max_added_lines": 80,
+    "max_files": 3,
+    "max_added_lines": 100,
     "max_deleted_lines": 40,
     "allowed_globs": [
       "references/semantic-baseline-refreeze-scope.json",
       "references/semantic-baseline-freeze.json",
-      "references/semantic-baseline-freeze.md",
-      "references/s5-source-consistency-audit.md"
+      "references/semantic-baseline-freeze.md"
     ],
     "forbidden_globs": [
       "runs/**",
