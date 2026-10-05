@@ -36,13 +36,15 @@ from .stage_contract_registry import (
 from .transcript import current_transcript_segments_path, current_transcript_words_path
 from .speech_attestation import has_verified_no_product_speech
 
-STAGE_EVIDENCE_CONTRACT_VERSION = 8
+STAGE_EVIDENCE_CONTRACT_VERSION = 9
+# Version 9 aligns hook/introduction, certificate scope and purchase-purpose boundaries.
 # Version 8 admits source-hash-bound human confirmation of no product speech.
 # Version 7 admits evidence-bound S3 explanation without changing actual-use facts.
 # Stage1-A only records atomic observations. Version 6 moves time-windowed
 # speech binding to deterministic code and makes optional unit fields sparse;
 # old provider responses must not be replayed under the new ownership rules.
-STAGE1_OBSERVATION_CONTRACT_VERSION = 6
+STAGE1_OBSERVATION_CONTRACT_VERSION = 7
+# Version 7 records identifiable printed certification without location-based exclusion.
 STAGE_EVIDENCE_SNAPSHOT_VERSION = 1
 STAGE_EVIDENCE_GATE_VERSION = 2
 STAGE1_ACQUISITION_VERSION = 6

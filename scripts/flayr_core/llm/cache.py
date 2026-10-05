@@ -37,7 +37,8 @@ from .stage_fact_artifacts import (
 
 # These versions are part of the persisted cache contract.  Keep them stable
 # across a structural extraction; callers still expose the old pipeline names.
-VIDEO_FACT_CACHE_SCHEMA_VERSION = 32
+# Stage qualification now shares contextual business boundaries and the S4 proof target.
+VIDEO_FACT_CACHE_SCHEMA_VERSION = 34
 PRODUCT_FOUNDATION_CACHE_SCHEMA_VERSION = 4
 CACHE_RECORD_SCHEMA_VERSION = 1
 

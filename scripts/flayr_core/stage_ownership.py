@@ -7,7 +7,7 @@ from typing import Any
 
 
 CERTIFICATION_OWNER_STAGE = "S5"
-_CERTIFICATION_TERMS = r"(?:KKM|KKMA|认证|证书|kelulusan|halal|sirim|sijil|certificate(?:s)?)"
+_CERTIFICATION_TERMS = r"(?:KKM|KKMA|\bCCC\b|认证|证书|kelulusan|halal|sirim|sijil|certificate(?:s)?)"
 CERTIFICATION_PATTERN = re.compile(_CERTIFICATION_TERMS, flags=re.IGNORECASE)
 # Stage1 facts deliberately record negative observations such as
 # "无认证/证书等视觉背书".  A lexical ownership check must not turn those
@@ -54,8 +54,8 @@ _POSITIVE_CERTIFICATION_MARKER = re.compile(
     flags=re.IGNORECASE,
 )
 _CERTIFICATION_S5_OWNERSHIP_MARKER = re.compile(
-    r"(?:认证|证书|KKM|KKMA|kelulusan|halal|sirim|sijil|certificate(?:s)?)"
-    r"[^。；;.!?，,\n]{0,24}?(?:归入|归属(?:于)?|属于|只能由|仅由|由)\s*S5",
+    _CERTIFICATION_TERMS
+    + r"[^。；;.!?，,\n]{0,24}?(?:归入|归属(?:于)?|属于|只能由|仅由|由)\s*S5",
     flags=re.IGNORECASE,
 )
 _CERTIFICATION_NON_SIGNAL_MARKER = re.compile(
@@ -75,7 +75,7 @@ CERTIFICATION_OWNERSHIP_PROMPT = (
     "不得因出现认证词拒绝、删除或强制迁移事实；也不得只凭认证词使其他阶段自动合格。"
     "每个阶段仍须满足自己的 required signals、signal bindings、渠道和排除项；认证不能替代 S3 的真实动作或 S4 的效果证明。"
     "跨阶段复用同一事实时，stage_evidence_links 仍按 primary/supporting 合同记录。"
-    "只有机构的数据、实验、研究、证书或官方标识实际证明本产品价值时才算 S5 背书；"
+    "只有可识别机构的数据、实验、研究、证书或官方标识与本产品购买判断直接相关时才算 S5 背书；安全或出行认证须按其证明范围判断，不自动当作功效证明或强背书。"
     "仅提到机构名字、合作 logo 或自述功效不算 S5 背书。口播提及但画面未显示时，必须标明口播声称、画面未验证。"
 )
 CERTIFICATION_POSITION_EXCEPTION_PROMPT = (

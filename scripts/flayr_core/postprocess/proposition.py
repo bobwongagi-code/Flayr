@@ -680,9 +680,7 @@ def _absolute_status(stage_id: str, flag: dict[str, Any] | None) -> tuple[str, s
         return "complete", "独立信任材料成立"
     if stage_id == "S6":
         if flag.get("exists") is False:
-            return "missing", "未完成结尾 CTA"
-        if flag.get("ending_position_met") is not True:
-            return "misplaced", "CTA 不在结尾促单位置"
+            return "missing", "未完成 CTA"
         if flag.get("direct_order_met") is not True and flag.get("action_path_clear") is not True:
             return "weak", "缺少明确购买指令或路径"
         if flag.get("module_fit_met") is False:
@@ -691,7 +689,7 @@ def _absolute_status(stage_id: str, flag: dict[str, Any] | None) -> tuple[str, s
             return "risky", "CTA 存在夸大或无法核实的承诺"
         if flag.get("module_type") == "D" and flag.get("computed_depends_on_valid_s4", flag.get("depends_on_valid_s4")) is False:
             return "complete", "购买动作成立；效果总结素材未通过 S4 依赖审计"
-        return "complete", "结尾购买动作成立"
+        return "complete", "购买动作成立"
     return "unknown", "未知阶段"
 
 

@@ -538,8 +538,6 @@ def _s6_cta_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
             return None
         if not _explicit_bool_fields(flag, required):
             return None
-        if flag.get("ending_position_met") is not True:
-            return 0.0
         direct = flag.get("direct_order_met") is True
         path = flag.get("action_path_clear") is True
         soft_value = flag.get("soft_purchase_invitation_met")
@@ -553,7 +551,7 @@ def _s6_cta_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
         if not direct and not path:
             if soft_value is not True and soft_value is not False:
                 return None
-            # 结尾的"感兴趣/需要的朋友 + 明确优惠"仍是软促单：没有路径，绝对质量仍弱，
+            # "感兴趣/需要的朋友 + 明确优惠"仍是软促单：没有路径，绝对质量仍弱，
             # 但不能与完全没有面向用户购买动作混为一谈。
             if soft_invitation:
                 offer_value = flag.get("offer_or_incentive_clear")
@@ -565,7 +563,7 @@ def _s6_cta_exec(stage: dict[str, Any]) -> dict[str, Any] | None:
                 return 0.5
             return 0.0
         # S6-D 的效果总结素材仍要依赖有效 S4（写入 trace/绝对质量审计），但 CTA 的核心是
-        # 结尾购买指令和行动路径。若这两项和利益点已成立，不能仅因模型把表达归成 D 就把 CTA
+        # 购买指令和行动路径。若这两项和利益点已成立，不能仅因模型把表达归成 D 就把 CTA
         # 降为无效；否则会把模块标签误差变成类型层级偏见。
         if fit_value is False:
             return 0.5

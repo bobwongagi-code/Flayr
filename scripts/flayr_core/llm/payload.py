@@ -33,7 +33,7 @@ from ..stage_evidence_contracts import (
     stage_codes,
 )
 from ..structure_modules import stage1_event_catalog
-from ..stage_contract_registry import S3_EXPRESSION_PROMPT
+from ..stage_contract_registry import S3_EXPRESSION_PROMPT, STAGE_BOUNDARY_TESTS
 from ..stage_ownership import (
     CERTIFICATION_OWNERSHIP_PROMPT,
     contains_certification,
@@ -766,8 +766,8 @@ def build_video_fact_payload(
         "据画面如实标，产品被手遮住或只露局部按真实可见程度给 low；"
         "再标 evidence_strength（direct|explicit|inferred|absent）：direct=本证据单元直接看见/听见的事实，explicit=本证据单元明确支持的事实，inferred=需要跨证据或解释才能得到，absent=本证据单元明确没有该事实；无法确定或缺失留空，绝不把 unknown 当 absent。"
         "再标 endorsement_verbal 与 endorsement_visual（各 true/false，纯观察、不判断算不算有效背书——有效性归后续打分）："
-        "endorsement_verbal＝该时段口播/字幕里有没有【出现】halal/KKM/认证/证书/检测/临床/医生/皮肤科/专家/机构/FDA/GMP/SIRIM/BPOM/GMP/certified 等硬来源词（只看词出没出现，不判断是否构成援引背书）；"
-        "endorsement_visual＝该时段画面里有没有【出现】独立的硬背书视觉证据（证书/检测报告文件/机构认证标识被画面清晰呈现）——产品瓶身上的印刷小标不算，口播说了但画面没出现也不算（口播归 endorsement_verbal，别把听到的脑补成画面）；"
+        "endorsement_verbal＝该时段口播/字幕里有没有【出现】halal/KKM/CCC/认证/证书/检测/临床/医生/皮肤科/专家/机构/FDA/GMP/SIRIM/BPOM/GMP/certified 等硬来源词（只看词出没出现，不判断是否构成援引背书）；"
+        "endorsement_visual＝该时段画面里有没有【出现】可识别的独立背书视觉证据（证书/检测报告文件/机构认证标识被清晰呈现）；不得仅因印在产品或包装上排除。普通品牌 logo、无法辨认的小标不算可识别认证，不得猜测认证名称。记录可辨认的原文/标识和位置；口播说了但画面没出现也不算（口播归 endorsement_verbal）；"
         "再标 trust_source_signals（数组，只记录实际看见/听见的独立信任来源，允许 authority/traceable_data/independent_user/social_consensus/process_transparency；没有则省略）和 trust_source_reference（逐字或概括写出实际出处；无出处必须省略）。authority/traceable_data 必须有机构名、报告号、官方/平台页面或可辨识认证；independent_user 必须有评论/用户原话；social_consensus 必须同时有明确群体/社区和该群体共同看法；process_transparency 必须有工厂、原料、生产或质检过程。产品数量、价格、参数、时长、赠品、达人自述均不得填。"
         "trust_source_*、variant_*、comparison_purpose_explicit 与 attention_competitor_ids 只在当前单元确有对应事实时输出；"
         "没有时直接省略，禁止逐条复制空数组、空映射、空字符串或默认 none。"
@@ -858,6 +858,31 @@ def build_stage_evidence_qualification_payload(
         }
     ]
     target_text = ", ".join(normalized_targets) or "S1-S6"
+    s4_proof_context = ""
+    foundation = analysis.get("product_foundation")
+    profile = foundation.get("product_profile") if isinstance(foundation, dict) else None
+    if "S4" in normalized_targets and isinstance(profile, dict):
+        proof = profile.get("proof_contract")
+        plan = profile.get("short_video_proof_plan")
+        if (
+            isinstance(proof, dict)
+            and proof.get("valid") is True
+            and isinstance(plan, dict)
+            and plan.get("s4_anchor_candidate_id")
+            and proof.get("anchor_candidate_id") == plan.get("s4_anchor_candidate_id")
+        ):
+            s4_proof_context = (
+                "## S4 商品证明目标（只读背景，不是视频证据）\n"
+                "以下是已有商品地基选定的 S4 核验对象，来源和置信度保持原值。"
+                "不得因目标存在就推断视频已展示，不得把模型推断升级为已确认商品事实。"
+                "仅核对已锁定观察是否呈现该目标；其他卖点的动作或完成状态不能替代此目标。"
+                "仍按阶段合同和实际覆盖状态判断，不得仅因未找到目标就猜测 absent。\n"
+                + json.dumps({
+                    "proof_contract": proof,
+                    "proof_contract_source": profile.get("proof_contract_source") or "unknown",
+                    "confidence": profile.get("confidence") or "unknown",
+                }, ensure_ascii=False, indent=2)
+            )
     acquisition = dict(
         facts.get("stage1_acquisition")
         if isinstance(facts.get("stage1_acquisition"), dict)
@@ -919,7 +944,7 @@ def build_stage_evidence_qualification_payload(
         "当某条已锁定观察被标记为 S6_cta，或完整口播包含可能的本地电商行动/路径表达时，"
         "必须结合整句、销售语境和当地平台惯用表达核对语义，不能只按一个错误 token 的字面翻译否定。"
         "例如 beg/bakul kuning、yellow bag/cart 以及 klik/tekan/tap/beli/order/checkout/link/retail 等只作为检索线索，"
-        "不是自动命中规则；只有整句至少能支持面向观众的行动、明确购买条件激励（如买就送/下单送）或可执行购买路径时才可判 present，"
+        "不是自动命中规则；只有整句至少能支持面向观众的购买行动、明确购买条件激励（如买就送/下单送）或促购语境中的可执行购买路径时才可判 present，"
         "其中购买条件激励属于 explicit_action；普通赠品清单、只报优惠或没有购买条件的描述不算 CTA。"
         "是否有行动与路径双重支撑属于后续强弱判断。"
         "coverage 表示相关素材范围是否已完整检查，不表示所有备选信号是否都出现。"
@@ -963,6 +988,7 @@ def build_stage_evidence_qualification_payload(
             *([s5_independence_review] if s5_independence_review else []),
             *([certification_policy] if certification_policy else []),
             s6_language_review,
+            *([s4_proof_context] if s4_proof_context else []),
             "## 已锁定 Canonical Stage1-A/C 事实（只读）",
             json.dumps(context, ensure_ascii=False, indent=2),
             "## 严格 JSON 输出",
@@ -1785,6 +1811,8 @@ def build_stage_group_judgment_payload(
             "readiness=partial 是可引用的真实阶段执行/尝试，不等于完整证明；必须结合其缺失信号与另一侧事实完成比较，不能把 partial 当 unknown，也不能把它写成 present/verified。readiness=absent 是已闭合的负向事实，不是采集缺失；单侧 absent、另一侧 present/partial 时仍要完成判断，relation 必须指向有证据的一侧，model_gap_magnitude 必须是 small、medium 或 large。双侧均 absent 时由代码收口为 not_applicable，不进入本阶段判断。只有 unknown/conflict，或比较合同未闭合的 not_applicable，才必须返回 uncertain。",
             "## 全阶段统一差距语义（结构库单一来源）",
             structure_library_gap_semantics(),
+            "## 目标阶段业务边界（合同单一来源）",
+            json.dumps({code: STAGE_BOUNDARY_TESTS[code] for code in targets}, ensure_ascii=False, indent=2),
             "## 目标阶段模块判断视图（结构库单一来源）",
             structure_library_judgment_view(targets),
             "## 阶段归属规则",

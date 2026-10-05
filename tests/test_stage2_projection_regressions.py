@@ -14,12 +14,16 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from flayr_core.llm.stage2_projection import (  # noqa: E402
     _SEGMENTED_FLAG_REQUIRED_KEYS,
     _normalize_segmented_stage,
+    _segmented_explicit_absence_flag,
 )
 from flayr_core.llm.payload import (  # noqa: E402
     build_llm_payload,
     build_stage_group_judgment_payload,
 )
-from flayr_core.postprocess.validate import validate_s4_effect_flags  # noqa: E402
+from flayr_core.postprocess.validate import (  # noqa: E402
+    validate_s3_usage_flags,
+    validate_s4_effect_flags,
+)
 from flayr_core.stage_contract_registry import S3_EXPRESSION_PROMPT  # noqa: E402
 from flayr_core.stage_evidence_contracts import (  # noqa: E402
     STAGE1_ACQUISITION_VERSION,
@@ -350,6 +354,61 @@ class Stage2ProjectionRegressionTests(unittest.TestCase):
                 result,
                 {"s4_flags_required": False, "evidence_state_required": False},
             )
+
+    def test_segmented_optional_flags_allow_missing_opposite_side(self) -> None:
+        for stage, validator in (("S3", validate_s3_usage_flags), ("S4", validate_s4_effect_flags)):
+            for absent_role in ("benchmark", "creator"):
+                with self.subTest(stage=stage, absent_role=absent_role):
+                    flag = _segmented_explicit_absence_flag(stage, absent_role)
+                    projected = {f"{absent_role}_{stage.lower()}": flag}
+                    result = {
+                        "stage2_pipeline_version": "segmented_stage_v1",
+                        "stage_analysis": [{} for _ in range(int(stage[1]) - 1)] + [projected],
+                    }
+                    original = copy.deepcopy(result)
+                    analysis = {f"{stage.lower()}_flags_required": False, "evidence_state_required": False}
+
+                    validator(result, analysis)
+                    self.assertEqual(result, original)
+
+                    missing_role = "creator" if absent_role == "benchmark" else "benchmark"
+                    strict = {**analysis, f"{stage.lower()}_flags_required": True}
+                    with self.assertRaisesRegex(SystemExit, f"缺少 {missing_role}_{stage.lower()}"):
+                        validator(result, strict)
+                    with self.assertRaisesRegex(SystemExit, f"缺少 {missing_role}_{stage.lower()}"):
+                        validator(result, {**analysis, "evidence_state_required": True})
+
+                    damaged = copy.deepcopy(result)
+                    damaged["stage_analysis"][-1][f"{missing_role}_{stage.lower()}"] = {}
+                    with self.assertRaises(SystemExit):
+                        validator(damaged, analysis)
+                    damaged["stage_analysis"][-1][f"{missing_role}_{stage.lower()}"] = "invalid"
+                    with self.assertRaises(SystemExit):
+                        validator(damaged, analysis)
+
+    def test_segmented_grounded_absence_with_missing_flag_passes_without_inventing_fields(self) -> None:
+        facts = {"benchmark": _side("B", "absent"), "creator": _side("C", "present")}
+        raw = _raw_s4()
+        raw.pop("creator_s4")
+        projected = _normalize_segmented_stage(raw, "S4", facts)
+        result = {
+            "stage2_pipeline_version": "segmented_stage_v1",
+            "video_understanding": facts,
+            "stage_analysis": [{}, {}, {}, projected],
+        }
+        original = copy.deepcopy(result)
+
+        validate_s4_effect_flags(result, {"s4_flags_required": False, "evidence_state_required": False})
+
+        self.assertEqual(result, original)
+        self.assertEqual(projected["stage_handoff_status"], "grounded")
+        self.assertEqual(projected["model_gap_magnitude"], raw["model_gap_magnitude"])
+        self.assertNotIn("creator_s4", projected)
+        self.assertEqual(projected["benchmark_s4"]["effect_evidence_state"], "none")
+        damaged = copy.deepcopy(result)
+        damaged["stage_analysis"][3]["benchmark_s4"].pop("effect_visible")
+        with self.assertRaisesRegex(SystemExit, "benchmark_s4.effect_visible"):
+            validate_s4_effect_flags(damaged, {"s4_flags_required": False, "evidence_state_required": False})
 
     def test_result_only_requires_unlinked_effect_flags(self) -> None:
         creator_flag = _provider_s4_flag("C")

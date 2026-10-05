@@ -246,7 +246,7 @@ class NoProductSpeechAttestationTests(unittest.TestCase):
                 },
             }
             manifest = build_stage1_acquisition_manifest({"videos": {"creator": info}}, "creator")
-            self.assertEqual(STAGE_EVIDENCE_CONTRACT_VERSION, 8)
+            self.assertEqual(STAGE_EVIDENCE_CONTRACT_VERSION, 9)
             self.assertEqual(STAGE1_ACQUISITION_VERSION, 6)
             self.assertEqual(manifest["channels"]["voiceover"]["status"], "ready")
             self.assertEqual(manifest["channels"]["voiceover"]["coverage"], "full")

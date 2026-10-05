@@ -762,10 +762,17 @@ def validate_s3_usage_flags(result: dict[str, Any], analysis: dict[str, Any]) ->
 
     errors: list[str] = []
     evidence_state_required = analysis.get("evidence_state_required") is True
+    optional_segmented_flags = (
+        result.get("stage2_pipeline_version") == "segmented_stage_v1"
+        and analysis.get("s3_flags_required") is False
+        and analysis.get("evidence_state_required") is False
+    )
     for role in ("creator", "benchmark"):
         key = f"{role}_s3"
         flag = s3.get(key)
         if not isinstance(flag, dict):
+            if flag is None and optional_segmented_flags:
+                continue
             errors.append(f"S3 缺少 {key}")
             continue
         if evidence_state_required and flag.get("usage_evidence_state") not in S3_USAGE_EVIDENCE_STATES:
@@ -870,10 +877,17 @@ def validate_s4_effect_flags(result: dict[str, Any], analysis: dict[str, Any]) -
 
     errors: list[str] = []
     evidence_state_required = analysis.get("evidence_state_required") is True
+    optional_segmented_flags = (
+        result.get("stage2_pipeline_version") == "segmented_stage_v1"
+        and analysis.get("s4_flags_required") is False
+        and analysis.get("evidence_state_required") is False
+    )
     for role in ("creator", "benchmark"):
         key = f"{role}_s4"
         flag = s4.get(key)
         if not isinstance(flag, dict):
+            if flag is None and optional_segmented_flags:
+                continue
             errors.append(f"S4 缺少 {key}")
             continue
         if evidence_state_required and flag.get("effect_evidence_state") not in S4_EFFECT_EVIDENCE_STATES:
