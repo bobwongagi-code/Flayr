@@ -1,7 +1,7 @@
 # S5 source-record consistency gate
 
 Date: 2026-10-05
-State: implemented and offline-verified; source commit and mechanical refreeze authorized on continuation. Not approved for production route activation or accuracy promotion.
+State: implemented, committed as `d4c009ef1061a6bcb076587cb2b0de47f3c31eb3`, and mechanically refrozen after authorization on continuation. Fixed-source verification passes. Not approved for production route activation or accuracy promotion.
 Parent source: `4abd9086bec14a426654d43b9a9a8a60909c4fe4`.
 
 ## Defect and scope
@@ -35,4 +35,8 @@ The guard cannot discover an unrecognized mark, correct OCR, or infer a source f
 
 ## Remaining version gate
 
-Commit the approved source changes and mechanically bind the freeze record to that source commit only with applicable authorization. Then rerun the version gate on the fixed source. Do not silently include failed rubric candidates, change GT, or treat this offline consistency fix as an accuracy experiment.
+The initial freeze failure above is preserved as pre-refreeze evidence. After source commit and authorized mechanical binding, the full project runner passes: all 1,111 tests, release checks, invariant checks, scoped-change gate, prompt reachability, analysis contracts (including freeze identity), and result-field ownership.
+
+Final full-suite log: `runs/diagnostics/gemini37-adaptation-20261005/s5-fixed-source-test.log`. The test run used committed production source; only the reviewed refreeze metadata was pending its separate commit. The freeze diff changes only source identity, execution-readiness explanation and latest-refreeze history. GT snapshots, routes, thresholds, schema identities and budgets are unchanged.
+
+No failed rubric candidate, historical score migration, provider request or production activation is included. No GitHub push is authorized or performed.
