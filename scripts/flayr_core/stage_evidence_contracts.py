@@ -1843,6 +1843,29 @@ def _unit_has_typed_s5_trust_source(unit: dict[str, Any]) -> bool:
     )
 
 
+def _s5_negative_source_record_issues(units_by_id: dict[str, dict[str, Any]]) -> list[str]:
+    """Reject negative closure over positive or unanswered source observations."""
+    issues: list[str] = []
+    for evidence_id, unit in units_by_id.items():
+        quality = unit.get("fact_quality")
+        if isinstance(quality, dict) and quality.get("subject") == "incorrect":
+            continue
+        if _unit_has_typed_s5_trust_source(unit):
+            issues.append(f"S5:negative_with_observed_trust_source:{evidence_id}")
+        elif unit.get("endorsement_visual") is True:
+            issues.append(f"S5:negative_with_unresolved_visual_source:{evidence_id}")
+        elif (
+            unit.get("trust_source_signals")
+            or str(unit.get("trust_source_reference") or "").strip()
+            or (
+                unit.get("endorsement_verbal") is True
+                and unit.get("trust_source_status") != "explicit_absent"
+            )
+        ):
+            issues.append(f"S5:negative_with_incomplete_source:{evidence_id}")
+    return issues
+
+
 def _budget_recovery_allows_qualification(side: Any, stage_code: str) -> bool:
     """Keep a budget-truncated extraction out of every downstream evidence view.
 
@@ -1908,6 +1931,8 @@ def _stage_check_issues(
     required = set(contract.required_signals)
     observed_disqualifiers = set(check.get("observed_disqualifiers") or [])
     signal_bindings = check.get("signal_bindings") if isinstance(check.get("signal_bindings"), dict) else {}
+    if contract.code == "S5" and status in {"absent", "not_applicable"}:
+        issues.extend(_s5_negative_source_record_issues(units_by_id))
     contradictory_signals = sorted(observed & missing)
     if contradictory_signals:
         issues.append(f"{contract.code}:signal_both_observed_and_missing:{','.join(contradictory_signals)}")

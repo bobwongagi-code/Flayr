@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "s5-source-consistency-20261005",
+  "description": "Approved fail-closed S5 source-record consistency gate. No positive eligibility thresholds, prompts, magnitude, routing, auto-fill or additional retry loop changed. Source verification is separate from production activation and accuracy acceptance.",
+  "change_scope": {
+    "max_files": 4,
+    "max_added_lines": 240,
+    "max_deleted_lines": 10,
+    "allowed_globs": [
+      "scripts/flayr_core/stage_evidence_contracts.py",
+      "tests/test_s5_source_consistency.py",
+      "references/s5-source-consistency-scope.json",
+      "references/s5-source-consistency-audit.md"
+    ],
+    "forbidden_globs": ["runs/**", "outputs/**", "jobs*.json", ".github/**"]
+  }
+}
