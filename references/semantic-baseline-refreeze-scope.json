@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-product-identity-alignment-2026-10-05",
-  "description": "Bind the approved product identity template alignment to 06b6e9e. Full observation now requests the existing twelve-field video-only preflight identity; unknown values remain empty and legacy normalization is unchanged. Eligibility thresholds, GT, gap bands, routes, budgets and promotion eligibility remain unchanged. No old artifact migration or provider calls.",
+  "name": "semantic-baseline-refreeze-after-s6-absence-projection-2026-10-06",
+  "description": "Bind approved S6 closed-absence projection to 277287f. Only locked readiness=absent gets a negative CTA flag, matching S3/S4. Unknown/conflict/partial, original relation/gap, qualification thresholds, GT, model routes and promotion eligibility remain unchanged. No old artifact migration or provider calls in this mechanical refreeze.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 100,
