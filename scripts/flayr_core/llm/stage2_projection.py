@@ -238,7 +238,7 @@ _S4_ABSENT_BOOLEAN_FIELDS = (
 def _segmented_explicit_absence_flag(stage: str, role: str) -> dict[str, Any] | None:
     """Build the code-owned negative flag for a closed Stage1 absence.
 
-    This is intentionally limited to S3/S4.  It must never turn an incomplete
+    This is intentionally limited to S3/S4/S6.  It must never turn an incomplete
     or uncertain observation into a negative fact, and it must not reuse any
     provider-authored partial values.
     """
@@ -270,6 +270,20 @@ def _segmented_explicit_absence_flag(stage: str, role: str) -> dict[str, Any] | 
             "proposition_ids": [],
         }
         flag.update({field: False for field in _S4_ABSENT_BOOLEAN_FIELDS})
+        return flag
+    if stage == "S6":
+        flag = {
+            "exists": False,
+            "module_type": "unknown",
+            "start_seconds": 0,
+            "end_seconds": 0,
+            "cta_reason": reason,
+            "evidence_ids": [],
+        }
+        flag.update({
+            field: False for field in _SEGMENTED_FLAG_REQUIRED_KEYS["S6"]
+            if field not in flag
+        })
         return flag
     return None
 
@@ -501,7 +515,7 @@ def _normalize_segmented_stage(
         key = f"{role}_{stage.lower() if stage != 'S1' else 'hook'}"
         value = raw.get(key)
         if (
-            stage in {"S3", "S4"}
+            stage in {"S3", "S4", "S6"}
             and readiness[role] == "absent"
             and (
                 output.get("stage_handoff_status") == "grounded"
