@@ -474,6 +474,24 @@ def build_improvement_reconciliation_payload(
     }
 
 
+def _video_product_identity_example() -> dict[str, Any]:
+    """Keep full observation and identity preflight on the same video-only fields."""
+    return {
+        "brand_or_product_name": "视频中实际看见、读到或听到的品牌/产品名；无法确认留空。",
+        "brand": "可确认的品牌；无法确认留空。",
+        "product_line": "可确认的产品线/系列；无法确认留空。",
+        "product_category": "视频实际展示的品类；无法确认留空。",
+        "functional_form": "影响使用机制的功能形态，如压粉、散粉、液体胶、卷材胶带；包装颜色和盒子圆方不写这里。",
+        "variant_attributes": ["包装颜色、外壳、色号、容量、套装等不改变核心使用机制的 SKU 属性。"],
+        "core_job": "消费者用它完成的核心任务；无法确认留空。",
+        "target_object": "产品作用对象；无法确认留空。",
+        "use_mechanism": "实际使用或作用机制；无法确认留空。",
+        "desired_outcome": "消费者追求的最终结果；无法确认留空。",
+        "identity_basis": "visible|spoken|subtitle|mixed|unknown",
+        "confidence": "high|medium|low",
+    }
+
+
 def build_video_fact_payload(
     model: str,
     role: str,
@@ -635,13 +653,7 @@ def build_video_fact_payload(
                 {
                     "content_summary": "只概括这条视频，不比较另一条视频。",
                     "communication_strategy": "只描述这条视频的口播、字幕、画面、BGM如何配合推进。",
-                    "product_identity": {
-                        "brand_or_product_name": "只写这条视频里看见或听见/读到的品牌、产品名；无法确认留空。",
-                        "product_category": "这条视频实际展示的品类；无法确认留空。",
-                        "form_factor": "实际可见的产品形态/关键结构，如便携搅拌杯、慢速榨汁机、手持挂烫机；无法确认留空。",
-                        "identity_basis": "visible|spoken|subtitle|mixed|unknown",
-                        "confidence": "high|medium|low",
-                    },
+                    "product_identity": _video_product_identity_example(),
                     "selling_point_observations": [
                         {
                             "id": "SP1",
@@ -2019,20 +2031,7 @@ def build_video_identity_payload(
             "## 输出 JSON",
             json.dumps(
                 {
-                    "product_identity": {
-                        "brand_or_product_name": "视频中实际看见、读到或听到的品牌/产品名；无法确认留空。",
-                        "brand": "可确认的品牌；无法确认留空。",
-                        "product_line": "可确认的产品线/系列；无法确认留空。",
-                        "product_category": "视频实际展示的品类；无法确认留空。",
-                        "functional_form": "影响使用机制的功能形态，如压粉、散粉、液体胶、卷材胶带；包装颜色和盒子圆方不写这里。",
-                        "variant_attributes": ["包装颜色、外壳、色号、容量、套装等不改变核心使用机制的 SKU 属性。"],
-                        "core_job": "消费者用它完成的核心任务；无法确认留空。",
-                        "target_object": "产品作用对象；无法确认留空。",
-                        "use_mechanism": "实际使用或作用机制；无法确认留空。",
-                        "desired_outcome": "消费者追求的最终结果；无法确认留空。",
-                        "identity_basis": "visible|spoken|subtitle|mixed|unknown",
-                        "confidence": "high|medium|low",
-                    }
+                    "product_identity": _video_product_identity_example()
                 },
                 ensure_ascii=False,
                 indent=2,
