@@ -70,6 +70,40 @@ Fun-ASR 原始文本和时间戳沿用来源哈希核验后的旧产物；其余
 
 ## 必要的下一步
 
+### 普通 CLI 独立品类与长视频验证
+
+`ordinary-cli-fasclean-v1` 使用干净源码 `490affe`，不复用预处理、模型响应或诊断猴子补丁。
+输入身份来自既有 Fasclean 视频记录，原视频仍为 36.942948 / 86.633333 秒；
+只读取视频路径和品名，不将历史判断或人工 GT 输入模型。诊断 runner 的参数与源码哈希已绑定。
+此前零调用盘点 34 份既有诊断/正式草稿，仅 Yoodex 普通 CLI v2 能通过当前人工审核来源校验；
+诊断结果未补成功标记、未计为普通 CLI 验收。盘点文件为 `human-review-source-inventory-20261006.json`。
+
+| 项目 | 本次实测 |
+| --- | --- |
+| 普通 CLI 技术状态 | exit 0、COMPLETED，正式成功清单校验通过 |
+| 完整耗时 | 595.252 秒 |
+| 非 ASR 请求 | 58 个逻辑请求、58 次发送，无重试 |
+| 非 ASR 响应模型 | 全部 gemini-3.7-flash、company_gemini_native |
+| 报告用量 | 340994 token；不将报告用量当作已核实账单 |
+| ASR | 双侧 fun-asr-flash-2026-06-15，原新加坡线路不变 |
+| 完整视频补查 | 2 次原生视频请求；不是只用两秒短片测试 |
+| 历史已确认 GT 对照 | S1-S5 为 2/5，包含 NA 正确性；S6 尚待听音确认，不入分母 |
+| 最终人工交付 | pending；尚未形成完整审核报告，不算交付验收通过 |
+
+具体分歧：S1 small 而人工 none；S2 借后面规格/包装展示评价引出；
+S4 理由承认没有污渍消失和前后追踪，却仍按 bilateral result_only 输出 none，人工为 NA。
+这些不是网关传输错误，也不能因技术 COMPLETED 而略过。未调整标尺或资格规则。
+S3 creator_better/small 与历史确认一致；S5 双侧不涉及与历史确认一致。
+
+S6 历史记录本来就要求标杆 ASR 二次核实。新 Fun-ASR 仍是难读的音译串，
+Gemini 翻译给出了流畅的明确购买指令；该译文不是独立听音证据，不能凭它冻结 S6 GT。
+已请求用户核实原片结尾，当前保留 pending，不假称 CTA 幻觉已经被证明。
+
+S1-S5 在本次正式成功来源下回放已有用户 GT，原始分析不变；
+这不是新人工审核，未估算审核用时，不算盲测或生产晋级。
+详细证据在 `ordinary-cli-fasclean-v1/delivery-audit.json`，来源、状态与旧人工记录 SHA256 均绑定。
+本轮不因判断错误重跑求好结果；默认线路和 `promotion_eligible=false` 不变。
+
 普通 CLI `ordinary-cli-acceptance-v1` 绑定 `f82504e`，无猴子补丁、回放或预处理复用。
 两侧 Fun-ASR 和 Gemini 翻译完成后，发现 `--ocr-mode on` 仍被旧 Qwen 名称启发式关掉；
 两侧 `_preprocess.json` 明确记录 `disabled_non_vision_config`。主动终止 CLI，退出 -15，
