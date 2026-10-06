@@ -52,6 +52,19 @@ def _show_stage(code: str, stage: Mapping[str, Any], review_stage: Mapping[str, 
     print(f"标杆摘要：{_text(stage.get('benchmark_summary') or stage.get('benchmark_key_message')) or '无'}")
     ids = values.get("evidence_ids") or []
     print(f"证据 ID：{'、'.join(ids) if ids else '无'}")
+    if code == "S4":
+        for role, label in (("creator", "达人"), ("benchmark", "标杆")):
+            effect = stage.get(f"{role}_s4")
+            if not isinstance(effect, Mapping):
+                continue
+            reason = _text(effect.get("effect_reason"))
+            if reason:
+                print(f"{label}效果依据（模型自述，尚待核实）：{reason}")
+            if effect.get("effect_visible") is True and effect.get("effect_proposition_matched") is False:
+                print(f"核对提示：{label}侧同时标记“效果可见”和“未匹配产品目标”，请核对实际展示的结果是什么；不自动改档。")
+            state = _text(effect.get("effect_evidence_state"))
+            if effect.get("effect_type") == "none" and state in {"result_only", "verified"}:
+                print(f"核对提示：{label}侧效果类型为 none，但证据状态为 {state}；请核对依据，不自动判为 NA。")
     if values.get("not_applicable"):
         print("提示：代码阶段门禁已确认未涉及，请选择 n 确认；不能用 c 确认。")
     elif values.get("prediction_unavailable"):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import tempfile
 import unittest
@@ -1094,6 +1095,59 @@ class HumanReviewTests(unittest.TestCase):
                 "S5", stage, {"decision": "pending"}
             )
         self.assertEqual(decision["decision"], "not_applicable")
+
+    def test_s4_review_shows_existing_conflicts_without_changing_decision(self) -> None:
+        stage = self._analysis()["stage_analysis"][3]
+        stage["creator_s4"] = {
+            "effect_visible": True, "effect_proposition_matched": False,
+            "effect_reason": "展示揉搓动作，未显示污渍消失。",
+        }
+        stage["benchmark_s4"] = {"effect_type": "none", "effect_evidence_state": "result_only"}
+        before = copy.deepcopy(stage)
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            review_analysis._show_stage("S4", stage, {"decision": "pending"})
+        self.assertIn("未匹配产品目标", output.getvalue())
+        self.assertIn("不自动判为 NA", output.getvalue())
+        self.assertIn("展示揉搓动作", output.getvalue())
+        self.assertEqual(stage, before)
+
+    def test_s4_review_does_not_reject_weak_real_results(self) -> None:
+        stage = self._analysis()["stage_analysis"][3]
+        stage["creator_s4"] = {
+            "effect_type": "process_visualization", "effect_evidence_state": "result_only",
+            "effect_visible": True, "effect_proposition_matched": True,
+            "effect_reason": "短暂显示接入手机后开始充电。",
+        }
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            review_analysis._show_stage("S4", stage, {"decision": "pending"})
+        self.assertIn("短暂显示", output.getvalue())
+        self.assertNotIn("核对提示", output.getvalue())
+
+    def test_s4_review_does_not_treat_missing_fields_as_false(self) -> None:
+        stage = self._analysis()["stage_analysis"][3]
+        stage["creator_s4"] = {"effect_visible": True}
+        stage["benchmark_s4"] = None
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            review_analysis._show_stage("S4", stage, {"decision": "pending"})
+        self.assertNotIn("核对提示", output.getvalue())
+
+    def test_s4_review_hints_do_not_apply_to_other_stages(self) -> None:
+        stage = self._analysis()["stage_analysis"][2]
+        stage["creator_s4"] = {"effect_visible": True, "effect_proposition_matched": False}
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            review_analysis._show_stage("S3", stage, {"decision": "pending"})
+        self.assertNotIn("核对提示", output.getvalue())
+
+    def test_s4_review_hints_tolerate_malformed_optional_values(self) -> None:
+        stage = self._analysis()["stage_analysis"][3]
+        stage["creator_s4"] = {
+            "effect_type": "none", "effect_evidence_state": ["result_only"],
+            "effect_visible": "true", "effect_proposition_matched": "false",
+            "effect_reason": {"text": "not a string"},
+        }
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            review_analysis._show_stage("S4", stage, {"decision": "pending"})
+        self.assertNotIn("核对提示", output.getvalue())
 
     def test_cli_interrupts_then_resumes_and_blocks_unavailable_confirm(self) -> None:
         temp, run_dir = self.fresh_run()
