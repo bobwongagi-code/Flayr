@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any
@@ -903,12 +904,30 @@ def _suppress_blocked_stage_improvements(result: dict[str, Any]) -> None:
     improvements = result.get("improvements")
     if not isinstance(improvements, list):
         return
-    result["improvements"] = [
-        item
-        for item in improvements
-        if not isinstance(item, dict)
-        or improvement_stage_code(item) not in blocked
-    ]
+    retained = []
+    for item in improvements:
+        if isinstance(item, dict) and improvement_stage_code(item) in blocked:
+            _retain_pending_action(result, item)
+        else:
+            retained.append(item)
+    result["improvements"] = retained
+
+
+def _retain_pending_action(result: dict[str, Any], item: dict[str, Any]) -> None:
+    """Keep only an action for explicit review, never its comparison or forecast."""
+    actions = {key: copy.deepcopy(item[key]) for key in ("actions", "action", "suggestion") if item.get(key)}
+    target = improvement_stage_code(item)
+    if not actions or not target:
+        return
+    candidate = {
+        "title": f"{target} 动作候选（待人工确认）",
+        "target_stage": target,
+        "status": "needs_human_confirmation",
+        **actions,
+    }
+    candidates = result.setdefault("candidate_experiments", [])
+    if isinstance(candidates, list) and candidate not in candidates:
+        candidates.append(candidate)
 
 
 def comparison_scope_summary(
@@ -979,9 +998,11 @@ def stabilize_improvement_priorities(result: dict[str, Any]) -> None:
             continue
         if str(stages.get(target, {}).get("comparison_status") or "") in {"not_directly_comparable", "not_applicable"}:
             excluded_by_scope = True
+            _retain_pending_action(result, item)
             continue
         cta_label = " ".join(str(item.get(key) or "") for key in ("target_stage", "title"))
         if cta_not_gap and (target == "S6" or re.search(r"CTA|促单", cta_label, flags=re.IGNORECASE)):
+            _retain_pending_action(result, item)
             continue
         filtered.append(item)
     severity_rank = {"large": 0, "medium": 1, "small": 2}

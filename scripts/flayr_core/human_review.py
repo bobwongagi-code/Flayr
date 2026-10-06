@@ -344,7 +344,8 @@ def _validate_review_against_analysis(review: Mapping[str, Any], analysis: Mappi
         if record["decision"] in {"approved", "edited"}:
             target = _item_stage_target(item)
             changed_codes = _changed_stage_codes(analysis, review)
-            if not changed_codes or target and target not in changed_codes:
+            preexisting_pending = _safe_text(item.get("status")) == "needs_human_confirmation"
+            if not preexisting_pending and (not changed_codes or target and target not in changed_codes):
                 raise HumanReviewError(f"{key} 未被本轮阶段更正降级，不能批准交付")
             if record["decision"] == "approved" and record["action"] != _candidate_action_sentence(item):
                 raise HumanReviewError(f"{key} approved 必须使用原候选首条动作句")
@@ -796,9 +797,6 @@ def reviewable_suggestion_actions(
     if review_status(current_review) != "approved":
         return []
     changed_codes = _changed_stage_codes(analysis, current_review)
-    if not changed_codes:
-        return []
-
     reviewed = current_review.get("suggestion_reviews", {})
     pending: list[dict[str, str]] = []
     for collection in ("improvements", "candidate_experiments"):
@@ -809,7 +807,10 @@ def reviewable_suggestion_actions(
             if not isinstance(item, Mapping):
                 continue
             target = _item_stage_target(item)
-            if target and target not in changed_codes:
+            preexisting_pending = _safe_text(item.get("status")) == "needs_human_confirmation"
+            if not preexisting_pending and not changed_codes:
+                continue
+            if target and target not in changed_codes and not preexisting_pending:
                 continue
             candidate = _needs_confirmation_candidate(item)
             action = _candidate_action_sentence(item)
@@ -894,7 +895,7 @@ def _review_suggestions(
         if not isinstance(item, Mapping):
             continue
         target = _item_stage_target(item)
-        if not target or target in changed_codes:
+        if not target or target in changed_codes or _safe_text(item.get("status")) == "needs_human_confirmation":
             candidate = _needs_confirmation_candidate(item)
             if candidate is not None:
                 record = decisions.get(f"{collection}:{index}")
@@ -1007,13 +1008,6 @@ def project_reviewed_analysis(run_dir: Path, review: Mapping[str, Any] | None = 
         projected["improvements"] = _review_suggestions(
             projected.get("improvements"), changed_codes, review, "improvements"
         )
-        if "candidate_experiments" in projected:
-            projected["candidate_experiments"] = _review_suggestions(
-                projected.get("candidate_experiments"),
-                changed_codes,
-                review,
-                "candidate_experiments",
-            )
         for key in (
             "one_line_summary",
             "commercial_priority_summary",
@@ -1031,6 +1025,20 @@ def project_reviewed_analysis(run_dir: Path, review: Mapping[str, Any] | None = 
             projected.pop(key, None)
         projected["one_line_verdict"] = projected["review_summary"]["verdict"]
         projected["executive_summary"] = projected["review_summary"]["detail"]
+    candidates = projected.get("candidate_experiments")
+    if isinstance(candidates, list) and (delivery_changed or any(
+        isinstance(item, Mapping) and _safe_text(item.get("status")) == "needs_human_confirmation"
+        for item in candidates
+    )):
+        projected["candidate_experiments"] = _review_suggestions(
+            candidates, changed_codes, review, "candidate_experiments"
+        )
+        for item in projected["candidate_experiments"]:
+            if item.get("status") == "human_approved_action":
+                approved = copy.deepcopy(item)
+                approved["suggestion"] = approved.pop("action", "")
+                if approved["suggestion"] and approved not in projected.setdefault("improvements", []):
+                    projected["improvements"].append(approved)
     projected["review_status"] = "approved"
     projected["review_mode"] = REVIEW_MODE
     return projected

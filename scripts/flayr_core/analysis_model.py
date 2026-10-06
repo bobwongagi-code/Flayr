@@ -217,6 +217,13 @@ class AnalysisResult:
         for field in ANALYSIS_RESULT_CONTRACT.projection_fields:
             if field in self.data:
                 analysis[field] = copy.deepcopy(self.data[field])
+        candidates = self.data.get("candidate_experiments")
+        if isinstance(candidates, list):
+            analysis["candidate_experiments"] = copy.deepcopy(candidates)
+            for item in analysis["candidate_experiments"]:
+                if isinstance(item, dict):
+                    # Delivery context is separate from shared stage semantics.
+                    item["status"] = "needs_human_confirmation"
         analysis["analysis_result_contract"] = ANALYSIS_RESULT_CONTRACT.metadata()
 
 
