@@ -49,6 +49,17 @@ from scripts.flayr_core.llm.api import (
 
 
 class WebAppHelpersTests(unittest.TestCase):
+    def test_web_defaults_share_the_company_gemini_route(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            args, models, route = _llm_configuration_from_env()
+        self.assertEqual(models, ("gemini-3.7-flash", "gemini-3.7-flash"))
+        self.assertEqual(args.llm_api_url, DEFAULT_COMPANY_LLM_API_URL)
+        self.assertEqual(args.vision_api_url, "")
+        self.assertEqual(args.llm_api_key_env, "FLAYR_LLM_API_KEY")
+        self.assertEqual(args.vision_api_key_env, "")
+        self.assertNotIn("gpt-6-sol", route)
+        self.assertNotIn("qwen3-vl-plus", route)
+
     def test_web_security_requires_explicit_public_mode(self) -> None:
         with self.assertRaises(ValueError):
             _resolve_web_security("192.168.1.20", False)
@@ -496,22 +507,18 @@ class WebAppHelpersTests(unittest.TestCase):
                 command = store._command(job)
             store.shutdown()
             self.assertIn("--judgment-model", command)
-            self.assertIn("gpt-6-sol", command)
+            self.assertIn("gemini-3.7-flash", command)
             self.assertIn("--vision-model", command)
-            self.assertIn("qwen3-vl-plus", command)
+            self.assertEqual(command.count("gemini-3.7-flash"), 2)
             self.assertIn(
                 "https://rootifyaiapi.rootifyglobal.com/v1/chat/completions",
                 command,
             )
-            self.assertIn("--vision-api-url", command)
-            self.assertIn(
-                "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
-                command,
-            )
+            self.assertNotIn("--vision-api-url", command)
             self.assertIn("--llm-api-key-env", command)
             self.assertIn("FLAYR_LLM_API_KEY", command)
-            self.assertIn("--vision-api-key-env", command)
-            self.assertIn("DASHSCOPE_API_KEY", command)
+            self.assertNotIn("--vision-api-key-env", command)
+            self.assertNotIn("DASHSCOPE_API_KEY", command)
 
     def test_web_worker_keeps_explicit_legacy_route_without_default_pair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

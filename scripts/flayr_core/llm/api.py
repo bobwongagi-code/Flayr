@@ -43,8 +43,8 @@ from ..utils import cleanup_stale_temp_entries, run_command, write_text
 DEFAULT_COMPANY_LLM_API_URL = (
     f"https://{ROOTIFY_COMPANY_LLM_API_HOST}/v1/chat/completions"
 )
-DEFAULT_COMPANY_JUDGMENT_MODEL = "gpt-6-sol"
-DEFAULT_COMPANY_VISION_MODEL = "qwen3-vl-plus"
+DEFAULT_COMPANY_JUDGMENT_MODEL = "gemini-3.7-flash"
+DEFAULT_COMPANY_VISION_MODEL = "gemini-3.7-flash"
 DEFAULT_LLM_API_KEY_ENV = "FLAYR_LLM_API_KEY"
 DEFAULT_BEIJING_MAAS_LLM_API_URL = (
     "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/"
@@ -130,7 +130,7 @@ def provider_capabilities(api_url: str, model: str = "") -> ProviderCapabilities
         return ProviderCapabilities(
             profile="rootify_company_gateway",
             confidence="approved_matrix",
-            native_video_input=normalized_model in {DEFAULT_COMPANY_VISION_MODEL, "gemini-3.7-flash"},
+            native_video_input=normalized_model in {"qwen3-vl-plus", "gemini-3.7-flash"},
             standalone_audio_input=False,
             native_audio_analysis=False,
         )

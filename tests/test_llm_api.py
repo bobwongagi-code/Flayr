@@ -1288,7 +1288,9 @@ class LlmApiContractTests(unittest.TestCase):
 
         judgment = provider_capabilities(DEFAULT_COMPANY_LLM_API_URL, DEFAULT_COMPANY_JUDGMENT_MODEL)
         self.assertEqual(judgment.profile, "rootify_company_gateway")
-        self.assertFalse(judgment.native_video_input)
+        self.assertTrue(judgment.native_video_input)
+        self.assertFalse(provider_capabilities(DEFAULT_COMPANY_LLM_API_URL, "gpt-6-sol").native_video_input)
+        self.assertTrue(provider_capabilities(DEFAULT_COMPANY_LLM_API_URL, "qwen3-vl-plus").native_video_input)
         self.assertFalse(can_analyze_native_audio(DEFAULT_COMPANY_LLM_API_URL, DEFAULT_COMPANY_VISION_MODEL))
         self.assertFalse(can_send_standalone_audio(DEFAULT_COMPANY_LLM_API_URL, DEFAULT_COMPANY_VISION_MODEL))
 

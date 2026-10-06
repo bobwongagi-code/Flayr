@@ -129,8 +129,8 @@ class CliContractTests(unittest.TestCase):
                 ]
             )
             flayr.validate_inputs(args)
-            self.assertEqual(pipeline.judgment_model(args), "gpt-6-sol")
-            self.assertEqual(pipeline.vision_model(args), "qwen3-vl-plus")
+            self.assertEqual(pipeline.judgment_model(args), "gemini-3.7-flash")
+            self.assertEqual(pipeline.vision_model(args), "gemini-3.7-flash")
             self.assertEqual(
                 args.llm_api_url,
                 "https://rootifyaiapi.rootifyglobal.com/v1/chat/completions",
@@ -138,10 +138,17 @@ class CliContractTests(unittest.TestCase):
             self.assertEqual(args.llm_api_key_env, "FLAYR_LLM_API_KEY")
             self.assertEqual(
                 args.vision_api_url,
-                "https://llm-nlx73tfv3mm6w67e.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
+                "",
             )
             self.assertEqual(provider_api_url(args, "judgment"), args.llm_api_url)
-            self.assertEqual(provider_api_url(args, "vision"), args.vision_api_url)
+            self.assertEqual(provider_api_url(args, "vision"), args.llm_api_url)
+            self.assertTrue(args.translate_with_llm)
+            self.assertEqual(args.max_llm_calls, 32)
+            self.assertEqual(args.max_total_wall_time, 3600)
+
+    def test_translation_can_be_explicitly_disabled(self) -> None:
+        args = flayr.build_parser().parse_args(["compare", "--verification-stage", "production", "--no-translate-with-llm"])
+        self.assertFalse(args.translate_with_llm)
 
     def test_explicit_legacy_route_remains_shared(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {}, clear=False):

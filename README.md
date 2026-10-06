@@ -84,7 +84,7 @@ python3 -m pip install --requirement requirements-dev.lock
 
 ## 配置
 
-常规分析按职责固定分路：文本判断走公司网关；图片、OCR、MP4 和定向回看走原北京 MaaS 视觉端点。ASR 继续使用独立配置。默认无需手工设置模型名或端点，但两路实时调用都必须有各自可用的密钥来源：文本默认读取 `FLAYR_LLM_API_KEY`，视觉默认读取 `DASHSCOPE_API_KEY`。自定义视觉端点必须同时指定 `FLAYR_VISION_API_KEY_ENV`。显式旧单路模型或旧共享端点配置仍按原单路执行。不要把密钥写入命令、仓库或运行产物；运行元数据只记录端点和密钥环境变量名，不记录密钥值。
+常规分析的文本判断、视频取证、OCR、定点回看和翻译统一走公司网关，默认共用 `FLAYR_LLM_API_KEY`。ASR 继续使用独立端点和密钥，不使用公司网关密钥。视频通过已核验的私有存储 URL 传输，需要配置视频存储凭据。显式模型或端点配置仍优先，不自动回退到旧线路。模型输出是待审核草稿，人工确认后才用于交付。不要把密钥写入命令、仓库或运行产物；运行元数据只记录端点和密钥环境变量名，不记录密钥值。
 
 ```bash
 # Optional role model and endpoint overrides.
@@ -94,8 +94,10 @@ python3 -m pip install --requirement requirements-dev.lock
 # export FLAYR_VISION_API_URL="<approved-vision-chat-completions-url>"
 # export FLAYR_VISION_API_KEY_ENV="<vision-key-environment-variable>"
 export FLAYR_LLM_API_KEY="<secret>"
-# Set the vision key in its own configured environment variable (default: DASHSCOPE_API_KEY).
-export DASHSCOPE_API_KEY="<secret>"
+# Private video URL storage.
+export FLAYR_R2_ACCOUNT_ID="<account-id>"
+export FLAYR_R2_BUCKET="<private-bucket>"
+export FLAYR_R2_API_TOKEN="<secret>"
 # Optional: set this only when the text key uses a different environment-variable name.
 # export FLAYR_LLM_API_KEY_ENV="<llm-key-environment-variable>"
 
@@ -148,16 +150,17 @@ CLI 提供四种模式：
 | `--judgment-model` | 资格、比较、汇总和文本判断所用模型 ID；默认路由可覆盖 |
 | `--vision-model` | OCR、事实观察和定向视频复核所用模型 ID；覆盖时必须与判断模型同时提供 |
 | `--llm-api-url` | 文本判断或显式旧单路使用的 Chat Completions 端点 |
-| `--vision-api-url` | 可选的独立视觉 Chat Completions 端点；默认使用原北京 MaaS 线路 |
+| `--vision-api-url` | 可选的独立视觉端点；默认共用公司网关 |
 | `--llm-api-key-env` | 保存 LLM 服务密钥的环境变量名；默认 `FLAYR_LLM_API_KEY` |
-| `--vision-api-key-env` | 独立视觉密钥的环境变量名；默认视觉线路使用 `DASHSCOPE_API_KEY` |
+| `--vision-api-key-env` | 可选的独立视觉密钥环境变量；默认共用公司网关密钥 |
 | `--asr-api-url` | 在线 ASR 服务端点 |
 | `--asr-model` | 在线 ASR 模型 ID |
 | `--asr-language` | ASR 语言提示，默认 `auto` |
 | `--asr-api-key-env` | 保存 ASR 服务密钥的环境变量名 |
 | `--ocr-mode auto/on/off` | 字幕 OCR 模式，默认 `auto` |
-| `--max-total-wall-time` | 单次运行总墙钟预算，默认 1800 秒 |
-| `--max-llm-calls` | 单次运行允许的真实模型网络尝试上限，默认 32 |
+| `--max-total-wall-time` | 单次运行总墙钟预算，默认 3600 秒；不改变单请求超时 |
+| `--max-llm-calls` | 单次运行允许的真实模型网络尝试上限，默认 32；OCR 独立计数 |
+| `--no-translate-with-llm` | 默认启用中文翻译；此选项显式关闭 |
 | `--reuse-preprocessing` | 复用同一输出目录中身份匹配的抽帧、转写和字幕轨 |
 | `--allow-degraded` | 明确允许生成降级结果；降级运行不会写成功清单 |
 

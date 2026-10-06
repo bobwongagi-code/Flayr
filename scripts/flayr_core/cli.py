@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=ResourceLimits().max_total_wall_time,
         help=(
-            "单次运行总墙钟上限（秒），默认 1800；只影响本次 run 的资源预算，"
+            "单次运行总墙钟上限（秒），默认 3600；只影响本次 run 的资源预算，"
             "不改变单个 HTTP 请求的 timeout。慢模型验证可显式提高。"
         ),
     )
@@ -195,7 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vision-api-url",
         default=os.environ.get("FLAYR_VISION_API_URL", "").strip(),
-        help="Independent visual-evidence endpoint; defaults to the original Beijing route in hybrid mode.",
+        help="Independent visual-evidence endpoint; defaults to the company judgment endpoint.",
     )
     parser.add_argument(
         "--llm-api-key-env",
@@ -205,7 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vision-api-key-env",
         default=os.environ.get("FLAYR_VISION_API_KEY_ENV", "").strip(),
-        help="Environment variable for the vision key; default Beijing route uses DASHSCOPE_API_KEY.",
+        help="Environment variable for the vision key; defaults to the company judgment key source.",
     )
     parser.add_argument(
         "--llm-api-key-keychain-service",
@@ -278,7 +278,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--translate-with-llm",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Translate local-language transcripts to Chinese with the configured LLM provider.",
     )
     parser.add_argument(

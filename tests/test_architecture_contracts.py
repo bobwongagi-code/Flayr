@@ -3023,7 +3023,7 @@ class ArchitectureContractTests(unittest.TestCase):
 
     def test_cli_exposes_an_explicit_run_wall_time_budget(self) -> None:
         default_args = flayr.build_parser().parse_args(["compare", "--verification-stage", "production"])
-        self.assertEqual(default_args.max_total_wall_time, 1800.0)
+        self.assertEqual(default_args.max_total_wall_time, 3600.0)
         self.assertEqual(default_args.max_llm_calls, 32)
         self.assertEqual(default_args.asr_model, "fun-asr-flash-2026-06-15")
         extended_args = flayr.build_parser().parse_args(

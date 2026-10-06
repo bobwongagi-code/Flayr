@@ -674,10 +674,6 @@ def validate_inputs(args: argparse.Namespace) -> dict[str, Path]:
     env_legacy = os.environ.get("FLAYR_LLM_MODEL", "").strip()
     env_judgment = os.environ.get("FLAYR_JUDGMENT_MODEL", "").strip()
     env_vision = os.environ.get("FLAYR_VISION_MODEL", "").strip()
-    explicit_shared_endpoint = bool(
-        str(getattr(args, "llm_api_url", "") or "").strip()
-        or os.environ.get("FLAYR_LLM_API_URL", "").strip()
-    )
     offline_analysis = bool(
         getattr(args, "analysis_result_json", None)
         or getattr(args, "provider_replay_from", None)
@@ -701,15 +697,6 @@ def validate_inputs(args: argparse.Namespace) -> dict[str, Path]:
         )
     ):
         args.llm_api_url = llm_api_core.DEFAULT_COMPANY_LLM_API_URL
-
-    default_hybrid_route = (
-        not explicit_model_route
-        and not (env_legacy or env_judgment or env_vision)
-        and not explicit_shared_endpoint
-        and not offline_analysis
-    )
-    if default_hybrid_route and not str(getattr(args, "vision_api_url", "") or "").strip():
-        args.vision_api_url = llm_api_core.DEFAULT_BEIJING_MAAS_LLM_API_URL
 
     explicit_judgment = str(getattr(args, "judgment_model", "") or "").strip()
     explicit_vision = str(getattr(args, "vision_model", "") or "").strip()

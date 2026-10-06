@@ -109,8 +109,6 @@ def _llm_configuration_from_env() -> tuple[Namespace, tuple[str, ...], list[str]
     legacy_model = os.environ.get("FLAYR_LLM_MODEL", "").strip()
     key_env = os.environ.get("FLAYR_LLM_API_KEY_ENV", "").strip() or DEFAULT_LLM_API_KEY_ENV
     vision_key_env = os.environ.get("FLAYR_VISION_API_KEY_ENV", "").strip()
-    explicit_model_route = bool(legacy_model or judgment_model or vision_model)
-    default_hybrid_route = not explicit_model_route and not endpoint
 
     if judgment_model or vision_model:
         if not judgment_model or not vision_model:
@@ -132,8 +130,6 @@ def _llm_configuration_from_env() -> tuple[Namespace, tuple[str, ...], list[str]
         ]
     if not endpoint:
         endpoint = DEFAULT_COMPANY_LLM_API_URL
-    if default_hybrid_route and not vision_endpoint:
-        vision_endpoint = DEFAULT_BEIJING_MAAS_LLM_API_URL
     if (
         vision_endpoint == DEFAULT_BEIJING_MAAS_LLM_API_URL
         and not vision_key_env

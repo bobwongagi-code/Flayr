@@ -81,7 +81,7 @@ class ResourceLimits:
     max_download_bytes: int = 128 * MIB
     max_report_bytes: int = 64 * MIB
     max_local_artifact_bytes: int = 512 * MIB
-    max_total_wall_time: float = 1800.0
+    max_total_wall_time: float = 3600.0
     max_cost_estimate: float = 5.0
 
     def __post_init__(self) -> None:
