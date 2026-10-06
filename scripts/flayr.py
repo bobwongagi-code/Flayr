@@ -1782,6 +1782,8 @@ def resolve_ocr_policy(args: argparse.Namespace) -> tuple[bool, str, str]:
 
 
 def looks_like_vision_config(args: argparse.Namespace) -> bool:
+    if provider_capabilities(provider_api_url(args, "vision"), vision_model(args)).native_video_input:
+        return True
     values = [
         provider_api_url(args, "vision").lower(),
         str(getattr(args, "vision_api_key_env", "") or "").lower(),
