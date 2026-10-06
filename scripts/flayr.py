@@ -108,7 +108,7 @@ from flayr_core.video_evidence import (
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNS_DIR = ROOT / "runs"
 PREPROCESS_CACHE_SCHEMA_VERSION = 5
-PREPROCESS_PIPELINE_VERSION = "2026-08-03.1-online-asr"
+PREPROCESS_PIPELINE_VERSION = "2026-10-06.1-ocr-status-verified-anchor-pts"
 PREPROCESS_ARTIFACT_SCHEMA_VERSION = 2
 # The only pre-fingerprint generation whose semantic compatibility was
 # audited for the current ordinary-sample resume. Keep its legacy identity;

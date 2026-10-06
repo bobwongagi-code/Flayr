@@ -128,13 +128,16 @@ def build_subtitle_track(
         )
 
     segments = merge_adjacent_subtitles(frame_results)
+    complete = bool(sampled) and len(frame_results) == len(sampled) and all(
+        frame["ocr_status"] in {"ocr_ready", "ocr_empty"} for frame in frame_results
+    )
     track = {
         "version": "0.1",
         "model": model,
         "sample_interval_sec": interval_sec,
         "frame_count": len(frame_results),
         "segment_count": len(segments),
-        "status": "ready" if segments else "empty",
+        "status": ("ready" if segments else "empty") if complete else ("partial" if segments else "failed"),
         "frames": frame_results,
         "segments": segments,
     }
@@ -368,13 +371,14 @@ def ocr_frame_with_retry(
             if attempt == 0:
                 continue
             return [], f"ocr_request_failed: {str(exc)[:80]}"
-        lines = parse_ocr_lines(text)
+        no_signal = str(text or "").strip().upper() == "NONE"
+        lines = [] if no_signal else parse_ocr_lines(text)
         write_json(
             meta_path,
             {
                 "schema_version": 1,
                 "attempt": attempt + 1,
-                "status": "completed" if lines else "empty_ocr",
+                "status": "completed" if lines else "no_signal" if no_signal else "empty_ocr",
                 "line_count": len(lines),
                 "provider_meta": response_meta,
                 "provider_artifact": f"provider_ocr_{index:03d}_attempt{attempt + 1}.json",
@@ -383,6 +387,8 @@ def ocr_frame_with_retry(
         )
         if lines:
             return lines, "ocr_ready"
+        if no_signal:
+            return [], "ocr_empty"
         # 无文字（多半是退回纯坐标检测模式）→ 重试一次
     return [], "ocr_unreadable"
 

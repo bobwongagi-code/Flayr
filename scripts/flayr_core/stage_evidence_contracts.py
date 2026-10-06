@@ -766,10 +766,10 @@ def build_stage1_acquisition_manifest(
     subtitle_segments = evidence.get("subtitle_segment_count") or info.get("subtitle_segment_count") or 0
     subtitle_ready = subtitle_status in {"ready", "empty"}
     subtitle_channel = _acquisition_channel(
-        "ready" if subtitle_ready else "failed" if subtitle_status in {"failed", "error", "unreadable"} else "unknown",
-        coverage="full" if subtitle_ready else "unknown",
+        "ready" if subtitle_ready or subtitle_status == "partial" else "failed" if subtitle_status in {"failed", "error", "unreadable"} else "unknown",
+        coverage="full" if subtitle_ready else "partial" if subtitle_status == "partial" else "unknown",
         count=subtitle_segments,
-        boundary_precision="frame" if subtitle_ready else "unknown",
+        boundary_precision="frame" if subtitle_ready or subtitle_status == "partial" else "unknown",
         reason=f"subtitle_track_status={subtitle_status}。",
     )
 

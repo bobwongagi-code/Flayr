@@ -407,9 +407,12 @@ def extract_anchor_frames(
             continue
         actual = _showinfo_timestamps(completed.stderr, 1)[0]
         if actual is None or actual > duration + 0.05 or abs(actual - timestamp) > 0.5:
-            actual = timestamp
+            result["errors"].append(
+                f"supplemental anchor frame timestamp unverified at requested {timestamp:.2f}s"
+            )
+            actual = None
         entry = {
-            "timestamp_seconds": round(actual, 3),
+            "timestamp_seconds": round(actual, 3) if actual is not None else None,
             "requested_timestamp_seconds": round(timestamp, 3),
             "path": str(output),
             "filename": output.name,

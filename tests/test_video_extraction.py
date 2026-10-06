@@ -16,6 +16,23 @@ from flayr_core import video
 
 
 class VideoExtractionTests(unittest.TestCase):
+    def test_anchor_frames_never_replace_unverified_pts_with_requested_time(self) -> None:
+        cases = (("", None), ("[showinfo] pts_time:9.0\n", None), ("[showinfo] pts_time:5.1\n", 5.1))
+        for stderr, expected in cases:
+            with self.subTest(stderr=stderr), tempfile.TemporaryDirectory() as tmp:
+                result = {"duration_seconds": 12.0, "errors": [], "frames": []}
+                with (
+                    mock.patch.object(Path, "is_file", return_value=True),
+                    mock.patch.object(video, "_collect_anchor_times", return_value=[(5.0, "scene_boundary")]),
+                    mock.patch.object(video, "run_command", return_value=SimpleNamespace(returncode=0, stderr=stderr)),
+                    mock.patch.object(video, "_reserve_artifacts", return_value=True),
+                    mock.patch.object(video, "write_json"),
+                ):
+                    video.extract_anchor_frames(Path("source.mp4"), Path(tmp), result)
+                self.assertEqual(result["frames"][0]["timestamp_seconds"], expected)
+                self.assertEqual(result["frames"][0]["requested_timestamp_seconds"], 5.0)
+                self.assertEqual(bool(result["errors"]), expected is None)
+
     def test_audio_stream_index_uses_only_unambiguous_ffmpeg_mapping(self) -> None:
         cases = (
             ("  Stream #0:3 -> #0:0 (aac -> pcm_s16le)\n", 3),

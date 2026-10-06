@@ -25,6 +25,9 @@ from flayr_core.llm.media import (  # noqa: E402
     select_stage_recovery_visual_inputs,
 )
 from flayr_core.subtitle_track import _merge_ocr_frame_entries  # noqa: E402
+from flayr_core import subtitle_track  # noqa: E402
+from flayr_core.resources import ResourceBudget, ResourceLimits  # noqa: E402
+from flayr_core.stage_evidence_contracts import build_stage1_acquisition_manifest, stage1_acquisition_issues  # noqa: E402
 from flayr_core.asr import extract_word_timestamps  # noqa: E402
 from flayr_core.video_evidence import (  # noqa: E402
     build_transcript_pack,
@@ -38,6 +41,59 @@ from flayr_core.postprocess.validate import validate_transcript_attribution  # n
 
 
 class VideoEvidenceSelectionTests(unittest.TestCase):
+    def test_ocr_aggregate_distinguishes_empty_failed_partial_and_skipped(self) -> None:
+        cases = (
+            ([([], "ocr_empty"), ([], "ocr_empty")], "empty", "full"),
+            ([( ["字幕"], "ocr_ready"), ([], "ocr_empty")], "ready", "full"),
+            ([( [], "ocr_request_failed: HTTP 502"), ([], "ocr_unreadable")], "failed", "unknown"),
+            ([( ["字幕"], "ocr_ready"), ([], "ocr_request_failed: HTTP 502")], "partial", "partial"),
+        )
+        for outcomes, expected, coverage in cases:
+            with self.subTest(status=expected), tempfile.TemporaryDirectory() as tmp:
+                frames = [{"path": "/fake/frame.jpg", "timestamp_seconds": ts} for ts in (1.0, 3.0)]
+                with (
+                    mock.patch.object(subtitle_track, "_merge_ocr_frame_entries", return_value=frames),
+                    mock.patch.object(subtitle_track, "sample_frames_by_interval", return_value=frames),
+                    mock.patch.object(Path, "is_file", return_value=True),
+                    mock.patch.object(subtitle_track, "ocr_frame_with_retry", side_effect=outcomes),
+                ):
+                    track = subtitle_track.build_subtitle_track(Path(tmp), {"duration_seconds": 5.0}, "fake", api_url="https://invalid.example", model="fake")
+                self.assertEqual(track["status"], expected)
+                manifest = build_stage1_acquisition_manifest(
+                    {"videos": {"creator": {"subtitle_track_status": track["status"], "subtitle_segment_count": len(track["segments"])}}},
+                    "creator",
+                )
+                self.assertEqual(manifest["channels"]["subtitle"]["coverage"], coverage)
+                self.assertEqual(bool(track["segments"]), expected in {"ready", "partial"})
+                if expected == "partial":
+                    manifest["speech_mode"] = "subtitle_driven"
+                    side = {
+                        "stage1_acquisition": manifest,
+                        "stage_evidence_checks": [{"stage": "S4", "status": "absent", "coverage": "complete"}],
+                    }
+                    self.assertIn(
+                        "S4:acquisition_channel_coverage_incomplete:subtitle",
+                        stage1_acquisition_issues(side, "S4"),
+                    )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            budget = ResourceBudget(ResourceLimits(max_ocr_calls=0))
+            with mock.patch.object(subtitle_track, "_merge_ocr_frame_entries", return_value=frames), mock.patch.object(subtitle_track, "ocr_frame_with_retry") as call:
+                track = subtitle_track.build_subtitle_track(Path(tmp), {"duration_seconds": 5.0}, "fake", api_url="https://invalid.example", model="fake", budget=budget)
+            self.assertEqual(track["status"], "failed")
+            call.assert_not_called()
+
+    def test_explicit_ocr_none_is_no_signal_without_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch.object(subtitle_track, "build_ocr_payload", return_value={}),
+                mock.patch.object(subtitle_track, "provider_call_with_artifact", return_value=({}, {}, "live")) as call,
+                mock.patch.object(subtitle_track, "extract_chat_completion_text", return_value="NONE"),
+            ):
+                lines, status = subtitle_track.ocr_frame_with_retry(Path("frame.jpg"), "fake", "https://invalid.example", "fake", Path(tmp), 0)
+            self.assertEqual((lines, status), ([], "ocr_empty"))
+            self.assertEqual(call.call_count, 1)
+
     def _write_frame(self, directory: Path, name: str, color: tuple[int, int, int], local_mark: bool = False) -> Path:
         image = Image.new("RGB", (90, 60), color)
         if local_mark:
