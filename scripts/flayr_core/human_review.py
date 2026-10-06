@@ -180,7 +180,14 @@ def _manifest_path(run_dir: Path) -> Path:
 def _source_fingerprint(run_dir: Path) -> dict[str, Any]:
     root = run_dir.expanduser().resolve()
     if not validate_success_manifest(root):
-        raise HumanReviewError("运行目录未通过 _SUCCESS.json 完整性校验，不能进入人工审核")
+        from .review_source import degraded_source_fingerprint
+
+        try:
+            source = degraded_source_fingerprint(root)
+            analysis_stage_map(_read_json(_analysis_path(root)))
+            return source
+        except (ValueError, OSError, TypeError, AttributeError) as exc:
+            raise HumanReviewError(f"运行目录未通过人工审核来源完整性校验：{exc}") from exc
     analysis_path = _analysis_path(root)
     manifest_path = _manifest_path(root)
     analysis_hash = _sha256_file(analysis_path)
@@ -1041,6 +1048,9 @@ def project_reviewed_analysis(run_dir: Path, review: Mapping[str, Any] | None = 
                     projected["improvements"].append(approved)
     projected["review_status"] = "approved"
     projected["review_mode"] = REVIEW_MODE
+    if source.get("source_run_state") == "DEGRADED":
+        projected["review_delivery"]["source_run_state"] = "DEGRADED"
+        projected["review_delivery"]["model_completed"] = False
     return projected
 
 

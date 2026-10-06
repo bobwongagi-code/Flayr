@@ -155,7 +155,7 @@ def _stage_payload(
         severity = "skip"
     elif review_decision == "insufficient_evidence":
         severity = "unknown"
-    elif review_decision == "corrected" and reviewed_gap in {"none", "small", "medium", "large"}:
+    elif review_decision in {"confirmed", "corrected"} and reviewed_gap in {"none", "small", "medium", "large"}:
         severity = "skip" if reviewed_gap == "none" else reviewed_gap
     elif skipped:
         severity = "skip"
