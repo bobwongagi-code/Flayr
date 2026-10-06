@@ -26,7 +26,6 @@ from .artifacts import (
     get_stage_frame_entries,
     parse_timestamp_seconds,
     resolve_artifact_path,
-    sample_evenly,
     select_frames_for_time_range,
     stage_time_ranges,
 )
@@ -726,26 +725,7 @@ def write_timeline_view(
 
 
 def frames_for_range(info: dict[str, Any], start: float, end: float, limit: int) -> list[dict[str, Any]]:
-    full = [
-        entry for entry in get_analysis_frame_entries(info)
-        if (timestamp := parse_timestamp_seconds(entry.get("timestamp_seconds"))) is not None
-        and start <= timestamp <= end
-    ]
-    if full:
-        return sample_evenly(full, limit)
-    focus = [
-        entry for entry in get_focus_frame_entries(info)
-        if (timestamp := parse_timestamp_seconds(entry.get("timestamp_seconds"))) is not None
-        and start <= timestamp <= end
-    ]
-    if focus:
-        return sample_evenly(focus, limit)
-    # A requested review window may fall between two sparse samples. Reuse the
-    # canonical range selector so the generated timeline still contains the
-    # nearest auditable frame instead of an empty filmstrip.
-    duration = parse_timestamp_seconds(info.get("duration_seconds"))
-    if duration is None:
-        return []
+    # Timeline and direct review must agree on both source frames and bounds.
     return select_frames_for_time_range(info, f"{start:.3f}s - {end:.3f}s", limit=limit)
 
 

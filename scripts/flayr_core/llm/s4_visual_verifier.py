@@ -337,14 +337,27 @@ def _collect_stage_frames(
     if isinstance(side, dict) and side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
         stage_code = str(stage.get("stage") or "").strip().upper()[:2]
         ids = [value for value in ids if value in qualified_stage_evidence_ids(side, stage_code)]
+    if limit <= 0:
+        return []
     frames: list[dict[str, str]] = []
     used_paths: set[str] = set()
+    candidates: list[list[tuple[str, dict[str, Any]]]] = []
     for evidence_id in ids:
         unit = units.get(evidence_id)
         if not unit:
             continue
         time_range = str(unit.get("time_range") or "")
-        for frame in select_frames_for_time_range(info, time_range, limit=limit):
+        candidates.append([
+            (evidence_id, frame)
+            for frame in select_frames_for_time_range(info, time_range, limit=limit)
+        ])
+    # Give each cited window a turn before spending every slot on the first.
+    for index in range(limit):
+        for group in candidates:
+            if index >= len(group):
+                continue
+            evidence_id, frame = group[index]
+            time_range = str(units[evidence_id].get("time_range") or "")
             path = Path(str(frame.get("path") or ""))
             if not path.is_file() or str(path) in used_paths:
                 continue

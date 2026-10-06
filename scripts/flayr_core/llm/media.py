@@ -6,8 +6,11 @@ image_url / input_audio / video_url 块；不写 prompt，不碰业务判断规�
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
+
+from PIL import Image, ImageDraw
 
 from ..artifacts import (
     format_seconds,
@@ -19,13 +22,13 @@ from ..artifacts import (
     sample_evenly,
     select_frames_for_time_range,
 )
+from ..resources import ResourceBudget
+from ..stage_evidence_contracts import stage_analysis_evidence_view
 from .api import (
     audio_to_mp3_data_url,
     can_send_standalone_audio,
     image_to_data_url,
 )
-from ..resources import ResourceBudget
-from ..stage_evidence_contracts import stage_analysis_evidence_view
 
 
 def select_role_visual_inputs(info: dict[str, Any], role: str, image_limit: int) -> list[dict[str, Any]]:
@@ -100,20 +103,77 @@ def select_stage_recovery_visual_inputs(
             continue
         timestamp = format_seconds(timestamp_value)
         marker = f" @ {timestamp}" if timestamp else ""
-        source_timestamps = list(entry.get("source_frame_timestamps") or [])
-        if not source_timestamps:
-            source_timestamps = [timestamp_value]
+        context = _recovery_frame_context(info, entry)
+        source_timestamps = [timestamp_value]
+        if context is not None:
+            frame, source_timestamps = context
+        context_label = (
+            " adjacent frames " + ", ".join(format_seconds(t) for t in source_timestamps)
+            if len(source_timestamps) > 1 else ""
+        )
         selected.append(
             {
                 "role": role,
                 "path": str(frame),
-                "label": f"{role}{marker} {frame.name}",
+                "label": f"{role}{marker} {frame.name}{context_label}",
                 "data_url": image_to_data_url(frame),
                 "timestamp_seconds": timestamp_value,
                 "source_frame_timestamps": source_timestamps,
             }
         )
     return selected[:image_limit]
+
+
+def _recovery_frame_context(
+    info: dict[str, Any], entry: dict[str, Any],
+) -> tuple[Path, list[float]] | None:
+    """Keep the sampled anchor and its local context at original resolution."""
+    timestamp = parse_timestamp_seconds(entry.get("timestamp_seconds"))
+    duration = parse_timestamp_seconds(info.get("duration_seconds"))
+    anchor = resolve_artifact_path(info, entry.get("path"), require_file=True, require_root=True)
+    if timestamp is None or duration is None or anchor is None:
+        return None
+    neighbors = select_frames_for_time_range(
+        info, f"{max(0.0, timestamp - 1.0)}s - {min(duration, timestamp + 1.0)}s", limit=3,
+    )
+    by_time = {timestamp: anchor}
+    # One preceding and one following image; never replace the anchor.
+    for side in (-1, 1):
+        options = [item for item in neighbors if (parse_timestamp_seconds(item["timestamp_seconds"]) - timestamp) * side > 0]
+        if not options:
+            continue
+        item = max(options, key=lambda value: abs(parse_timestamp_seconds(value["timestamp_seconds"]) - timestamp))
+        path = resolve_artifact_path(info, item.get("path"), require_file=True, require_root=True)
+        if path is not None and path not in by_time.values():
+            by_time[parse_timestamp_seconds(item["timestamp_seconds"])] = path
+    if len(by_time) == 1:
+        return None
+    images = []
+    digest = hashlib.sha256(b"recovery-context-v2-jpeg85")
+    try:
+        for time, path in sorted(by_time.items()):
+            digest.update(str(time).encode())
+            digest.update(path.read_bytes())
+            with Image.open(path) as source:
+                images.append((time, source.convert("RGB")))
+    except (OSError, ValueError):
+        return None
+    root = resolve_artifact_path(info, "recovery_frames", require_root=True)
+    if root is None:
+        return None
+    root.mkdir(parents=True, exist_ok=True)
+    output = root / f"context-{digest.hexdigest()[:24]}.jpg"
+    canvas = Image.new("RGB", (sum(image.width for _, image in images), max(image.height for _, image in images) + 28), "white")
+    draw = ImageDraw.Draw(canvas)
+    x = 0
+    for time, image in images:
+        draw.text((x + 4, 5), f"{time:.3f}s", fill="black")
+        canvas.paste(image, (x, 28))
+        x += image.width
+    # Re-encoding heavily compressed source JPEGs at 95 bloats the request
+    # without recovering source detail. Keep pixel dimensions, optimize bytes.
+    canvas.save(output, quality=85, optimize=True)
+    return output, sorted(by_time)
 
 
 def _recovery_visual_windows(

@@ -328,7 +328,9 @@ def select_frames_for_time_range(
     time_range: str,
     limit: int = 3,
 ) -> list[dict[str, Any]]:
-    entries = get_analysis_frame_entries(info)
+    # A focused review can recover frames omitted by overview deduplication.
+    # Keep canonical provenance when the same timestamp is available twice.
+    entries = get_analysis_frame_entries(info) + get_frame_entries(info)
     if not entries:
         entries = get_stage_frame_entries(info) + get_focus_frame_entries(info)
     if not entries:
@@ -343,17 +345,13 @@ def select_frames_for_time_range(
         for item in entries
         if (timestamp := parse_timestamp_seconds(item.get("timestamp_seconds"))) is not None
     ]
-    in_range = [item for item, timestamp in timed_entries if start <= timestamp <= end]
-    candidates = in_range
-    if not candidates:
-        target = (start + end) / 2
-        candidates = [
-            item
-            for item, _timestamp in sorted(
-                timed_entries,
-                key=lambda pair: abs(pair[1] - target),
-            )[:max(1, limit)]
-        ]
+    by_time: dict[float, dict[str, Any]] = {}
+    for item, timestamp in timed_entries:
+        if start <= timestamp <= end:
+            by_time.setdefault(timestamp, item)
+    candidates = [by_time[timestamp] for timestamp in sorted(by_time)]
+    if limit == 1 and candidates:
+        return [min(candidates, key=lambda item: abs(parse_timestamp_seconds(item["timestamp_seconds"]) - (start + end) / 2))]
     return sample_evenly(candidates, limit)
 
 
