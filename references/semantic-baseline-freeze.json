@@ -4,7 +4,7 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "754c909febb1c0491ce547e1392e64070a0c09ab",
+  "production_behavior_commit": "dd0c367519dcfb486ed029a064903a72f91bedbd",
   "execution_readiness": {
     "status": "gemini_delivery_acceptance_failed",
     "scope": "approved_review_frame_context_pending_actions_and_inactive_native_adapter",
@@ -23,8 +23,9 @@
   "latest_refreeze": {
     "status": "applied_and_refrozen",
     "date": "2026-10-06",
-    "scope": "Add an inactive native Gemini qualification container adapter derived from current registry examples. Preserve all business text and values; reject invalid versions, keys, enums and types rather than repairing responses. Thirteen saved real qualification responses pass lossless offline conversion. Ordinary CLI native/R2 transport is not activated or verified. No new model calls, stage rules, thresholds, GT, ASR or route change.",
-    "previous_production_behavior_commit": "103e9a4fb732bfa993998b026147e81c5eddd813",
+    "scope": "Add a private R2 upload and presigned URL module using existing curl, explicit environment configuration and source SHA256 read-back verification. Credential/URL redaction, pinned public destinations, no redirects and existing resource limits are retained. One existing full Yoodex video passed live upload and exact read-back after correcting diagnostic-output headroom. The module is not yet wired into ordinary CLI; no model call, semantic rule, ASR or production route change.",
+    "previous_production_behavior_commit": "754c909febb1c0491ce547e1392e64070a0c09ab",
+    "r2_transport_module_commit": "dd0c367519dcfb486ed029a064903a72f91bedbd",
     "qualification_wire_adapter_commit": "754c909febb1c0491ce547e1392e64070a0c09ab",
     "pending_action_review_commit": "103e9a4fb732bfa993998b026147e81c5eddd813",
     "refusal_diagnostic_commit": "8c888e941a52a3f3ab499b0efa8f17ba5841474f",
