@@ -34,6 +34,7 @@ from ..resources import (
     encode_file_data_url,
 )
 from ..stage_catalog import DEFAULT_STAGES
+from ..stage_contract_registry import S4_EFFECT_STATE_PROMPT
 from ..utils import write_bytes, write_json
 from ..video import probe_duration_seconds
 from . import frozen_inputs as frozen_inputs_module
@@ -941,14 +942,10 @@ def build_s4_fact_state_payload(
         "你是 Flayr 的 S4 事实状态判定器。只输出严格 JSON，不要 Markdown，不要解释。"
         "本次只判定双方效果证据状态，不输出 severity、relation、gap 或改进建议。"
         "输入事实已经锁定；不得新增、改写、合并或跨角色移动 evidence_units。"
-        "effect_evidence_state 的判断必须严格区分：none=没有效果证据；"
-        "result_only=只有结果画面或结果口播，没有产品导致结果的因果桥；"
-        "verified=效果肉眼可见，且产品使用/过程与结果之间存在可信连接；"
-        "uncertain=事实冲突、看不清或证据不足。"
+        + S4_EFFECT_STATE_PROMPT +
         "资格边界：产品包装或外观、开封倒出、单纯质地展示只属于product form；"
         "只有涂抹、操作或演示步骤但没有使用后结果只属于process；"
         "一般功效或益处主张只属于claim，三者都不能升级为result_only或verified。"
-        "具体的使用后结果口播最多可支持result_only，不能单独支持verified；"
         "肉眼可见的使用后结果或直接前后/对照结果，才可结合因果连接判断result_only或verified。"
         "visibility、proof、causal_link 只能描述锁定事实本身；不确定就填 uncertain。"
         f"evidence_ids 只能引用同侧 S4 事实，最多 {S4_MAX_EVIDENCE_IDS} 个；不能引用相邻阶段。"
@@ -1238,10 +1235,7 @@ def build_s4_single_pass_payload(
         "你是 Flayr 的 S4 单次混合判断器。只输出严格 JSON，不要 Markdown，不要解释。"
         "输入事实已经锁定；不得新增、改写、合并或跨角色移动 evidence_units。"
         "在同一个 JSON 中，先分别填写 creator 与 benchmark 的效果事实状态，再填写 relation 和 gap_magnitude。"
-        "effect_evidence_state 必须严格区分：none=没有效果证据；"
-        "result_only=只有结果画面或结果口播，没有产品导致结果的因果桥；"
-        "verified=效果肉眼可见，且产品使用/过程与结果之间存在可信连接；"
-        "uncertain=事实冲突、看不清或证据不足。"
+        + S4_EFFECT_STATE_PROMPT +
         "visibility、proof、causal_link 只能描述锁定事实本身；不确定就填 uncertain。"
         f"evidence_ids 只能引用同侧 S4 事实，最多 {S4_MAX_EVIDENCE_IDS} 个；不能引用相邻阶段。"
         "基于刚填写的双方状态给出简短 decision_basis，再输出 relation 和 gap_magnitude。"

@@ -24,6 +24,15 @@ S3_EXPRESSION_PROMPT = S3_FACT_PROMPT + (
     "S4 效果证明与 S5 独立来源规则不变，功能讲解不代替效果证明或背书。"
 )
 
+S4_EFFECT_STATE_PROMPT = (
+    "effect_evidence_state 四态定义：none=没有效果证据；"
+    "result_only=可观察的产品相关结果画面存在，但产品导致该结果的因果连接不足；"
+    "verified=效果可见且产品使用/过程与结果之间存在可信连接；"
+    "uncertain=事实冲突、看不清或证据不足。"
+    "只有结果口播或叙述不能充当视觉结果，操作结束或对象当前状态也不自行证明产品效果。"
+    "真实但有限的目标结果仍可参与，不要求所有品类都采用前后对照。"
+)
+
 # These definitions keep the registry from becoming a list of names whose
 # meaning drifts between prompt authors, parsers, and reviewers.  They describe
 # what may be recorded as an observation, not how much the observation is worth.

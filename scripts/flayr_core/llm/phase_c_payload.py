@@ -15,7 +15,7 @@ from ..artifacts import (
 )
 from ..multimodal import multimodal_output_example
 from ..resources import ResourceBudget
-from ..stage_contract_registry import S3_FACT_PROMPT
+from ..stage_contract_registry import S3_FACT_PROMPT, S4_EFFECT_STATE_PROMPT
 from ..stage_evidence_contracts import (
     stage_analysis_evidence_view,
     stage_analysis_stage_context,
@@ -259,7 +259,8 @@ def build_stage_review_payload(
         add_stage_patch_example("S4")
         s4_contract = (
             "目标阶段包含 S4 时，stage patch 必须同时包含 creator_s4 与 benchmark_s4；"
-            "两侧都必须输出 effect_evidence_state=none/result_only/verified/uncertain（none=没有效果证据，result_only=只有结果图或结果叙述没有因果桥，verified=效果可见且归因/过程可信，uncertain=证据冲突或不足；result_only 不得写成 verified）；"
+            "两侧都必须输出 effect_evidence_state=none/result_only/verified/uncertain；" + S4_EFFECT_STATE_PROMPT +
+            "result_only 不得写成 verified；"
             "S4 只判效果是否可见、效果是否显著、是否命中核心视觉命题、是否可信地由产品造成。"
             "只有结果且没有因果桥时不得标记 verified，应按 effect_evidence_state、effect_attribution_supported 和 result_only_without_process 如实记录；"
             "需要仔细看才有变化时 requires_close_inspection=true 且 effect_salience=subtle；"

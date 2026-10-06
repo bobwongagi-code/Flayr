@@ -8,13 +8,79 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from flayr_core.llm.payload import build_stage_group_judgment_payload  # noqa: E402
+from flayr_core.llm.payload import (  # noqa: E402
+    build_stage_evidence_qualification_payload,
+    build_stage_group_judgment_payload,
+)
+from flayr_core.llm.phase_c_payload import build_stage_review_payload  # noqa: E402
+from flayr_core.llm.compact_eval import (  # noqa: E402
+    build_s4_fact_state_payload,
+    build_s4_single_pass_payload,
+)
+from flayr_core.llm.frozen_inputs import FrozenCompactBundle  # noqa: E402
 from flayr_core.stage_contract_registry import S3_EXPRESSION_PROMPT  # noqa: E402
+from flayr_core.stage_contract_registry import S4_EFFECT_STATE_PROMPT  # noqa: E402
 from flayr_core.stage_contract_registry import stage_evidence_contract  # noqa: E402
+from flayr_core.stage_evidence_contracts import (  # noqa: E402
+    normalize_stage_evidence_checks,
+    stage_evidence_contract_issues,
+)
 from flayr_core.translation import build_translation_payload  # noqa: E402
 
 
 class StagePromptBoundaryTests(unittest.TestCase):
+    def test_all_six_contracts_reach_qualification_and_stage2(self) -> None:
+        for code in ("S1", "S2", "S3", "S4", "S5", "S6"):
+            with self.subTest(stage=code):
+                contract = stage_evidence_contract(code)
+                qualification = build_stage_evidence_qualification_payload(
+                    "test-model", "creator", {}, {}, [code]
+                )
+                judgment = build_stage_group_judgment_payload("test-model", "", {}, {}, [code])
+                for payload in (qualification, judgment):
+                    text = str(payload["messages"])
+                    for clause in contract.as_prompt_dict()["boundary_tests"].values():
+                        self.assertIn(clause, text)
+
+    def test_s4_visual_definition_reaches_all_four_state_instruction_sites(self) -> None:
+        bundle = FrozenCompactBundle(ROOT, {}, {}, (), "test-digest")
+        payloads = (
+            build_stage_group_judgment_payload("test-model", "", {}, {}, ["S4"]),
+            build_stage_review_payload("test-model", {}, {}, {}, ["S4"]),
+            build_s4_fact_state_payload("test-model", bundle),
+            build_s4_single_pass_payload("test-model", bundle),
+        )
+        forbidden = (
+            "只有结果图或结果叙述", "只有结果画面或结果口播",
+            "使用后结果口播最多可支持result_only",
+        )
+        for payload in payloads:
+            with self.subTest(system=payload["messages"][0]["content"][:40]):
+                text = str(payload["messages"])
+                self.assertIn(S4_EFFECT_STATE_PROMPT, text)
+                for clause in forbidden:
+                    self.assertNotIn(clause, text)
+
+    def test_s4_invented_or_other_role_reference_cannot_qualify(self) -> None:
+        for evidence_id in ("C999", "B1"):
+            with self.subTest(evidence_id=evidence_id):
+                raw = {
+                    "stage": "S4", "status": "partial", "coverage": "complete",
+                    "evidence_ids": ["C1", evidence_id],
+                    "observed_signals": ["result_presentation"],
+                    "signal_bindings": {"result_presentation": {
+                        "status": "supported", "evidence_ids": [evidence_id],
+                        "reason": "声称有结果，但引用不属于当前视频事实包",
+                    }},
+                }
+                side = {
+                    "stage_evidence_checks": normalize_stage_evidence_checks([raw], {"C1"}),
+                    "evidence_units": [{"id": "C1", "visual_fact": "只有操作", "evidence_strength": "direct"}],
+                }
+                issues = stage_evidence_contract_issues(side, require_version=False)
+                self.assertIn("S4:signal_binding_invalid_evidence:result_presentation", issues)
+                self.assertIn("S4:supported_signal_without_evidence:result_presentation", issues)
+
     def test_approved_delivery_boundaries_reach_both_contract_and_judgment(self) -> None:
         clauses = {
             "S1": "不能仅凭钩子形式不同就判有差距",
