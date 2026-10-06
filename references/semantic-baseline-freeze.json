@@ -4,11 +4,11 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "e53e70e2466d0bbac44c6750b69aae6771b45dc4",
+  "production_behavior_commit": "8c888e941a52a3f3ab499b0efa8f17ba5841474f",
   "execution_readiness": {
-    "status": "gemini_adaptation_validation_pending",
+    "status": "gemini_delivery_acceptance_failed",
     "scope": "approved_review_frame_context_and_inactive_native_adapter",
-    "reason": "Source identity is bound to e53e70e2466d0bbac44c6750b69aae6771b45dc4. Recovery preserves sampled anchors and adjacent existing source frames; focused review can recover raw frames within the actual evidence interval and never borrows out-of-window images. Visual review distributes its bounded slots across cited windows. Source timestamps and dimensions remain auditable. JPEG encoding is optimized; provider readability and cost remain subject to live acceptance. Existing S6 absence projection and source consistency guards remain. This refreeze is not semantic acceptance or production route activation.",
+    "reason": "Source identity is bound to 8c888e941a52a3f3ab499b0efa8f17ba5841474f. Approved neighboring-frame sampling remains unchanged. Fresh delivery validation on 7aad8e3 completed three of four all-Gemini chains; the fourth received an HTTP-200 upstream refusal. Yoodex repeats still missed CCC and changed S3/S6 judgments; one completed Halal control missed its source mark. Review projection invalidates stale summaries but this sample had no retained actionable suggestions. The new correction only distinguishes refusal envelopes from incomplete responses; it does not solve these delivery failures or activate production routing.",
     "baseline_code_commit": "c88d9827a29c6024b4d36ed98f06bbbcf4ed439d",
     "required_before_new_runs": "Pass fixed-source full tests and freeze verification, then execute the authorized Gemini adaptation diagnostic protocol in runs/diagnostics/gemini37-adaptation-20261005. Keep development comparisons separate from historical cohort scoring. Stage2 requires current version-9 qualified inputs; old qualification artifacts cannot be silently upgraded. No production route switch or automatic promotion."
   },
@@ -23,8 +23,9 @@
   "latest_refreeze": {
     "status": "applied_and_refrozen",
     "date": "2026-10-06",
-    "scope": "Approved review sampling correction: retain temporal anchors with neighboring existing frames, recover raw frames only inside evidence intervals, avoid first-evidence slot monopoly, and optimize contact-image JPEG encoding. No qualification threshold, relation, gap, GT, ASR or production route change. Live Gemini delivery acceptance remains separate.",
-    "previous_production_behavior_commit": "277287f34fb4a562bdeb736e91505dd5702bf561",
+    "scope": "Distinguish an HTTP-200 upstream refusal with no finishReason from an incomplete native response. Both remain failures; no retry, refusal bypass, semantic reinterpretation or successful artifact is introduced. Approved review sampling remains unchanged. No qualification threshold, relation, gap, GT, ASR or production route change.",
+    "previous_production_behavior_commit": "e53e70e2466d0bbac44c6750b69aae6771b45dc4",
+    "refusal_diagnostic_commit": "8c888e941a52a3f3ab499b0efa8f17ba5841474f",
     "review_sampling_commit": "e53e70e2466d0bbac44c6750b69aae6771b45dc4",
     "s6_absence_projection_commit": "277287f34fb4a562bdeb736e91505dd5702bf561",
     "approved_code_commits": ["b9a6538", "eec9096", "bb8fd25", "d354a44", "8300799", "cb10bb1", "5c4d4b0", "8159529", "5748467", "531309b", "71bb287", "44496c3", "caa4d6c", "2aebb16", "d4c009e", "06b6e9e"],
