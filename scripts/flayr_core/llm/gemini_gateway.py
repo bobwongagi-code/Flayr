@@ -204,9 +204,13 @@ def assemble_native_response(
                     text.append(part["text"])
     if versions != {expected_model}:
         raise ValueError("native response model identity missing or mismatched")
+    content = "".join(text)
+    # Some compatible gateways wrap an upstream refusal in an HTTP-200
+    # candidate with no finishReason rather than using promptFeedback.
+    if not reasons and content.strip().startswith("The prompt could not be submitted."):
+        raise ValueError("native provider refused the request; no completed answer")
     if reasons != ["STOP"]:
         raise ValueError("native response did not finish normally")
-    content = "".join(text)
     if not content.strip():
         raise ValueError("native response contains no answer")
     return {"content": content, "model": expected_model, "usage_metadata": usage}

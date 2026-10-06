@@ -19,6 +19,22 @@ from flayr_core.llm.gemini_gateway import (
 from flayr_core.llm.payload import build_video_fact_payload
 
 
+def test_gateway_http_200_refusal_is_not_an_incomplete_answer():
+    refused = {
+        "modelVersion": "gemini-3.7-flash",
+        "candidates": [{"content": {"parts": [{"text":
+            "The prompt could not be submitted. The prompt contains sensitive words."}]}}],
+        "usageMetadata": {"promptTokenCount": 15564},
+    }
+    before = copy.deepcopy(refused)
+    with unittest.TestCase().assertRaisesRegex(ValueError, "refused the request"):
+        assemble_native_response([refused], expected_model="gemini-3.7-flash")
+    assert refused == before
+    refused["candidates"][0]["content"]["parts"][0]["text"] = "partial ordinary answer"
+    with unittest.TestCase().assertRaisesRegex(ValueError, "did not finish normally"):
+        assemble_native_response([refused], expected_model="gemini-3.7-flash")
+
+
 def test_observation_schema_preserves_sparse_fields_and_source_bound_lists():
     payload = build_video_fact_payload("test", "creator", {}, [])
     text = payload["messages"][1]["content"][0]["text"]
