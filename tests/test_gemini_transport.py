@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from scripts.flayr_core.llm import api, gemini_transport as transport
 from scripts.flayr_core.network import ValidatedOutboundURL
-from scripts.flayr_core.llm.payload import build_video_fact_recovery_payload
+from scripts.flayr_core.llm.payload import build_video_fact_recovery_payload, build_comparison_eligibility_payload
 
 
 class GeminiTransportTests(unittest.TestCase):
@@ -69,9 +69,15 @@ class GeminiTransportTests(unittest.TestCase):
         for text, finish in (("The prompt could not be submitted.", None), ('{"partial":', "MAX_TOKENS")):
             with tempfile.TemporaryDirectory() as folder, self.mock_network(), patch.object(
                 transport, "run_command", return_value=subprocess.CompletedProcess([], 0, self.response(text, finish), "__FLAYR_HTTP_STATUS__200")
-            ) as command, self.assertRaises(SystemExit):
-                self.call(folder)
-            self.assertEqual(command.call_count, 1)
+            ) as command:
+                with self.assertRaises(SystemExit):
+                    self.call(folder)
+                self.assertEqual(command.call_count, 1)
+                failure = json.loads((Path(folder) / "response.json.native-answer-failure.json").read_text())
+                self.assertEqual(failure["native_response_meta"]["finish_reasons"], [finish])
+                envelope = Path(folder) / "response.json.native-envelope-failure.json"
+                self.assertEqual(envelope.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(json.loads(envelope.read_text())["modelVersion"], "gemini-3.7-flash")
 
     def test_normal_api_explicit_gemini_dispatch_and_payload_cleanup(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -109,6 +115,10 @@ class GeminiTransportTests(unittest.TestCase):
         with patch("scripts.flayr_core.llm.payload._replace_recovery_full_media", return_value=[]):
             payload = build_video_fact_recovery_payload("gemini-3.7-flash", "creator", {}, [], {}, ["S5"])
         self.assertNotIn("_flayr_native_schema", payload)
+
+    def test_eligibility_budget_matches_verified_native_configuration_only(self):
+        self.assertEqual(build_comparison_eligibility_payload("gemini-3.7-flash", {})["max_tokens"], 8192)
+        self.assertEqual(build_comparison_eligibility_payload("gpt-6-sol", {})["max_tokens"], 2048)
 
 
 if __name__ == "__main__":

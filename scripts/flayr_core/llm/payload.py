@@ -304,7 +304,7 @@ def build_comparison_eligibility_payload(model: str, facts: dict[str, Any]) -> d
             {"role": "user", "content": [{"type": "text", "text": text}]},
         ],
         "temperature": 0.0,
-        "max_tokens": 2048,
+        "max_tokens": 8192 if str(model).lower() == "gemini-3.7-flash" else 2048,
     }
 
 

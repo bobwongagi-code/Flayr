@@ -52,6 +52,8 @@ def call_native_completion(
     if request_bytes > limit:
         raise SystemExit("Native request exceeds the single-request byte limit")
     attempts: list[dict[str, Any]] = []
+    native_raw = ""
+    native_response_meta: dict[str, Any] = {}
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with tempfile.TemporaryDirectory(prefix=".gemini-native.", dir=raw_path.parent) as directory:
@@ -97,7 +99,23 @@ def call_native_completion(
                         time.sleep(5)
                         continue
                     raise SystemExit(f"Native gateway transport failed: HTTP={status}, curl={completed.returncode}")
-                assembled = assemble_native_response([json.loads(completed.stdout)], expected_model=model)
+                native_raw = completed.stdout
+                envelope = json.loads(native_raw)
+                if not isinstance(envelope, dict):
+                    raise ValueError("native response must be a JSON object")
+                candidates = envelope.get("candidates") or []
+                if not isinstance(candidates, list):
+                    raise ValueError("native candidates must be an array")
+                native_response_meta = {
+                    "response_sha256": hashlib.sha256(native_raw.encode()).hexdigest(),
+                    "model_version": envelope.get("modelVersion"),
+                    "finish_reasons": [item.get("finishReason") for item in candidates
+                                       if isinstance(item, dict)],
+                    "usage_metadata": envelope.get("usageMetadata"),
+                }
+                if response_meta is not None:
+                    response_meta["native_response_meta"] = native_response_meta
+                assembled = assemble_native_response([envelope], expected_model=model)
                 content = assembled["content"]
                 if not plain:
                     content = normalize_native_json(content)
@@ -125,7 +143,12 @@ def call_native_completion(
             response_meta["status"] = "failed"
         failure = raw_path.with_name(raw_path.name + ".native-answer-failure.json")
         failure.write_text(json.dumps({"status": "failed", "error_type": type(exc).__name__,
-                                      "reason": str(exc)[:240], "attempts": attempts}) + "\n", encoding="utf-8")
+                                      "reason": str(exc)[:240], "attempts": attempts,
+                                      "native_response_meta": native_response_meta}) + "\n", encoding="utf-8")
+        if native_raw:
+            envelope_path = raw_path.with_name(raw_path.name + ".native-envelope-failure.json")
+            envelope_path.write_text(native_raw, encoding="utf-8")
+            envelope_path.chmod(0o600)
         raise SystemExit(f"Native answer rejected: {exc}") from exc
     finally:
         if cleanup_raw:
