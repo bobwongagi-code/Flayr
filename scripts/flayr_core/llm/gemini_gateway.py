@@ -11,6 +11,93 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .parse import _FACT_QUALITY_VALUES, _S5_SOURCE_SIGNALS
+from .payload import STAGE_EVIDENCE_CONTRACT_VERSION, _stage_evidence_qualification_examples
+
+
+def _qualification_shape(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return {"type": "OBJECT", "required": list(value),
+                "properties": {key: _qualification_shape(item) for key, item in value.items()}}
+    if isinstance(value, list):
+        return {"type": "ARRAY", "items": {"type": "STRING"}}
+    if isinstance(value, int):
+        return {"type": "INTEGER"}
+    return {"type": "STRING"}
+
+
+def build_qualification_wire(stages: list[str]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Use the existing registry examples; change container shape only."""
+    examples = _stage_evidence_qualification_examples(stages)
+    if not stages or len(set(stages)) != len(stages) or {item["stage"] for item in examples} != set(stages):
+        raise ValueError("invalid qualification target stages")
+    wire = {"stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+            "stage_evidence_checks": {item["stage"]: item for item in examples}}
+    schema = _qualification_shape(wire)
+    schema["properties"]["stage_evidence_contract_version"]["enum"] = [STAGE_EVIDENCE_CONTRACT_VERSION]
+    for code, item in schema["properties"]["stage_evidence_checks"]["properties"].items():
+        item["properties"]["stage"]["enum"] = [code]
+        for field in ("status", "coverage", "evidence_strength"):
+            item["properties"][field]["enum"] = wire["stage_evidence_checks"][code][field].split("|")
+        for binding in item["properties"]["signal_bindings"]["properties"].values():
+            binding["properties"]["status"]["enum"] = ["supported", "missing", "unknown"]
+    return wire, schema
+
+
+def canonical_qualification_wire(value: dict[str, Any], stages: list[str]) -> dict[str, Any]:
+    """Reject malformed wire records before restoring the canonical list."""
+    _, schema = build_qualification_wire(stages)
+
+    def check(item: Any, spec: dict[str, Any], path: str) -> None:
+        expected = {"OBJECT": dict, "ARRAY": list, "STRING": str, "INTEGER": int}[spec["type"]]
+        if not isinstance(item, expected) or (expected is int and isinstance(item, bool)):
+            raise ValueError(f"qualification wire type mismatch: {path}")
+        if "enum" in spec and item not in spec["enum"]:
+            raise ValueError(f"qualification wire enum mismatch: {path}")
+        if spec["type"] == "OBJECT":
+            if set(item) != set(spec["properties"]):
+                raise ValueError(f"qualification wire fields mismatch: {path}")
+            for key, child in item.items():
+                check(child, spec["properties"][key], f"{path}.{key}")
+        elif spec["type"] == "ARRAY":
+            for index, child in enumerate(item):
+                check(child, spec["items"], f"{path}[{index}]")
+
+    check(value, schema, "root")
+    result = copy.deepcopy(value)
+    result["stage_evidence_checks"] = [result["stage_evidence_checks"][code] for code in stages]
+    return result
+
+
+def prepare_native_qualification_payload(
+    payload: dict[str, Any], stages: list[str]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Replace only the registry output example, retaining all business text."""
+    updated = copy.deepcopy(payload)
+    content = updated["messages"][-1]["content"]
+    text_block = None
+    if isinstance(content, list) and len(content) == 1 and content[0].get("type") == "text":
+        text_block = content[0]
+        content = text_block.get("text")
+    if not isinstance(content, str):
+        raise ValueError("qualification payload must be text-only")
+    marker = "## 严格 JSON 输出"
+    prefix, suffix = content.split(marker, 1)
+    stripped = suffix.lstrip()
+    example, end = json.JSONDecoder().raw_decode(stripped)
+    expected = {"stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
+                "stage_evidence_checks": _stage_evidence_qualification_examples(stages)}
+    if example != expected:
+        raise ValueError("qualification example differs from the current registry")
+    wire, schema = build_qualification_wire(stages)
+    text = (
+        prefix + marker + suffix[:len(suffix) - len(stripped)]
+        + json.dumps(wire, ensure_ascii=False, indent=2) + stripped[end:]
+    )
+    if text_block is not None:
+        text_block["text"] = text
+    else:
+        updated["messages"][-1]["content"] = text
+    return updated, schema
 
 
 def build_observation_schema(example: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
