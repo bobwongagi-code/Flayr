@@ -1253,6 +1253,8 @@ def build_video_fact_recovery_payload(
         },
         *media,
     ]
+    # Recovery emits candidates, not the initial observation container.
+    payload.pop("_flayr_native_schema", None)
     return payload
 
 

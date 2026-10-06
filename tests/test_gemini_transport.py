@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from scripts.flayr_core.llm import api, gemini_transport as transport
 from scripts.flayr_core.network import ValidatedOutboundURL
+from scripts.flayr_core.llm.payload import build_video_fact_recovery_payload
 
 
 class GeminiTransportTests(unittest.TestCase):
@@ -103,6 +104,10 @@ class GeminiTransportTests(unittest.TestCase):
         upload.assert_called_once()
         self.assertEqual(bodies[0]["contents"][0]["parts"][1]["fileData"]["mimeType"], "video/mp4")
         self.assertNotIn("inlineData", str(bodies[0]))
+
+    def test_recovery_does_not_inherit_initial_observation_schema(self):
+        payload = build_video_fact_recovery_payload("gemini-3.7-flash", "creator", {}, [], {}, ["S5"])
+        self.assertNotIn("_flayr_native_schema", payload)
 
 
 if __name__ == "__main__":
