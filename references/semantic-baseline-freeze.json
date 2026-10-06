@@ -4,11 +4,11 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "8c888e941a52a3f3ab499b0efa8f17ba5841474f",
+  "production_behavior_commit": "103e9a4fb732bfa993998b026147e81c5eddd813",
   "execution_readiness": {
     "status": "gemini_delivery_acceptance_failed",
-    "scope": "approved_review_frame_context_and_inactive_native_adapter",
-    "reason": "Source identity is bound to 8c888e941a52a3f3ab499b0efa8f17ba5841474f. Approved neighboring-frame sampling remains unchanged. Fresh delivery validation on 7aad8e3 completed three of four all-Gemini chains; the fourth received an HTTP-200 upstream refusal. Yoodex repeats still missed CCC and changed S3/S6 judgments; one completed Halal control missed its source mark. Review projection invalidates stale summaries but this sample had no retained actionable suggestions. The new correction only distinguishes refusal envelopes from incomplete responses; it does not solve these delivery failures or activate production routing.",
+    "scope": "approved_review_frame_context_pending_actions_and_inactive_native_adapter",
+    "reason": "Source identity is bound to 103e9a4fb732bfa993998b026147e81c5eddd813. Fresh validation on 7aad8e3 completed three of four all-Gemini chains; the fourth received an HTTP-200 upstream refusal. Yoodex repeats missed CCC and changed S3/S6 judgments; one completed Halal control missed its source mark. Suppressed actions are now retained for explicit source-bound human review, separate from stage semantics. Offline review mechanics pass, but no accuracy, productivity or ordinary-CLI production acceptance is claimed. Sampling, ASR and production routing remain unchanged.",
     "baseline_code_commit": "c88d9827a29c6024b4d36ed98f06bbbcf4ed439d",
     "required_before_new_runs": "Pass fixed-source full tests and freeze verification, then execute the authorized Gemini adaptation diagnostic protocol in runs/diagnostics/gemini37-adaptation-20261005. Keep development comparisons separate from historical cohort scoring. Stage2 requires current version-9 qualified inputs; old qualification artifacts cannot be silently upgraded. No production route switch or automatic promotion."
   },
@@ -23,8 +23,9 @@
   "latest_refreeze": {
     "status": "applied_and_refrozen",
     "date": "2026-10-06",
-    "scope": "Distinguish an HTTP-200 upstream refusal with no finishReason from an incomplete native response. Both remain failures; no retry, refusal bypass, semantic reinterpretation or successful artifact is introduced. Approved review sampling remains unchanged. No qualification threshold, relation, gap, GT, ASR or production route change.",
-    "previous_production_behavior_commit": "e53e70e2466d0bbac44c6750b69aae6771b45dc4",
+    "scope": "Preserve suppressed filming actions as pending delivery context, separate from shared stage semantics. Explicit source-bound human approval is required before delivery; old comparison reasons and forecasts are not restored. No qualification threshold, relation, gap, GT, ASR or production route change. Existing acceptance remains failed; offline review mechanics are not semantic promotion.",
+    "previous_production_behavior_commit": "8c888e941a52a3f3ab499b0efa8f17ba5841474f",
+    "pending_action_review_commit": "103e9a4fb732bfa993998b026147e81c5eddd813",
     "refusal_diagnostic_commit": "8c888e941a52a3f3ab499b0efa8f17ba5841474f",
     "review_sampling_commit": "e53e70e2466d0bbac44c6750b69aae6771b45dc4",
     "s6_absence_projection_commit": "277287f34fb4a562bdeb736e91505dd5702bf561",
