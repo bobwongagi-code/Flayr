@@ -36,7 +36,8 @@ from .stage_contract_registry import (
 from .transcript import current_transcript_segments_path, current_transcript_words_path
 from .speech_attestation import has_verified_no_product_speech
 
-STAGE_EVIDENCE_CONTRACT_VERSION = 9
+STAGE_EVIDENCE_CONTRACT_VERSION = 10
+# Version 10 separates introduction quality and product-target result participation.
 # Version 9 aligns hook/introduction, certificate scope and purchase-purpose boundaries.
 # Version 8 admits source-hash-bound human confirmation of no product speech.
 # Version 7 admits evidence-bound S3 explanation without changing actual-use facts.

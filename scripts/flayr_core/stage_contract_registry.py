@@ -47,7 +47,7 @@ STAGE_SIGNAL_DEFINITIONS: dict[str, str] = {
     "usage_context": "使用对象、场景或限制条件可被直接定位",
     "multi_scene_logic": "多个使用场景之间有可观察的关系，而非随意拼接",
     "result_difference": "操作前后、控制对象或结果状态的可见差异",
-    "result_presentation": "把使用后的目标对象或结果状态作为效果结果展示，即使差异本身不够明显",
+    "result_presentation": "展示本品证明目标相关的可观察结果，即使证明较弱；普通对象状态、操作结束或已干净的物体本身不自动构成效果展示，不要求所有品类都采用前后对照",
     "effect_attribution": "结果与本产品操作之间存在可追踪的事实连接",
     "before_after_or_control": "前后状态或对照对象被实际呈现",
     "proof_salience": "效果证明区域足够清晰、占据可观察画面",
@@ -92,7 +92,7 @@ STAGE_DISQUALIFIER_DEFINITIONS: dict[str, str] = {
 # where its meaning starts and ends.
 STAGE_BOUNDARY_TESTS: dict[str, dict[str, str]] = {
     "S1": {
-        "own_positive": "开头已有可理解的痛点、变化、冲突、承诺或问题触发点。",
+        "own_positive": "开头已有可理解的痛点、变化、冲突、承诺或问题触发点；比较观众实际获得的吸引与理解，不能仅凭钩子形式不同就判有差距，也不能仅因双方合格就强制相当。",
         "not_own_negative": "只有问候或泛泛开场，不能构成可识别触发点。",
         "previous_stage_confusion": "S1 没有前置功能阶段；不能把后续完整上下文倒灌进开头。",
         "next_stage_confusion": "产品身份或解决方案承接本身属于 S2，不应单独充当 S1 Hook。",
@@ -101,7 +101,7 @@ STAGE_BOUNDARY_TESTS: dict[str, dict[str, str]] = {
         "own_positive": "产品身份与钩子、问题或需求的承接可观察；不要求先有独立痛点，同一证据单元可同时完成 S1 钩子与 S2 引出。",
         "not_own_negative": "只展示产品身份，未建立与钩子、问题或需求的承接；不得仅因没有独立痛点而否定引出。",
         "previous_stage_confusion": "S1/S2 可同时完成，但吸引注意本身不自动证明产品身份及承接已经清楚。",
-        "next_stage_confusion": "真实操作动作和使用对象接触属于 S3，不因产品出现就算 S2 完成。",
+        "next_stage_confusion": "真实操作动作和使用对象接触属于 S3，不因产品出现就算 S2 完成；比较产品引出时的身份与承接，后续包装、规格、功能讲解或使用展示不能倒推为引出更好；引出当时的产品展示仍可支持身份清晰度。",
     },
     "S3": {
         "own_positive": "可追踪的真实使用，或有证据支持的具体功能/用法解释，均可参与 S3。",
@@ -111,7 +111,7 @@ STAGE_BOUNDARY_TESTS: dict[str, dict[str, str]] = {
     },
     "S4": {
         "own_positive": "本品已锁定证明目标的可见结果差异，与本品操作之间存在可追踪的对象与时间连接；其他卖点的动作不能替代该目标。",
-        "not_own_negative": "只有功效声称，没有可见结果差异。",
+        "not_own_negative": "只有功效声称，或只有普通对象状态而未呈现本品证明目标相关结果，不构成效果展示；真实但有限的目标结果仍可参与，不能把证明较弱一律当成没有展示。",
         "previous_stage_confusion": "使用动作本身属于 S3，不能把动作完成当成效果已证明。",
         "next_stage_confusion": "认证、评论或来源可信度属于 S5，不是效果本身。",
     },

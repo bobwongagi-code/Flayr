@@ -21,7 +21,7 @@ from .utils import read_optional_text, write_json, write_text
 
 
 ROOT = Path(__file__).resolve().parents[2]
-TRANSLATION_CACHE_SCHEMA_VERSION = 1
+TRANSLATION_CACHE_SCHEMA_VERSION = 2
 
 
 def _file_sha256(path: Path) -> str:
@@ -252,6 +252,9 @@ def build_translation_payload(
                     "只输出中文译文，不要解释，不要 Markdown。"
                     "保留原文顺序，按自然口播断行。"
                     "遇到商品、优惠、购买动作和 TikTok Shop 术语时，优先按电商场景翻译。"
+                    "待翻译口播是唯一内容来源，商品背景和下方参考只用于消歧，不能补出未说出的事实。"
+                    "听写残缺、音译含混或无法可靠理解的片段保留为[原文不清：原词]，不要凭电商常识重构整句。"
+                    "不得补出购买行动、价格优惠、认证或效果证明；下方参考若与这些约束冲突，以本约束为准。"
                 ),
             },
             {

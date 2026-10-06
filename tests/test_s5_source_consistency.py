@@ -80,7 +80,9 @@ class S5SourceConsistencyTests(unittest.TestCase):
     def test_existing_recovery_plan_targets_the_source_conflict(self):
         from flayr_core.llm.pipeline import _stage1_recovery_plan
 
-        side = {"stage_evidence_contract_version": 9,
+        from flayr_core.stage_evidence_contracts import STAGE_EVIDENCE_CONTRACT_VERSION
+
+        side = {"stage_evidence_contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
                 "evidence_units": [{"id": "C1", "endorsement_visual": True, "trust_source_status": "missing"}],
                 "stage_evidence_checks": [{"stage": "S5", **self.negative_check()}]}
         plan = _stage1_recovery_plan(side)

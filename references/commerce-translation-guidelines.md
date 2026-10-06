@@ -8,14 +8,14 @@ Use this when creating `transcript.zh.txt` from a local-language TikTok commerce
 
 Translate short-video commerce voiceover into natural, easy-to-read Simplified Chinese for a China-based operations team.
 
-The goal is not literal translation. The goal is to recover what the creator is selling, what proof they show, and what purchase action they ask viewers to take.
+Translate the spoken meaning naturally. The transcript is the only source of spoken claims; translation cannot establish what the video visually proves.
 
 ## Priority Rules
 
 1. Translate by meaning, not word by word.
 2. Read the full transcript before translating individual lines.
-3. Use product context from the transcript, file name, and frames when available.
-4. If online ASR output contains obvious speech-recognition errors, correct them from commerce context.
+3. Use product context only to disambiguate words, not to add spoken claims from file names or frames.
+4. Correct only reliably identifiable recognition errors. Preserve unresolved fragments as `[原文不清：原词]`; do not reconstruct sentences from commerce context.
 5. Do not invent brands, prices, discounts, stock, product effects, ingredients, or parameters.
 6. Keep short sentence rhythm. Do not merge many short creator lines into one long paragraph.
 7. Keep the tone conversational and suitable for subtitle reading.
@@ -49,7 +49,7 @@ The final purchase call-to-action is conversion-critical. Do not translate these
 | kepala vehicle | 机头 / 主机头部 |
 | baking cleaner | 根据语境译为实际产品 |
 
-If an opening noun conflicts with the demonstrated product, translate it as a neutral product reference such as "这款" or "这个", and preserve the real product type inferred from the demonstration.
+If a noun is uncertain, use a neutral reference such as "这款" or "这个" only when the surrounding speech supports that reference. Do not insert a product type inferred solely from the demonstration.
 
 ## Output Style
 
