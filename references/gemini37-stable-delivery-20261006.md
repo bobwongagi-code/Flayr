@@ -104,6 +104,21 @@ S1-S5 在本次正式成功来源下回放已有用户 GT，原始分析不变�
 详细证据在 `ordinary-cli-fasclean-v1/delivery-audit.json`，来源、状态与旧人工记录 SHA256 均绑定。
 本轮不因判断错误重跑求好结果；默认线路和 `promotion_eligible=false` 不变。
 
+#### S4 零调用资格到判断核对
+
+另存 `ordinary-cli-fasclean-v1/s4-participation-boundary-audit.json`，绑定当前代码及事实哈希。
+旧人工记录对应两侧原视频大小/SHA256 与本次完全一致，排除旧 GT 用了不同原视频的解释。
+Stage1 双侧均明确为 partial：result_presentation supported，result_difference/effect_attribution missing。
+当前 S4 注册表把 result_presentation 列为参与信号，允许 result_only_without_process 保留为 partial；
+readiness 保留 partial，门禁允许有限参与进入比较，没有把它伪造为完整证明。
+Stage2 双侧 effect_type=none、effect_visible=false、visual_difference_observed=false，
+同时记录 effect_evidence_state=result_only，最后仍给 equivalent/none。
+
+因此本格不能归为未取到画面、partial 交接丢失或仅仅没读事实。
+它暴露了“有限结果参与可以比较”与人工“本品洗净效果没有被展示，因此 NA”的口径分歧。
+这不是已验证的通用修法：不能把所有品类的 result_only 自动排除，也不能全局把 partial 改 absent。
+本次只记档，未改合同、Prompt、GT 或原始产物。用户选择 Fasclean S6 暂不确认，审核仍 pending。
+
 普通 CLI `ordinary-cli-acceptance-v1` 绑定 `f82504e`，无猴子补丁、回放或预处理复用。
 两侧 Fun-ASR 和 Gemini 翻译完成后，发现 `--ocr-mode on` 仍被旧 Qwen 名称启发式关掉；
 两侧 `_preprocess.json` 明确记录 `disabled_non_vision_config`。主动终止 CLI，退出 -15，
