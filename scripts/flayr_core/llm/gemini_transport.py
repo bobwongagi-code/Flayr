@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import tempfile
 import time
@@ -84,7 +85,8 @@ def call_native_completion(
                 if response_meta is not None:
                     response_meta.update(logical_request_id=request_id, transport_attempts=len(attempts),
                                          native_attempts=list(attempts), transport="company_gemini_native",
-                                         video_sha256=video_hashes, request_bytes=request_bytes)
+                                         video_sha256=video_hashes, request_bytes=request_bytes,
+                                         request_sha256=hashlib.sha256(data.encode()).hexdigest())
                 if completed.returncode or status != 200:
                     # Retain failures without disclosing signed URLs or credentials.
                     failure = raw_path.with_name(raw_path.name + f".native-failure-{index + 1}.json")
