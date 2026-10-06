@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-s6-absence-projection-2026-10-06",
-  "description": "Bind approved S6 closed-absence projection to 277287f. Only locked readiness=absent gets a negative CTA flag, matching S3/S4. Unknown/conflict/partial, original relation/gap, qualification thresholds, GT, model routes and promotion eligibility remain unchanged. No old artifact migration or provider calls in this mechanical refreeze.",
+  "name": "semantic-baseline-refreeze-after-media-boundaries-and-s4-definition-2026-10-06",
+  "description": "Bind separately committed approved media-failure fixes and shared visual-required S4 state definitions to c365a6f. Qualification candidate stays unimplemented and inactive. No gap-scale, GT, route, promotion or historical artifact changes; zero provider calls. Only these three governance records change in the mechanical refreeze.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 100,
