@@ -106,7 +106,8 @@ class GeminiTransportTests(unittest.TestCase):
         self.assertNotIn("inlineData", str(bodies[0]))
 
     def test_recovery_does_not_inherit_initial_observation_schema(self):
-        payload = build_video_fact_recovery_payload("gemini-3.7-flash", "creator", {}, [], {}, ["S5"])
+        with patch("scripts.flayr_core.llm.payload._replace_recovery_full_media", return_value=[]):
+            payload = build_video_fact_recovery_payload("gemini-3.7-flash", "creator", {}, [], {}, ["S5"])
         self.assertNotIn("_flayr_native_schema", payload)
 
 
