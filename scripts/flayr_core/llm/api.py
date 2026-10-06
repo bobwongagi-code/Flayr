@@ -130,7 +130,7 @@ def provider_capabilities(api_url: str, model: str = "") -> ProviderCapabilities
         return ProviderCapabilities(
             profile="rootify_company_gateway",
             confidence="approved_matrix",
-            native_video_input=normalized_model == DEFAULT_COMPANY_VISION_MODEL,
+            native_video_input=normalized_model in {DEFAULT_COMPANY_VISION_MODEL, "gemini-3.7-flash"},
             standalone_audio_input=False,
             native_audio_analysis=False,
         )
@@ -1164,6 +1164,23 @@ def call_llm_api(
         if cleanup_payload:
             payload_path.unlink(missing_ok=True)
         raise SystemExit("LLM streaming 需要 curl，但系统未找到 curl。")
+    if urlsplit(api_url).hostname == ROOTIFY_COMPANY_LLM_API_HOST:
+        native_payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        if native_payload.get("model") == "gemini-3.7-flash":
+            from .gemini_transport import call_native_completion
+            try:
+                return call_native_completion(
+                    api_key, native_payload, raw_path,
+                    max_time_seconds=min(max_time_seconds, 600), retries=retries,
+                    budget=budget or current_budget(), call_kind=call_kind,
+                    request_id=request_id or uuid.uuid4().hex, response_meta=response_meta,
+                    cleanup_raw=cleanup_raw,
+                )
+            except (ValueError, OSError) as exc:
+                raise SystemExit(f"Native transport preparation failed: {exc}") from exc
+            finally:
+                if cleanup_payload:
+                    payload_path.unlink(missing_ok=True)
     try:
         validated_url = validate_outbound_url(
             api_url,

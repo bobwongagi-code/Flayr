@@ -820,6 +820,11 @@ def build_video_fact_payload(
         # the requested object; thinking adds cost here without adding facts.
         payload["response_format"] = {"type": "json_object"}
         payload["enable_thinking"] = False
+    if str(model).lower() == "gemini-3.7-flash":
+        from .gemini_gateway import build_observation_schema
+        text = next(item["text"] for item in content if item.get("type") == "text")
+        example = json.JSONDecoder().raw_decode(text.split("## 输出 JSON", 1)[1].lstrip())[0]
+        payload["_flayr_native_schema"] = build_observation_schema(example, analysis)
     return payload
 
 
@@ -1028,6 +1033,11 @@ def build_stage_evidence_qualification_payload(
         if str(model).lower().startswith("qwen3.6-plus")
         else {"max_tokens": 8192}
     )
+    if str(model).lower() == "gemini-3.7-flash":
+        from .gemini_gateway import prepare_native_qualification_payload
+        payload, schema = prepare_native_qualification_payload(payload, normalized_targets)
+        payload["_flayr_native_schema"] = schema
+        payload["_flayr_qualification_stages"] = normalized_targets
     return payload
 
 

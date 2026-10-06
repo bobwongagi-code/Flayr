@@ -141,6 +141,7 @@ def translate_transcript_with_llm(
                         payload_path,
                         raw_path,
                         budget=budget,
+                        call_kind="translation",
                         response_meta=live_meta,
                     )
                 ),

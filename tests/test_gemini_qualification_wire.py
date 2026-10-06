@@ -32,7 +32,7 @@ class GeminiQualificationWireTests(unittest.TestCase):
 
     def test_production_prompt_keeps_all_rules_and_source_facts(self):
         payload = build_stage_evidence_qualification_payload(
-            "gemini-3.7-flash", "creator", {}, {"evidence_units": []}, ["S2", "S3"]
+            "gpt-6-sol", "creator", {}, {"evidence_units": []}, ["S2", "S3"]
         )
         before = copy.deepcopy(payload)
         updated, schema = prepare_native_qualification_payload(payload, ["S2", "S3"])
