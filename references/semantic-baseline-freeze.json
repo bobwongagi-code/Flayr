@@ -4,13 +4,13 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "3b341a34e044289796873607dfb85db39f559e56",
+  "production_behavior_commit": "e19ace400237e81c94c265275de65eb280cb7008",
   "execution_readiness": {
-    "status": "approved_boundary_v10_live_acceptance_pending",
-    "scope": "explicit_native_dispatch_recovery_contract_and_eligibility_capacity",
-    "reason": "Source identity is bound to 16a76a913bfd1d424ff2f4ccae8584f2d0932c20. Ordinary CLI v3 on 512bb8e failed before Stage2: comparison eligibility returned HTTP 200 without normal completion. Its exact finish reason was not retained, so truncation cannot be declared as proven. The formal Gemini eligibility output capacity now matches the previously tested diagnostic 8192 limit; failed native envelopes and finish metadata are retained. S5 independently remains unresolved: a visible source observation has no typed source, and the existing negative-source guard correctly blocks absent closure. No semantic rule, GT, ASR or production-default change; no new full-chain acceptance claim.",
+    "status": "gemini_draft_production_active_human_review_required",
+    "scope": "company_gemini_default_route_with_original_funasr_and_human_delivery",
+    "reason": "Six ordinary CLI runs on 5dbf9af completed: three video pairs, two fresh repeats each, OCR and product foundation active, speech translation where applicable. Source fingerprints pass the existing human-review entry. All 338 non-ASR sends used company Gemini; eight ASR sends used the original Singapore route; no network retries. Fasclean S4 reversed direction between repeats and disagrees with historical NA, so semantic stability and automatic production promotion remain blocked. New review sidecars are pending, not approved. See references/gemini37-production-draft-activation-20261006.md. Earlier v3 failure and all prior artifacts remain historical.",
     "baseline_code_commit": "c88d9827a29c6024b4d36ed98f06bbbcf4ed439d",
-    "required_before_new_runs": "Pass fixed-source full tests and freeze verification, then execute the bounded six-chain delivery acceptance in references/gemini37-delivery-boundary-closeout-20261006.md. Stage2 requires version-10 qualified inputs; old qualification artifacts cannot be silently upgraded. Keep historical cohort and prior successful v9 acceptance separate. No production route switch or automatic promotion."
+    "required_before_new_runs": "Pass fixed-source full tests and freeze verification. Stage2 requires version-10 qualified inputs; old qualification artifacts cannot be silently upgraded. Default company Gemini drafts require human confirmation before delivery. Explicit overrides stay explicit; no automatic fallback. Keep historical cohort, prior v9 acceptance and new pending drafts separate; no automatic promotion."
   },
   "authorized_semantic_correction": {
     "status": "applied_and_refrozen",
@@ -23,8 +23,10 @@
   "latest_refreeze": {
     "status": "applied_and_refrozen",
     "date": "2026-10-06",
-    "scope": "Explicit company-gateway gemini-3.7-flash selections dispatch through native generateContent, hash-verified R2 video URLs, source-derived observation/qualification schemas and the existing completion contract. OCR and translation use text/plain. Rejection or truncation remains failure; identical transport retries permit at most three consecutive 504s. Default models and ASR remain unchanged. Ordinary-entry live acceptance is pending; no accuracy or production promotion claim.",
-    "previous_production_behavior_commit": "1e723f7fbeabbb29172f133c4befa23c050fecf7",
+    "scope": "Activate company-gateway gemini-3.7-flash defaults for visual and text tasks after six ordinary CLI engineering completions on 5dbf9af. Native generateContent, verified R2 URLs and existing completion contracts are retained. Translation defaults on; whole-run wall budget is 3600 seconds; LLM call budget remains 32 with separate OCR counting. Fun-ASR and business rules unchanged. Human confirmation remains mandatory; repeat semantic stability failed and no accuracy or automatic production promotion is claimed.",
+    "previous_production_behavior_commit": "3b341a34e044289796873607dfb85db39f559e56",
+    "draft_default_activation_commit": "e19ace400237e81c94c265275de65eb280cb7008",
+    "six_chain_producer_commit": "5dbf9af257a6ecd4fe48928abc3441be8b10e7b6",
     "approved_delivery_boundary_commit": "3b341a34e044289796873607dfb85db39f559e56",
     "approved_delivery_boundary_scope": "User-authorized S1 form-neutral comparison, S2 introduction-only comparison and S4 product-target result participation clarification; no gap-scale change. Translation preserves unclear source fragments and does not reconstruct commerce claims from context; cache schema is 2. Prior v9 results remain historical, new v10 live acceptance pending.",
     "degraded_human_review_commit": "1e723f7fbeabbb29172f133c4befa23c050fecf7",
@@ -52,7 +54,7 @@
     "stage1_observation_contract_version": 7,
     "gap_bands": "small both-sides-executed prerequisite removed; none, medium/large, NA and uncertain unchanged; no automatic action-count mapping",
     "model_route": "Historical frozen-cohort route unchanged; runtime provider route changed as described in scope.",
-    "resource_budget": "unchanged",
+    "resource_budget": "whole-run wall time 1800 to 3600 seconds; request timeout, retry policy, 32 LLM calls and independent OCR budget unchanged",
     "legacy_artifact_policy": "No old analysis artifact rerun or rewritten; reviewed reports are separate derived outputs and prior sample states remain unchanged",
     "model_calls_made": 0
   },
