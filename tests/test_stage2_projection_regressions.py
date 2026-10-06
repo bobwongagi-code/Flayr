@@ -24,7 +24,7 @@ from flayr_core.postprocess.validate import (  # noqa: E402
     validate_s3_usage_flags,
     validate_s4_effect_flags,
 )
-from flayr_core.stage_contract_registry import S3_EXPRESSION_PROMPT  # noqa: E402
+from flayr_core.stage_contract_registry import S3_EXPRESSION_PROMPT, S4_EFFECT_STATE_PROMPT  # noqa: E402
 from flayr_core.stage_evidence_contracts import (  # noqa: E402
     STAGE1_ACQUISITION_VERSION,
     STAGE1_COVERAGE_AUDIT_INDEPENDENCE,
@@ -294,11 +294,8 @@ class Stage2ProjectionRegressionTests(unittest.TestCase):
         s4_payload = build_stage_group_judgment_payload("test", "", {}, {}, ["S4"])
         s4_text = s4_payload["messages"][1]["content"][0]["text"]
 
-        self.assertIn(
-            "effect_evidence_state 四态定义：none=没有效果证据；result_only=只有结果图或结果叙述没有因果桥；"
-            "verified=效果可见且归因/过程可信；uncertain=证据冲突或不足",
-            s4_text,
-        )
+        self.assertIn(S4_EFFECT_STATE_PROMPT, s4_text)
+        self.assertNotIn("只有结果图或结果叙述没有因果桥", s4_text)
         self.assertIn(
             "当 effect_evidence_state=result_only 时，result_only_without_process 必须为 true，"
             "process_linked_effect 必须为 false",
