@@ -75,6 +75,9 @@ from .full_analysis_payload import (
 
 ROOT = Path(__file__).resolve().parents[3]
 MIN_NATIVE_VIDEO_WINDOW_SECONDS = 2.0
+TRUST_SOURCE_OBSERVATION_RULE = (
+    "再标 trust_source_signals（数组，只记录实际看见/听见的独立信任来源，允许 authority/traceable_data/independent_user/social_consensus/process_transparency；没有则省略）和 trust_source_reference（逐字或概括写出实际出处；无出处必须省略）。authority/traceable_data 必须有机构名、报告号、官方/平台页面或可辨识认证；independent_user 必须有评论/用户原话；social_consensus 必须同时有明确群体/社区和该群体共同看法；process_transparency 必须有工厂、原料、生产或质检过程。产品数量、价格、参数、时长、赠品、达人自述均不得填。"
+)
 
 
 def _certification_units_for_target_stages(
@@ -780,8 +783,8 @@ def build_video_fact_payload(
         "再标 endorsement_verbal 与 endorsement_visual（各 true/false，纯观察、不判断算不算有效背书——有效性归后续打分）："
         "endorsement_verbal＝该时段口播/字幕里有没有【出现】halal/KKM/CCC/认证/证书/检测/临床/医生/皮肤科/专家/机构/FDA/GMP/SIRIM/BPOM/GMP/certified 等硬来源词（只看词出没出现，不判断是否构成援引背书）；"
         "endorsement_visual＝该时段画面里有没有【出现】可识别的独立背书视觉证据（证书/检测报告文件/机构认证标识被清晰呈现）；不得仅因印在产品或包装上排除。普通品牌 logo、无法辨认的小标不算可识别认证，不得猜测认证名称。记录可辨认的原文/标识和位置；口播说了但画面没出现也不算（口播归 endorsement_verbal）；"
-        "再标 trust_source_signals（数组，只记录实际看见/听见的独立信任来源，允许 authority/traceable_data/independent_user/social_consensus/process_transparency；没有则省略）和 trust_source_reference（逐字或概括写出实际出处；无出处必须省略）。authority/traceable_data 必须有机构名、报告号、官方/平台页面或可辨识认证；independent_user 必须有评论/用户原话；social_consensus 必须同时有明确群体/社区和该群体共同看法；process_transparency 必须有工厂、原料、生产或质检过程。产品数量、价格、参数、时长、赠品、达人自述均不得填。"
-        "trust_source_*、variant_*、comparison_purpose_explicit 与 attention_competitor_ids 只在当前单元确有对应事实时输出；"
+        + TRUST_SOURCE_OBSERVATION_RULE
+        + "trust_source_*、variant_*、comparison_purpose_explicit 与 attention_competitor_ids 只在当前单元确有对应事实时输出；"
         "没有时直接省略，禁止逐条复制空数组、空映射、空字符串或默认 none。"
         "每条还要标 functions（list，多选）：这段画面支撑哪些带货功能，枚举 S1_hook/S2_intro/S3_usage/S4_effect/S5_trust/S6_cta，"
         "按信息功能判断、信道无关（口播/字幕/画面/特效综合看，无口播也能判），一段可同时支撑多个"
@@ -1132,6 +1135,8 @@ def build_video_fact_recovery_payload(
         "候选观察是未资格化的恢复线索，不是事实；必须结合其内容、时间和本轮媒体独立核实，"
         "不得仅凭 functions、关键词或旧资格表把候选直接升级为证据。"
         "没有确认的新观察就写空数组，不得为了让阶段成立而推断。"
+        "若已有单元提到了来源画面或口播，但来源细节尚未完整记录，可在同一视频、对应时间位置独立核实，"
+        "用新的唯一 ID 追加来源细节候选；不重复整条原事实，不把认证标志自动认定为独立权威背书。"
         + recovery_audio_rule
     )
     payload["messages"][0]["content"] = recovery_system
@@ -1200,6 +1205,8 @@ def build_video_fact_recovery_payload(
                     "S4 中把使用后的目标对象或结果状态当作结果展示，可记录为 result_presentation 候选；静态产品展示或只有口播功效声称不属于 result_presentation。",
                     "S5 是可选的信任放大阶段，不得根据品类先验强行要求或关闭；品牌/logo/产品身份本身不等于 source_basis，"
                     "只有实际来源、报告、认证、用户原话或过程信息才可作为合格背书依据。",
+                    TRUST_SOURCE_OBSERVATION_RULE,
+                    "trust_source_* 只在本候选确有对应来源事实时输出；没有则省略，不复制空数组、空字符串或默认值。",
                     "若候选观察可能承担 S6_cta，必须原样保留完整窗口口播、字幕、画面和时间范围，"
                     "不要在本层裁决它最终是否构成购买行动。",
                     "每个新 candidate_evidence_unit 必须填写 fact_quality 的六个观察轴；"
