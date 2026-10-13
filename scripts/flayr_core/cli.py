@@ -73,6 +73,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output-dir", type=Path, help="Output run directory.")
     parser.add_argument(
+        "--analysis-only", action="store_true",
+        help="保存分析及未发布终态，不生成业务报告或成功发布标记；不代表已通过人工审核来源门禁。",
+    )
+    parser.add_argument(
         "--max-total-wall-time",
         type=float,
         default=ResourceLimits().max_total_wall_time,

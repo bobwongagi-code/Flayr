@@ -15,11 +15,86 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import flayr  # noqa: E402
-from scripts.flayr_core.resources import ResourceBudget
-from scripts.flayr_core.run_state import COMPLETED, FAILED, initialize_run_state, read_run_state
+from scripts.flayr_core.resources import ResourceBudget  # noqa: E402
+from scripts.flayr_core.run_state import (  # noqa: E402
+    COMPLETED, FAILED, PROCESSING, initialize_run_state, read_run_state, transition_run_state,
+)
 
 
 class OperationsContractTests(unittest.TestCase):
+    def test_analysis_only_finishes_without_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            initialize_run_state(run_dir)
+            transition_run_state(run_dir, PROCESSING)
+            analysis = {"analysis_run_state": "completed", "segmented_pipeline": {
+                "candidate_status": "completed", "synthesis_status": "completed",
+                "unresolved_stages": [], "stage_groups": [
+                    {"group": group, "status": "completed"} for group in
+                    (["S1", "S2"], ["S3", "S4"], ["S5"], ["S6"])
+                ],
+            }}
+            for name in ("analysis.json", "analysis_result.json"):
+                (run_dir / name).write_text(json.dumps(analysis), encoding="utf-8")
+            with mock.patch.object(flayr, "write_report") as report, mock.patch.object(flayr, "write_success_manifest") as publish:
+                path = flayr._finish_analysis_only(run_dir, analysis)
+            self.assertEqual(path, run_dir / "analysis.json")
+            self.assertEqual(read_run_state(run_dir)["state"], "UNPUBLISHED")
+            self.assertIsNotNone(read_run_state(run_dir)["completed_at"])
+            report.assert_not_called()
+            publish.assert_not_called()
+            self.assertFalse((run_dir / "_SUCCESS.json").exists())
+            status = json.loads((run_dir / "execution_status.json").read_text())
+            self.assertEqual(status["status"], "analysis_completed_unpublished")
+            self.assertFalse(status["review_source_ready"])
+            self.assertEqual(status["errors"], [])
+            with self.assertRaises(flayr.RunStateError):
+                flayr.begin_report_generation(run_dir)
+
+    def test_analysis_only_degraded_retains_terminal_failure_and_no_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            initialize_run_state(run_dir)
+            transition_run_state(run_dir, PROCESSING)
+            analysis = {"analysis_run_state": "degraded", "segmented_pipeline": {
+                "candidate_status": "partial", "synthesis_status": "not_run",
+                "unresolved_stages": ["S3"], "stage_groups": [],
+            }}
+            for name in ("analysis.json", "analysis_result.json"):
+                (run_dir / name).write_text(json.dumps(analysis), encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                flayr._finish_analysis_only(run_dir, analysis)
+            self.assertEqual(read_run_state(run_dir)["state"], "DEGRADED")
+            self.assertIn("S3", (run_dir / "degraded_manifest.json").read_text())
+            self.assertEqual(json.loads((run_dir / "execution_status.json").read_text())["status"], "failed")
+            self.assertFalse((run_dir / "_SUCCESS.json").exists())
+
+    def test_analysis_only_cannot_accept_missing_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            initialize_run_state(run_dir)
+            transition_run_state(run_dir, PROCESSING)
+            with self.assertRaises(SystemExit):
+                flayr._finish_analysis_only(run_dir, {"analysis_run_state": "completed"})
+            self.assertEqual(read_run_state(run_dir)["state"], FAILED)
+
+    def test_analysis_only_option_is_explicit_and_default_keeps_reports(self) -> None:
+        parser = flayr.build_parser()
+        argv = ["compare", "--verification-stage", "production"]
+        self.assertFalse(parser.parse_args(argv).analysis_only)
+        self.assertTrue(parser.parse_args([*argv, "--analysis-only"]).analysis_only)
+
+    def test_analysis_only_does_not_overwrite_terminal_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            initialize_run_state(run_dir)
+            transition_run_state(run_dir, FAILED)
+            (run_dir / "execution_status.json").write_text('{"status":"failed"}', encoding="utf-8")
+            before = {path.name: path.read_bytes() for path in run_dir.iterdir()}
+            with self.assertRaisesRegex(SystemExit, "不覆盖"):
+                flayr._finish_analysis_only(run_dir, {"analysis_run_state": "completed"})
+            self.assertEqual(before, {path.name: path.read_bytes() for path in run_dir.iterdir()})
+
     def test_asr_failure_can_only_publish_degraded_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"

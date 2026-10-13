@@ -73,11 +73,13 @@ from flayr_core.report import write_report
 from flayr_core.resources import ResourceBudget, ResourceBudgetExceeded, ResourceLimits, finite_nonnegative
 from flayr_core.run_manifest import SUCCESS_MANIFEST_NAME, command_digest, write_success_manifest
 from flayr_core.run_state import (
+    ANALYSIS_COMPLETED,
     COMPLETED,
     DEGRADED,
     PROCESSING,
     RUN_STATE_FILE,
     RunStateError,
+    UNPUBLISHED,
     begin_report_generation,
     initialize_run_state,
     read_run_state,
@@ -135,6 +137,7 @@ _RUN_OUTPUT_FILES = frozenset(
         "degraded_manifest.json",
         "final_derived_result.json",
         "failure.json",
+        "execution_status.json",
         "postprocess_change_log.json",
         "product_foundation.json",
         "product_foundation_provider_meta.json",
@@ -421,6 +424,17 @@ def main() -> int:
     write_json(run_dir / "analysis.json", analysis)
     write_analysis_input(run_dir, analysis)
 
+    if args.analysis_only:
+        try:
+            _finish_analysis_only(run_dir, analysis)
+        except (Exception, SystemExit) as exc:
+            lifecycle = read_run_state(run_dir) or {}
+            if lifecycle.get("state") not in {DEGRADED, "FAILED", UNPUBLISHED}:
+                _record_run_failure(run_dir, f"只分析收口失败：{exc}")
+            raise
+        print(f"Analysis saved without publication: {run_dir / 'analysis.json'}")
+        return 0
+
     report_path = _generate_reports_and_publish(
         run_dir,
         args,
@@ -430,6 +444,69 @@ def main() -> int:
     )
     print_summary(run_dir, report_path, deps, videos)
     return 0
+
+
+def _finish_analysis_only(run_dir: Path, analysis: dict[str, Any]) -> Path:
+    """Close a new analysis-only run; never retrofit old diagnostic outputs."""
+    lifecycle = read_run_state(run_dir) or {}
+    if lifecycle.get("state") != PROCESSING:
+        raise SystemExit("只分析收口要求当前运行处于 PROCESSING；不覆盖已结束或状态不明的目录。")
+    errors: list[str] = []
+    state = analysis.get("analysis_run_state")
+    if state != "completed":
+        errors.append("analysis_not_completed")
+    segmented = analysis.get("segmented_pipeline")
+    segmented = segmented if isinstance(segmented, dict) else {}
+    if segmented.get("candidate_status") != "completed" or segmented.get("synthesis_status") != "completed":
+        errors.append("segmented_not_completed")
+    unresolved = segmented.get("unresolved_stages")
+    if unresolved != []:
+        errors.append("unresolved_stages:" + ",".join(str(code) for code in unresolved or []))
+    groups = segmented.get("stage_groups")
+    groups = groups if isinstance(groups, list) else []
+    expected_groups = {("S1", "S2"), ("S3", "S4"), ("S5",), ("S6",)}
+    actual_groups = {
+        tuple(group["group"]) for group in groups
+        if isinstance(group, dict) and isinstance(group.get("group"), list)
+        and all(isinstance(code, str) for code in group["group"])
+    }
+    if len(groups) != 4 or actual_groups != expected_groups or any(
+        not isinstance(group, dict) or group.get("status") != "completed" for group in groups
+    ):
+        errors.append("stage_groups_not_completed")
+    for name in ("analysis.json", "analysis_result.json"):
+        if not (run_dir / name).is_file():
+            errors.append(name + "_missing")
+    write_json(run_dir / "execution_status.json", {
+        "status": "failed" if errors else "analysis_completed_unpublished",
+        "analysis_run_state": state, "errors": errors,
+        "publish_attempted": False, "report_rendered": False,
+        "success_manifest_written": False, "review_source_ready": False,
+        "source_commit": _git_commit_sha(),
+        "analysis_artifact": _file_metadata(run_dir / "analysis.json", include_sha256=True),
+    })
+    artifacts = ("analysis.json", "analysis_result.json", "execution_status.json")
+    if errors and state != "degraded":
+        _record_run_failure(run_dir, "只分析收口校验失败：" + "；".join(errors))
+        raise SystemExit("只分析收口校验失败：" + "；".join(errors))
+    try:
+        transition_run_state(run_dir, ANALYSIS_COMPLETED, artifacts=artifacts)
+        if errors:
+            _mark_analysis_degraded(run_dir, analysis, errors)
+            write_json(run_dir / "analysis.json", analysis)
+            execution = json.loads((run_dir / "execution_status.json").read_text(encoding="utf-8"))
+            execution["analysis_artifact"] = _file_metadata(run_dir / "analysis.json", include_sha256=True)
+            write_json(run_dir / "execution_status.json", execution)
+            transition_run_state(run_dir, DEGRADED, reason="；".join(errors),
+                                 artifacts=(*artifacts, "degraded_manifest.json"))
+        else:
+            transition_run_state(run_dir, UNPUBLISHED, reason="分析完成；未生成报告或发布成功标记。", artifacts=artifacts)
+    except RunStateError as exc:
+        _record_run_failure(run_dir, f"只分析状态收口失败：{exc}")
+        raise SystemExit(f"只分析状态收口失败：{exc}") from exc
+    if errors:
+        raise SystemExit("只分析草稿已降级：" + "；".join(errors))
+    return run_dir / "analysis.json"
 
 
 def _generate_reports_and_publish(
