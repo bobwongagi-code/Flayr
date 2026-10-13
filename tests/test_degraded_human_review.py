@@ -53,7 +53,7 @@ class DegradedHumanReviewTests(unittest.TestCase):
     def test_terminal_draft_has_distinct_bound_source(self):
         review = hr.init_review(self.root)
         self.assertEqual(review["source"]["source_run_state"], "DEGRADED")
-        self.assertIn("creator/frame.jpg", review["source"]["review_inputs"])
+        self.assertIn(str(Path("creator") / "frame.jpg"), review["source"]["review_inputs"])
         self.assertFalse((self.root / "_SUCCESS.json").exists())
         with self.assertRaises(hr.HumanReviewError):
             hr.update_stage(self.root, "S5", "confirmed")
