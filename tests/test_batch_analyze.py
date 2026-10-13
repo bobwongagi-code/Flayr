@@ -24,6 +24,7 @@ from scripts.flayr_core.llm.api import (
     DEFAULT_COMPANY_LLM_API_URL,
     provider_api_url,
 )
+from scripts.flayr_core.cli import build_parser, effective_run_identity
 from scripts.flayr_core.run_manifest import (
     command_digest,
     validate_success_manifest,
@@ -380,7 +381,8 @@ class BatchAnalyzeValidationTests(unittest.TestCase):
                 out,
                 {"creator_video": creator, "benchmark_video": benchmark},
                 {"analysis_run_state": "completed"},
-                {"argv_sha256": command_digest(build_command(job, out, [])[2:])},
+                {"argv_sha256": command_digest(build_command(job, out, [])[2:]),
+                 "effective_run_identity": effective_run_identity(build_parser().parse_args(build_command(job, out, [])[2:]))},
             )
             self.assertTrue(validate_success_manifest(out, {"creator_video": creator, "benchmark_video": benchmark}))
             self.assertTrue(_success_manifest_valid(job, out, []))

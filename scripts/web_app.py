@@ -55,6 +55,7 @@ from scripts.flayr_core.run_state import (
     DEGRADED,
     FAILED,
     REPORT_GENERATING,
+    UNPUBLISHED,
     RunStateError,
     read_run_state,
     recover_run_state,
@@ -451,7 +452,7 @@ def _run_state(run_dir: Path) -> str:
 def _analysis_state(run_dir: Path) -> str:
     try:
         payload = json.loads((run_dir / "analysis.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeError):
         return ""
     if not isinstance(payload, dict):
         return ""
@@ -590,12 +591,48 @@ def _safe_servable_asset(run_dir: Path, relative_path: str) -> Path | None:
     return candidate if candidate is not None and _servable_asset(candidate) else None
 
 
+def _publication_status(
+    run_dir: Path,
+    expected_inputs: dict[str, Path],
+    *,
+    recovery: bool = False,
+    returncode: int | None = None,
+) -> str | None:
+    """Lifecycle rejection takes precedence over leftover report artifacts."""
+    lifecycle = _run_state(run_dir)
+    if lifecycle in {FAILED, UNPUBLISHED} or (returncode is not None and returncode != 0):
+        return "failed"
+    if not run_dir.is_dir():
+        return "failed"
+    analysis_state = _analysis_state(run_dir)
+    if lifecycle == COMPLETED:
+        return "completed" if (recovery or analysis_state == "completed") and validate_success_manifest(
+            run_dir, expected_inputs
+        ) else "failed"
+    if lifecycle == DEGRADED and analysis_state == "degraded" and report_variants_ready(run_dir):
+        try:
+            degraded = json.loads((run_dir / "degraded_manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError):
+            return "failed"
+        if isinstance(degraded, dict) and degraded.get("analysis_run_state") == "degraded" and isinstance(
+            degraded.get("degraded_flags"), list
+        ) and isinstance(degraded.get("reason"), str):
+            return "degraded"
+    return "failed" if lifecycle == DEGRADED or not recovery else None
+
+
 def report_variants_ready(run_dir: Path) -> bool:
     """Return true only when both audience reports are safely available."""
     return all(
         _safe_servable_asset(run_dir, name) is not None
         for name in ("bd_report.html", "creator_report.html")
     )
+
+
+def _job_reports_published(job: dict[str, Any], run_dir: Path) -> bool:
+    # Full artifact/input validation happens at completion and restart, not on every poll.
+    expected = {"completed": COMPLETED, "degraded": DEGRADED}.get(str(job.get("status")))
+    return expected is not None and expected == _run_state(run_dir)
 
 
 def _content_disposition(value: str) -> tuple[str, str | None]:
@@ -887,25 +924,24 @@ class JobStore:
             if job.get(f"{role}_path")
         }
         lifecycle = _run_state(run_dir)
-        complete = run_dir.is_dir() and validate_success_manifest(run_dir, expected_inputs)
-        degraded = run_dir.is_dir() and (
-            (run_dir / "degraded_manifest.json").is_file() and report_variants_ready(run_dir)
-        )
-        if complete:
+        publication = _publication_status(run_dir, expected_inputs, recovery=True)
+        if job.get("status") == "failed" and lifecycle not in {COMPLETED, DEGRADED}:
+            publication = "failed"
+        if publication == "completed":
             job.update({
                 "status": "completed",
                 "progress": 100,
                 "phase": "报告生成",
                 "estimated_remaining_seconds": 0,
             })
-        elif degraded and lifecycle != COMPLETED:
+        elif publication == "degraded":
             job.update({
                 "status": "degraded",
                 "progress": 100,
                 "phase": "报告生成（部分分析能力降级）",
                 "estimated_remaining_seconds": 0,
             })
-        elif lifecycle == FAILED or not run_dir.is_dir():
+        elif publication == "failed" or not run_dir.is_dir():
             job.update({
                 "status": "failed",
                 "progress": 0,
@@ -987,6 +1023,17 @@ class JobStore:
         with self._lock:
             changed = False
             for job in self.jobs.values():
+                if job.get("status") in {"completed", "degraded"}:
+                    run_dir = Path(str(job.get("run_dir") or ""))
+                    expected = {
+                        "benchmark_video": Path(str(job.get("benchmark_path") or "")),
+                        "creator_video": Path(str(job.get("creator_path") or "")),
+                    }
+                    if _publication_status(run_dir, expected, recovery=True) != job.get("status"):
+                        job.update(status="failed", estimated_remaining_seconds=0,
+                                   failure_reason="完成记录与运行状态或发布产物不一致；报告不可交付。")
+                        changed = True
+                    continue
                 if job.get("status") not in {"queued", "running"}:
                     continue
                 run_dir = Path(str(job.get("run_dir") or ""))
@@ -994,17 +1041,8 @@ class JobStore:
                     "benchmark_video": Path(str(job.get("benchmark_path") or "")),
                     "creator_video": Path(str(job.get("creator_path") or "")),
                 }
-                lifecycle = _run_state(run_dir)
-                complete = run_dir.is_dir() and validate_success_manifest(run_dir, expected)
-                degraded = run_dir.is_dir() and (run_dir / "degraded_manifest.json").is_file() and report_variants_ready(run_dir)
-                if lifecycle == COMPLETED:
-                    degraded = False
-                elif lifecycle == DEGRADED:
-                    complete = False
-                elif lifecycle == FAILED:
-                    complete = False
-                    degraded = False
-                if complete:
+                publication = _publication_status(run_dir, expected, recovery=True)
+                if publication == "completed":
                     recover_run_state(
                         run_dir,
                         COMPLETED,
@@ -1018,7 +1056,7 @@ class JobStore:
                         "phase": "报告生成",
                         "estimated_remaining_seconds": 0,
                     })
-                elif degraded:
+                elif publication == "degraded":
                     recover_run_state(
                         run_dir,
                         DEGRADED,
@@ -1310,8 +1348,12 @@ class JobStore:
     def public(self, job: dict[str, Any]) -> dict[str, Any]:
         status = str(job.get("status") or "failed")
         run_dir = Path(str(job.get("run_dir") or ""))
+        if _run_state(run_dir) in {FAILED, UNPUBLISHED} or (
+            status in {"completed", "degraded"} and not _job_reports_published(job, run_dir)
+        ):
+            status = "failed"
         analysis_scope = self._read_analysis_scope(run_dir)
-        reports_ready = status in {"completed", "degraded"}
+        reports_ready = status in {"completed", "degraded"} and _job_reports_published(job, run_dir)
         has_bd_report = _safe_servable_asset(run_dir, "bd_report.html") is not None
         has_legacy_report = _safe_servable_asset(run_dir, "report.html") is not None
         has_creator_report = _safe_servable_asset(run_dir, "creator_report.html") is not None
@@ -1381,9 +1423,9 @@ class JobStore:
         run_dir.parent.mkdir(parents=True, exist_ok=True)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         command = self._command(job)
-        self._update(job_id, status="running", phase="素材处理与转写")
         process: subprocess.Popen | None = None
         try:
+            self._update(job_id, status="running", phase="素材处理与转写")
             with log_path.open("ab") as log:
                 log.write(("$ " + " ".join(command) + "\n").encode("utf-8", "replace"))
                 process = subprocess.Popen(
@@ -1416,20 +1458,31 @@ class JobStore:
             reason = f"任务启动或执行失败：{str(exc)[:240]}"
             try:
                 recover_run_state(run_dir, FAILED, job_id=job_id, reason=reason)
-            except RunStateError:
-                pass
-            self._update(
-                job_id,
-                status="failed",
-                failure_reason=reason,
-                phase="分析失败",
-                estimated_remaining_seconds=0,
-            )
+            except Exception as state_error:
+                sys.stderr.write(f"[flayr-web] cannot persist failed lifecycle: {state_error}\n")
+            try:
+                self._update(
+                    job_id,
+                    status="failed",
+                    failure_reason=reason,
+                    phase="分析失败",
+                    estimated_remaining_seconds=0,
+                )
+            except Exception as persistence_error:
+                sys.stderr.write(f"[flayr-web] cannot persist worker failure: {persistence_error}\n")
         finally:
             if process is not None:
-                with self._lock:
-                    if self._running_processes.get(job_id) is process:
-                        self._running_processes.pop(job_id, None)
+                try:
+                    if process.poll() is None:
+                        stop_process_group(process, grace_seconds=5.0)
+                except Exception as cleanup_error:
+                    sys.stderr.write(f"[flayr-web] cannot stop worker; handle retained: {cleanup_error}\n")
+                finally:
+                    # If stopping failed, retain the handle for shutdown/recovery.
+                    if process.poll() is not None:
+                        with self._lock:
+                            if self._running_processes.get(job_id) is process:
+                                self._running_processes.pop(job_id, None)
 
     def _command(self, job: dict[str, Any]) -> list[str]:
         command = [
@@ -1494,35 +1547,23 @@ class JobStore:
             "benchmark_video": Path(str(job["benchmark_path"])),
             "creator_video": Path(str(job["creator_path"])),
         }
-        state = _analysis_state(run_dir)
-        if returncode == 0 and state == "completed" and validate_success_manifest(run_dir, expected):
-            if _run_state(run_dir) == COMPLETED:
-                self._update(
-                    job_id,
-                    status="completed",
-                    progress=100,
-                    phase="报告生成",
-                    estimated_remaining_seconds=0,
-                )
-                return
-            returncode = 1
-        if returncode == 0 and state == "degraded" and (run_dir / "degraded_manifest.json").is_file() and report_variants_ready(run_dir):
+        publication = _publication_status(run_dir, expected, returncode=returncode)
+        if publication == "completed":
+            self._update(job_id, status="completed", progress=100, phase="报告生成",
+                         estimated_remaining_seconds=0)
+            return
+        if publication == "degraded":
             reason = "分析链路已降级，部分结论不可发布。"
             try:
                 payload = json.loads((run_dir / "degraded_manifest.json").read_text(encoding="utf-8"))
                 reason = str(payload.get("reason") or reason)
             except (OSError, json.JSONDecodeError):
                 pass
-            if _run_state(run_dir) == DEGRADED:
-                self._update(
-                    job_id,
-                    status="degraded",
-                    progress=100,
-                    phase="报告生成（部分分析能力降级）",
-                    estimated_remaining_seconds=0,
-                    degraded_reason=reason[:500],
-                )
-                return
+            self._update(job_id, status="degraded", progress=100,
+                         phase="报告生成（部分分析能力降级）",
+                         estimated_remaining_seconds=0, degraded_reason=reason[:500])
+            return
+        if returncode == 0:
             returncode = 1
         reason = self._log_failure(Path(str(job["log_path"])), returncode)
         try:
@@ -1781,7 +1822,8 @@ class FlayrHandler(BaseHTTPRequestHandler):
         except AdmissionError as exc:
             self._json(503, {"error": str(exc)})
         except RequestError as exc:
-            self._json(400, {"error": str(exc)})
+            self.close_connection = True
+            self._json(400, {"error": str(exc)}, extra_headers={"Connection": "close"})
         except Exception as exc:
             self._json(500, {"error": f"任务创建失败：{str(exc)[:200]}"})
         finally:
@@ -1821,16 +1863,35 @@ class FlayrHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _upload_storage_reservation_bytes(self) -> int:
-        try:
-            content_length = int(self.headers.get("Content-Length", "-1"))
-        except ValueError:
-            content_length = -1
-        if content_length < 0:
-            content_length = MAX_REQUEST_BYTES
-        content_length = min(content_length, MAX_REQUEST_BYTES)
-        return max(1, content_length) * 2
+        _, content_length = self._request_body_framing()
+        return max(1, content_length if content_length is not None else MAX_REQUEST_BYTES) * 2
+
+    def _request_body_framing(self) -> tuple[str, int | None]:
+        def values(name: str) -> list[str]:
+            if hasattr(self.headers, "get_all"):
+                return self.headers.get_all(name, [])
+            value = self.headers.get(name)
+            return [] if value is None else [value]
+
+        lengths = values("Content-Length")
+        encodings = values("Transfer-Encoding")
+        if len(lengths) > 1 or len(encodings) > 1 or (lengths and encodings):
+            raise RequestError("上传请求包含冲突的正文长度或编码")
+        if encodings:
+            if encodings[0].strip().lower() != "chunked":
+                raise RequestError("上传请求编码不受支持")
+            return "chunked", None
+        if not lengths or not re.fullmatch(r"[0-9]+", lengths[0].strip()):
+            raise RequestError("上传请求必须包含有效 Content-Length 或 chunked 编码")
+        decimal = lengths[0].strip().lstrip("0") or "0"
+        maximum = str(MAX_REQUEST_BYTES)
+        if len(decimal) > len(maximum) or len(decimal) == len(maximum) and decimal > maximum:
+            raise RequestError("上传请求超过大小限制")
+        length = int(decimal)
+        return "fixed", length
 
     def _read_request_body(self, destination: Any) -> None:
+        framing, content_length = self._request_body_framing()
         started_at = time.monotonic()
         deadline = started_at + UPLOAD_TOTAL_TIMEOUT_SECONDS
         previous_timeout = self.connection.gettimeout()
@@ -1849,12 +1910,13 @@ class FlayrHandler(BaseHTTPRequestHandler):
             return result
 
         try:
-            transfer_encoding = self.headers.get("Transfer-Encoding", "").lower()
-            if "chunked" in transfer_encoding:
+            if framing == "chunked":
                 total = 0
                 while True:
                     line = read_with_deadline(lambda: self.rfile.readline(128))
-                    if not line or len(line) > 127:
+                    if not line.endswith(b"\r\n") or len(line) > 127:
+                        raise RequestError("chunked 上传请求无效")
+                    if not re.fullmatch(rb"[0-9a-fA-F]+", line.split(b";", 1)[0].strip()):
                         raise RequestError("chunked 上传请求无效")
                     try:
                         size = int(line.split(b";", 1)[0].strip(), 16)
@@ -1863,12 +1925,16 @@ class FlayrHandler(BaseHTTPRequestHandler):
                     if size < 0:
                         raise RequestError("chunked 上传请求无效")
                     if size == 0:
+                        trailer_bytes = 0
                         while True:
                             trailer = read_with_deadline(lambda: self.rfile.readline(64 * 1024 + 1))
-                            if trailer in {b"", b"\r\n", b"\n"}:
+                            if trailer == b"\r\n":
                                 return
-                            if len(trailer) > 64 * 1024:
+                            trailer_bytes += len(trailer)
+                            if not trailer.endswith(b"\r\n") or trailer_bytes > 64 * 1024:
                                 raise RequestError("chunked trailer 过大")
+                    if total + size > MAX_REQUEST_BYTES:
+                        raise RequestError("上传请求超过大小限制")
                     remaining = size
                     while remaining:
                         chunk = read_with_deadline(
@@ -1883,14 +1949,7 @@ class FlayrHandler(BaseHTTPRequestHandler):
                         remaining -= len(chunk)
                     if read_with_deadline(lambda: self.rfile.read(2)) != b"\r\n":
                         raise RequestError("chunked 上传请求无效")
-            try:
-                content_length = int(self.headers.get("Content-Length", "-1"))
-            except ValueError:
-                content_length = -1
-            if content_length < 0:
-                raise RequestError("上传请求必须包含 Content-Length 或 chunked 编码")
-            if content_length > MAX_REQUEST_BYTES:
-                raise RequestError("上传请求超过大小限制")
+            assert content_length is not None
             remaining = content_length
             while remaining:
                 chunk = read_with_deadline(lambda: self.rfile.read(min(UPLOAD_CHUNK_BYTES, remaining)))
@@ -1912,14 +1971,14 @@ class FlayrHandler(BaseHTTPRequestHandler):
         if not job:
             self._json(404, {"error": "任务不存在"})
             return
-        if artifact in {"report", "creator-report"} and job.get("status") not in {"completed", "degraded"}:
+        run_dir = Path(str(job.get("run_dir") or ""))
+        if artifact in {"report", "creator-report"} and not _job_reports_published(job, run_dir):
             self._json(409, {"error": "报告尚未生成"})
             return
-        run_dir = Path(str(job.get("run_dir") or ""))
         if artifact == "report":
             report_names = ("bd_report.html", "report.html")
             candidate = next(
-                (_safe_servable_asset(run_dir, name) for name in report_names),
+                (path for name in report_names if (path := _safe_servable_asset(run_dir, name)) is not None),
                 None,
             )
         elif artifact == "creator-report":
@@ -1942,9 +2001,13 @@ class FlayrHandler(BaseHTTPRequestHandler):
         if not job:
             self._json(404, {"error": "任务不存在"})
             return
-        candidate = safe_asset_path(Path(str(job.get("run_dir") or "")), relative_path)
+        run_dir = Path(str(job.get("run_dir") or ""))
+        candidate = safe_asset_path(run_dir, relative_path)
         if not candidate:
             self._json(404, {"error": "资源不存在"})
+            return
+        if candidate.name in {"report.html", "bd_report.html", "creator_report.html"} and not _job_reports_published(job, run_dir):
+            self._json(409, {"error": "报告尚未生成"})
             return
         content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
         self._serve_file(candidate, content_type)

@@ -35,11 +35,13 @@ from scripts.web_app import (
 )
 from scripts.flayr_core.run_state import (
     ANALYSIS_COMPLETED,
+    COMPLETED,
     DEGRADED,
     PROCESSING,
     REPORT_GENERATING,
     initialize_run_state,
     read_run_state,
+    recover_run_state,
     transition_run_state,
 )
 from scripts.flayr_core.llm.api import (
@@ -690,6 +692,7 @@ class WebAppHelpersTests(unittest.TestCase):
             store = JobStore(Path(tmp))
             run_dir = Path(tmp) / "run"
             run_dir.mkdir()
+            recover_run_state(run_dir, COMPLETED, reason="validated fixture")
             job = {
                 "id": "job-1",
                 "status": "completed",
@@ -775,6 +778,7 @@ class WebAppHelpersTests(unittest.TestCase):
             run_dir = root / "job-run"
             run_dir.mkdir()
             (run_dir / "bd_report.html").write_text("<html>private report</html>", encoding="utf-8")
+            recover_run_state(run_dir, COMPLETED, reason="validated fixture")
             with store._lock:
                 store.jobs["job-1"] = {
                     "id": "job-1",

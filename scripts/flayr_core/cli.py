@@ -3,13 +3,87 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 from pathlib import Path
 
 from .asr import DEFAULT_FUN_ASR_API_URL, DEFAULT_FUN_ASR_MODEL
-from .llm.api import DEFAULT_LLM_API_KEY_ENV
+from .llm.api import (
+    DEFAULT_LLM_API_KEY_ENV, DEFAULT_COMPANY_JUDGMENT_MODEL,
+    DEFAULT_COMPANY_VISION_MODEL, DEFAULT_COMPANY_LLM_API_URL, provider_run_metadata,
+)
+from .run_manifest import command_digest
 from .market import normalize_target_market
 from .resources import ResourceLimits
+
+
+# Bump for result-affecting code/contract changes, not documentation-only commits.
+RESULT_REUSE_VERSION = 1
+
+
+def resolve_model_defaults(args: argparse.Namespace) -> None:
+    explicit = any(str(getattr(args, name, "") or "").strip()
+                   for name in ("llm_model", "judgment_model", "vision_model"))
+    offline = bool(getattr(args, "analysis_result_json", None)
+                   or getattr(args, "provider_replay_from", None))
+    if not explicit and not offline:
+        legacy = os.environ.get("FLAYR_LLM_MODEL", "").strip()
+        if legacy:
+            args.llm_model = legacy
+        elif os.environ.get("FLAYR_JUDGMENT_MODEL", "").strip() or os.environ.get("FLAYR_VISION_MODEL", "").strip():
+            args.judgment_model = os.environ.get("FLAYR_JUDGMENT_MODEL", "").strip()
+            args.vision_model = os.environ.get("FLAYR_VISION_MODEL", "").strip()
+        else:
+            args.judgment_model = DEFAULT_COMPANY_JUDGMENT_MODEL
+            args.vision_model = DEFAULT_COMPANY_VISION_MODEL
+    if not str(getattr(args, "llm_api_url", "") or "").strip() and not offline and any(
+        str(getattr(args, name, "") or "").strip()
+        for name in ("llm_model", "judgment_model", "vision_model")
+    ):
+        args.llm_api_url = DEFAULT_COMPANY_LLM_API_URL
+
+
+def effective_run_identity(args: argparse.Namespace) -> str:
+    """Bind reuse to resolved configuration, without reading any credential value."""
+    resolve_model_defaults(args)
+    excluded = {"benchmark_video", "creator_video", "output_dir", "reuse_preprocessing"}
+    config = {
+        name: str(value.expanduser().resolve()) if isinstance(value, Path) else value
+        for name, value in vars(args).items()
+        if not name.startswith("_") and name not in excluded
+    }
+    config["provider_routes"] = provider_run_metadata(args)
+    config["result_reuse_version"] = RESULT_REUSE_VERSION
+    # An attestation file can change in place without changing argv.
+    attestation = getattr(args, "verified_no_product_speech_attestation_file", None)
+    if attestation:
+        config["speech_attestation_sha256"] = getattr(args, "_speech_attestation_sha256", "") or hashlib.sha256(
+            Path(attestation).read_bytes()
+        ).hexdigest()
+    sources = {}
+    for name in ("provider_replay_from", "stage1_replay_from", "stage1_resume_from",
+                 "stage2_replay_from", "stage2_resume_from", "analysis_result_json"):
+        value = getattr(args, name, None)
+        if not value:
+            continue
+        root = Path(value).expanduser().resolve()
+        if not root.exists():
+            raise FileNotFoundError(root)
+        files = [root] if root.is_file() else sorted(
+            path for path in root.rglob("*.json")
+            if path.name.startswith(("provider_", "stage1_provider_", "stage2_provider_"))
+        )
+        digests = {}
+        for path in files:
+            digest = hashlib.sha256()
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            digests[path.name if root.is_file() else path.relative_to(root).as_posix()] = digest.hexdigest()
+        sources[name] = digests
+    config["replay_input_sha256"] = sources
+    return command_digest([json.dumps(config, ensure_ascii=False, sort_keys=True)])
 
 
 def build_parser() -> argparse.ArgumentParser:

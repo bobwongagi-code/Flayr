@@ -22,7 +22,7 @@ from flayr_core.audio_quality import analyze_audio_quality
 from flayr_core.analysis_model import ANALYSIS_RESULT_CONTRACT, placeholder_stages
 from flayr_core.artifacts import resolve_artifact_path
 from flayr_core.bd_report import write_bd_report
-from flayr_core.cli import build_parser
+from flayr_core.cli import build_parser, effective_run_identity, resolve_model_defaults
 from flayr_core.asr import (
     ASR_FAILURE_PLACEHOLDER,
     DEFAULT_FUN_ASR_MODEL,
@@ -213,15 +213,14 @@ def _load_verified_no_product_speech_attestations(
     if not path.is_file():
         raise SystemExit(f"no-product-speech attestation manifest does not exist: {path}")
     try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        manifest_bytes = path.read_bytes()
+        manifest = json.loads(manifest_bytes)
+    except (OSError, json.JSONDecodeError, UnicodeError) as exc:
         raise SystemExit(f"no-product-speech attestation manifest is unreadable: {path}") from exc
     records = manifest.get("verified_no_product_speech_attestations") if isinstance(manifest, dict) else None
     if not isinstance(records, list) or not records:
         raise SystemExit("attestation manifest must contain verified_no_product_speech_attestations")
-    file_metadata = _file_metadata(path, include_sha256=True)
-    if not isinstance(file_metadata, dict):
-        raise SystemExit(f"no-product-speech attestation manifest is unreadable: {path}")
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
     input_hashes = {
         role: str((_file_metadata(video_path, include_sha256=True) or {}).get("sha256") or "")
         for role, video_path in inputs.items()
@@ -233,7 +232,7 @@ def _load_verified_no_product_speech_attestations(
             raise SystemExit("no-product-speech attestation entries must be objects")
         attestation = {
             **record,
-            "attestation_file": {"path": str(path), "sha256": file_metadata["sha256"]},
+            "attestation_file": {"path": str(path), "sha256": manifest_sha256},
         }
         source_sha256 = str(record.get("source_sha256") or "").strip().lower()
         if source_sha256 in seen_hashes or not speech_attestation_core.valid_no_product_speech_attestation(attestation):
@@ -313,6 +312,9 @@ def main() -> int:
         getattr(args, "verified_no_product_speech_attestation_file", None),
         inputs,
     )
+    if args._verified_no_product_speech_attestations:
+        args._speech_attestation_sha256 = next(iter(args._verified_no_product_speech_attestations.values()))["attestation_file"]["sha256"]
+    args._effective_run_identity = effective_run_identity(args)
     if args.verification_stage:
         if args.verification_stage != "production":
             assert_verification_order(args.verification_root, args.verification_stage)
@@ -367,11 +369,19 @@ def main() -> int:
         _record_run_failure(run_dir, reason)
         raise SystemExit(reason)
     if args.mode == "scope":
-        eligibility = run_comparison_scope_preflight(args, analysis, run_dir)
-        analysis["resource_budget"] = budget.snapshot()
-        write_json(run_dir / "analysis.json", analysis)
-        write_analysis_input(run_dir, analysis)
-        print_scope_summary(run_dir, deps, videos, eligibility)
+        try:
+            eligibility = run_comparison_scope_preflight(args, analysis, run_dir)
+            analysis["resource_budget"] = budget.snapshot()
+            write_json(run_dir / "analysis.json", analysis)
+            write_analysis_input(run_dir, analysis)
+            artifacts = tuple(name for name in ("analysis.json", "analysis_input.md", "comparison_eligibility.json")
+                              if (run_dir / name).is_file())
+            transition_run_state(run_dir, ANALYSIS_COMPLETED, artifacts=artifacts)
+            transition_run_state(run_dir, UNPUBLISHED, reason="比较资格检查完成；未生成比较报告。", artifacts=artifacts)
+            print_scope_summary(run_dir, deps, videos, eligibility)
+        except (Exception, SystemExit) as exc:
+            _record_run_failure(run_dir, f"比较资格检查失败：{exc}")
+            raise
         return 0
     if judgment_model(args) and not args.analysis_result_json:
         try:
@@ -544,6 +554,7 @@ def _generate_reports_and_publish(
                     "mode": args.mode,
                     "code_commit": _git_commit_sha(),
                     "argv_sha256": command_digest(sys.argv[1:]),
+                    "effective_run_identity": getattr(args, "_effective_run_identity", None) or effective_run_identity(args),
                     "llm_model": judgment_model(args),
                     "judgment_model": judgment_model(args),
                     "vision_model": vision_model(args),
@@ -582,6 +593,13 @@ def _generate_reports_and_publish(
                 reason="；".join(reasons),
                 artifacts=("degraded_manifest.json", "analysis.json", "bd_report.html", "creator_report.html"),
             )
+        elif args.mode == "breakdown":
+            # A single-video report is not a completed comparison. No _SUCCESS marker.
+            target = DEGRADED if analysis.get("analysis_run_state") != "completed" else COMPLETED
+            transition_run_state(run_dir, target, reason="单视频拆解报告生成完成。",
+                                 artifacts=("analysis.json", "report.html"))
+        else:
+            raise ValueError("报告生成后未获得可发布的分析状态")
         return report_path
     except Exception as exc:
         _record_run_failure(run_dir, f"报告生成失败：{exc}")
@@ -743,37 +761,7 @@ def check_dependencies(args: argparse.Namespace) -> dict[str, Any]:
 
 def validate_inputs(args: argparse.Namespace) -> dict[str, Path]:
     inputs: dict[str, Path] = {}
-
-    explicit_model_route = any(
-        str(getattr(args, name, "") or "").strip()
-        for name in ("llm_model", "judgment_model", "vision_model")
-    )
-    env_legacy = os.environ.get("FLAYR_LLM_MODEL", "").strip()
-    env_judgment = os.environ.get("FLAYR_JUDGMENT_MODEL", "").strip()
-    env_vision = os.environ.get("FLAYR_VISION_MODEL", "").strip()
-    offline_analysis = bool(
-        getattr(args, "analysis_result_json", None)
-        or getattr(args, "provider_replay_from", None)
-    )
-    if not explicit_model_route and not offline_analysis:
-        if env_legacy:
-            args.llm_model = env_legacy
-        elif env_judgment or env_vision:
-            args.judgment_model = env_judgment
-            args.vision_model = env_vision
-        else:
-            args.judgment_model = llm_api_core.DEFAULT_COMPANY_JUDGMENT_MODEL
-            args.vision_model = llm_api_core.DEFAULT_COMPANY_VISION_MODEL
-
-    if (
-        not str(getattr(args, "llm_api_url", "") or "").strip()
-        and not offline_analysis
-        and any(
-            str(getattr(args, name, "") or "").strip()
-            for name in ("llm_model", "judgment_model", "vision_model")
-        )
-    ):
-        args.llm_api_url = llm_api_core.DEFAULT_COMPANY_LLM_API_URL
+    resolve_model_defaults(args)
 
     explicit_judgment = str(getattr(args, "judgment_model", "") or "").strip()
     explicit_vision = str(getattr(args, "vision_model", "") or "").strip()

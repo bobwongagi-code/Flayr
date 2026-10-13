@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any
 
 try:  # works both as ``python scripts/batch_analyze.py`` and as a test module
+    from flayr_core.cli import build_parser, effective_run_identity
     from flayr_core.llm.api import (
         DEFAULT_BEIJING_MAAS_LLM_API_URL,
         DEFAULT_COMPANY_JUDGMENT_MODEL,
@@ -67,6 +68,7 @@ try:  # works both as ``python scripts/batch_analyze.py`` and as a test module
     from flayr_core.run_state import COMPLETED, read_run_state
     from flayr_core.utils import process_group_popen_kwargs
 except ModuleNotFoundError:  # pragma: no cover - package import path in test runners
+    from scripts.flayr_core.cli import build_parser, effective_run_identity
     from scripts.flayr_core.llm.api import (
         DEFAULT_BEIJING_MAAS_LLM_API_URL,
         DEFAULT_COMPANY_JUDGMENT_MODEL,
@@ -316,6 +318,8 @@ def _success_manifest_valid(
     out_dir: Path,
     common_args: list[str] | None = None,
     trusted_args: list[str] | None = None,
+    *,
+    reuse_historical_results: bool = False,
 ) -> bool:
     """A stale/partial analysis file is never a resumable completion marker."""
     effective_args = [*(common_args or []), *job.get("args", [])]
@@ -327,10 +331,18 @@ def _success_manifest_valid(
     if analysis_result:
         expected_inputs["analysis_result_json"] = Path(analysis_result)
     command = build_command(job, out_dir, common_args or [], trusted_args)
+    expected_provenance = {"argv_sha256": command_digest(command[2:])}
+    if not reuse_historical_results:
+        try:
+            expected_provenance["effective_run_identity"] = effective_run_identity(
+                build_parser().parse_args(command[2:])
+            )
+        except (OSError, ValueError, SystemExit):
+            return False
     return validate_success_manifest(
         out_dir,
         expected_inputs,
-        {"argv_sha256": command_digest(command[2:])},
+        expected_provenance,
     )
 
 
@@ -341,6 +353,7 @@ def _completion_gate(
     trusted_args: list[str] | None = None,
     *,
     returncode: int | None = None,
+    reuse_historical_results: bool = False,
 ) -> tuple[bool, str]:
     """Require an actually completed run before marking a batch job done.
 
@@ -365,7 +378,8 @@ def _completion_gate(
     if not isinstance(analysis, dict) or analysis.get("analysis_run_state") != "completed":
         return False, "analysis_run_state is not completed"
 
-    if not _success_manifest_valid(job, out_dir, common_args, trusted_args):
+    if not _success_manifest_valid(job, out_dir, common_args, trusted_args,
+                                   reuse_historical_results=reuse_historical_results):
         return False, "missing or invalid _SUCCESS.json"
     return True, ""
 
@@ -545,6 +559,8 @@ def main() -> int:
     parser.add_argument("jobs_file", help="作业清单 JSON")
     parser.add_argument("--concurrency", type=int, default=1, help="并发作业数，默认 1（顺序）")
     parser.add_argument("--runs-dir", default=str(ROOT / "runs"))
+    parser.add_argument("--reuse-historical-results", action="store_true",
+                        help="显式复用旧配置结果；仍校验命令、输入、产物和完成状态，不作为当前配置的新结果。")
     # 这些选项属于启动 runner 的可信配置，不允许出现在 jobs.json。
     parser.add_argument("--llm-model")
     parser.add_argument("--judgment-model")
@@ -598,6 +614,7 @@ def main() -> int:
             status_path,
             args.concurrency,
             _trusted_runner_args(args),
+            reuse_historical_results=args.reuse_historical_results,
         )
     finally:
         release_lock(lock_path)
@@ -671,6 +688,8 @@ def _run_jobs(
     status_path: Path,
     concurrency: int,
     trusted_args: list[str] | None = None,
+    *,
+    reuse_historical_results: bool = False,
 ) -> int:
     batch_dir = status_path.parent
     status: dict = {
@@ -682,12 +701,15 @@ def _run_jobs(
     }
     for job in jobs:
         out = job_output_dir(job, runs_dir)
-        done, _ = _completion_gate(job, out, common_args, trusted_args)
+        done, _ = _completion_gate(job, out, common_args, trusted_args,
+                                   reuse_historical_results=reuse_historical_results)
         if not done:
             # Do not let a marker from an interrupted/changed run survive a
             # relaunch and become valid by accident later.
             (out / SUCCESS_MANIFEST_NAME).unlink(missing_ok=True)
         status["jobs"][job["name"]] = {"state": "done" if done else "pending", "output_dir": str(out)}
+        if done and reuse_historical_results:
+            status["jobs"][job["name"]]["reuse_policy"] = "historical_explicit"
     write_status(status_path, status)
 
     pending = [job for job in jobs if status["jobs"][job["name"]]["state"] != "done"]

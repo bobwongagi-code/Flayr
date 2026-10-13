@@ -25,6 +25,19 @@
 | `subtitle_track.json`（OCR 权威字幕轨） | 视觉模型，auto 策略（有分析 key 即开） | 可选 | 状态标记，缺失显示占位 |
 | `_preprocess.json`（复用缓存） | flayr.py | 自动 | `--reuse-preprocessing` 仅在源视频内容和预处理配置指纹完全一致时命中；旧缓存或任一配置变化会重跑 |
 
+批量完成复用同时校验命令、输入/产物哈希、终态及有效配置指纹，后者由 CLI 与 batch
+共用解析器和模型默认值解析生成，绑定模型、端点、ASR/OCR、语义配置、语音确认文件及重放材料内容。
+`cli.RESULT_REUSE_VERSION` 在影响结果的代码或合同变更时递增；普通文档提交不使结果失效。
+没有指纹的旧结果或不同配置结果默认不复用；只有可信 runner 上显式
+`--reuse-historical-results` 才可跳过配置指纹，仍保留其余校验并标记为历史复用。
+
+Web 正常收口和索引恢复共用发布状态决策，FAILED/UNPUBLISHED 优先于残留降级报告；
+索引中的完成记录也须与可读终态及发布清单一致；损坏或缺失不能被残留报告盖过。
+失败报告不通过专用报告入口或通用资源入口发布。上传预约与读取共用正文长度/编码解析，
+拒绝重复、冲突及不支持的编码。监控失败时先停止并等待子进程；停止失败保留句柄供关闭时处理。
+`scope` 成功终止于 UNPUBLISHED，`breakdown` 完整报告终止于 COMPLETED、未完整分析终止于 DEGRADED；
+两者均不生成代表完整对比的 `_SUCCESS.json`。
+
 ### 0.2 Step-0 + 分层分析架构 + Phase C
 
 默认混合路由按任务角色固定：文本判断走公司批准的 Chat Completions 网关；图片、OCR、MP4 和定向视觉回看走原北京 MaaS 视觉端点。公司网关的完整/大视频 MP4 路径曾失败且未验收，因此默认视觉请求不发往公司网关；这条历史失败不改变其小视频协议能力声明。视觉与文本端点、密钥来源分开记录，产物不包含密钥值。显式旧单路配置仍保持原路由，不自动跨线路fallback。路由只改变 provider 执行者，不改变 ADR-007 的字段所有权、Evidence Ledger、resolver 或 Phase C 合同。Fun-ASR 保留独立 endpoint 与 key 配置，不使用 LLM 网关 key。
