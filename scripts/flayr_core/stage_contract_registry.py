@@ -64,7 +64,7 @@ STAGE_SIGNAL_DEFINITIONS: dict[str, str] = {
     "close_detail": "关键结果区域以足够细节被展示",
     "reference_measure": "可识别的尺寸、数量、时间或其他对照参照",
     "source_identity": "独立于产品、品牌和当前达人的信任来源主体可被识别",
-    "source_basis": "独立来源的出处、报告、认证、第三方用户原话或过程信息实际出现",
+    "source_basis": "独立来源的出处、报告、认证、第三方用户原话或过程信息实际出现，并通过口播、字幕或画面强调清楚传递为信任依据；包装自带标志顺带可见不自动满足",
     "product_relevance": "该来源明确与当前产品或同一购买判断有关",
     "source_specificity": "来源不是泛泛的‘很多人说’，而有可定位对象或群体",
     "traceability": "来源可以回溯到画面、口播、字幕或具体出处",
@@ -91,6 +91,7 @@ STAGE_DISQUALIFIER_DEFINITIONS: dict[str, str] = {
     "product_claim_only": "只有产品自述或卖点声称，没有独立来源",
     "offer_only": "只有价格、优惠或赠品，不构成信任来源",
     "unattributed_social_claim": "只有‘网上很火/很多人推荐’等不可定位的社会性说法",
+    "incidental_source_only": "可识别来源只是随产品或用量介绍顺带出现，没有清楚的背书表达；事实保留，不因可见就认定阶段完成",
     "generic_praise_only": "只有推荐、好用或喜欢等泛泛评价，没有行动指令",
     "benefit_only_without_action": "只回顾产品利益，没有面向观众的可执行行动",
 }
@@ -125,8 +126,8 @@ STAGE_BOUNDARY_TESTS: dict[str, dict[str, str]] = {
         "next_stage_confusion": "认证、评论或来源可信度属于 S5，不是效果本身。",
     },
     "S5": {
-        "own_positive": "独立来源主体、依据和产品相关性均有可定位事实；清晰可识别的认证不因印在产品或包装上失格，须按实际证明范围判断，不从安全认证推断功效。",
-        "not_own_negative": "只有产品、品牌或当前达人自述，或泛泛‘网上很火/很多人推荐’，没有独立来源。",
+        "own_positive": "独立来源主体、依据和产品相关性均有可定位事实，并通过口播、字幕或画面强调清楚传递背书；包装认证可主动表达，不因印刷位置失格，须按实际证明范围判断，不从安全认证推断功效。",
+        "not_own_negative": "只有产品、品牌或当前达人自述，或泛泛‘网上很火/很多人推荐’，没有独立来源；认证随产品展示或用量介绍顺带可见，也不等于主动表达背书。",
         "previous_stage_confusion": "效果是否可见属于 S4，不因结果画面存在就构成信任来源。",
         "next_stage_confusion": "价格、优惠或行动指令属于 S6，不构成来源可信度。",
     },
@@ -244,8 +245,8 @@ STAGE_EVIDENCE_CONTRACTS: tuple[StageEvidenceContract, ...] = (
         ("source_specificity", "traceability"),
         "visual_or_voiceover",
         (),
-        ("product_claim_only", "offer_only", "unattributed_social_claim"),
-        "检查是否有可识别、与产品相关且独立于品牌和当前达人的信任来源；达人自己的使用经历、演示、旧工具对比、价格和优惠都不能单独构成独立信任来源。",
+        ("product_claim_only", "offer_only", "unattributed_social_claim", "incidental_source_only"),
+        "检查是否有可识别、与产品相关且独立于品牌和当前达人的来源被清楚表达为背书；认证顺带可见只记录来源事实，画面强调或字幕表达无需口播也可以成立。达人自己的使用经历、演示、旧工具对比、价格和优惠都不能单独构成独立信任来源。",
         participation_signals=("source_identity", "source_basis", "product_relevance", "independent_origin"),
     ),
     StageEvidenceContract(

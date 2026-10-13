@@ -77,6 +77,77 @@ class S5SourceConsistencyTests(unittest.TestCase):
         check["missing_signals"] = list(contract.required_signals)
         self.assertEqual(_stage_check_issues(contract, check, {"C1": {"endorsement_visual": True}}), [])
 
+    def test_incidental_printed_source_can_close_absent_without_erasing_fact(self):
+        unit = {"trust_source_signals": ["authority"], "trust_source_reference": "ISO 9001",
+                "trust_source_status": "explicit_present", "evidence_strength": "direct",
+                "visual_fact": "ISO 9001 printed beside feeding instructions", "functions": ["S3_usage"]}
+        check = self.negative_check()
+        check.update(incidental_source_ids=["C1"], observed_disqualifiers=["incidental_source_only"],
+                     reason="C1 shows feeding instructions; printed ISO is incidental, not emphasized.")
+        before = copy.deepcopy(unit)
+        self.assertEqual(_stage_check_issues(stage_evidence_contract("S5"), check, {"C1": unit}), [])
+        self.assertEqual(unit, before)
+
+    def test_incidental_exclusion_cannot_hide_active_or_unresolved_source(self):
+        for unit in (
+            {"trust_source_signals": ["authority"], "trust_source_reference": "Halal",
+             "trust_source_status": "explicit_present", "evidence_strength": "direct",
+             "visual_fact": "Halal emphasized", "functions": ["S5_trust"]},
+            {"trust_source_signals": ["authority"], "trust_source_reference": "Halal",
+             "trust_source_status": "explicit_present", "evidence_strength": "direct",
+             "visual_fact": "Halal badge", "endorsement_verbal": True},
+            {"endorsement_visual": True, "trust_source_status": "missing"},
+        ):
+            with self.subTest(unit=unit):
+                check = self.negative_check()
+                check.update(incidental_source_ids=["C1"], observed_disqualifiers=["incidental_source_only"])
+                self.assertTrue(_stage_check_issues(stage_evidence_contract("S5"), check, {"C1": unit}))
+
+    def test_incidental_exclusion_requires_named_existing_ids_and_reason(self):
+        unit = {"trust_source_signals": ["authority"], "trust_source_reference": "ISO 9001",
+                "trust_source_status": "explicit_present", "evidence_strength": "direct",
+                "visual_fact": "Printed ISO 9001", "functions": ["S3_usage"]}
+        for changes in ({"incidental_source_ids": ["C99"]},
+                        {"incidental_source_ids": ["C1"], "reason": ""},
+                        {"incidental_source_ids": ["C1"], "observed_disqualifiers": []}):
+            check = self.negative_check()
+            check.update(observed_disqualifiers=["incidental_source_only"])
+            check.update(changes)
+            self.assertTrue(_stage_check_issues(stage_evidence_contract("S5"), check, {"C1": unit}))
+
+    def test_incidental_ids_survive_normalization_and_invalid_ids_are_not_dropped(self):
+        from flayr_core.stage_evidence_contracts import normalize_stage_evidence_checks
+        raw = {"stage": "S5", **self.negative_check(), "incidental_source_ids": ["C1", "C99"],
+               "observed_disqualifiers": ["incidental_source_only"]}
+        check = next(c for c in normalize_stage_evidence_checks([raw], {"C1"}) if c["stage"] == "S5")
+        self.assertEqual(check["incidental_source_ids"], ["C1"])
+        self.assertEqual(check["invalid_incidental_source_ids"], ["C99"])
+
+    def test_shared_prompt_separates_observation_and_trust_expression(self):
+        from flayr_core.stage_ownership import CERTIFICATION_OWNERSHIP_PROMPT
+        from flayr_core.llm.payload import _stage_evidence_qualification_examples
+        self.assertIn("顺带", CERTIFICATION_OWNERSHIP_PROMPT)
+        self.assertIn("画面强调", CERTIFICATION_OWNERSHIP_PROMPT)
+        self.assertIn("incidental_source_ids", _stage_evidence_qualification_examples(["S5"])[0])
+        self.assertNotIn("incidental_source_ids", _stage_evidence_qualification_examples(["S2"])[0])
+
+    def test_incidental_list_cannot_hide_a_second_active_source(self):
+        incidental = {"trust_source_signals": ["authority"], "trust_source_reference": "ISO 9001",
+                      "trust_source_status": "explicit_present", "evidence_strength": "direct",
+                      "visual_fact": "Printed ISO 9001", "functions": ["S3_usage"]}
+        active = {**incidental, "functions": ["S5_trust"]}
+        check = self.negative_check()
+        check.update(incidental_source_ids=["C1"], observed_disqualifiers=["incidental_source_only"])
+        self.assertIn("S5:negative_with_observed_trust_source:C2",
+                      _stage_check_issues(stage_evidence_contract("S5"), check, {"C1": incidental, "C2": active}))
+
+    def test_normalizing_incidental_audit_twice_is_idempotent(self):
+        from flayr_core.stage_evidence_contracts import normalize_stage_evidence_checks
+        raw = {"stage": "S5", **self.negative_check(), "incidental_source_ids": ["C1", "C99"],
+               "observed_disqualifiers": ["incidental_source_only"]}
+        once = normalize_stage_evidence_checks([raw], {"C1"})
+        self.assertEqual(normalize_stage_evidence_checks(once, {"C1"}), once)
+
     def test_existing_recovery_plan_targets_the_source_conflict(self):
         from flayr_core.llm.pipeline import _stage1_recovery_plan
 

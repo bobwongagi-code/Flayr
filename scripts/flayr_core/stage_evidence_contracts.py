@@ -36,7 +36,8 @@ from .stage_contract_registry import (
 from .transcript import current_transcript_segments_path, current_transcript_words_path
 from .speech_attestation import has_verified_no_product_speech
 
-STAGE_EVIDENCE_CONTRACT_VERSION = 10
+STAGE_EVIDENCE_CONTRACT_VERSION = 11
+# Version 11 separates visible trust sources from communicated endorsement.
 # Version 10 separates introduction quality and product-target result participation.
 # Version 9 aligns hook/introduction, certificate scope and purchase-purpose boundaries.
 # Version 8 admits source-hash-bound human confirmation of no product speech.
@@ -1635,6 +1636,14 @@ def normalize_stage_evidence_checks(value: Any, valid_ids: set[str]) -> list[dic
             "evidence_strength": strength,
             "reason": str(raw.get("reason") or "").strip(),
         }
+        if stage == "S5" and ("incidental_source_ids" in raw or "invalid_incidental_source_ids" in raw):
+            raw_incidental = raw.get("incidental_source_ids", [])
+            incidental = _clean_tokens(raw_incidental) if isinstance(raw_incidental, list) else []
+            by_stage[stage]["incidental_source_ids"] = [value for value in incidental if value in valid_ids]
+            by_stage[stage]["invalid_incidental_source_ids"] = _clean_tokens(raw.get("invalid_incidental_source_ids")) + (
+                [value for value in incidental if value not in valid_ids]
+                if isinstance(raw_incidental, list) else ["invalid_array"]
+            )
 
     normalized: list[dict[str, Any]] = []
     for contract in STAGE_EVIDENCE_CONTRACTS:
@@ -1844,10 +1853,34 @@ def _unit_has_typed_s5_trust_source(unit: dict[str, Any]) -> bool:
     )
 
 
-def _s5_negative_source_record_issues(units_by_id: dict[str, dict[str, Any]]) -> list[str]:
+def _s5_negative_source_record_issues(
+    units_by_id: dict[str, dict[str, Any]], check: dict[str, Any],
+) -> list[str]:
     """Reject negative closure over positive or unanswered source observations."""
     issues: list[str] = []
+    incidental_ids = set(check.get("incidental_source_ids") or [])
+    valid_incidental: set[str] = set()
+    for evidence_id in incidental_ids:
+        unit = units_by_id.get(evidence_id) or {}
+        quality = unit.get("fact_quality") or {}
+        if (
+            check.get("coverage") == "complete"
+            and "incidental_source_only" in (check.get("observed_disqualifiers") or [])
+            and str(check.get("reason") or "").strip()
+            and _unit_has_typed_s5_trust_source(unit)
+            and unit.get("evidence_strength") in {"direct", "explicit"}
+            and str(unit.get("visual_fact") or "").strip()
+            and quality.get("subject") != "incorrect"
+            and quality.get("visibility") not in {"unclear", "unknown"}
+            and unit.get("endorsement_verbal") is not True
+            and "S5_trust" not in (unit.get("functions") or [])
+        ):
+            valid_incidental.add(evidence_id)
+        else:
+            issues.append(f"S5:invalid_incidental_source:{evidence_id}")
     for evidence_id, unit in units_by_id.items():
+        if evidence_id in valid_incidental:
+            continue
         quality = unit.get("fact_quality")
         if isinstance(quality, dict) and quality.get("subject") == "incorrect":
             continue
@@ -1919,6 +1952,7 @@ def _stage_check_issues(
         "invalid_missing_signals",
         "invalid_observed_disqualifiers",
         "invalid_signal_bindings",
+        "invalid_incidental_source_ids",
     ):
         invalid = [str(value) for value in check.get(field) or [] if str(value).strip()]
         if invalid:
@@ -1933,7 +1967,9 @@ def _stage_check_issues(
     observed_disqualifiers = set(check.get("observed_disqualifiers") or [])
     signal_bindings = check.get("signal_bindings") if isinstance(check.get("signal_bindings"), dict) else {}
     if contract.code == "S5" and status in {"absent", "not_applicable"}:
-        issues.extend(_s5_negative_source_record_issues(units_by_id))
+        issues.extend(_s5_negative_source_record_issues(units_by_id, check))
+    elif check.get("incidental_source_ids"):
+        issues.append(f"{contract.code}:incidental_exclusion_outside_negative_s5")
     contradictory_signals = sorted(observed & missing)
     if contradictory_signals:
         issues.append(f"{contract.code}:signal_both_observed_and_missing:{','.join(contradictory_signals)}")

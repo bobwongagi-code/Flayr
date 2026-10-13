@@ -77,6 +77,7 @@ ROOT = Path(__file__).resolve().parents[3]
 MIN_NATIVE_VIDEO_WINDOW_SECONDS = 2.0
 TRUST_SOURCE_OBSERVATION_RULE = (
     "再标 trust_source_signals（数组，只记录实际看见/听见的独立信任来源，允许 authority/traceable_data/independent_user/social_consensus/process_transparency；没有则省略）和 trust_source_reference（逐字或概括写出实际出处；无出处必须省略）。authority/traceable_data 必须有机构名、报告号、官方/平台页面或可辨识认证；independent_user 必须有评论/用户原话；social_consensus 必须同时有明确群体/社区和该群体共同看法；process_transparency 必须有工厂、原料、生产或质检过程。产品数量、价格、参数、时长、赠品、达人自述均不得填。"
+    "这些字段只记录来源存在，不代表视频完成背书表达；包装认证顺带可见时仍保留原文，不自动标 functions=S5_trust。"
 )
 
 
@@ -983,6 +984,10 @@ def build_stage_evidence_qualification_payload(
         "达人本人以用户身份出镜、讲自己的使用经历、演示产品，或比较自己以前使用的工具，仍是当前达人自述，不能构成 independent_user。"
         "independent_user 必须能归因到与当前达人不同的第三方用户，例如可识别的评论、晒单、访谈或第三方用户原话；"
         "authority、traceable_data、social_consensus 和 process_transparency 也必须分别有其真实独立来源。"
+        "可见来源与主动背书分别判断：口播主动提出、字幕说明或画面强调清楚传递来源时可支持 source_basis，不要求必须口播。"
+        "包装认证随产品展示或用量介绍顺带可见，不自动满足 source_basis，也不能删除来源事实。"
+        "仅在覆盖完整、所有候选来源均被核对且确认未表达背书时才可 absent：在 incidental_source_ids 逐一列出顺带出现的真实来源 ID，"
+        "填写 incidental_source_only 排除项，并在 reason 说明各 ID 的实际表达用途。不能用该清单排除主动强调、口播背书或尚未闭合的来源；判断不清保持 unknown。"
         "若只有达人自述，应标记 product_claim_only，并把 independent_origin 绑定为 missing；不得因为内容具体、画中画对比或达人自称真实用户就判 present。"
         if "S5" in normalized_targets
         else ""
@@ -1340,6 +1345,7 @@ def _stage_evidence_qualification_examples(
                 "invalid_observed_disqualifiers": [],
                 "evidence_strength": "direct|explicit|inferred|absent",
                 "reason": "只说明该阶段资格事实，不写比较或严重度。",
+                **({"incidental_source_ids": []} if code == "S5" else {}),
             }
         )
     return examples
