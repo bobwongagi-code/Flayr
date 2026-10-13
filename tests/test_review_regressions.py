@@ -87,6 +87,16 @@ class ReviewRegressions(unittest.TestCase):
                 self.assertFalse(batch._success_manifest_valid(job, out, []),
                                  'A changed effective model route must not reuse the old result')
                 self.assertTrue(batch._success_manifest_valid(job, out, [], reuse_historical_results=True))
+                before = (out / manifest.SUCCESS_MANIFEST_NAME).read_bytes()
+                with mock.patch.object(batch, 'subprocess') as subprocess_mock:
+                    status_path = root / '_batch' / 'status.json'
+                    status_path.parent.mkdir()
+                    # Match the output identity used by this fixture without modifying old artifacts.
+                    with mock.patch.object(batch, 'job_output_dir', return_value=out):
+                        self.assertEqual(batch._run_jobs([job], [], root, status_path, 1), 1)
+                    subprocess_mock.Popen.assert_not_called()
+                self.assertEqual((out / manifest.SUCCESS_MANIFEST_NAME).read_bytes(), before)
+                self.assertEqual(json.loads(status_path.read_text())['jobs']['fixture']['state'], 'failed')
                 creator.write_bytes(b'changed source')
                 self.assertFalse(batch._success_manifest_valid(job, out, [], reuse_historical_results=True))
 

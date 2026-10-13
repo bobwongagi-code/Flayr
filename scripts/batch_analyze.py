@@ -701,18 +701,27 @@ def _run_jobs(
     }
     for job in jobs:
         out = job_output_dir(job, runs_dir)
-        done, _ = _completion_gate(job, out, common_args, trusted_args,
-                                   reuse_historical_results=reuse_historical_results)
-        if not done:
+        done, reason = _completion_gate(job, out, common_args, trusted_args,
+                                        reuse_historical_results=reuse_historical_results)
+        lifecycle = read_run_state(out) or {}
+        immutable_completion = not done and lifecycle.get("state") == COMPLETED
+        if not done and not immutable_completion:
             # Do not let a marker from an interrupted/changed run survive a
             # relaunch and become valid by accident later.
             (out / SUCCESS_MANIFEST_NAME).unlink(missing_ok=True)
-        status["jobs"][job["name"]] = {"state": "done" if done else "pending", "output_dir": str(out)}
+        status["jobs"][job["name"]] = {
+            "state": "done" if done else "failed" if immutable_completion else "pending",
+            "output_dir": str(out),
+        }
+        if immutable_completion:
+            status["jobs"][job["name"]]["failure_reason"] = (
+                f"run_state=COMPLETED cannot be reused: {reason}; preserve the old run and select a new output identity"
+            )
         if done and reuse_historical_results:
             status["jobs"][job["name"]]["reuse_policy"] = "historical_explicit"
     write_status(status_path, status)
 
-    pending = [job for job in jobs if status["jobs"][job["name"]]["state"] != "done"]
+    pending = [job for job in jobs if status["jobs"][job["name"]]["state"] == "pending"]
     running: list[tuple[dict, subprocess.Popen, object]] = []
     idx = 0
 
