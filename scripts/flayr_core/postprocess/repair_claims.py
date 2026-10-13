@@ -105,6 +105,23 @@ def unit_product_visible(unit: dict[str, Any]) -> bool:
 def remove_unverified_brand_models(result: dict[str, Any], analysis: dict[str, Any]) -> None:
     """删除未被产品上下文或转写支持的英文品牌型号，避免模型幻觉品牌。"""
     allowed_text = "\n".join(allowed_claim_sources(analysis)).lower()
+    model_pattern = r"\b[A-Z][A-Za-z]{2,}(?:\s+[A-Z]?\d+[A-Za-z0-9-]*)+\b"
+    observed_references: set[str] = set()
+    # Preserve identifiers observed in locked visual source records, not claims
+    # inferred by the report or product foundation. This does not qualify S5.
+    for side in (result.get("video_understanding") or {}).values():
+        if not isinstance(side, dict) or side.get("stage_evidence_contract_version") != STAGE_EVIDENCE_CONTRACT_VERSION:
+            continue
+        for unit in side.get("evidence_units") or []:
+            if not isinstance(unit, dict) or unit.get("evidence_strength") not in {"direct", "explicit"}:
+                continue
+            if unit.get("trust_source_status") != "explicit_present" or (unit.get("fact_quality") or {}).get("subject") == "incorrect":
+                continue
+            visual_text = str(unit.get("visual_fact") or "").lower()
+            for match in re.finditer(model_pattern, str(unit.get("trust_source_reference") or "")):
+                identifier = match.group(0).lower()
+                if identifier in visual_text:
+                    observed_references.add(identifier)
     product_name = str(analysis.get("product", {}).get("name") or "该产品").strip() or "该产品"
     local_product_name = local_product_reference(analysis, product_name)
 
@@ -113,8 +130,10 @@ def remove_unverified_brand_models(result: dict[str, Any], analysis: dict[str, A
             return value
         replacement = local_product_name if key == "creator_script" else product_name
         return re.sub(
-            r"\b[A-Z][A-Za-z]{2,}(?:\s+[A-Z]?\d+[A-Za-z0-9-]*)+\b",
-            lambda match: match.group(0) if match.group(0).lower() in allowed_text else replacement,
+            model_pattern,
+            lambda match: match.group(0) if (
+                match.group(0).lower() in allowed_text or match.group(0).lower() in observed_references
+            ) else replacement,
             value,
         )
 
