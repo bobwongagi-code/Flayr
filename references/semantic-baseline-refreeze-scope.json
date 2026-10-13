@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-engineering-fixes-and-s5-boundary-2026-10-13",
-  "description": "Bind separate approved certification prose and analysis-only lifecycle repairs plus the S5 communicated-endorsement boundary to 6a616d7. Qualification v11, observation v7; earlier S4 candidate remains inactive. No gap-scale, GT, route, promotion or historical artifact changes; zero provider calls. Only these three governance records change in the mechanical refreeze.",
+  "name": "semantic-baseline-refreeze-after-creator-delivery-wording-2026-10-13",
+  "description": "Bind approved creator-delivery wording repair to 10c93ca. Qualification v11, observation v7 and existing S5 boundary retained. No gap-scale, GT, prompt, route, promotion or historical artifact changes; zero provider calls. Only these three governance records change in the mechanical refreeze.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 100,

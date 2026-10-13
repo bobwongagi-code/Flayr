@@ -4,7 +4,7 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "6a616d7455cc745a219d09201a3c84ccfc947127",
+  "production_behavior_commit": "10c93ca1d7a8ee0a2df1d3a0603eb0afbaa680cb",
   "execution_readiness": {
     "status": "gemini_draft_production_active_human_review_required",
     "scope": "company_gemini_default_route_with_original_funasr_and_human_delivery",
@@ -23,8 +23,9 @@
   "latest_refreeze": {
     "status": "applied_and_refrozen",
     "date": "2026-10-13",
-    "scope": "Bind separately committed certification prose repair (97c2983), analysis-only lifecycle repair (032a34d), and approved S5 qualification boundary (6a616d7). Visible sources remain observations; communicated endorsement requires voice, subtitle or visual emphasis, while audited incidental sources may support negative S5 closure without hiding active or unresolved sources. Qualification contract becomes v11, observation contract stays v7. No gap-scale, GT, route, budget, acceptance-threshold or historical artifact changes. Zero model/video calls, no accuracy or promotion claim; earlier S4 candidate remains inactive.",
-    "previous_production_behavior_commit": "c365a6f548fcc856a56a0167a08f861313cdcec6",
+    "scope": "Bind approved creator-delivery wording repair (10c93ca). Reviewed creator output leads with approved concrete actions, not internal stage rankings; corrected observations use human notes. Internal BD comparison, literal evidence quotes and source identities remain unchanged. Existing S5 v11 boundary and observation v7 retained. No gap-scale, GT, prompt, route, budget, acceptance-threshold or historical artifact changes. Zero model/video calls; no accuracy, time-saving or promotion claim.",
+    "previous_production_behavior_commit": "6a616d7455cc745a219d09201a3c84ccfc947127",
+    "creator_delivery_wording_commit": "10c93ca1d7a8ee0a2df1d3a0603eb0afbaa680cb",
     "certification_prose_repair_commit": "97c2983f47d44b6f015d23e2f0181f703606d52d",
     "analysis_only_lifecycle_repair_commit": "032a34d8b3078328f02202823a8da906e353839c",
     "s5_endorsement_boundary_commit": "6a616d7455cc745a219d09201a3c84ccfc947127",
