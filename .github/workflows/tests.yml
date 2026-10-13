@@ -40,6 +40,8 @@ jobs:
         shell: bash
         env:
           FLAYR_COVERAGE: "1"
+          # Push/PR ranges may contain multiple separately approved local batches.
+          FLAYR_SCOPE_MODE: publication
           FLAYR_SCOPE_SPEC: references/bitter-lesson-runtime-fix-scope.json
           FLAYR_SCOPE_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || 'HEAD' }}
         run: bash scripts/run-tests.sh

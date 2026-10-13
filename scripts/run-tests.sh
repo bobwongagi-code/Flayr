@@ -19,7 +19,13 @@ fi
 "$PYTHON_BIN" scripts/verify_bitter_lesson_contract.py
 SCOPE_SPEC="${FLAYR_SCOPE_SPEC:-references/bitter-lesson-frozen-spec.json}"
 SCOPE_BASE_REF="${FLAYR_SCOPE_BASE_REF:-HEAD}"
-"$PYTHON_BIN" scripts/check_change_scope.py --base-ref "$SCOPE_BASE_REF" --spec "$SCOPE_SPEC"
+SCOPE_ARGS=(--base-ref "$SCOPE_BASE_REF" --spec "$SCOPE_SPEC")
+case "${FLAYR_SCOPE_MODE:-batch}" in
+  batch) ;;
+  publication) SCOPE_ARGS+=(--publication) ;;
+  *) echo "unsupported scope mode: $FLAYR_SCOPE_MODE" >&2; exit 2 ;;
+esac
+"$PYTHON_BIN" scripts/check_change_scope.py "${SCOPE_ARGS[@]}"
 if [[ "${FLAYR_COVERAGE:-0}" == "1" ]]; then
   "$PYTHON_BIN" -m coverage run --branch -m unittest discover -s tests -v
 else

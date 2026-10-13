@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce the frozen batch file and line budget before a change is committed."""
+"""Check a local batch budget or the publication boundary of a Git range."""
 
 from __future__ import annotations
 
@@ -122,19 +122,29 @@ def check_scope(spec: dict[str, Any], base_ref: str) -> list[str]:
     return issues
 
 
+def check_publication(spec: dict[str, Any], base_ref: str) -> list[str]:
+    """A push can contain multiple batches; only publication exclusions apply."""
+    forbidden = [str(item) for item in spec["change_scope"]["forbidden_globs"]]
+    return [f"forbidden path: {path}" for path in sorted(_changed_paths(base_ref))
+            if _matches(path, forbidden)]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-ref", default="HEAD", help="Git ref used as the batch baseline")
     parser.add_argument("--spec", type=Path, default=SPEC_PATH)
+    parser.add_argument("--publication", action="store_true",
+                        help="Check forbidden publication paths across the full range, not a single batch budget")
     args = parser.parse_args()
     spec = json.loads(args.spec.expanduser().resolve().read_text(encoding="utf-8"))
-    issues = check_scope(spec, args.base_ref)
+    issues = (check_publication if args.publication else check_scope)(spec, args.base_ref)
+    gate = "publication boundary" if args.publication else "change scope"
     if issues:
-        print("change scope gate failed:")
+        print(f"{gate} gate failed:")
         for issue in issues:
             print(f"- {issue}")
         return 1
-    print(f"change scope gate passed: base={args.base_ref}")
+    print(f"{gate} gate passed: base={args.base_ref}")
     return 0
 
 
