@@ -219,7 +219,7 @@
 
   <div class="section-head" id="experiment-section-head">
     <h2>下一次可以试试看的方向</h2>
-    <p class="section-hint">最多选 1-2 个先专注尝试，我们会帮你整理成一张拍摄清单。</p>
+    <p class="section-hint">可以先选 1-2 个方向，整理成一张拍摄清单。</p>
   </div>
 
   <div id="experiment-list"></div>
@@ -233,7 +233,7 @@
 
   <div class="card commitment" id="commitment-card">
     <h2>本次创作约定</h2>
-    <div id="commit-empty" class="commit-empty">选择上面 1-2 个你想先试的方向，我们会帮你整理成一张可保存的拍摄清单。</div>
+    <div id="commit-empty" class="commit-empty">可以选择上面 1-2 个方向，保存为本次拍摄清单。</div>
     <div id="commit-filled" style="display:none;">
       <div class="commit-block" id="commit-keep-block">
         <div class="commit-label">本次保留</div>
@@ -283,7 +283,7 @@
   var selected = [];
 
   function renderMasthead(){
-    setText('context-line', report.context || '基于本次上传的视频，我们看了完整版本。');
+    setText('context-line', report.context || '本次视频的内容复盘与拍摄建议。');
     var title = document.querySelector('.masthead h1');
     if (title && report.title) title.textContent = report.title;
     var brand = document.querySelector('.brand');

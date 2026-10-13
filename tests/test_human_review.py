@@ -867,12 +867,13 @@ class HumanReviewTests(unittest.TestCase):
         self.assertEqual(bd_view["improvements"][0]["planB"], "理想方向候选，不能作为已确认的标杆示范。")
         self.assertEqual(creator_view["experiments"], [])
         self.assertIsNone(creator_view["topExperiment"])
-        self.assertIn("吸引注意：达人更强（中等差距）", creator_view["intent"])
+        self.assertEqual(creator_view["intent"], "阶段结论已确认；拍摄建议仍需单独确认。")
+        self.assertIn("吸引注意：达人更强（中等差距）", projected["review_summary"]["verdict"])
         self.assertNotIn("旧商业总结", creator_view["intent"])
         self.assertNotIn("重新拍摄关键操作", creator_view["intent"])
-        self.assertIn("原有建议并未随阶段确认自动获批", creator_view["reviewSummary"]["detail"])
+        self.assertIn("未获批准的建议不作为交付建议", creator_view["reviewSummary"]["detail"])
         creator_stage = next(stage for stage in creator_view["stages"] if stage["code"] == "S1")
-        self.assertIn("原模型记录，未随本次人工更正复核：", creator_stage["observation"])
+        self.assertEqual(creator_stage["observation"], "开场差距已修正。")
 
     def _approve_and_change_s1(self, run_dir: Path) -> None:
         self._approve_all(run_dir)

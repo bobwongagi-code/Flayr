@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import tempfile
 import unittest
@@ -155,7 +156,7 @@ class CreatorReportTests(unittest.TestCase):
             self.assertEqual(len(data["experiments"]), 1)
             action = data["experiments"][0]
             self.assertEqual(action["status"], "human_approved_action")
-            self.assertEqual(action["action"], "补拍真实充电过程，不用动画证明快充。")
+            self.assertEqual(action["action"], "可以补拍真实充电过程，不用动画证明快充。")
             self.assertEqual(action["observation"], "")
             self.assertEqual(action["hypothesis"], "")
             self.assertNotIn("预计点击率提升", json.dumps(data, ensure_ascii=False))
@@ -181,7 +182,84 @@ class CreatorReportTests(unittest.TestCase):
 
             data = build_creator_report_data(analysis, ReportAssetContext(root / "run"))
 
-            self.assertEqual([item["action"] for item in data["experiments"]], ["补拍真实充电过程。"])
+            self.assertEqual([item["action"] for item in data["experiments"]], ["可以补拍真实充电过程。"])
+
+    def test_delivery_wording_is_scoped_and_keeps_literal_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            analysis = self._analysis(root / "run")
+            quote = "你看这个迷你产品，达人也可以用。"
+            analysis["video_understanding"]["creator"]["evidence_units"][0]["voiceover"] = quote
+            analysis["stage_analysis"][0].update({
+                "creator_summary": "达人展示了迷你产品，但还无法确认效果。",
+                "reference_observation": "标杆视频清楚展示接口。",
+            })
+            analysis["retained_points"] = "素材路径 /tmp/benchmark.mp4 和 creator.png 保留；`creator` 为原文件标识。"
+            analysis["improvements"][0]["suggestion"] = "建议你补拍接口近景，字幕可写“你看接口”。"
+            original = copy.deepcopy(analysis)
+
+            path = write_creator_report(root / "run", analysis)
+            html = path.read_text(encoding="utf-8")
+            data = build_creator_report_data(analysis, ReportAssetContext(root / "run"))
+
+            self.assertEqual(analysis, original)
+            self.assertEqual(data["stages"][0]["quote"], quote)
+            self.assertEqual(data["stages"][0]["observation"], "出镜者展示了迷你产品，但还无法确认效果。")
+            self.assertEqual(data["stages"][0]["reference"]["text"], "参考视频清楚展示接口。")
+            self.assertEqual(data["experiments"][0]["action"], "可以补拍接口近景，字幕可写“你看接口”。")
+            self.assertNotIn("建议你", html)
+            self.assertNotIn("帮你", html)
+            self.assertNotIn("达人展示", html)
+            self.assertIn(quote, html)
+            self.assertNotIn("卖爆", html)
+            self.assertEqual(data["keep"], analysis["retained_points"])
+            analysis["stage_analysis"][0]["creator_summary"] = "达人是专业化妆师。"
+            data = build_creator_report_data(analysis, ReportAssetContext(root / "run"))
+            self.assertEqual(data["stages"][0]["observation"], "出镜者是专业化妆师。")
+
+    def test_reviewed_delivery_leads_with_approved_action_not_internal_ranking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            analysis = self._analysis(root / "run")
+            analysis["review_delivery"] = {"summary_status": "replaced_after_stage_review"}
+            analysis["review_summary"] = {"verdict": "功能与使用：达人更强（小差距）", "detail": "内部审核说明"}
+            analysis["improvements"] = [{
+                "target_stage": "S4", "status": "human_approved_action",
+                "suggestion": "可以补拍真实清洗前后画面。",
+            }]
+            original = copy.deepcopy(analysis)
+            data = build_creator_report_data(analysis, ReportAssetContext(root / "run"))
+            self.assertEqual(data["intent"], "可以补拍真实清洗前后画面。")
+            self.assertEqual(analysis, original)
+            self.assertNotIn("可以可以", data["intent"])
+            self.assertNotIn("更强", json.dumps(data["reviewSummary"], ensure_ascii=False))
+
+            analysis["improvements"] = []
+            data = build_creator_report_data(analysis, ReportAssetContext(root / "run"))
+            self.assertEqual(data["intent"], "阶段结论已确认；拍摄建议仍需单独确认。")
+            self.assertEqual(data["experiments"], [])
+
+    def test_corrected_stage_uses_review_note_not_unreviewed_model_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            analysis = self._analysis(root / "run")
+            analysis["stage_analysis"][0].update({
+                "review_decision": "corrected",
+                "review_note": "达人展示了 CCC 标志；不确认认证真实性。",
+                "creator_summary": "creator资格未知，无法判断。",
+            })
+            data = build_creator_report_data(analysis, ReportAssetContext(root / "run"))
+            self.assertEqual(data["stages"][0]["observation"], "出镜者展示了 CCC 标志；不确认认证真实性。")
+            self.assertNotIn("资格未知", data["stages"][0]["observation"])
+
+    def test_ambiguous_direct_address_requires_wording_review_not_blind_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            analysis = self._analysis(root / "run")
+            analysis["improvements"][0]["suggestion"] = "如果你觉得合适，下次试试近景。"
+            with self.assertRaisesRegex(ValueError, "对外交付文字"):
+                write_creator_report(root / "run", analysis)
+            self.assertFalse((root / "run" / "creator_report.html").exists())
 
 
 if __name__ == "__main__":

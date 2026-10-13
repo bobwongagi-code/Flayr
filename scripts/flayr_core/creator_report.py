@@ -44,6 +44,27 @@ _FORBIDDEN_CREATOR_PHRASES = (
     "完播率可能大幅提升",
     "转化可能跳一档",
 )
+# Apply only to delivery prose, never to evidence quotes or source identities.
+_DELIVERY_WORDING = (
+    ("建议达人", "可以"),
+    ("建议你", "可以"),
+    ("你可以", "可以"),
+    ("你的这条视频", "当前视频"),
+    ("你的视频", "当前视频"),
+    ("达人的视频", "当前视频"),
+    ("达人视频", "当前视频"),
+    ("达人更", "当前视频更"),
+    ("达人", "出镜者"),
+    ("标杆视频", "参考视频"),
+    ("标杆更", "参考视频更"),
+    ("标杆", "参考视频中的出镜者"),
+)
+_LITERAL_PROSE_RE = re.compile(
+    r'(“[^”]*”|「[^」]*」|\"[^\"]*\"|`[^`]*`|https?://\S+'
+    r'|(?:[A-Za-z]:[\\/]|/)[^\s，。；]+'
+    r'|\b[\w.-]+\.(?:mp4|mov|png|jpg|json)\b)'
+)
+_INTERNAL_ROLE_RE = re.compile(r"\b(creator|benchmark)\b", re.IGNORECASE)
 
 
 def write_creator_report(
@@ -126,8 +147,12 @@ def build_creator_report_data(
             observation = f"未纳入比较：{review_note}" if review_note else "未纳入比较"
         elif review_decision == "insufficient_evidence":
             observation = "证据不足，无法比较"
-        elif review_decision == "corrected" and observation:
-            observation = f"原模型记录，未随本次人工更正复核：{observation}"
+        elif review_decision == "corrected":
+            review_note = _safe_text(stage.get("review_note"))
+            observation = (
+                review_note if review_note
+                else "本阶段结论已人工更正，原模型说明不作为已确认结论。"
+            )
         insufficient = bool(stage.get("insufficient_evidence")) or code in low_confidence_codes
         if not observation and not units:
             insufficient = True
@@ -168,7 +193,7 @@ def build_creator_report_data(
                 "name": name,
                 "status": status,
                 "statusLabel": status_label,
-                "observation": observation,
+                "observation": _delivery_text(observation),
                 "frameTs": frame_ts,
                 "frame": frame,
                 "quote": quote,
@@ -176,7 +201,7 @@ def build_creator_report_data(
                 "reference": reference,
                 "referenceNote": "暂未提供同类参考。" if not reference else "",
                 "linked": linked_id,
-                "confidence": confidence,
+                "confidence": _delivery_text(confidence),
             }
         )
 
@@ -187,7 +212,10 @@ def build_creator_report_data(
         review_delivery.get("summary_status") == "replaced_after_stage_review"
         and isinstance(review_summary, dict)
     ):
-        intent = _first_text(review_summary.get("verdict"), review_summary.get("detail"))
+        approved_actions = [
+            item["action"] for item in experiments if item["status"] == "human_approved_action"
+        ]
+        intent = "\n".join(approved_actions) or "阶段结论已确认；拍摄建议仍需单独确认。"
     else:
         intent = _first_text(
             semantic.creator_context.get("content_intent"),
@@ -201,11 +229,14 @@ def build_creator_report_data(
         "brand": "Flayr · 心译复盘",
         "reviewStatus": effective_review_status,
         "reviewMode": _safe_text(semantic.get("review_mode")) or "draft_visible",
-        "reviewSummary": semantic.get("review_summary") if isinstance(semantic.get("review_summary"), dict) else None,
+        "reviewSummary": {
+            "verdict": _delivery_text(intent),
+            "detail": "阶段结论已确认；未获批准的建议不作为交付建议。",
+        } if isinstance(review_summary, dict) else None,
         "metadata": build_report_metadata("creator-v2", "flayr_core.creator_report"),
         "title": "这条视频，我们一起复盘",
         "context": _context_line(product),
-        "intent": intent or "目前还无法判断这条视频正在尝试完成什么。",
+        "intent": _delivery_text(intent) or "目前还无法判断这条视频正在尝试完成什么。",
         "highlights": highlights,
         "topExperiment": top_experiment,
         "experiments": experiments,
@@ -213,7 +244,7 @@ def build_creator_report_data(
         "continuity": _build_continuity(semantic.creator_context.get("continuity_record")),
         "keep": _build_keep(semantic.creator_context),
         "analysisState": _safe_text(semantic.get("analysis_run_state")),
-        "degradedFlags": _as_list(semantic.get("degraded_flags")),
+        "degradedFlags": [_delivery_text(item) for item in _as_list(semantic.get("degraded_flags"))],
     }
 
 
@@ -267,7 +298,7 @@ def _build_experiments(
                     "targetStage": target_stage,
                     "observation": "",
                     "hypothesis": "",
-                    "action": action,
+                    "action": _delivery_action(action),
                     "demonstration": "",
                     "verification": "下次核对是否完成这条拍摄动作。",
                     "why": "这条拍摄动作已由人工确认，实际效果仍需观察。",
@@ -320,15 +351,15 @@ def _build_experiments(
         experiments.append(
             {
                 "id": experiment_id,
-                "title": title,
+                "title": _delivery_text(title),
                 "targetStage": target_stage,
-                "observation": observation,
-                "hypothesis": hypothesis,
-                "action": action,
-                "demonstration": demonstration,
-                "verification": verification,
-                "why": _first_text(raw.get("why"), hypothesis, observation),
-                "confidence": _safe_text(raw.get("confidence")),
+                "observation": _delivery_text(observation),
+                "hypothesis": _delivery_text(hypothesis),
+                "action": _delivery_action(action),
+                "demonstration": _delivery_text(demonstration),
+                "verification": _delivery_text(verification),
+                "why": _delivery_text(_first_text(raw.get("why"), hypothesis, observation)),
+                "confidence": _delivery_text(raw.get("confidence")),
                 "status": _safe_text(raw.get("status")) or "proposed",
                 "sourceIndex": original_index,
             }
@@ -359,7 +390,7 @@ def _build_highlights(analysis: dict[str, Any]) -> list[dict[str, str]]:
             timestamp = ""
         if not text:
             continue
-        highlights.append({"timestamp": timestamp, "text": text})
+        highlights.append({"timestamp": timestamp, "text": _delivery_text(text)})
         if len(highlights) >= 2:
             break
     return highlights
@@ -390,7 +421,7 @@ def _build_continuity(value: Any) -> dict[str, Any] | None:
         if not text:
             continue
         status_class, status_label = _continuity_status(item.get("status", item.get("state")))
-        items.append({"text": text, "statusClass": status_class, "statusLabel": status_label})
+        items.append({"text": _delivery_text(text), "statusClass": status_class, "statusLabel": status_label})
     return {
         "title": "上次约定回顾",
         "items": items,
@@ -402,8 +433,8 @@ def _build_keep(creator_context: Mapping[str, Any]) -> str:
     if value is None:
         value = creator_context.get("creator_retain")
     if isinstance(value, list):
-        return "、".join(item for item in (_safe_text(entry) for entry in value) if item)
-    return _safe_text(value)
+        return "、".join(item for item in (_delivery_text(entry) for entry in value) if item)
+    return _delivery_text(value)
 
 
 def _reference_payload(
@@ -420,7 +451,7 @@ def _reference_payload(
         return None
     return {
         "ts": _first_text(stage.get("benchmark_time_range"), experiment.get("benchmark_time_range") if experiment else ""),
-        "text": text,
+        "text": _delivery_text(text),
     }
 
 
@@ -497,8 +528,34 @@ def _frame_payload(frame: dict[str, Any] | None, assets: ReportAssetContext, sta
 def _context_line(product: dict[str, Any]) -> str:
     name = _safe_text(product.get("name"))
     if name:
-        return f"基于这次的「{name}」视频和同类参考，我们一起看了完整版本。"
-    return "基于这次上传的达人视频和同类参考，我们一起看了完整版本。"
+        return f"「{name}」视频的内容复盘与拍摄建议。参考视频指本次提供的对照视频。"
+    return "本次视频的内容复盘与拍摄建议。参考视频指本次提供的对照视频。"
+
+
+def _delivery_text(value: Any) -> str:
+    text = _safe_text(value)
+    text = re.sub(r"^(?:历史人工确认|用户本轮听音确认|人工确认|用户确认)[：:]?", "", text)
+    text = text.removesuffix("；沿用用户已确认结论。")
+    parts = _LITERAL_PROSE_RE.split(text)
+    for index in range(0, len(parts), 2):
+        for old, new in _DELIVERY_WORDING:
+            parts[index] = parts[index].replace(old, new)
+        parts[index] = _INTERNAL_ROLE_RE.sub(
+            lambda match: "当前视频" if match.group(1).lower() == "creator" else "参考视频",
+            parts[index],
+        )
+        if re.search(r"(?<!迷)你", parts[index]):
+            raise ValueError("对外交付文字仍有直接称呼，请改为具体行动建议后再输出")
+    return "".join(parts)
+
+
+def _delivery_action(value: Any) -> str:
+    text = _delivery_text(value)
+    if text.startswith("建议"):
+        text = "可以" + text[2:].lstrip("：: ")
+    if not text or text.startswith(("可以", "可尝试", "建议", "试试看")):
+        return text
+    return f"可以{text}"
 
 
 def _continuity_status(value: Any) -> tuple[str, str]:
