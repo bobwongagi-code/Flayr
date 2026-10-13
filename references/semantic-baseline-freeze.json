@@ -4,13 +4,13 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "c365a6f548fcc856a56a0167a08f861313cdcec6",
+  "production_behavior_commit": "6a616d7455cc745a219d09201a3c84ccfc947127",
   "execution_readiness": {
     "status": "gemini_draft_production_active_human_review_required",
     "scope": "company_gemini_default_route_with_original_funasr_and_human_delivery",
     "reason": "Six ordinary CLI runs on 5dbf9af completed: three video pairs, two fresh repeats each, OCR and product foundation active, speech translation where applicable. Source fingerprints pass the existing human-review entry. All 338 non-ASR sends used company Gemini; eight ASR sends used the original Singapore route; no network retries. Fasclean S4 reversed direction between repeats and disagrees with historical NA, so semantic stability and automatic production promotion remain blocked. New review sidecars are pending, not approved. See references/gemini37-production-draft-activation-20261006.md. Earlier v3 failure and all prior artifacts remain historical.",
     "baseline_code_commit": "c88d9827a29c6024b4d36ed98f06bbbcf4ed439d",
-    "required_before_new_runs": "Pass fixed-source full tests and freeze verification. Stage2 requires version-10 qualified inputs; old qualification artifacts cannot be silently upgraded. Default company Gemini drafts require human confirmation before delivery. Explicit overrides stay explicit; no automatic fallback. Keep historical cohort, prior v9 acceptance and new pending drafts separate; no automatic promotion."
+    "required_before_new_runs": "Pass fixed-source full tests and freeze verification. Stage2 requires version-11 qualified inputs; old qualification artifacts cannot be silently upgraded. Default company Gemini drafts require human confirmation before delivery. Explicit overrides stay explicit; no automatic fallback. Keep historical cohort, prior v9/v10 acceptance and new pending drafts separate; no automatic promotion. This refreeze authorizes no new model or video calls."
   },
   "authorized_semantic_correction": {
     "status": "applied_and_refrozen",
@@ -22,9 +22,12 @@
   },
   "latest_refreeze": {
     "status": "applied_and_refrozen",
-    "date": "2026-10-06",
-    "scope": "Separately close approved media-failure boundaries (15a6983) and S4 visual result definition consistency (c365a6f), with projection assertion alignment (ea1dff3). Failed or skipped OCR cannot establish complete empty coverage; explicit NONE is no signal; anchor PTS must be verified and preprocess cache identity changes. Four S4 state prompt sites share the existing visual-required contract: oral result claims do not establish a visual result, real limited results remain eligible. Gap scale, GT, model routes and qualification algorithm unchanged. Qualification candidate is not implemented or activated; weak-result experiment input admission remains blocked. Zero model calls; no accuracy or promotion claim.",
-    "previous_production_behavior_commit": "e19ace400237e81c94c265275de65eb280cb7008",
+    "date": "2026-10-13",
+    "scope": "Bind separately committed certification prose repair (97c2983), analysis-only lifecycle repair (032a34d), and approved S5 qualification boundary (6a616d7). Visible sources remain observations; communicated endorsement requires voice, subtitle or visual emphasis, while audited incidental sources may support negative S5 closure without hiding active or unresolved sources. Qualification contract becomes v11, observation contract stays v7. No gap-scale, GT, route, budget, acceptance-threshold or historical artifact changes. Zero model/video calls, no accuracy or promotion claim; earlier S4 candidate remains inactive.",
+    "previous_production_behavior_commit": "c365a6f548fcc856a56a0167a08f861313cdcec6",
+    "certification_prose_repair_commit": "97c2983f47d44b6f015d23e2f0181f703606d52d",
+    "analysis_only_lifecycle_repair_commit": "032a34d8b3078328f02202823a8da906e353839c",
+    "s5_endorsement_boundary_commit": "6a616d7455cc745a219d09201a3c84ccfc947127",
     "media_failure_boundary_commit": "15a6983f346b5edb95924ae0842d237574866023",
     "s4_visual_definition_commit": "c365a6f548fcc856a56a0167a08f861313cdcec6",
     "s4_projection_test_alignment_commit": "ea1dff345efe9a8b745e81922f7ff827f0f848f5",
@@ -53,8 +56,8 @@
     "adapter_schema_correction": "Existing optional trust_source_signals and trust_source_reference are allowed by the inactive Gemini observation Schema. No values are inferred or filled, no fields become required, no qualification rules change. Zero model calls in this correction cycle; previous integration responses remain bound to caa4d6c.",
     "stage2_semantics": "Canonical contextual stage boundaries shared with Stage2; existing S3 comparison and gap bands retained; no action-count-to-gap mapping",
     "gt": "unchanged",
-    "qualification": "Contextual S2/S4/S5/S6 corrections; existing source-bound no-product-speech attestation retained; no positive evidence invented",
-    "stage_evidence_contract_version": 10,
+    "qualification": "Existing contextual boundaries retained; S5 source existence separated from clearly communicated endorsement, with per-source audited incidental exclusions. Unknown remains unknown; no positive evidence invented. Existing source-bound no-product-speech attestation retained.",
+    "stage_evidence_contract_version": 11,
     "stage1_observation_contract_version": 7,
     "gap_bands": "small both-sides-executed prerequisite removed; none, medium/large, NA and uncertain unchanged; no automatic action-count mapping",
     "model_route": "Historical frozen-cohort route unchanged; runtime provider route changed as described in scope.",
