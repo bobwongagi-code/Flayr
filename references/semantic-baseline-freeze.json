@@ -4,7 +4,7 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "7fe59fc86d2fee7e682b1066144c926529ac204b",
+  "production_behavior_commit": "90ea47a628f64b3f020b239ead0b0c07e0766ec2",
   "execution_readiness": {
     "status": "gemini_draft_production_active_human_review_required",
     "scope": "company_gemini_default_route_with_original_funasr_and_human_delivery",
@@ -23,8 +23,9 @@
   "latest_refreeze": {
     "status": "applied_and_refrozen",
     "date": "2026-10-14",
-    "scope": "Bind approved author delivery projection (7fe59fc): public role wording, deliveryText separate from untouched internal notes, per-role ledger windows and actual screenshot timestamps, speech-only literal excerpts, fail-closed visible-prose guards. Existing S5 v11, observation v7 and review runtime repairs retained. No gap-scale, GT, qualification, prompt, route, budget, acceptance-threshold or historical artifact changes. Zero model/video calls; no accuracy, time-saving or promotion claim.",
-    "previous_production_behavior_commit": "02cb19325898b979ede10b53fffd984576b11da9",
+    "scope": "Bind author ledger-caption source-role correction (90ea47a). Single-video actor wording follows that evidence's creator/benchmark role; literal quotes, internal notes and reviewed judgments remain untouched. Approved author delivery projection, S5 v11, observation v7 and review runtime repairs retained. No gap-scale, GT, qualification, prompt, route, budget, acceptance-threshold or historical artifact changes. Zero model/video calls; no accuracy, time-saving or promotion claim.",
+    "previous_production_behavior_commit": "7fe59fc86d2fee7e682b1066144c926529ac204b",
+    "author_evidence_role_wording_commit": "90ea47a628f64b3f020b239ead0b0c07e0766ec2",
     "author_delivery_binding_commit": "7fe59fc86d2fee7e682b1066144c926529ac204b",
     "review_runtime_repair_commit": "02cb19325898b979ede10b53fffd984576b11da9",
     "creator_delivery_wording_commit": "10c93ca1d7a8ee0a2df1d3a0603eb0afbaa680cb",
