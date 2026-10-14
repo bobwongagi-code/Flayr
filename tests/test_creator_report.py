@@ -79,7 +79,7 @@ class CreatorReportTests(unittest.TestCase):
         self.assertIn("--paper:#FAFAF8", template)
         self.assertIn("这条视频，我们一起复盘", template)
         self.assertIn("完整证据地图", template)
-        self.assertIn("部分分析能力降级", template)
+        self.assertIn("部分说明暂未提供", template)
         self.assertIn("{{creator_report_data}}", template)
         self.assertNotIn("孩子不肯刷牙？", template)
 
@@ -91,7 +91,7 @@ class CreatorReportTests(unittest.TestCase):
             serialized = json.dumps(data, ensure_ascii=False)
             self.assertEqual(data["experiments"][0]["id"], "exp1")
             self.assertEqual(data["stages"][0]["linked"], "exp1")
-            self.assertIsNotNone(data["stages"][0]["frame"])
+            self.assertIsNotNone(data["stages"][0]["creatorEvidence"][0]["frame"])
             self.assertIsNone(data["stages"][0]["reference"])
             self.assertNotIn("gmv_impact", serialized)
             self.assertNotIn('"severity"', serialized)
@@ -103,7 +103,7 @@ class CreatorReportTests(unittest.TestCase):
             outside.write_bytes(ONE_PIXEL_PNG)
             analysis["videos"]["creator"]["frames"][0]["path"] = str(outside)
             data = build_creator_report_data(analysis, ReportAssetContext(root / "run"))
-            self.assertIsNone(data["stages"][0]["frame"])
+            self.assertIsNone(data["stages"][0]["creatorEvidence"][0]["frame"])
 
     def test_report_writes_creator_artifact_and_handles_empty_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,11 +131,11 @@ class CreatorReportTests(unittest.TestCase):
             ]
             data = build_creator_report_data(analysis, ReportAssetContext(root / "run"))
             self.assertEqual(data["stages"][0]["status"], "not_applicable")
-            self.assertEqual(data["stages"][0]["statusLabel"], "未纳入比较")
-            self.assertEqual(data["stages"][0]["observation"], "未纳入比较")
+            self.assertEqual(data["stages"][0]["statusLabel"], "本次不比较")
+            self.assertEqual(data["stages"][0]["deliveryText"], "本次不作比较。")
             self.assertEqual(data["stages"][1]["status"], "insufficient_evidence")
-            self.assertEqual(data["stages"][1]["statusLabel"], "证据不足，无法比较")
-            self.assertEqual(data["stages"][1]["observation"], "证据不足，无法比较")
+            self.assertEqual(data["stages"][1]["statusLabel"], "暂不作比较")
+            self.assertEqual(data["stages"][1]["deliveryText"], "这部分暂不作具体比较。")
 
     def test_reviewed_action_shows_only_the_human_approved_sentence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -194,6 +194,13 @@ class CreatorReportTests(unittest.TestCase):
                 "creator_summary": "达人展示了迷你产品，但还无法确认效果。",
                 "reference_observation": "标杆视频清楚展示接口。",
             })
+            benchmark_frame = root / "run" / "benchmark" / "frames" / "frame.png"
+            benchmark_frame.parent.mkdir(parents=True)
+            benchmark_frame.write_bytes(ONE_PIXEL_PNG)
+            analysis["videos"]["benchmark"] = {"duration_seconds": 4, "frames": [{"timestamp_seconds": 1, "path": str(benchmark_frame)}]}
+            analysis["video_understanding"]["benchmark"]["evidence_units"][0].update({
+                "time_range": "0s - 3s", "visual_fact": "标杆视频清楚展示接口。",
+            })
             analysis["retained_points"] = "素材路径 /tmp/benchmark.mp4 和 creator.png 保留；`creator` 为原文件标识。"
             analysis["improvements"][0]["suggestion"] = "建议你补拍接口近景，字幕可写“你看接口”。"
             original = copy.deepcopy(analysis)
@@ -203,9 +210,9 @@ class CreatorReportTests(unittest.TestCase):
             data = build_creator_report_data(analysis, ReportAssetContext(root / "run"))
 
             self.assertEqual(analysis, original)
-            self.assertEqual(data["stages"][0]["quote"], quote)
-            self.assertEqual(data["stages"][0]["observation"], "出镜者展示了迷你产品，但还无法确认效果。")
-            self.assertEqual(data["stages"][0]["reference"]["text"], "参考视频清楚展示接口。")
+            self.assertEqual(data["stages"][0]["creatorEvidence"][0]["quote"], quote)
+            self.assertEqual(data["stages"][0]["deliveryText"], "你的视频的出镜者展示了迷你产品，但还无法确认效果。")
+            self.assertEqual(data["stages"][0]["reference"]["text"], "爆款视频清楚展示接口。")
             self.assertEqual(data["experiments"][0]["action"], "可以补拍接口近景，字幕可写“你看接口”。")
             self.assertNotIn("建议你", html)
             self.assertNotIn("帮你", html)
@@ -215,7 +222,7 @@ class CreatorReportTests(unittest.TestCase):
             self.assertEqual(data["keep"], analysis["retained_points"])
             analysis["stage_analysis"][0]["creator_summary"] = "达人是专业化妆师。"
             data = build_creator_report_data(analysis, ReportAssetContext(root / "run"))
-            self.assertEqual(data["stages"][0]["observation"], "出镜者是专业化妆师。")
+            self.assertEqual(data["stages"][0]["deliveryText"], "你的视频的出镜者是专业化妆师。")
 
     def test_reviewed_delivery_leads_with_approved_action_not_internal_ranking(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -236,7 +243,7 @@ class CreatorReportTests(unittest.TestCase):
 
             analysis["improvements"] = []
             data = build_creator_report_data(analysis, ReportAssetContext(root / "run"))
-            self.assertEqual(data["intent"], "阶段结论已确认；拍摄建议仍需单独确认。")
+            self.assertEqual(data["intent"], "本次先查看下面的视频片段，暂不提供拍摄建议。")
             self.assertEqual(data["experiments"], [])
 
     def test_corrected_stage_uses_review_note_not_unreviewed_model_claim(self) -> None:
@@ -249,8 +256,8 @@ class CreatorReportTests(unittest.TestCase):
                 "creator_summary": "creator资格未知，无法判断。",
             })
             data = build_creator_report_data(analysis, ReportAssetContext(root / "run"))
-            self.assertEqual(data["stages"][0]["observation"], "出镜者展示了 CCC 标志；不确认认证真实性。")
-            self.assertNotIn("资格未知", data["stages"][0]["observation"])
+            self.assertEqual(data["stages"][0]["deliveryText"], "你的视频的出镜者展示了 CCC 标志；不确认认证真实性。")
+            self.assertNotIn("资格未知", data["stages"][0]["deliveryText"])
 
     def test_ambiguous_direct_address_requires_wording_review_not_blind_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

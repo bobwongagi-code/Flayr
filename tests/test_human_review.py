@@ -571,7 +571,7 @@ class HumanReviewTests(unittest.TestCase):
             stage["code"]: stage
             for stage in build_creator_report_data(projected, ReportAssetContext(run_dir))["stages"]
         }
-        self.assertEqual(creator_stages["S4"]["observation"], "未纳入比较：本轮不比较效果呈现。")
+        self.assertEqual(creator_stages["S4"]["deliveryText"], "本次不比较效果呈现。")
         self.assertEqual(projected["stage_analysis"][0]["relation"], "creator_better")
         self.assertNotIn("comparison_reason", projected["stage_analysis"][0])
         for key in ("reference_relevance", "reference_observation", "benchmark_reference", "communication_strategy", "confidence_note"):
@@ -867,13 +867,13 @@ class HumanReviewTests(unittest.TestCase):
         self.assertEqual(bd_view["improvements"][0]["planB"], "理想方向候选，不能作为已确认的标杆示范。")
         self.assertEqual(creator_view["experiments"], [])
         self.assertIsNone(creator_view["topExperiment"])
-        self.assertEqual(creator_view["intent"], "阶段结论已确认；拍摄建议仍需单独确认。")
+        self.assertEqual(creator_view["intent"], "本次先查看下面的视频片段，暂不提供拍摄建议。")
         self.assertIn("吸引注意：达人更强（中等差距）", projected["review_summary"]["verdict"])
         self.assertNotIn("旧商业总结", creator_view["intent"])
         self.assertNotIn("重新拍摄关键操作", creator_view["intent"])
-        self.assertIn("未获批准的建议不作为交付建议", creator_view["reviewSummary"]["detail"])
+        self.assertEqual(creator_view["reviewSummary"]["detail"], "可以先查看下面的视频片段和拍摄建议。")
         creator_stage = next(stage for stage in creator_view["stages"] if stage["code"] == "S1")
-        self.assertEqual(creator_stage["observation"], "开场差距已修正。")
+        self.assertEqual(creator_stage["deliveryText"], "")
 
     def _approve_and_change_s1(self, run_dir: Path) -> None:
         self._approve_all(run_dir)

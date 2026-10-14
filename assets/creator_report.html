@@ -117,7 +117,6 @@
     display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 16px;cursor:pointer;
   }
   .stage-head .left{display:flex;align-items:center;gap:10px;min-width:0;}
-  .stage-code{font-family:var(--font-mono);font-size:12.5px;color:var(--ink-faint);flex-shrink:0;}
   .stage-name{font-size:14.5px;font-weight:500;flex-shrink:0;}
   .stage-obs-preview{font-size:12.5px;color:var(--ink-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .status-chip{font-size:11px;padding:3px 9px;border-radius:999px;flex-shrink:0;}
@@ -135,7 +134,8 @@
   .ev-frame{
     display:flex;align-items:center;gap:10px;background:var(--spark-soft);border-radius:10px;padding:10px 12px;margin-bottom:8px;
   }
-  .ev-frame img{width:56px;height:40px;object-fit:cover;border-radius:6px;flex-shrink:0;}
+  .ev-frame{flex-wrap:wrap;align-items:flex-start;}
+  .ev-frame img{width:100%;max-width:220px;height:auto;object-fit:contain;border-radius:6px;}
   .ev-frame .ts-badge{font-family:var(--font-mono);font-size:11.5px;background:var(--ink);color:#fff;padding:2px 8px;border-radius:6px;flex-shrink:0;}
   .ev-frame .quote{font-size:13px;color:var(--ink);}
   .ev-note{font-size:12.5px;color:var(--ink-soft);margin-bottom:8px;}
@@ -148,6 +148,11 @@
   .ref-empty{font-size:12.5px;color:var(--ink-faint);margin-top:8px;font-style:italic;}
 
   .confidence-note{font-size:12px;color:var(--ink-faint);margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);}
+  .evidence-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;}
+  .evidence-side{min-width:0;}
+  .evidence-label{display:block;font-size:13px;font-weight:600;margin:10px 0;}
+  .ev-frame .quote{overflow-wrap:anywhere;}
+  @media(max-width:680px){.evidence-columns{grid-template-columns:minmax(0,1fr);}}
 
   .linked-tag{font-size:12px;color:var(--spark-ink);margin-top:10px;display:flex;align-items:center;gap:6px;}
 
@@ -192,7 +197,7 @@
     <p class="context-line" id="context-line"></p>
     <div class="review-note pending" id="review-note">待人工确认，仅供复核</div>
     <div class="degraded-note" id="degraded-note" hidden>
-      <strong>部分分析能力降级</strong>
+      <strong>部分说明暂未提供</strong>
       <span id="degraded-text"></span>
     </div>
   </div>
@@ -297,7 +302,7 @@
     var degradedNote = $('degraded-note');
     degradedNote.hidden = !degraded;
     if (degraded) {
-      setText('degraded-text', (report.degradedFlags || []).join('；') || '部分分析能力未完成，报告中的相关判断请结合原始证据复核。');
+      setText('degraded-text', (report.degradedFlags || []).join('；') || '部分片段暂不提供比较说明。');
     }
   }
 
@@ -385,6 +390,9 @@
       addLine(body, '这可能会让', e.hypothesis);
       addLine(body, '下一条可以测试', e.action);
       addLine(body, '可以具体改成', e.demonstration, 'demo');
+      if (e.evidenceFigures && e.evidenceFigures.length){
+        addLine(body, '相关片段', e.evidenceFigures.join('、'));
+      }
       addLine(body, '下次我们一起看', e.verification);
       card.appendChild(body);
       wrap.appendChild(card);
@@ -405,6 +413,37 @@
     });
   }
 
+  function renderBoundEvidence(container, label, evidence){
+    var side = document.createElement('div');
+    side.className = 'evidence-side';
+    addText(side, 'evidence-label', label);
+    if (!evidence || !evidence.length){
+      addText(side, 'ref-empty', '这里暂未展示对应片段。');
+    }
+    (evidence || []).forEach(function(item){
+      var block = document.createElement('div');
+      block.className = 'ev-block';
+      var frame = document.createElement('div');
+      frame.className = 'ev-frame';
+      if (item.frame && item.frame.src){
+        var image = document.createElement('img');
+        image.src = item.frame.src;
+        image.alt = label + ' ' + item.figure + '，截图 ' + item.frameTs;
+        frame.appendChild(image);
+        addText(frame, 'ts-badge', item.figure + ' · 截图 ' + item.frameTs);
+      }
+      addText(frame, 'quote', '片段：' + item.timeRange);
+      if (item.quote){ addText(frame, 'quote', '台词：' + item.quote); }
+      if (item.quoteZh && item.quoteZh !== item.quote){
+        addText(frame, 'quote', '中文：' + item.quoteZh);
+      }
+      block.appendChild(frame);
+      if (item.text){ addText(block, 'ev-note', item.text); }
+      side.appendChild(block);
+    });
+    container.appendChild(side);
+  }
+
   function renderStages(){
     var wrap = $('stage-list');
     wrap.innerHTML = '';
@@ -416,7 +455,6 @@
       head.className = 'stage-head';
       var left = document.createElement('div');
       left.className = 'left';
-      addText(left, 'stage-code', s.code);
       addText(left, 'stage-name', s.name);
       head.appendChild(left);
       if (s.status){
@@ -432,37 +470,14 @@
       var detail = document.createElement('div');
       detail.className = 'stage-detail';
       var block = document.createElement('div');
-      block.className = 'ev-block';
-      var frame = document.createElement('div');
-      frame.className = 'ev-frame';
-      if (s.frame && s.frame.src){
-        var image = document.createElement('img');
-        image.src = s.frame.src;
-        image.alt = s.frame.alt || s.name || '证据画面';
-        frame.appendChild(image);
-      }
-      addText(frame, 'ts-badge', s.frameTs || '时间未确认');
-      var quote = s.quote || s.observation || '目前还无法判断，这一段证据不足。';
-      addText(frame, 'quote', quote);
-      if (s.quoteZh && s.quoteZh !== s.quote){
-        addText(frame, 'quote', '（中文：' + s.quoteZh + '）');
-      }
-      block.appendChild(frame);
-      addText(block, 'ev-note', s.observation || '目前还无法判断，这一段证据不足。');
-      if (s.reference){
-        var ref = document.createElement('div');
-        ref.className = 'ref-block';
-        addText(ref, 'tag', '参考 ' + (s.reference.ts || ''));
-        addText(ref, 'txt', s.reference.text);
-        block.appendChild(ref);
-      } else if (s.referenceNote){
-        addText(block, 'ref-empty', s.referenceNote);
-      }
-      if (s.linked && experiments[s.linked]){
-        addText(block, 'linked-tag', '→ 关联实验：' + experiments[s.linked].title);
-      }
-      if (s.confidence){ addText(block, 'confidence-note', s.confidence); }
+      block.className = 'evidence-columns';
+      renderBoundEvidence(block, '你的视频', s.creatorEvidence);
+      renderBoundEvidence(block, '爆款视频', s.reference && s.reference.evidence);
       detail.appendChild(block);
+      if (s.deliveryText){ addText(detail, 'ev-note', s.deliveryText); }
+      if (s.linked && experiments[s.linked]){
+        addText(detail, 'linked-tag', '可以尝试：' + experiments[s.linked].action);
+      }
       acc.appendChild(detail);
       wrap.appendChild(acc);
     });

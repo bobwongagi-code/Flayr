@@ -12,16 +12,18 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
-from .artifacts import format_seconds
+from .artifacts import (
+    format_seconds, get_analysis_frame_entries, get_frame_entries,
+    parse_time_range_seconds, parse_timestamp_seconds,
+)
+from .human_review import _remove_performance_forecast_sentences, model_stage_values
 from .report import (
     REPORT_MAX_EMBEDDED_BYTES,
     ReportAssetContext,
     evidence_quotes,
     referenced_evidence_units,
-    select_referenced_frames,
     stage_display_names,
 )
-from .stage_evidence_contracts import STAGE_EVIDENCE_CONTRACT_VERSION
 from .resources import ResourceBudget, ResourceBudgetExceeded, ResourceLimits
 from .report_metadata import build_report_metadata
 from .semantic_model import SemanticAnalysis
@@ -49,15 +51,17 @@ _DELIVERY_WORDING = (
     ("建议达人", "可以"),
     ("建议你", "可以"),
     ("你可以", "可以"),
-    ("你的这条视频", "当前视频"),
-    ("你的视频", "当前视频"),
-    ("达人的视频", "当前视频"),
-    ("达人视频", "当前视频"),
-    ("达人更", "当前视频更"),
-    ("达人", "出镜者"),
-    ("标杆视频", "参考视频"),
-    ("标杆更", "参考视频更"),
-    ("标杆", "参考视频中的出镜者"),
+    ("你的这条视频", "你的视频"),
+    ("达人的视频", "你的视频"),
+    ("达人视频", "你的视频"),
+    ("当前视频", "你的视频"),
+    ("参考视频中的出镜者", "爆款视频的出镜者"),
+    ("参考视频", "爆款视频"),
+    ("标杆视频", "爆款视频"),
+    ("达人更", "你的视频更"),
+    ("标杆更", "爆款视频更"),
+    ("达人", "你的视频的出镜者"),
+    ("标杆", "爆款视频的出镜者"),
 )
 _LITERAL_PROSE_RE = re.compile(
     r'(“[^”]*”|「[^」]*」|\"[^\"]*\"|`[^`]*`|https?://\S+'
@@ -65,6 +69,13 @@ _LITERAL_PROSE_RE = re.compile(
     r'|\b[\w.-]+\.(?:mp4|mov|png|jpg|json)\b)'
 )
 _INTERNAL_ROLE_RE = re.compile(r"\b(creator|benchmark)\b", re.IGNORECASE)
+_INTERNAL_PROSE_RE = re.compile(
+    r"\b(?:S[1-6]|Stage[12]|small|medium|large|none|NA|uncertain|DEGRADED|FAILED|"
+    r"PROCESSING|UNPUBLISHED|COMPLETED|prediction_unavailable|pending|grounded)\b"
+    r"|差距|档位|门禁|资格层|资格响应|内部备注|改判|沿用用户已确认结论",
+    re.IGNORECASE,
+)
+_STAGE_NAMES = ("吸引注意", "产品引出", "功能与使用", "效果呈现", "信任表达", "购买提醒")
 
 
 def write_creator_report(
@@ -115,6 +126,8 @@ def build_creator_report_data(
     videos = semantic.videos
     creator_info = _as_dict(videos.get("creator"))
     creator_understanding = semantic.side("creator")
+    benchmark_info = _as_dict(videos.get("benchmark"))
+    benchmark_understanding = semantic.side("benchmark")
 
     raw_stages = [stage.data for stage in semantic.stages]
     low_confidence_codes = _low_confidence_codes(semantic.get("low_confidence_stages"))
@@ -127,7 +140,6 @@ def build_creator_report_data(
         stage_by_code,
         creator_understanding,
     )
-    experiments_by_id = {str(item.get("id")): item for item in experiments}
     experiments_by_stage = {
         _stage_code(item.get("targetStage"), index): item
         for index, item in enumerate(experiments, start=1)
@@ -136,74 +148,69 @@ def build_creator_report_data(
     top_experiment = experiments[0] if experiments else None
 
     stages = []
+    figure_number = 0
     for index, stage in enumerate(raw_stages, start=1):
-        code, name = stage_display_names(stage.get("stage", ""), index)
-        creator_range = _safe_text(stage.get("creator_time_range"))
+        _, name = stage_display_names(stage.get("stage", ""), index)
+        code = _stage_code(stage.get("stage"), index)
+        name = _STAGE_NAMES[int(code[1:]) - 1] if re.fullmatch(r"S[1-6]", code) else name
         units = referenced_evidence_units(stage.get("creator_evidence_ids"), creator_understanding, code)
+        benchmark_units = referenced_evidence_units(stage.get("benchmark_evidence_ids"), benchmark_understanding, code)
+        creator_evidence = _bound_evidence(creator_info, units, assets, "creator", name)
+        benchmark_evidence = _bound_evidence(benchmark_info, benchmark_units, assets, "benchmark", name)
+        for item in [*creator_evidence, *benchmark_evidence]:
+            if item["frame"]:
+                figure_number += 1
+                item["figure"] = f"图 {figure_number}"
         review_decision = _safe_text(stage.get("review_decision"))
+        if not review_decision and model_stage_values(stage)["not_applicable"]:
+            review_decision = "not_applicable"
         observation = _stage_observation(stage, units)
         if review_decision == "not_applicable":
-            review_note = _safe_text(stage.get("review_note"))
-            observation = f"未纳入比较：{review_note}" if review_note else "未纳入比较"
+            observation = _review_delivery_text(stage.get("review_note")) or "本次不作比较。"
         elif review_decision == "insufficient_evidence":
-            observation = "证据不足，无法比较"
+            observation = "这部分暂不作具体比较。"
         elif review_decision == "corrected":
-            review_note = _safe_text(stage.get("review_note"))
-            observation = (
-                review_note if review_note
-                else "本阶段结论已人工更正，原模型说明不作为已确认结论。"
-            )
+            observation = _review_delivery_text(stage.get("review_note"))
+        observation = _delivery_text(_review_delivery_text(observation))
+        # A comparison sentence cannot borrow the other video's screenshot or an unbound time label.
+        if review_decision not in {"not_applicable", "insufficient_evidence"}:
+            observation = _bound_delivery_text(observation, creator_evidence, benchmark_evidence)
         insufficient = bool(stage.get("insufficient_evidence")) or code in low_confidence_codes
         if not observation and not units:
             insufficient = True
         linked_id = _linked_experiment_id(stage, code, experiments, experiments_by_stage)
-        linked = experiments_by_id.get(linked_id)
         if linked_id and linked_id not in {item.get("id") for item in experiments}:
             linked_id = ""
 
-        active_contract = (
-            isinstance(creator_understanding, dict)
-            and creator_understanding.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
-        )
-        frames = select_referenced_frames(
-            creator_info,
-            units,
-            creator_range,
-            allow_fallback=not active_contract or bool(units),
-        )
-        frame = _frame_payload(frames[0] if frames else None, assets, name)
-        local_quote, translated_quote = evidence_quotes(units)
-        quote = _first_text(local_quote, stage.get("creator_quote"), translated_quote, stage.get("creator_quote_zh"))
-        quote_zh = _first_text(stage.get("creator_quote_zh"), translated_quote)
-        frame_ts = creator_range or (format_seconds(frames[0].get("timestamp_seconds")) if frames else "")
-
-        reference = _reference_payload(stage, linked)
+        reference = _reference_payload(benchmark_evidence)
         if review_decision == "not_applicable":
             linked_id = ""
-            status, status_label = "not_applicable", "未纳入比较"
+            status, status_label = "not_applicable", "本次不比较"
         elif review_decision == "insufficient_evidence":
             linked_id = ""
-            status, status_label = "insufficient_evidence", "证据不足，无法比较"
+            status, status_label = "insufficient_evidence", "暂不作比较"
         else:
             status, status_label = _stage_status(stage, linked_id, experiments, insufficient)
-        confidence = _stage_confidence(stage, insufficient)
         stages.append(
             {
                 "code": code,
                 "name": name,
                 "status": status,
                 "statusLabel": status_label,
-                "observation": _delivery_text(observation),
-                "frameTs": frame_ts,
-                "frame": frame,
-                "quote": quote,
-                "quoteZh": quote_zh,
+                "deliveryText": observation,
+                "creatorEvidence": creator_evidence,
                 "reference": reference,
-                "referenceNote": "暂未提供同类参考。" if not reference else "",
+                "referenceNote": "爆款视频的对应片段暂未展示。" if not reference else "",
                 "linked": linked_id,
-                "confidence": _delivery_text(confidence),
+                "confidence": "",
             }
         )
+
+    by_code = {stage["code"]: stage for stage in stages}
+    for experiment in experiments:
+        target = by_code.get(experiment.get("targetStage"), {})
+        evidence = [*target.get("creatorEvidence", []), *_as_dict(target.get("reference")).get("evidence", [])]
+        experiment["evidenceFigures"] = [item["figure"] for item in evidence if item["figure"]]
 
     highlights = _build_highlights(semantic.creator_context)
     review_summary = semantic.get("review_summary")
@@ -215,7 +222,7 @@ def build_creator_report_data(
         approved_actions = [
             item["action"] for item in experiments if item["status"] == "human_approved_action"
         ]
-        intent = "\n".join(approved_actions) or "阶段结论已确认；拍摄建议仍需单独确认。"
+        intent = "\n".join(approved_actions) or "本次先查看下面的视频片段，暂不提供拍摄建议。"
     else:
         intent = _first_text(
             semantic.creator_context.get("content_intent"),
@@ -225,13 +232,13 @@ def build_creator_report_data(
             semantic.get("one_line_summary"),
             semantic.get("executive_summary"),
         )
-    return {
+    payload = {
         "brand": "Flayr · 心译复盘",
         "reviewStatus": effective_review_status,
         "reviewMode": _safe_text(semantic.get("review_mode")) or "draft_visible",
         "reviewSummary": {
             "verdict": _delivery_text(intent),
-            "detail": "阶段结论已确认；未获批准的建议不作为交付建议。",
+            "detail": "可以先查看下面的视频片段和拍摄建议。",
         } if isinstance(review_summary, dict) else None,
         "metadata": build_report_metadata("creator-v2", "flayr_core.creator_report"),
         "title": "这条视频，我们一起复盘",
@@ -244,8 +251,11 @@ def build_creator_report_data(
         "continuity": _build_continuity(semantic.creator_context.get("continuity_record")),
         "keep": _build_keep(semantic.creator_context),
         "analysisState": _safe_text(semantic.get("analysis_run_state")),
-        "degradedFlags": [_delivery_text(item) for item in _as_list(semantic.get("degraded_flags"))],
+        "degradedFlags": ["部分片段暂不提供比较说明，请以页面中已有的片段和建议为准。"]
+            if semantic.get("analysis_run_state") == "degraded" or semantic.get("degraded_flags") else [],
     }
+    _validate_delivery_payload(payload)
+    return payload
 
 
 def _build_experiments(
@@ -294,14 +304,14 @@ def _build_experiments(
             experiments.append(
                 {
                     "id": _safe_text(raw.get("experiment_id")) or f"reviewed-{original_index + 1}",
-                    "title": f"{target_stage} 人工确认的拍摄建议" if target_stage else "人工确认的拍摄建议",
+                    "title": "可以试试这项拍摄调整",
                     "targetStage": target_stage,
                     "observation": "",
                     "hypothesis": "",
                     "action": _delivery_action(action),
                     "demonstration": "",
                     "verification": "下次核对是否完成这条拍摄动作。",
-                    "why": "这条拍摄动作已由人工确认，实际效果仍需观察。",
+                    "why": "先观察这项调整是否让内容表达更清楚，不预设销量变化。",
                     "confidence": "",
                     "status": action_status,
                     "sourceIndex": original_index,
@@ -437,22 +447,126 @@ def _build_keep(creator_context: Mapping[str, Any]) -> str:
     return _delivery_text(value)
 
 
-def _reference_payload(
-    stage: dict[str, Any],
-    experiment: dict[str, Any] | None,
-) -> dict[str, str] | None:
-    text = _first_text(
-        stage.get("reference_relevance"),
-        stage.get("reference_observation"),
-        stage.get("benchmark_reference"),
-        experiment.get("benchmark_reference") if experiment else "",
-    )
-    if not text:
+def _reference_payload(evidence: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not evidence:
         return None
     return {
-        "ts": _first_text(stage.get("benchmark_time_range"), experiment.get("benchmark_time_range") if experiment else ""),
-        "text": _delivery_text(text),
+        "ts": evidence[0]["timeRange"],
+        "text": "；".join(item["text"] for item in evidence if item["text"]),
+        "evidence": evidence,
     }
+
+
+def _bound_evidence(
+    info: dict[str, Any], units: list[dict[str, Any]], assets: ReportAssetContext,
+    role: str, stage_name: str,
+) -> list[dict[str, Any]]:
+    """Bind each displayed excerpt to one role's real ledger window, never a stage bucket."""
+    entries = get_analysis_frame_entries(info) + get_frame_entries(info)
+    role_root = (assets.run_dir / role).resolve()
+    evidence = []
+    for unit in units:
+        raw_range = unit.get("time_range")
+        bounds = parse_time_range_seconds(raw_range, info.get("duration_seconds"))
+        if bounds is None:
+            continue
+        start, end = bounds
+        candidates = []
+        for entry in entries:
+            timestamp = parse_timestamp_seconds(entry.get("timestamp_seconds"))
+            path = assets.safe_file(entry.get("path"))
+            if timestamp is None or not start <= timestamp <= end or path is None:
+                continue
+            if not path.is_relative_to(role_root):
+                continue
+            candidates.append(entry)
+        frame = None
+        for entry in sorted(candidates, key=lambda item: abs(parse_timestamp_seconds(item["timestamp_seconds"]) - (start + end) / 2)):
+            frame = _frame_payload(entry, assets, stage_name)
+            if frame:
+                break
+        quote, quote_zh = evidence_quotes([unit])
+        if not frame and not (quote or quote_zh):
+            continue
+        text = _first_text(unit.get("visual_fact"), unit.get("subtitle_fact"), unit.get("information")) if frame else ""
+        evidence.append({
+            "evidenceId": str(unit.get("id") or ""),
+            "timeRange": f"{format_seconds(start)} - {format_seconds(end)}",
+            "frame": frame,
+            "frameTs": frame["timestamp"] if frame else "",
+            "figure": "",
+            "quote": quote,
+            "quoteZh": quote_zh,
+            "text": _delivery_text(_review_delivery_text(text)),
+            "sourceKind": "visual" if frame else "speech",
+        })
+        if len(evidence) >= 3:
+            break
+    return evidence
+
+
+def _review_delivery_text(value: Any) -> str:
+    """Keep factual wording separate from the untouched internal rationale."""
+    text = _safe_text(_remove_performance_forecast_sentences(value))
+    # Do not extract an unqualified conclusion from a rationale whose conditions were internal.
+    if _INTERNAL_PROSE_RE.search(text):
+        return ""
+    kept = []
+    for clause in re.split(r"(?<=[。！？!?；;\n])", text):
+        clause = re.sub(r"^(?:历史人工确认|用户本轮听音确认|人工确认|用户确认)[：:]?", "", clause.strip())
+        quoted_internal = any(
+            part.startswith(('“', '「', '"')) and re.search(r"达人|标杆|当前视频|参考视频|\b(?:creator|benchmark)\b", part, re.I)
+            for part in _LITERAL_PROSE_RE.split(clause)[1::2]
+        )
+        if clause and not (quoted_internal or "模型" in clause):
+            kept.append(clause.replace("本轮", "本次"))
+    return "".join(kept)
+
+
+def _bound_delivery_text(text: str, creator: list[dict[str, Any]], benchmark: list[dict[str, Any]]) -> str:
+    kept = []
+    for sentence in re.split(r"(?<=[。！？!?；;\n])", text):
+        if not (creator or benchmark):
+            continue
+        if ("你的视频" in sentence and not creator) or ("爆款视频" in sentence and not benchmark):
+            continue
+        comparative = bool(re.search(r"双方|两条|相当|相近|相比|更好|更强|略好|优于|好过|不如|弱于", sentence))
+        if comparative and not (creator and benchmark):
+            continue
+        # Speech-only evidence is shown as its literal quote, not converted into free visual prose.
+        sides = [benchmark] if "爆款视频" in sentence and "你的视频" not in sentence else [creator]
+        if comparative or ("你的视频" in sentence and "爆款视频" in sentence):
+            sides = [creator, benchmark]
+        if any(not any(item["frame"] for item in side) for side in sides):
+            continue
+        kept.append(sentence)
+    return "".join(kept)
+
+
+def _validate_delivery_payload(payload: dict[str, Any]) -> None:
+    visible = {
+        "title", "context", "intent", "keep", "verdict", "detail", "name", "deliveryText",
+        "observation", "referenceNote", "confidence", "text", "hypothesis", "action",
+        "demonstration", "verification", "why", "statusLabel", "degradedFlags", "timestamp",
+    }
+    def check(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in visible:
+                    texts = item if isinstance(item, list) else [item]
+                    for text in texts:
+                        if isinstance(text, str):
+                            for part in _LITERAL_PROSE_RE.split(text):
+                                if part.startswith(('`', 'http://', 'https://', '/', '\\')) or re.fullmatch(r"[\w.-]+\.(?:mp4|mov|png|jpg|json)", part):
+                                    continue
+                                if _INTERNAL_PROSE_RE.search(part) or re.search(r"达人|标杆|当前视频|参考视频|\b(?:creator|benchmark)\b", part, re.I):
+                                    raise ValueError(f"对外交付文字包含内部用语：{key}")
+                if key not in {"quote", "quoteZh", "metadata", "frame"}:
+                    check(item)
+        elif isinstance(value, list):
+            for item in value:
+                check(item)
+    check(payload)
 
 
 def _stage_observation(stage: dict[str, Any], units: list[dict[str, Any]]) -> str:
@@ -466,17 +580,6 @@ def _stage_observation(stage: dict[str, Any], units: list[dict[str, Any]]) -> st
     return _first_text(
         *(unit.get(key) for unit in units for key in ("information", "visual_fact", "subtitle_fact"))
     )
-
-
-def _stage_confidence(stage: dict[str, Any], insufficient: bool) -> str:
-    explicit = _first_text(
-        stage.get("confidence_note"),
-        stage.get("confidence_notes"),
-        stage.get("evidence_confidence"),
-    )
-    if explicit:
-        return explicit
-    return "目前还无法判断，这一段证据不足。" if insufficient else ""
 
 
 def _stage_status(
@@ -528,12 +631,12 @@ def _frame_payload(frame: dict[str, Any] | None, assets: ReportAssetContext, sta
 def _context_line(product: dict[str, Any]) -> str:
     name = _safe_text(product.get("name"))
     if name:
-        return f"「{name}」视频的内容复盘与拍摄建议。参考视频指本次提供的对照视频。"
-    return "本次视频的内容复盘与拍摄建议。参考视频指本次提供的对照视频。"
+        return f"「{name}」视频的内容复盘与拍摄建议。对比你的视频与本次提供的爆款视频。"
+    return "本次视频的内容复盘与拍摄建议。对比你的视频与本次提供的爆款视频。"
 
 
 def _delivery_text(value: Any) -> str:
-    text = _safe_text(value)
+    text = _safe_text(_remove_performance_forecast_sentences(value))
     text = re.sub(r"^(?:历史人工确认|用户本轮听音确认|人工确认|用户确认)[：:]?", "", text)
     text = text.removesuffix("；沿用用户已确认结论。")
     parts = _LITERAL_PROSE_RE.split(text)
@@ -541,10 +644,10 @@ def _delivery_text(value: Any) -> str:
         for old, new in _DELIVERY_WORDING:
             parts[index] = parts[index].replace(old, new)
         parts[index] = _INTERNAL_ROLE_RE.sub(
-            lambda match: "当前视频" if match.group(1).lower() == "creator" else "参考视频",
+            lambda match: "你的视频" if match.group(1).lower() == "creator" else "爆款视频",
             parts[index],
         )
-        if re.search(r"(?<!迷)你", parts[index]):
+        if re.search(r"(?<!迷)你(?!的视频)", parts[index]):
             raise ValueError("对外交付文字仍有直接称呼，请改为具体行动建议后再输出")
     return "".join(parts)
 
