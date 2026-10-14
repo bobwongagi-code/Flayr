@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-review-runtime-repairs-2026-10-14",
-  "description": "Bind approved review runtime repairs to 02cb193. Qualification v11, observation v7 and creator-delivery wording retained. No gap-scale, GT, prompt, route, promotion or historical artifact changes; zero provider calls. Only these three governance records change in the mechanical refreeze.",
+  "name": "semantic-baseline-refreeze-after-author-delivery-binding-2026-10-14",
+  "description": "Bind approved author delivery projection to 7fe59fc: public wording, separate delivery text and source-bound screenshots. Qualification v11, observation v7 and runtime repairs retained. No gap-scale, GT, prompt, route, promotion or historical artifact changes; zero provider calls. Only these three governance records change in the mechanical refreeze.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 100,

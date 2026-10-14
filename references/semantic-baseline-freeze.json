@@ -4,7 +4,7 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "02cb19325898b979ede10b53fffd984576b11da9",
+  "production_behavior_commit": "7fe59fc86d2fee7e682b1066144c926529ac204b",
   "execution_readiness": {
     "status": "gemini_draft_production_active_human_review_required",
     "scope": "company_gemini_default_route_with_original_funasr_and_human_delivery",
@@ -23,8 +23,9 @@
   "latest_refreeze": {
     "status": "applied_and_refrozen",
     "date": "2026-10-14",
-    "scope": "Bind approved review runtime repairs (02cb193): configuration/content-bound batch reuse with explicit historical policy, fail-closed publication recovery and report access, consistent upload framing/reservation, monitored child cleanup, truthful scope/breakdown terminal records and legacy report fallback. Existing S5 v11, observation v7 and creator-delivery wording retained. No gap-scale, GT, prompt, route, budget, acceptance-threshold or historical artifact changes. Zero model/video calls; no accuracy, time-saving or promotion claim.",
-    "previous_production_behavior_commit": "10c93ca1d7a8ee0a2df1d3a0603eb0afbaa680cb",
+    "scope": "Bind approved author delivery projection (7fe59fc): public role wording, deliveryText separate from untouched internal notes, per-role ledger windows and actual screenshot timestamps, speech-only literal excerpts, fail-closed visible-prose guards. Existing S5 v11, observation v7 and review runtime repairs retained. No gap-scale, GT, qualification, prompt, route, budget, acceptance-threshold or historical artifact changes. Zero model/video calls; no accuracy, time-saving or promotion claim.",
+    "previous_production_behavior_commit": "02cb19325898b979ede10b53fffd984576b11da9",
+    "author_delivery_binding_commit": "7fe59fc86d2fee7e682b1066144c926529ac204b",
     "review_runtime_repair_commit": "02cb19325898b979ede10b53fffd984576b11da9",
     "creator_delivery_wording_commit": "10c93ca1d7a8ee0a2df1d3a0603eb0afbaa680cb",
     "certification_prose_repair_commit": "97c2983f47d44b6f015d23e2f0181f703606d52d",
