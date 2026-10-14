@@ -497,7 +497,7 @@ def _bound_evidence(
             "figure": "",
             "quote": quote,
             "quoteZh": quote_zh,
-            "text": _delivery_text(_review_delivery_text(text)),
+            "text": _delivery_text(_review_delivery_text(text), evidence_role=role),
             "sourceKind": "visual" if frame else "speech",
         })
         if len(evidence) >= 3:
@@ -635,16 +635,19 @@ def _context_line(product: dict[str, Any]) -> str:
     return "本次视频的内容复盘与拍摄建议。对比你的视频与本次提供的爆款视频。"
 
 
-def _delivery_text(value: Any) -> str:
+def _delivery_text(value: Any, *, evidence_role: str | None = None) -> str:
     text = _safe_text(_remove_performance_forecast_sentences(value))
     text = re.sub(r"^(?:历史人工确认|用户本轮听音确认|人工确认|用户确认)[：:]?", "", text)
     text = text.removesuffix("；沿用用户已确认结论。")
     parts = _LITERAL_PROSE_RE.split(text)
     for index in range(0, len(parts), 2):
         for old, new in _DELIVERY_WORDING:
+            # In a single-video ledger, "达人" names that video's speaker, not the compared creator.
+            if evidence_role == "benchmark" and old.startswith("达人"):
+                new = new.replace("你的视频", "爆款视频")
             parts[index] = parts[index].replace(old, new)
         parts[index] = _INTERNAL_ROLE_RE.sub(
-            lambda match: "你的视频" if match.group(1).lower() == "creator" else "爆款视频",
+            lambda match: "你的视频" if match.group(1).lower() == "creator" and evidence_role != "benchmark" else "爆款视频",
             parts[index],
         )
         if re.search(r"(?<!迷)你(?!的视频)", parts[index]):

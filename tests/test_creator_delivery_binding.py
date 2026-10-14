@@ -71,6 +71,24 @@ class CreatorDeliveryBindingTests(unittest.TestCase):
             self.assertEqual(analysis["stage_analysis"][0]["severity"], "medium")
             self.assertNotIn("frame", stage)  # No duplicate embedded image in a legacy alias.
 
+    def test_ledger_actor_wording_belongs_to_its_source_video_not_always_creator(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            analysis = self.fixture(root)
+            for side in analysis["video_understanding"].values():
+                side["evidence_units"][0]["visual_fact"] = "达人手持充电宝，creator 展示接口。"
+                side["evidence_units"][0]["voiceover"] = "达人说看这里。"
+            original = copy.deepcopy(analysis)
+            stage = self.project(root, analysis)["stages"][0]
+            own = stage["creatorEvidence"][0]
+            reference = stage["reference"]["evidence"][0]
+            self.assertIn("你的视频的出镜者手持充电宝", own["text"])
+            self.assertIn("爆款视频的出镜者手持充电宝", reference["text"])
+            self.assertIn("爆款视频 展示接口", reference["text"])
+            self.assertNotIn("你的视频", reference["text"])
+            self.assertEqual(reference["quote"], "达人说看这里。")
+            self.assertEqual(analysis, original)
+
     def test_missing_unknown_or_invalid_reference_never_borrows_a_stage_frame(self):
         for change in ("missing_time", "unknown_id", "outside_window", "cross_role", "symlink", "bad_image", "unqualified"):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as temp:
