@@ -11,6 +11,7 @@ The product principle is simple: do not hand creators a long text report. Produc
 
 ## Modes
 
+- Offline requirement review: when the task is checking an existing revision against explicit instructions, use `scripts/review_requirements.py` and [requirement-review.md](references/requirement-review.md). Reuse only source-validated existing artifacts and supplied candidate IDs. Do not start the analysis pipeline, invent requirements, infer completion, or import TwinClip learning scores. Candidate retrieval itself is not implemented or validated by this mode.
 - `breakdown`: analyze one benchmark video and explain why it works.
 - `compare`: compare one benchmark video with one creator video and identify concrete gaps.
 - `improve`: compare videos, select the top 3 to 5 GMV-oriented improvements, and generate the improvement package.

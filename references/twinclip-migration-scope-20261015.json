@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "name": "twinclip-offline-requirement-review-migration-2026-10-15",
+  "description": "Migrate only explicit requirement sources, candidate evidence binding, source invalidation and separate human notes. No retrieval/model calls, automatic completion, scoring, GT, prompt, production route or historical artifact changes. Excludes unrelated diagnostic documents. Mechanical refreeze is a separate governance commit.",
+  "change_scope": {
+    "max_files": 8,
+    "max_added_lines": 850,
+    "max_deleted_lines": 30,
+    "allowed_globs": [
+      "README.md",
+      "SKILL.md",
+      "scripts/review_requirements.py",
+      "scripts/flayr_core/requirement_review.py",
+      "tests/test_requirement_review.py",
+      "references/requirement-review.md",
+      "references/twinclip-migration-scope-20261015.json",
+      "references/bitter-lesson-runtime-fix-scope.json"
+    ],
+    "forbidden_globs": [
+      "runs/**",
+      "outputs/**",
+      "jobs*.json",
+      ".github/**",
+      "references/semantic-baseline-gt.json",
+      "references/analysis-output-schema.json"
+    ]
+  }
+}
