@@ -4,7 +4,7 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "fae7984b19c44f66555b165c516172f8ff76941e",
+  "production_behavior_commit": "716bf988962da70a8d62e16f9f4b4a05b90ac6d0",
   "execution_readiness": {
     "status": "gemini_draft_production_active_human_review_required",
     "scope": "company_gemini_default_route_with_original_funasr_and_human_delivery",
@@ -23,8 +23,9 @@
   "latest_refreeze": {
     "status": "applied_and_refrozen",
     "date": "2026-10-15",
-    "scope": "Bind local report/preprocess repair (fae7984). Default author verification quotes the public action, descriptive stage codes use existing public names, and embedded staging paths relocate without dropping diagnostics. Final delivery and artifact rejection gates remain active. Result reuse version increments to 2; old output is not silently reused as repaired output. Author source-role binding, S5 v11 and observation v7 retained. No gap-scale, GT, qualification, prompt, route, budget, acceptance-threshold or historical artifact changes. Zero model/video calls; no accuracy, time-saving or promotion claim.",
-    "previous_production_behavior_commit": "90ea47a628f64b3f020b239ead0b0c07e0766ec2",
+    "scope": "Bind offline TwinClip requirement review migration (716bf98). Explicit requirements, human-supplied creator evidence IDs, original-time screenshots and separate human notes are source-hash-bound; changed sources invalidate review. Reuses existing review source gates. No automatic retrieval, completion, scores or model calls. Production analysis, gap-scale, GT, qualification, prompt, route, budget, acceptance thresholds and historical artifacts remain unchanged. No semantic accuracy or time-saving claim.",
+    "previous_production_behavior_commit": "fae7984b19c44f66555b165c516172f8ff76941e",
+    "offline_requirement_review_commit": "716bf988962da70a8d62e16f9f4b4a05b90ac6d0",
     "local_report_preprocess_repair_commit": "fae7984b19c44f66555b165c516172f8ff76941e",
     "result_reuse_version": 2,
     "author_evidence_role_wording_commit": "90ea47a628f64b3f020b239ead0b0c07e0766ec2",

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-local-report-preprocess-fix-2026-10-15",
-  "description": "Bind the approved report/preprocess repair to fae7984, including result reuse identity version 2. Existing author source binding, qualification v11 and observation v7 retained. No gap-scale, GT, prompt, route, budget, promotion or historical artifact changes; zero provider calls. Only these three governance records change in this mechanical refreeze.",
+  "name": "semantic-baseline-refreeze-after-twinclip-migration-2026-10-15",
+  "description": "Bind the approved offline requirement review migration to 716bf98. Existing production analysis, qualification v11, observation v7 and result reuse version 2 retained. No gap-scale, GT, prompt, route, budget, promotion or historical artifact changes; zero provider calls. Only these three governance records change in this mechanical refreeze.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 100,
