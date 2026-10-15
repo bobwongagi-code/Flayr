@@ -19,7 +19,7 @@ from .resources import ResourceLimits
 
 
 # Bump for result-affecting code/contract changes, not documentation-only commits.
-RESULT_REUSE_VERSION = 1
+RESULT_REUSE_VERSION = 2
 
 
 def resolve_model_defaults(args: argparse.Namespace) -> None:

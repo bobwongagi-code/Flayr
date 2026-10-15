@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "name": "local-report-preprocess-fix-2026-10-15",
+  "description": "Approved local repairs only: author verification uses public actions, descriptive stage codes use public names, embedded staging paths relocate without dropping warnings, and result reuse identity increments. No model calls, video reruns, gap-scale, qualification, GT or route changes. Existing diagnostic documents are excluded.",
+  "change_scope": {
+    "max_files": 7,
+    "max_added_lines": 350,
+    "max_deleted_lines": 30,
+    "allowed_globs": [
+      "scripts/flayr.py",
+      "scripts/flayr_core/creator_report.py",
+      "scripts/flayr_core/cli.py",
+      "tests/test_creator_report.py",
+      "tests/test_preprocess_generation_paths.py",
+      "references/local-report-preprocess-fix-scope-20261015.json",
+      "references/bitter-lesson-runtime-fix-scope.json"
+    ],
+    "forbidden_globs": [
+      "runs/**",
+      "outputs/**",
+      "jobs*.json",
+      ".github/**",
+      "references/semantic-baseline-gt.json",
+      "references/analysis-output-schema.json"
+    ]
+  }
+}

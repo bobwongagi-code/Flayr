@@ -17,6 +17,48 @@ ONE_PIXEL_PNG = base64.b64decode(
 
 
 class CreatorReportTests(unittest.TestCase):
+    def test_default_verification_quotes_the_public_action_not_internal_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            analysis = self._analysis(root)
+            raw = analysis["improvements"][0]
+            raw.pop("verification")
+            raw["suggestion"] = "参考标杆视频，补拍使用过程。"
+            original = copy.deepcopy(analysis)
+            data = build_creator_report_data(analysis, ReportAssetContext(root))
+            experiment = data["experiments"][0]
+            self.assertIn("爆款视频", experiment["action"])
+            self.assertIn(experiment["action"], experiment["verification"])
+            self.assertNotIn("标杆", experiment["verification"])
+            self.assertEqual(analysis, original)
+
+    def test_experiment_stage_references_use_public_names_without_changing_judgments(self) -> None:
+        names = ("吸引注意", "产品引出", "功能与使用", "效果呈现", "信任表达", "购买提醒")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            analysis = self._analysis(root)
+            for index, name in enumerate(names, 1):
+                with self.subTest(stage=index):
+                    raw = analysis["improvements"][0]
+                    raw["title"] = f"补足 S{index} 的画面"
+                    raw["problem"] = f"S{index} 的画面没有拍清楚。"
+                    original = copy.deepcopy(analysis)
+                    data = build_creator_report_data(analysis, ReportAssetContext(root))
+                    experiment = data["experiments"][0]
+                    self.assertEqual(experiment["title"], f"补足 {name} 的画面")
+                    self.assertEqual(experiment["observation"], f"{name} 的画面没有拍清楚。")
+                    self.assertEqual(analysis, original)
+
+    def test_stage_name_conversion_does_not_hide_internal_levels_or_rewrite_quotes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            analysis = self._analysis(root)
+            for title in ("补足 S3 medium", "补足 S4 uncertain", "参考“标杆视频”的 S1"):
+                with self.subTest(title=title):
+                    analysis["improvements"][0]["title"] = title
+                    with self.assertRaisesRegex(ValueError, "内部用语：title"):
+                        build_creator_report_data(analysis, ReportAssetContext(root))
+
     def _analysis(self, run_dir: Path) -> dict:
         frame = run_dir / "creator" / "frames" / "frame_0001.png"
         frame.parent.mkdir(parents=True)

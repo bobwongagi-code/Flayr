@@ -356,19 +356,20 @@ def _build_experiments(
             raw.get("creator_script"),
         )
         verification = _first_text(raw.get("verification"), raw.get("check"))
+        public_action = _delivery_action(action)
         if not verification:
-            verification = f"是否完成“{action}”并在对应片段看见这项改动。"
+            verification = f"是否完成“{public_action}”并在对应片段看见这项改动。"
         experiments.append(
             {
                 "id": experiment_id,
-                "title": _delivery_text(title),
+                "title": _experiment_delivery_text(title),
                 "targetStage": target_stage,
-                "observation": _delivery_text(observation),
-                "hypothesis": _delivery_text(hypothesis),
-                "action": _delivery_action(action),
-                "demonstration": _delivery_text(demonstration),
-                "verification": _delivery_text(verification),
-                "why": _delivery_text(_first_text(raw.get("why"), hypothesis, observation)),
+                "observation": _experiment_delivery_text(observation),
+                "hypothesis": _experiment_delivery_text(hypothesis),
+                "action": public_action,
+                "demonstration": _experiment_delivery_text(demonstration),
+                "verification": _experiment_delivery_text(verification),
+                "why": _experiment_delivery_text(_first_text(raw.get("why"), hypothesis, observation)),
                 "confidence": _delivery_text(raw.get("confidence")),
                 "status": _safe_text(raw.get("status")) or "proposed",
                 "sourceIndex": original_index,
@@ -662,6 +663,16 @@ def _delivery_action(value: Any) -> str:
     if not text or text.startswith(("可以", "可尝试", "建议", "试试看")):
         return text
     return f"可以{text}"
+
+
+def _experiment_delivery_text(value: Any) -> str:
+    """Translate stage references in descriptive prose, not literal quotes or actions."""
+    parts = _LITERAL_PROSE_RE.split(_delivery_text(value))
+    for index in range(0, len(parts), 2):
+        parts[index] = _STAGE_CODE_RE.sub(
+            lambda match: _STAGE_NAMES[int(match.group(1)) - 1], parts[index],
+        )
+    return "".join(parts)
 
 
 def _continuity_status(value: Any) -> tuple[str, str]:

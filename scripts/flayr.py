@@ -1390,6 +1390,11 @@ def _generation_path_variants(root: Path) -> set[str]:
     return variants
 
 
+def _generation_path_pattern(path: str) -> re.Pattern[str]:
+    # Match a real root reference, not a sibling prefix, URL or nested external path.
+    return re.compile(r"(?<![\w/\\.-])" + re.escape(path) + r"(?=$|[/\\\s'\"，。；,:;!?）)\]])")
+
+
 def _rewrite_generation_paths(value: Any, old_root: Path, new_root: Path) -> Any:
     old_variants = sorted(_generation_path_variants(old_root), key=len, reverse=True)
     if isinstance(value, dict):
@@ -1410,6 +1415,10 @@ def _rewrite_generation_paths(value: Any, old_root: Path, new_root: Path) -> Any
             except ValueError:
                 continue
             return str((new_root / relative).resolve())
+        if not os.path.isabs(value):
+            # Audit warnings and subprocess errors embed paths inside sentences.
+            for old in old_variants:
+                value = _generation_path_pattern(old).sub(lambda _match: str(new_root.resolve()), value)
     return value
 
 
@@ -1444,7 +1453,7 @@ def _rewrite_generation_json_artifacts(
             raise ValueError(f"generated JSON artifact contains a staging path but is invalid: {path}") from exc
         rewritten = _rewrite_generation_paths(value, old_root, new_root)
         write_json(path, rewritten)
-        if any(old in path.read_text(encoding="utf-8") for old in serialized_old_variants):
+        if any(_generation_path_pattern(old).search(path.read_text(encoding="utf-8")) for old in serialized_old_variants):
             raise ValueError(f"staging path remains in generated JSON artifact: {path}")
 
 
