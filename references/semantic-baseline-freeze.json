@@ -4,7 +4,7 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "90ea47a628f64b3f020b239ead0b0c07e0766ec2",
+  "production_behavior_commit": "fae7984b19c44f66555b165c516172f8ff76941e",
   "execution_readiness": {
     "status": "gemini_draft_production_active_human_review_required",
     "scope": "company_gemini_default_route_with_original_funasr_and_human_delivery",
@@ -22,9 +22,11 @@
   },
   "latest_refreeze": {
     "status": "applied_and_refrozen",
-    "date": "2026-10-14",
-    "scope": "Bind author ledger-caption source-role correction (90ea47a). Single-video actor wording follows that evidence's creator/benchmark role; literal quotes, internal notes and reviewed judgments remain untouched. Approved author delivery projection, S5 v11, observation v7 and review runtime repairs retained. No gap-scale, GT, qualification, prompt, route, budget, acceptance-threshold or historical artifact changes. Zero model/video calls; no accuracy, time-saving or promotion claim.",
-    "previous_production_behavior_commit": "7fe59fc86d2fee7e682b1066144c926529ac204b",
+    "date": "2026-10-15",
+    "scope": "Bind local report/preprocess repair (fae7984). Default author verification quotes the public action, descriptive stage codes use existing public names, and embedded staging paths relocate without dropping diagnostics. Final delivery and artifact rejection gates remain active. Result reuse version increments to 2; old output is not silently reused as repaired output. Author source-role binding, S5 v11 and observation v7 retained. No gap-scale, GT, qualification, prompt, route, budget, acceptance-threshold or historical artifact changes. Zero model/video calls; no accuracy, time-saving or promotion claim.",
+    "previous_production_behavior_commit": "90ea47a628f64b3f020b239ead0b0c07e0766ec2",
+    "local_report_preprocess_repair_commit": "fae7984b19c44f66555b165c516172f8ff76941e",
+    "result_reuse_version": 2,
     "author_evidence_role_wording_commit": "90ea47a628f64b3f020b239ead0b0c07e0766ec2",
     "author_delivery_binding_commit": "7fe59fc86d2fee7e682b1066144c926529ac204b",
     "review_runtime_repair_commit": "02cb19325898b979ede10b53fffd984576b11da9",
