@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "name": "learning-review-rules-and-offline-checks-2026-10-16",
+  "description": "Publish direction A review rules, creator communication, supporting rationale and read-only material/wording checks. No production pipeline, model calls, scoring, GT or pilot artifacts. Local historical evidence remains outside this commit.",
+  "change_scope": {
+    "max_files": 11,
+    "max_added_lines": 1600,
+    "max_deleted_lines": 30,
+    "allowed_globs": [
+      "AGENTS.md",
+      "SKILL.md",
+      "references/creator-communication.md",
+      "references/learning-review.md",
+      "references/papafeel-learning-review-plan-20261016.md",
+      "references/papafeel-pilot-execution-retrospective-20261016.md",
+      "references/papafeel-capability-reuse-20261016.md",
+      "references/flayr-direction-a-reuse-review-20261016.md",
+      "references/learning-review-rules-scope-20261016.json",
+      "scripts/validate_learning_review.py",
+      "tests/test_learning_review_materials.py"
+    ],
+    "forbidden_globs": [
+      "runs/**", "outputs/**", "jobs*.json", ".github/**",
+      "scripts/flayr.py", "scripts/flayr_core/**",
+      "references/semantic-baseline-gt.json",
+      "references/analysis-output-schema.json"
+    ]
+  }
+}

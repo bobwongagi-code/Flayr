@@ -1,6 +1,6 @@
 ---
 name: flayr
-description: Analyze TikTok commerce videos, compare a benchmark video with a creator video, and produce a practical improvement package with extracted frames, transcript artifacts, structured recommendations, and an HTML report.
+description: Review TikTok commerce learning submissions against reference breakdowns and storyboards, check explicit filming requirements, or analyze and compare commerce videos. Use product understanding, source-linked evidence and human review to prepare concrete shooting suggestions.
 ---
 
 # Flayr
@@ -9,16 +9,27 @@ Use this skill when the user wants to analyze, compare, or improve TikTok commer
 
 The product principle is simple: do not hand creators a long text report. Produce a visual, concrete improvement package that operations teams can use and creators can understand by watching.
 
+For any A/B/C output intended for creators, follow [creator-communication.md](references/creator-communication.md). Check current text with `scripts/validate_learning_review.py --author-copy <draft>`; a learning-review packet may also be supplied. Integrate factual, audience and expression review into existing content finalization, record the actual file/version and human disposition, and recheck affected content after changes. The scan is not human approval or a rendered-media check. Do not infer that the legacy report renderer has adopted this offline procedure or its updated reference naming.
+
+In content review, recognize real visible results, including multi-day personal before/after records. Do not substitute clinical proof requirements or same-day/multi-day blanket rules for observing the actual result. Do not make beauty-filter choices a default correction, or add internal evidence disclaimers to creator prose. Follow the manual's current correction examples; preserve actual evidence and avoid inventing outcomes or timeframes.
+
 ## Modes
 
+- Learning-submission review (direction A): when a team supplies a reference breakdown/storyboard for authors to learn from, read [learning-review.md](references/learning-review.md) first. Start from the product, buying question and whole-video reasoning, then compare teaching purpose with submitted content. Reuse existing materials unless new collection is authorized. This is human-assisted content review, not automatic grading or explicit-requirement completion. The default command, legacy workflow, 3-to-5 recommendation count and comparison output contract below do **not** apply. Run `python3 scripts/validate_learning_review.py <cases.json>` before handoff; a pass checks completeness, not correctness or approval.
 - Offline requirement review: when the task is checking an existing revision against explicit instructions, use `scripts/review_requirements.py` and [requirement-review.md](references/requirement-review.md). Reuse only source-validated existing artifacts and supplied candidate IDs. Do not start the analysis pipeline, invent requirements, infer completion, or import TwinClip learning scores. Candidate retrieval itself is not implemented or validated by this mode.
 - `breakdown`: analyze one benchmark video and explain why it works.
 - `compare`: compare one benchmark video with one creator video and identify concrete gaps.
 - `improve`: compare videos, select the top 3 to 5 GMV-oriented improvements, and generate the improvement package.
 
+## Review Mode Boundary
+
+After selecting either review mode above, follow its linked procedure and stop reading the legacy execution instructions below as task requirements. In particular, the later Analysis Rules, Structure Library defaults, Dependency Handling and Output Contract do not require review work to run models, produce gap grades, add 3 to 5 recommendations, or generate a comparison report. For learning review, current responsibilities and superseded-rule handling are in `references/learning-review.md`. Explicit user authorization still governs any new collection or calls.
+
+The remainder documents the legacy comparison harness, not the direction A review procedure. Provider descriptions there are historical; they do not authorize a route change or override current production configuration.
+
 ## Default Command
 
-Run the bundled script:
+For the legacy comparison modes only, run the bundled script. Selecting a review mode above does not authorize new model calls or video reprocessing:
 
 ```bash
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/Flayr/scripts/flayr.py" improve \
