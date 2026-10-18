@@ -1,5 +1,11 @@
 # Flayr · TikTok 带货短视频分析与提升工具
 
+## 产品升级方案（文档已冻结，未实施）
+
+2026-10-18已形成并内部复核[Flayr升级冻结方案v1.1](references/flayr-upgrade-frozen-plan-20261018.md)：升级ABC，不新增D，以商品理解和带货表达知识服务作者的策划与反馈；与Rootify Agent、ClipMentor按职责协作，不合仓。详细需求见[ABC需求v0.7](references/flayr-abc-product-requirements-20261015.md)，[v1.0原文](references/flayr-upgrade-frozen-plan-20261018-v1.0.md)留档。这是产品方案，不代表下方既有分析链已完成改造、自动检索或业务试点已通过，也不授权调用、发送或代码refreeze。
+
+## 既有分析工具
+
 Flayr 接收一条参考视频和一条达人视频，结合画面、口播、字幕和音频质检，按 S1-S6 功能阶段对比差距，输出可执行的拍摄、剪辑和表达建议。Flayr 生成结构化分析和 HTML 报告，不生成替换视频、达人音色视频或 AI 示意视频。
 
 ## 能力概览
