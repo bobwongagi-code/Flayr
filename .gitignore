@@ -1,6 +1,11 @@
 # 运行产物（每次分析的输出，体积大、可重新生成）
 runs/
 
+# Senty originals and machine-local audit evidence are not approved for publication.
+references/archive/senty-20261107/
+references/migrations/senty-20261107/external-reference-audit.json
+references/migrations/senty-20261107/review-record.md
+
 # 本地人工标注与实验输出（保留在本机，不纳入版本库）
 outputs/
 
