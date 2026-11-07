@@ -1,266 +1,74 @@
-# Flayr · TikTok 带货短视频分析与提升工具
+# Flayr
 
-## 产品升级方案（文档已冻结，未实施）
+**面向 TikTok Shop 的商品内容策划与视频复盘工具。**
 
-2026-10-18已形成并内部复核[Flayr升级冻结方案v1.1](references/flayr-upgrade-frozen-plan-20261018.md)：升级ABC，不新增D，以商品理解和带货表达知识服务作者的策划与反馈；与Rootify Agent、ClipMentor按职责协作，不合仓。详细需求见[ABC需求v0.7](references/flayr-abc-product-requirements-20261015.md)，[v1.0原文](references/flayr-upgrade-frozen-plan-20261018-v1.0.md)留档。这是产品方案，不代表下方既有分析链已完成改造、自动检索或业务试点已通过，也不授权调用、发送或代码refreeze。
+Flayr 帮助创作者和内容团队把“这个商品有什么用”，变成“这条视频具体怎么拍”。它结合商品特点、买家的使用场景和带货视频表达方法，准备拍摄方向、镜头脚本，以及有原片依据的改进建议。
 
-## 既有分析工具
+当前通过 Agent 辅助流程和 Python 工具使用，交付内容由人确认；尚未提供一键生成全部产出物的独立应用。
 
-Flayr 接收一条参考视频和一条达人视频，结合画面、口播、字幕和音频质检，按 S1-S6 功能阶段对比差距，输出可执行的拍摄、剪辑和表达建议。Flayr 生成结构化分析和 HTML 报告，不生成替换视频、达人音色视频或 AI 示意视频。
+## 可以用它做什么
 
-## 能力概览
+| 需要解决的问题 | 产出物 | 方法 |
+| --- | --- | --- |
+| 一款商品可以从哪些角度拍？ | **商品内容简报与方向选择卡**：购买理由、可选情境、拍摄条件和关键画面 | [商品内容策划](references/content-planning.md) |
+| 选好方向，拍摄时怎么执行？ | **拍摄卡**：具体镜头、动作、示范话术和可改编部分 | [从方向到拍法](references/content-planning.md) |
+| 已拍的视频，下一条可以怎样改？ | **图文反馈页**：整片重点、原片时间点与截图、具体改法；有合适参考时并列对照 | [交稿反馈](references/learning-review.md) |
+| 约定的拍摄要求，能在成片里找到吗？ | **候选片段清单**：集中展示相关时间段和已有证据，供人核对 | [明确要求核对](references/requirement-review.md) |
 
-| 能力 | 说明 |
-|------|------|
-| 视频转写 | 通过可配置的在线 ASR 服务生成句级和词级时间戳，支持传入语言提示 |
-| 视频理解 | 以 canonical frames 和时间线为可审计主证据，必要时定向查看原生视频时间窗 |
-| 音频质检 | 检查音量、静音和峰值风险；语气、BGM 和音效只作观察，不直接决定差距等级 |
-| 结构化分析 | 按 S1-S6 功能阶段比较达人与参考视频 |
-| 改进建议 | 按商业影响排序，给出话术、画面和执行建议 |
-| 报告输出 | 生成业务分析报告、达人执行报告和结构化 JSON 产物 |
+对于还不了解内容服务的创作者，也可以先提供一次基于本人视频的具体观察；素材和使用范围合适时，再准备重组样片的策划与改动说明。剪辑制作与发送分别安排，不自动执行。
 
-## 使用边界
+## 一张拍摄卡是什么样
 
-Flayr 是辅助分析工具。relation、gap 和改进建议在发布前必须由人工确认；证据不足时应保留 `unknown` 或 `degraded` 状态，不自动发布确定结论。
-
-### 已有返稿的要求核对（离线）
-
-`scripts/review_requirements.py` 接收已核准的要求清单和人工指定的候选证据 ID，
-复用已有 Flayr 产物，集中展示对应时间、截图路径、账本原文，并单独记录人工意见。
-不调用模型、不自动检索、不打分，也不把“找到候选”当成“要求已满足”。
-来源或版本变化会使旧核对包失效。操作与边界见 [要求核对说明](references/requirement-review.md)。
-
-## 分析架构
-
-Flayr 使用视觉模型、判断模型和 ASR 服务分工协作。所有阶段共用统一事实账本、最终判定流程和受限复核机制，不为不同模型维护平行的事实或判断系统。
+以可更换接头的充电配件为例：
 
 ```text
-Stage1：单视频事实抽取
-  分别处理参考视频和达人视频
-  canonical 关键帧/时间线 + 窗口化 ASR + OCR
-  -> 生成带时间戳的 evidence_units
-  -> Stage1-B 只基于事实做资格投影
-  -> 资格或连续性未闭合时，Stage1-C 最多补看一次目标时间窗
-  -> 确认后的 facts 成为后续判断的唯一事实源
+拍摄方向：借到线了，接口却对不上。
 
-Stage2：跨视频比较
-  只读取两侧 facts，不重新查看完整视频
-  -> 按 S1-S6 分组判断 relation、gap 和 reason
-  -> Stage3 汇总 key_conclusions 与 improvements
+这一条要讲清：换接头怎样解决接口不匹配的问题。
+需要准备：手机、一根接口不匹配的线、适用于该手机的充电配件。
 
-Phase C：定向复核
-  仅由覆盖、资格、连续性或最终判定冲突触发，最多复核两个阶段
-  -> 查看对应时间窗并生成受限事实补丁
-  -> 重新执行既有后处理与校验
-  -> 不整段重写判断，也不无限索取素材
+镜头 1｜把线头停在手机接口旁，同框拍清两者的差别。
+可以说：“借到线了，怎么接口不一样？”
+
+镜头 2｜拿出配件，近景拍清更换接头和插入手机的过程。
+可以说：“换成这个接头，再接上。”
+
+镜头 3｜拍清实际连接状态和手机屏幕提示，再将整套配件同框展示。
+
+话术按自己的说法改，画面按实际操作拍。
 ```
 
-详细的模块边界和数据流见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+反馈页则从已经拍出的内容出发：先找整条视频最重要的表达问题，再把对应画面、为什么值得改和下一条的具体拍法放在一起，不只给“拍近一点”“讲清楚”这样的泛泛建议。
 
-## 目录结构
+## 工作方式
 
 ```text
-Flayr/
-├── scripts/
-│   ├── flayr.py                  # CLI 主入口
-│   ├── web_app.py                # 本地 Web 入口
-│   ├── batch_analyze.py          # 批量作业、断点续跑与限并发
-│   ├── replay_finalization.py    # 确定性最终处理回放
-│   ├── run-quality-gates.sh      # 代码质量检查
-│   └── flayr_core/               # 分析、证据、报告和运行状态模块
-├── frontend/                     # Web 前端资源
-├── assets/                       # HTML 报告模板
-├── references/                   # 输出契约、观察指引和市场知识
-├── QA-RULES.md                   # 分析结果校验规则
-├── structure_library_full.md     # S1-S6 结构库
-└── runs/                         # 默认运行输出目录
+商品资料、使用场景与参考视频
+    → 商品内容简报
+    → 选择方向，准备镜头与话术
+    → 创作者拍摄
+    → 对照实际交稿给反馈
+    → 已确认的发现用于下一条策划
 ```
 
-## 安装与依赖
+商品简报可以供多条视频、多个创作者复用。每条视频的方向仍要结合本人已有内容和拍摄条件选择，不要求照搬同一套画面。
 
-运行环境：
+分析先看商品价值有没有表达成立，再看构图、剪辑和字幕怎样配合。商家主张、原片可见事实、人工确认和创意提议分开记录；不能把抽样没找到写成“没拍”，也不能把已经拍过的内容重新包装成缺失项。
 
-- Python 3.11、3.12 或 3.13
-- `ffmpeg` 和 `ffprobe`，用于媒体探测、抽帧和音频提取
-- `curl`，用于调用在线 ASR 服务
-- 可访问的视觉模型、判断模型和 ASR 服务
+## 从哪里开始
 
-核心分析代码只使用 Python 标准库。开发、报告增强和质量检查依赖已固定在 `requirements-dev.lock`：
+- **做策划或反馈**：准备商品资料、目标市场、可用视频及本次要解决的问题，让 Agent 按 [SKILL.md](SKILL.md) 选择相应流程。具体拍法和事实在发送前由内容人员确认。
+- **核对明确要求**：使用 [离线核对工具](references/requirement-review.md)。当前候选片段由人工提供，不是自动检索或自动验收。
+- **开发或接入工具**：阅读 [DEVELOPMENT.md](DEVELOPMENT.md)，包含运行环境、命令、旧分析链与验证方式。
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install --requirement requirements-dev.lock
-```
+## 项目状态
 
-依赖边界见 [DEPENDENCIES.md](DEPENDENCIES.md)，版本和发布流程见 [VERSION](VERSION) 与 [RELEASE.md](RELEASE.md)。
+已有视频抽帧、转写、OCR、时间轴、来源记录和离线核对代码。拍摄卡与反馈流程处于人工辅助的业务验证阶段，自动比较方向和差距档位的旧代码仍保留，但不作为可直接交付的自动结论。
 
-## 配置
+当前重点是验证建议是否有用、创作者是否采用，以及团队实际投入。没有验证的省时或成交提升不作为产品承诺。
 
-常规分析的文本判断、视频取证、OCR、定点回看和翻译统一走公司网关，默认共用 `FLAYR_LLM_API_KEY`。ASR 继续使用独立端点和密钥，不使用公司网关密钥。视频通过已核验的私有存储 URL 传输，需要配置视频存储凭据。显式模型或端点配置仍优先，不自动回退到旧线路。模型输出是待审核草稿，人工确认后才用于交付。不要把密钥写入命令、仓库或运行产物；运行元数据只记录端点和密钥环境变量名，不记录密钥值。
+## 方法与资料
 
-```bash
-# Optional role model and endpoint overrides.
-# export FLAYR_JUDGMENT_MODEL="<judgment-model-id>"
-# export FLAYR_VISION_MODEL="<vision-model-id>"
-# export FLAYR_LLM_API_URL="<approved-chat-completions-url>"
-# export FLAYR_VISION_API_URL="<approved-vision-chat-completions-url>"
-# export FLAYR_VISION_API_KEY_ENV="<vision-key-environment-variable>"
-export FLAYR_LLM_API_KEY="<secret>"
-# Private video URL storage.
-export FLAYR_R2_ACCOUNT_ID="<account-id>"
-export FLAYR_R2_BUCKET="<private-bucket>"
-export FLAYR_R2_API_TOKEN="<secret>"
-# Optional: set this only when the text key uses a different environment-variable name.
-# export FLAYR_LLM_API_KEY_ENV="<llm-key-environment-variable>"
+[商品内容策划](references/content-planning.md) · [交稿反馈](references/learning-review.md) · [创作者沟通](references/creator-communication.md) · [本地场景资料](references/local-context-candidates.md) · [开发说明](DEVELOPMENT.md)
 
-# ASR keeps its own endpoint, model, and key; the LLM gateway key is not used for ASR.
-export FLAYR_ASR_API_URL="<approved-asr-url>"
-export FLAYR_ASR_MODEL="<asr-model-id>"
-export FLAYR_ASR_API_KEY="<secret>"
-export FLAYR_ASR_API_KEY_ENV="FLAYR_ASR_API_KEY"
-```
-
-系统不会在调用失败后静默切换线路。公司网关的长视频原生 MP4 路径曾失败，未通过验收；默认视觉任务保持在原北京 MaaS 线路，不代表其他长度视频已完成验收。LLM 与 ASR 使用独立密钥配置；ASR 不会借用公司网关密钥。ASR 失败时，`compare` 和 `improve` 默认返回非零；只有显式使用 `--allow-degraded` 才会继续生成带降级状态的报告。
-
-## CLI 用法
-
-### 基本分析
-
-```bash
-python3 scripts/flayr.py improve \
-  --benchmark-video /path/to/benchmark.mp4 \
-  --creator-video /path/to/creator.mp4 \
-  --product-name "产品名称" \
-  --target-market auto \
-  --core-selling-points "已确认的核心卖点" \
-  --asr-api-url "$FLAYR_ASR_API_URL" \
-  --asr-model "$FLAYR_ASR_MODEL" \
-  --asr-api-key-env FLAYR_ASR_API_KEY \
-  --verification-stage production \
-  --output-dir runs/example
-```
-
-CLI 提供四种模式：
-
-| 模式 | 用途 |
-|------|------|
-| `breakdown` | 分析单条参考视频的结构 |
-| `compare` | 对比参考视频与达人视频 |
-| `improve` | 对比并生成改进建议和完整报告 |
-| `scope` | 只执行可比较性预检，不生成报告 |
-
-常用参数：
-
-| 参数 | 说明 |
-|------|------|
-| `--benchmark-video` | 参考视频路径 |
-| `--creator-video` | 达人视频路径，`compare`、`improve` 和 `scope` 必需 |
-| `--product-name` | 产品名称 |
-| `--product-category` | 结构库中的产品类别 |
-| `--target-market` | `auto`、`sea` 或两位市场代码 |
-| `--core-selling-points` | 已核实的产品卖点和差异点 |
-| `--judgment-model` | 资格、比较、汇总和文本判断所用模型 ID；默认路由可覆盖 |
-| `--vision-model` | OCR、事实观察和定向视频复核所用模型 ID；覆盖时必须与判断模型同时提供 |
-| `--llm-api-url` | 文本判断或显式旧单路使用的 Chat Completions 端点 |
-| `--vision-api-url` | 可选的独立视觉端点；默认共用公司网关 |
-| `--llm-api-key-env` | 保存 LLM 服务密钥的环境变量名；默认 `FLAYR_LLM_API_KEY` |
-| `--vision-api-key-env` | 可选的独立视觉密钥环境变量；默认共用公司网关密钥 |
-| `--asr-api-url` | 在线 ASR 服务端点 |
-| `--asr-model` | 在线 ASR 模型 ID |
-| `--asr-language` | ASR 语言提示，默认 `auto` |
-| `--asr-api-key-env` | 保存 ASR 服务密钥的环境变量名 |
-| `--ocr-mode auto/on/off` | 字幕 OCR 模式，默认 `auto` |
-| `--max-total-wall-time` | 单次运行总墙钟预算，默认 3600 秒；不改变单请求超时 |
-| `--max-llm-calls` | 单次运行允许的真实模型网络尝试上限，默认 32；OCR 独立计数 |
-| `--no-translate-with-llm` | 默认启用中文翻译；此选项显式关闭 |
-| `--reuse-preprocessing` | 复用同一输出目录中身份匹配的抽帧、转写和字幕轨 |
-| `--allow-degraded` | 明确允许生成降级结果；降级运行不会写成功清单 |
-
-完整参数以命令帮助为准：
-
-```bash
-python3 scripts/flayr.py --help
-```
-
-## Web 用法
-
-Web worker 在未指定模型时使用与 CLI 相同的固定混合线路。覆盖时读取上一节的 `FLAYR_*` 配置；判断模型和视觉模型只设置一个时，任务会在启动分析前失败。
-
-```bash
-python3 scripts/web_app.py --host 127.0.0.1 --port 8787
-```
-
-启动后访问 `http://127.0.0.1:8787/`。默认只监听本机。对外监听必须显式使用 `--unsafe-expose`，并配置不少于 32 字节的 `FLAYR_WEB_AUTH_TOKEN` 和允许访问的 `FLAYR_WEB_ALLOWED_HOSTS`。使用前先查看：
-
-```bash
-python3 scripts/web_app.py --help
-```
-
-## 工作流程
-
-```text
-视频输入
-  -> 在线转写、抽帧和音频提取
-  -> 可选的转写翻译
-  -> Stage1 单视频事实抽取和资格投影
-  -> Stage2 分阶段比较
-  -> 必要时 Phase C 定向复核
-  -> 后处理、契约校验和报告渲染
-  -> 输出到 --output-dir 或 runs/<时间戳>/
-```
-
-## 输入与输出
-
-所有模式都需要参考视频；`compare`、`improve`、`scope` 还需要达人视频。建议明确提供产品名称、产品类别、目标市场和已核实卖点；目标用户与购买动机可进一步收窄判断上下文。未提供的信息不会由 README 示例替用户推断。
-
-成功的 `compare` 或 `improve` 运行会写入 `_SUCCESS.json`。降级运行会写入 `degraded_manifest.json`，不会伪装成成功。
-
-主要产物：
-
-| 文件 | 说明 |
-|------|------|
-| `bd_report.html` | 业务分析报告 |
-| `creator_report.html` | 达人执行报告 |
-| `report.html` | 通用报告 |
-| `analysis.json` | 完整运行数据和状态 |
-| `analysis_result.json` | 归一化后的模型分析结果 |
-| `raw_model_response.json` | 原始模型响应 |
-| `validated_normalized_result.json` | 通过契约校验的规范化结果 |
-| `final_derived_result.json` | 最终派生结果和字段来源 |
-| `analysis_replay_context.json` | 最终处理回放所需的上下文与输入哈希 |
-| `postprocess_change_log.json` | 后处理字段变更、规则和证据记录 |
-| `video_facts_benchmark.json` / `video_facts_creator.json` | 两侧 Stage1 事实清单 |
-| `stage1_provider_*.json` / `stage2_provider_*.json` | Provider 响应、请求身份、哈希和执行来源 |
-| `provider_asr.json` | ASR 原始响应、请求身份、哈希和执行来源 |
-| `benchmark/` / `creator/` | 各侧转写、帧、联系表、时间线和证据审计产物 |
-
-## 回放
-
-确定性最终处理只读取已存在的规范化结果、分析上下文和输入哈希，不读取视频，也不调用外部服务：
-
-```bash
-python3 scripts/replay_finalization.py <source-run> <new-output-dir>
-```
-
-Stage1、Stage2 或完整 Provider 结果可分别通过 `--stage1-replay-from`、`--stage2-replay-from` 和 `--provider-replay-from` 严格回放。缺失产物或请求身份不匹配会直接失败，不会静默回退到在线调用。
-
-## 验证
-
-运行单元测试和质量检查：
-
-```bash
-python3 -m unittest discover -s tests -v
-bash scripts/run-quality-gates.sh
-python3 scripts/check_release.py
-```
-
-## 设计原则
-
-1. **模态分工明确**：视觉模型负责可见事实和定向视频复核，ASR 服务负责口播转写，判断模型只读取确认后的事实。
-2. **事实与判断分离**：Stage1 生成事实，Stage2 在事实账本上比较，避免两侧证据串用。
-3. **证据可追溯**：事实、判断和建议绑定时间范围、证据 ID 与执行来源。
-4. **失败显式化**：外部服务、模型输出或契约失败返回非零；降级结果不会写成功清单。
-5. **有限复核**：原生视频只用于触发条件明确的定向复核，不创建第二套事实系统。
-6. **商业导向**：建议围绕停留、信任和下单转化组织。
-7. **本地化**：输出适配目标市场，话术建议保留达人使用的语言语境。
+本地场景资料保留已有马来西亚本地人审核的来源，使用时结合具体商品和情境适配。原始视频、内部名单、私有商品输入、凭据和本机审计记录不随公开仓库发布。
