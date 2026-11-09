@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "name": "offline-skill-workflow-and-verification-2026-11-09",
+  "description": "Public skill routing, scoped feedback contrasts and offline source/final-file checks only. No production behavior, private pilot artifacts or dependency changes.",
+  "change_scope": {
+    "max_files": 14,
+    "max_added_lines": 1800,
+    "max_deleted_lines": 300,
+    "allowed_globs": [
+      "AGENTS.md", "HANDOFF.MD", "SKILL.md",
+      "references/creator-communication.md",
+      "references/learning-review.md",
+      "references/papafeel-pilot-execution-retrospective-20261016.md",
+      "references/legacy-analysis-workflow.md",
+      "references/review-improvement.md",
+      "references/review-contrasts.json",
+      "references/skill-iteration-scope-20261109.json",
+      "scripts/validate_learning_review.py",
+      "scripts/review_evidence.py",
+      "scripts/validate_review_delivery.py",
+      "tests/test_review_workflow_checks.py"
+    ],
+    "forbidden_globs": [
+      "runs/**", "outputs/**", "jobs*.json", ".github/**", "requirements*",
+      "scripts/flayr.py", "scripts/flayr_core/**",
+      "references/semantic-baseline*", "references/analysis-output-schema.json",
+      "references/flayr-zero-*", "references/flayr-upgrade-frozen-plan-20261018.md"
+    ]
+  }
+}

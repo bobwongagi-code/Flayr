@@ -1,145 +1,52 @@
 ---
 name: flayr
-description: Review TikTok commerce learning submissions against reference breakdowns and storyboards, check explicit filming requirements, or analyze and compare commerce videos. Use product understanding, source-linked evidence and human review to prepare concrete shooting suggestions.
+description: Plan product-grounded TikTok commerce content, prepare shooting directions and visual cards, review submitted videos or explicit filming requirements, and prepare personalized content-experience outreach. Use source-linked evidence and human finalization; not automatic grading or outreach sending.
 ---
 
 # Flayr
 
-Use this skill when the user wants to analyze, compare, or improve TikTok commerce short videos for GMV-oriented creator coaching.
+Combine product understanding with shoppable-video expression. Keep purchase reasons and whole-video reasoning upstream; give creators concrete visual directions or feedback, not a long internal report.
 
-The product principle is simple: do not hand creators a long text report. Produce a visual, concrete improvement package that operations teams can use and creators can understand by watching.
+## Work Map
 
-For any A/B/C output intended for creators, follow [creator-communication.md](references/creator-communication.md). Check current text with `scripts/validate_learning_review.py --author-copy <draft>`; a learning-review packet may also be supplied. Integrate factual, audience and expression review into existing content finalization, record the actual file/version and human disposition, and recheck affected content after changes. The scan is not human approval or a rendered-media check. Do not infer that the legacy report renderer has adopted this offline procedure or its updated reference naming.
+Choose by the requested outcome. ABC are workflows sharing one foundation, not separate apps or a reason to run the old comparison chain.
 
-In content review, recognize real visible results, including multi-day personal before/after records. Do not substitute clinical proof requirements or same-day/multi-day blanket rules for observing the actual result. Do not make beauty-filter choices a default correction, or add internal evidence disclaimers to creator prose. Follow the manual's current correction examples; preserve actual evidence and avoid inventing outcomes or timeframes.
+| Task | Input | Output and completion boundary | Read |
+| --- | --- | --- | --- |
+| C: shared product reasoning | Existing product material, buyer questions, reviewed references | Product content brief: supported purchase reasons, distinct directions, shooting conditions, evidence status and limits; content owner confirms reuse | [Planning](references/content-planning.md), [ABC definitions](references/flayr-upgrade-frozen-plan-20261018.md) |
+| B: before filming | C or available product evidence, actual assignment and resources | Author direction choices and selected shot card: what to film, prepare and show; no invented personal diagnosis or resources | [Planning](references/content-planning.md), ABC definitions above |
+| A: submission feedback | Actual video, material actually sent if any, existing product evidence | Whole-video reasoning, supported priorities and screenshot-linked actions; diagnose as a draft until human finalization | [A review](references/learning-review.md); use its no-teaching branch when no teaching was sent |
+| Explicit requirement check | Approved requirements, one existing run, supplied candidate IDs | Bound review packet and separate notes; located does not mean satisfied; no automatic retrieval | [Requirement review](references/requirement-review.md) |
+| Zero: content-experience entry | Business-qualified participants and their own footage | Source-supported observation or recut plan plus production handoff; qualification, grouping, production and BD sending remain separate | The current task's explicitly approved Zero plan and entry record; absence of that plan does not authorize selection, production or sending |
+| Legacy analysis, only when explicitly requested | Approved videos, route and task authorization | Legacy breakdown/comparison artifacts, with their original verification obligations | [Legacy harness](references/legacy-analysis-workflow.md) |
 
-## Modes
+A does not require a C archive or a reference comparison to start. No explicit requirements means no invented checklist. B and C do not need a fabricated learning-review packet.
 
-For C briefs, B directions and the product reasoning used by A/Zero, use [product-to-content planning](references/content-planning.md). It supplements existing product understanding and evidence, not a new mode, call chain or form. [Senty migration boundaries](references/migrations/senty-20261107/README.md) separate public methods from local-only original assets; historical scoring, provider configuration and templates are not executable policy.
+## Shared Execution
 
-- Learning-submission review (direction A): when a team supplies a reference breakdown/storyboard for authors to learn from, read [learning-review.md](references/learning-review.md) first. Start from the product, buying question and whole-video reasoning, then compare teaching purpose with submitted content. Reuse existing materials unless new collection is authorized. This is human-assisted content review, not automatic grading or explicit-requirement completion. The default command, legacy workflow, 3-to-5 recommendation count and comparison output contract below do **not** apply. Run `python3 scripts/validate_learning_review.py <cases.json>` before handoff; a pass checks completeness, not correctness or approval.
-- Offline requirement review: when the task is checking an existing revision against explicit instructions, use `scripts/review_requirements.py` and [requirement-review.md](references/requirement-review.md). Reuse only source-validated existing artifacts and supplied candidate IDs. Do not start the analysis pipeline, invent requirements, infer completion, or import TwinClip learning scores. Candidate retrieval itself is not implemented or validated by this mode.
-- `breakdown`: analyze one benchmark video and explain why it works.
-- `compare`: compare one benchmark video with one creator video and identify concrete gaps.
-- `improve`: compare videos, select the top 3 to 5 GMV-oriented improvements, and generate the improvement package.
+1. Read the current task's entry record and relevant mode, not every historical log. Restore product purpose, actual sources, authorization and unresolved facts before proposing a local tip.
+2. Draft from purchase reasons and whole-video expression, then select concrete shots, actions or edits. Recognize valid alternatives, actual visible results and relevant personal before/after records. Sampling supports “not found,” not “not done.” No automatic grades or fixed number of improvements.
+3. Follow [creator communication](references/creator-communication.md) for the actual recipient. Keep internal evidence caveats out of creator prose; do not make beauty filters a default correction or promise sales. Preserve product-use conditions, comparison objects and source times.
+4. Run the checks applicable to the changed artifact, below. Finish executor reasoning and evidence review; a script pass is not content approval.
+5. Record current artifact/version, check scope and remaining review in the existing task record. Final sending still follows the business owner's authorization. Feedback follows [the improvement loop](references/review-improvement.md); prefer a tool fix or scoped contrast case over another universal rule.
 
-## Review Mode Boundary
+## Checks and Known Limits
 
-After selecting either review mode above, follow its linked procedure and stop reading the legacy execution instructions below as task requirements. In particular, the later Analysis Rules, Structure Library defaults, Dependency Handling and Output Contract do not require review work to run models, produce gap grades, add 3 to 5 recommendations, or generate a comparison report. For learning review, current responsibilities and superseded-rule handling are in `references/learning-review.md`. Explicit user authorization still governs any new collection or calls.
+| Object | Offline command from repository root | What it establishes |
+| --- | --- | --- |
+| A learning-review packet, only when teaching exists | `python3 scripts/validate_learning_review.py /path/to/cases.json` | Required fields and readable teaching file only; not required for no-teaching A |
+| Structured source bindings, when available | Same command plus `--evidence-index /path/to/evidence-index.json` | Exact source bytes, declared IDs/quotes, video association and bounded times; unresolved facts stay explicit |
+| Current author Markdown/text | `python3 scripts/validate_learning_review.py --author-copy /path/to/draft.md` | Limited wording scan; repeat option for affected drafts |
+| Final single-file HTML | `python3 scripts/validate_review_delivery.py /path/to/final.html --author-region directions --author-region shoot` | Selected author DOM text, resource/fragment checks, embedded image decoding and final SHA-256; use the actual region IDs |
 
-The remainder documents the legacy comparison harness, not the direction A review procedure. Provider descriptions there are historical; they do not authorize a route change or override current production configuration.
+Bindings and final-file details are in [the improvement/check contract](references/review-improvement.md). Do not rewrite old packets to claim stronger checks retroactively. HTML checks do not run scripts or prove browser layout, screenshot meaning, source truth, local-language naturalness or sharing permission. PDF/audio/video need their actual format's final review; do not pass them off as HTML.
 
-## Default Command
+Use [reviewed contrasts](references/review-contrasts.json) as scoped development examples, including counterexamples. Their presence or keyword overlap does not establish semantic success. Old human-reviewed stage lookup remains available via `scripts/lookup_reviewed_cases.py`; it is not the new A/B/C feedback store.
 
-For the legacy comparison modes only, run the bundled script. Selecting a review mode above does not authorize new model calls or video reprocessing:
+Keep four results separate: automatic check, executor/AI review, human confirmation, not yet verified. Do not collapse them into a global “PASS.” Content changes invalidate the affected file's old verification.
 
-```bash
-python3 "${CODEX_HOME:-$HOME/.codex}/skills/Flayr/scripts/flayr.py" improve \
-  --benchmark-video "/path/to/benchmark.mp4" \
-  --creator-video "/path/to/creator.mp4" \
-  --product-name "Product name" \
-  --product-price "39" \
-  --verification-stage production
-```
+## Scope and Current State
 
-When working from this repository directly, use:
+Reuse the existing product foundation and stage responsibilities, not retired automatic gap grades. [Senty migration boundaries](references/migrations/senty-20261107/README.md) preserve public methods versus local-only source assets; do not revive its services or automatic scores.
 
-```bash
-python3 scripts/flayr.py improve \
-  --benchmark-video "/path/to/benchmark.mp4" \
-  --creator-video "/path/to/creator.mp4" \
-  --verification-stage production
-```
-
-## Workflow
-
-`scripts/flayr.py` is the skill harness: it owns CLI parsing, run-directory setup, orchestration, and output wiring. Core responsibilities live under `scripts/flayr_core/`: video evidence extraction, online transcription/translation, LLM analysis, and report rendering.
-
-1. Confirm the requested mode and local video paths.
-2. Run dependency checks for `ffmpeg`, `ffprobe`, and the approved online Fun-ASR endpoint configuration.
-3. Extract a bounded adaptive base frame set (up to 2 fps under the shared frame budget) and a WAV audio file for each input video.
-4. Extract denser 2 fps focus frames for the first 5 seconds and final 5 seconds, and write `focus_frames/manifest.json` with timestamps.
-   Also write `frames/manifest.json` and `frames/stage_frames.json` so S1-S6 diagnosis has full-funnel visual evidence. Scene, subtitle, local-change, action-change, and bounded word-level speech anchors are then merged into the canonical `frames/analysis_manifest.json` and `analysis_stage_frames.json` consumed by model inputs and downstream views.
-5. Transcribe speech in the detected local language through the approved Beijing MaaS Fun-ASR endpoint, and keep a Chinese translation beside it.
-   Use `--translate-with-llm` when the Chinese translation should be generated automatically.
-6. Classify `speech_mode`: `spoken`, `subtitle_driven`, `visual_driven`, or `music_driven`.
-   Use `transcript_packed` / `transcript.srt` as the primary spine only for `spoken` videos. For no-speech videos, use OCR subtitles, visual changes, timeline views, shot tracks, and audio rhythm instead.
-7. Generate secondary evidence artifacts from those assets: `frames/selection_report.*`, `contact_sheets/`, `timeline_views/`, `transcript_packed.*`, and `video_evidence_audit.json`.
-   The canonical analysis manifests are the only visual input source; selection reports, contact sheets, and timelines are audit views of that same set. Stage1 visual payloads should prefer Hook/CTA timeline views before canonical frames when available.
-8. Generate `analysis_input.md` for large-model diagnosis.
-9. If `--llm-model` is provided, call the configured OpenAI-compatible chat endpoint to generate `analysis_result.json`.
-   Use `--llm-include-images` when the model should inspect Hook/CTA focus frames directly; keep `--llm-image-limit` modest, such as 8 to 12 images.
-   Validate the model JSON against the schema. Shared deterministic normalization resolves mechanical contradictions; the configured provider profile controls any supported repair path. Facts, evidence references, proposition references, and severity remain immutable during repair.
-10. If a large-model result exists, pass it with `--analysis-result-json` and merge it back into the report.
-11. Analyze videos through the 6-slot commerce structure: Hook, product intro, usage, result, trust, CTA.
-12. For compare/improve mode, produce stage-level gaps and top 3 to 5 improvements.
-13. Generate output under a timestamped run directory:
-   - `analysis.json`
-   - `analysis_input.md`
-   - `report.html`
-   - extracted frames and audio
-   - contact sheets and timeline views
-   - local-language `transcript.txt`
-   - Chinese `transcript.zh.txt`
-14. Do not render or synthesize a replacement video. Keep the report grounded in the original media, evidence frames, local audio checks, and executable improvement suggestions.
-
-## Analysis Rules
-
-- Keep advice GMV-oriented, not aesthetic for its own sake.
-- Keep creator-facing wording plain and concrete.
-- Limit final improvement points to 3 to 5.
-- Every improvement must name the time range, current problem, benchmark reference, exact suggested change, and GMV reason.
-- Prefer changes with high leverage and low execution difficulty.
-- Do not recommend unverifiable claims, medical claims, or competitor attacks.
-- Never use English-style space splitting or word count to decide whether a transcript has valid speech. Thai and other no-space languages can be valid even when token count is low.
-
-## Structure Library
-
-Use `structure_library_full.md` as the source of truth for short-video structure:
-
-- S1 Hook
-- S2 product intro
-- S3 usage process
-- S4 result presentation
-- S5 trust amplification
-- S6 CTA
-
-When asking a large model to understand or analyze a video, explicitly tell it that the S1-S6 structure comes from `structure_library_full.md`. The model should apply that structure library, not invent a new funnel.
-
-When choosing modules, apply the material tags and fallback rules from the library instead of inventing new structures.
-
-## Dependency Handling
-
-The script checks dependencies but does not install them automatically.
-
-Expected tools:
-
-- `ffmpeg`: frame/audio evidence extraction
-- Online Beijing MaaS Fun-ASR access: speech transcription and word-level timestamps
-
-If optional dependencies are missing, record an explicit `degraded` status and continue only for outputs that do not require them. Online Fun-ASR is required for compare/improve speech evidence: an ASR failure is blocking by default and returns nonzero. A requested LLM call, response parse, or schema failure is also blocking. Compare/improve without completed LLM or ASR analysis may continue only with `--allow-degraded`; the run must remain degraded and cannot publish a success manifest.
-
-For Flayr model analysis, use the company gateway for text judgments and the original Beijing MaaS route for all visual work: images, OCR, MP4 input, and focused video review. The full/large MP4 route through the company gateway failed and is not accepted; keep the default visual route on Beijing MaaS. There is no provider fallback after a failure. Explicit historical single-route configuration remains available and must not be rewritten. Keep the text key in `FLAYR_LLM_API_KEY` and the independent vision key in `DASHSCOPE_API_KEY` (or the explicitly configured `FLAYR_VISION_API_KEY_ENV`). Fun-ASR retains its own endpoint and key configuration and must not borrow the company gateway key. Do not put credentials, personal Keychain names, or private machine paths in a committed job manifest.
-
-Subtitle OCR runs in `--ocr-mode auto` by default and reuses the configured visual model. It samples within the OCR budget while forcing first/last and shot-boundary frames, so short subtitles at cuts are not governed only by the 2.5-second interval. Disable it with `--no-ocr` for fast local debugging. OCR improves on-screen subtitle grounding and adds per-frame API latency.
-
-Use `--asr-language auto` by default. Southeast Asia commerce videos often use Malay, Thai, Indonesian, or English local口播, so do not force Chinese unless the user explicitly says the video is Chinese. The default model is `fun-asr-flash-2026-06-15`; the endpoint, model, and key environment variable can be overridden with `--asr-api-url`, `--asr-model`, and `--asr-api-key-env`.
-
-When generating `transcript.zh.txt`, follow `references/commerce-translation-guidelines.md`. The Chinese translation must be commerce-aware: correct likely online ASR mistakes from product context, preserve product facts, and translate purchase calls such as `beg kuning` / `back kuning` as `黄色购物车`.
-For model analysis, require evidence: every stage and improvement should cite time range, visual evidence, or spoken evidence. The HTML report should expose key frames, not just text.
-Do not treat the S1-S6 reference times as fixed cuts. The model must first understand the full video, then write the actual `time_range` for each stage. The HTML report should match benchmark and creator frames to those actual ranges and show the frames inside the stage comparison.
-
-## Output Contract
-
-For normal work, summarize:
-
-- where the run directory was created
-- whether frame/audio extraction succeeded
-- whether dense Hook/CTA focus frames were created
-- whether transcription succeeded or was skipped
-- whether the Chinese translation file exists
-- whether LLM analysis was generated or merged
-- the top improvements selected
-- whether the report has complete evidence and grounded improvement suggestions
-
-Do not over-explain the framework to creators. The HTML report is for operations and creator coaching.
+Task status belongs in its current task entry; durable references describe procedure, not which author is “next.” PAPA-specific business scope and source corrections remain in [its plan](references/papafeel-learning-review-plan-20261016.md) and [retrospective](references/papafeel-pilot-execution-retrospective-20261016.md). Do not reopen settled examples, trigger a pilot, call a model, reprocess video, publish or push merely because a skill describes how.

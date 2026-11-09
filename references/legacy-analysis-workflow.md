@@ -1,0 +1,120 @@
+# Legacy Video Analysis Harness
+
+This reference preserves the earlier `breakdown` / `compare` / `improve` workflow. Read it only for an explicitly requested legacy harness task. It does not govern Zero/A/B/C, authorize calls, restore automatic grading or change production contracts.
+
+Provider prose below is historical. Resolve current defaults and explicit overrides from `scripts/flayr_core/cli.py` and `scripts/flayr_core/llm/api.py`; do not copy this reference's old route into a job. The repository-relative command is the portable entry; the installation-path example applies only when that installation actually exists.
+
+## Default Command
+
+For the legacy comparison modes only, run the bundled script. Selecting a review mode above does not authorize new model calls or video reprocessing:
+
+```bash
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/Flayr/scripts/flayr.py" improve \
+  --benchmark-video "/path/to/benchmark.mp4" \
+  --creator-video "/path/to/creator.mp4" \
+  --product-name "Product name" \
+  --product-price "39" \
+  --verification-stage production
+```
+
+When working from this repository directly, use:
+
+```bash
+python3 scripts/flayr.py improve \
+  --benchmark-video "/path/to/benchmark.mp4" \
+  --creator-video "/path/to/creator.mp4" \
+  --verification-stage production
+```
+
+## Workflow
+
+`scripts/flayr.py` is the skill harness: it owns CLI parsing, run-directory setup, orchestration, and output wiring. Core responsibilities live under `scripts/flayr_core/`: video evidence extraction, online transcription/translation, LLM analysis, and report rendering.
+
+1. Confirm the requested mode and local video paths.
+2. Run dependency checks for `ffmpeg`, `ffprobe`, and the approved online Fun-ASR endpoint configuration.
+3. Extract a bounded adaptive base frame set (up to 2 fps under the shared frame budget) and a WAV audio file for each input video.
+4. Extract denser 2 fps focus frames for the first 5 seconds and final 5 seconds, and write `focus_frames/manifest.json` with timestamps.
+   Also write `frames/manifest.json` and `frames/stage_frames.json` so S1-S6 diagnosis has full-funnel visual evidence. Scene, subtitle, local-change, action-change, and bounded word-level speech anchors are then merged into the canonical `frames/analysis_manifest.json` and `analysis_stage_frames.json` consumed by model inputs and downstream views.
+5. Transcribe speech in the detected local language through the approved Beijing MaaS Fun-ASR endpoint, and keep a Chinese translation beside it.
+   Use `--translate-with-llm` when the Chinese translation should be generated automatically.
+6. Classify `speech_mode`: `spoken`, `subtitle_driven`, `visual_driven`, or `music_driven`.
+   Use `transcript_packed` / `transcript.srt` as the primary spine only for `spoken` videos. For no-speech videos, use OCR subtitles, visual changes, timeline views, shot tracks, and audio rhythm instead.
+7. Generate secondary evidence artifacts from those assets: `frames/selection_report.*`, `contact_sheets/`, `timeline_views/`, `transcript_packed.*`, and `video_evidence_audit.json`.
+   The canonical analysis manifests are the only visual input source; selection reports, contact sheets, and timelines are audit views of that same set. Stage1 visual payloads should prefer Hook/CTA timeline views before canonical frames when available.
+8. Generate `analysis_input.md` for large-model diagnosis.
+9. If `--llm-model` is provided, call the configured OpenAI-compatible chat endpoint to generate `analysis_result.json`.
+   Use `--llm-include-images` when the model should inspect Hook/CTA focus frames directly; keep `--llm-image-limit` modest, such as 8 to 12 images.
+   Validate the model JSON against the schema. Shared deterministic normalization resolves mechanical contradictions; the configured provider profile controls any supported repair path. Facts, evidence references, proposition references, and severity remain immutable during repair.
+10. Historical JSON import is audit-only: `--analysis-result-json /path/to/old.json` requires explicit `--legacy-import` and produces a degraded audit result, not a normal completed production report. Do not use it as a way to merge new drafts into production or claim a successful run. Use current replay/resume options only for an explicitly authorized task and according to the current CLI contract.
+11. Analyze videos through the 6-slot commerce structure: Hook, product intro, usage, result, trust, CTA.
+12. For compare/improve mode, produce stage-level gaps and top 3 to 5 improvements.
+13. Generate output under a timestamped run directory:
+   - `analysis.json`
+   - `analysis_input.md`
+   - `report.html`
+   - extracted frames and audio
+   - contact sheets and timeline views
+   - local-language `transcript.txt`
+   - Chinese `transcript.zh.txt`
+14. Do not render or synthesize a replacement video. Keep the report grounded in the original media, evidence frames, local audio checks, and executable improvement suggestions.
+
+## Analysis Rules
+
+- Keep advice GMV-oriented, not aesthetic for its own sake.
+- Keep creator-facing wording plain and concrete.
+- Limit final improvement points to 3 to 5.
+- Every improvement must name the time range, current problem, benchmark reference, exact suggested change, and GMV reason.
+- Prefer changes with high leverage and low execution difficulty.
+- Do not recommend unverifiable claims, medical claims, or competitor attacks.
+- Never use English-style space splitting or word count to decide whether a transcript has valid speech. Thai and other no-space languages can be valid even when token count is low.
+
+## Structure Library
+
+Use `structure_library_full.md` as the source of truth for short-video structure:
+
+- S1 Hook
+- S2 product intro
+- S3 usage process
+- S4 result presentation
+- S5 trust amplification
+- S6 CTA
+
+When asking a large model to understand or analyze a video, explicitly tell it that the S1-S6 structure comes from `structure_library_full.md`. The model should apply that structure library, not invent a new funnel.
+
+When choosing modules, apply the material tags and fallback rules from the library instead of inventing new structures.
+
+## Dependency Handling
+
+The script checks dependencies but does not install them automatically.
+
+Expected tools:
+
+- `ffmpeg`: frame/audio evidence extraction
+- Online Beijing MaaS Fun-ASR access: speech transcription and word-level timestamps
+
+If optional dependencies are missing, record an explicit `degraded` status and continue only for outputs that do not require them. Online Fun-ASR is required for compare/improve speech evidence: an ASR failure is blocking by default and returns nonzero. A requested LLM call, response parse, or schema failure is also blocking. Compare/improve without completed LLM or ASR analysis may continue only with `--allow-degraded`; the run must remain degraded and cannot publish a success manifest.
+
+For Flayr model analysis, use the company gateway for text judgments and the original Beijing MaaS route for all visual work: images, OCR, MP4 input, and focused video review. The full/large MP4 route through the company gateway failed and is not accepted; keep the default visual route on Beijing MaaS. There is no provider fallback after a failure. Explicit historical single-route configuration remains available and must not be rewritten. Keep the text key in `FLAYR_LLM_API_KEY` and the independent vision key in `DASHSCOPE_API_KEY` (or the explicitly configured `FLAYR_VISION_API_KEY_ENV`). Fun-ASR retains its own endpoint and key configuration and must not borrow the company gateway key. Do not put credentials, personal Keychain names, or private machine paths in a committed job manifest.
+
+Subtitle OCR runs in `--ocr-mode auto` by default and reuses the configured visual model. It samples within the OCR budget while forcing first/last and shot-boundary frames, so short subtitles at cuts are not governed only by the 2.5-second interval. Disable it with `--no-ocr` for fast local debugging. OCR improves on-screen subtitle grounding and adds per-frame API latency.
+
+Use `--asr-language auto` by default. Southeast Asia commerce videos often use Malay, Thai, Indonesian, or English local口播, so do not force Chinese unless the user explicitly says the video is Chinese. The default model is `fun-asr-flash-2026-06-15`; the endpoint, model, and key environment variable can be overridden with `--asr-api-url`, `--asr-model`, and `--asr-api-key-env`.
+
+When generating `transcript.zh.txt`, follow `references/commerce-translation-guidelines.md`. The Chinese translation must be commerce-aware: correct likely online ASR mistakes from product context, preserve product facts, and translate purchase calls such as `beg kuning` / `back kuning` as `黄色购物车`.
+For model analysis, require evidence: every stage and improvement should cite time range, visual evidence, or spoken evidence. The HTML report should expose key frames, not just text.
+Do not treat the S1-S6 reference times as fixed cuts. The model must first understand the full video, then write the actual `time_range` for each stage. The HTML report should match benchmark and creator frames to those actual ranges and show the frames inside the stage comparison.
+
+## Output Contract
+
+For normal work, summarize:
+
+- where the run directory was created
+- whether frame/audio extraction succeeded
+- whether dense Hook/CTA focus frames were created
+- whether transcription succeeded or was skipped
+- whether the Chinese translation file exists
+- whether LLM analysis was generated or merged
+- the top improvements selected
+- whether the report has complete evidence and grounded improvement suggestions
+
+Do not over-explain the framework to creators. The HTML report is for operations and creator coaching.

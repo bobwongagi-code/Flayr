@@ -8,6 +8,10 @@ import json
 import re
 from pathlib import Path
 
+if __package__:
+    from .review_evidence import check_index, read_json
+else:
+    from review_evidence import check_index, read_json
 
 REQUIRED = ("intended_belief", "established_support", "priority_gap")
 FOUNDATION_FIELDS = (
@@ -36,15 +40,15 @@ AUTHOR_CHECKS = (
 )
 
 
-def validate_author_copy(text):
+def validate_author_copy(text, *, markdown=True):
     """Flag limited wording issues in Markdown author prose without rewriting it."""
     errors = []
     author_lines = []
     for number, line in enumerate(text.splitlines(), 1):
-        if line.strip() == INTERNAL_NOTES:
+        if markdown and line.strip() == INTERNAL_NOTES:
             break
         # Keep captions and link labels; source paths are not delivery prose.
-        visible = re.sub(r"(!?\[[^\]]*\])\([^\n)]*\)", r"\1", line)
+        visible = re.sub(r"(!?\[[^\]]*\])\([^\n)]*\)", r"\1", line) if markdown else line
         author_lines.append(visible)
         for label, pattern in AUTHOR_CHECKS:
             match = pattern.search(visible)
@@ -129,12 +133,17 @@ def main(argv=None):
                         help="Learning-review material packet; omit for author wording checks only")
     parser.add_argument("--author-copy", type=Path, action="append", default=[],
                         help="Check a current Markdown author draft; repeat for multiple drafts")
+    parser.add_argument("--evidence-index", type=Path,
+                        help="Optional hash-bound teaching, video and fact-reference index")
     args = parser.parse_args(argv)
     if args.cases is None and not args.author_copy:
         parser.error("Provide a learning-review packet or at least one --author-copy")
+    if args.evidence_index is not None and args.cases is None:
+        parser.error("--evidence-index requires a learning-review packet")
+    binding_result = None
     if args.cases is not None:
         try:
-            data = json.loads(args.cases.read_text(encoding="utf-8"))
+            data = read_json(args.cases)
         except (OSError, ValueError) as exc:
             parser.exit(1, f"Cannot read review: {exc}\n")
         errors = validate(data)
@@ -149,6 +158,11 @@ def main(argv=None):
                 parser.exit(1, f"Teaching reference is empty: {teaching}\n")
         except (OSError, ValueError) as exc:
             parser.exit(1, f"Cannot read teaching reference: {exc}\n")
+        if args.evidence_index is not None:
+            try:
+                binding_result = check_index(args.cases, data, args.evidence_index)
+            except (OSError, ValueError) as exc:
+                parser.exit(1, f"Evidence binding failed: {exc}\n")
     wording_errors = []
     for draft in args.author_copy:
         try:
@@ -160,7 +174,10 @@ def main(argv=None):
         parser.exit(1, "\n".join(wording_errors) + "\n")
     if args.cases is not None:
         print(f"PASS: {len(data['cases'])} cases have product, teaching, evidence and whole-video fields.")
-        print("Teaching reference is readable. Reference IDs and evidence contents are not verified.")
+        if binding_result is None:
+            print("Teaching reference is readable. Reference IDs and evidence contents are not verified.")
+        else:
+            print("Evidence bindings: " + json.dumps(binding_result, ensure_ascii=False))
         print("Completeness only; source truth, reasoning, priority and delivery still require human review.")
     if args.author_copy:
         print(f"PASS: {len(args.author_copy)} author drafts have no listed wording matches.")

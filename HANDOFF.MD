@@ -1,5 +1,13 @@
 # Flayr Handoff
 
+## Offline Skill Improvement (2026-11-09)
+
+- `SKILL.md` routes product briefs, shooting cards, submission feedback, explicit requirements and content-experience entry tasks without defaulting to the old comparison chain. Legacy commands remain in `references/legacy-analysis-workflow.md`; historical JSON imports are audit-only/degraded.
+- `references/review-improvement.md` defines source bindings, final-file checks and the feedback loop. `references/review-contrasts.json` holds scoped development contrasts with sources and counterexamples, not GT or an independent semantic benchmark.
+- `validate_learning_review.py --evidence-index` checks declared IDs, source bytes and ranges; old packets retain their limited completeness check. `validate_review_delivery.py` checks selected author DOM text, embedded image decoding, resources, fragments, local paths and final hashes without executing scripts or granting sending approval.
+- Targeted tests and adversarial regressions cover parsing, malformed input, stale bindings, hidden wording and truncated images. Automatic checks, executor review, human confirmation and unverified items remain separate. Production source, scoring, GT, model routes and dependency pins are unchanged; the semantic freeze verifier passes without refreezing.
+- Keep local task artifacts, videos, private source paths and unrelated unfinished plans out of public commits. The user authorized this scoped push while retaining the existing Pillow/Black dependency-audit CI blocker; no audit waiver or dependency change belongs in this batch.
+
 ## Senty Content Migration (2026-11-07)
 
 - Current product-to-content method: `references/content-planning.md`; local-context provenance and fit: `references/local-context-candidates.md`. Reuse product understanding and stage responsibilities, not historical automatic scoring, visual-first ranking or fixed two-line templates.

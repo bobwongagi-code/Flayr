@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "purpose": "Scoped development contrasts from existing confirmed feedback, not GT, automatic scoring or independent evaluation",
+  "cases": [
+    {
+      "id": "papafeel-03-texture-versus-use",
+      "scope": "PAPA FEEL eye-care submission 03; human-confirmed footage scope",
+      "source": {"path": "papafeel-pilot-execution-retrospective-20261016.md", "quote": "03 用户已确认只有手背试质地"},
+      "observed": "18–27秒挤出产品在手背涂开；后面指部位，没有实际眼周使用。",
+      "wrong": "质地拍得清楚，所以使用已经到位，或者无需重要改进。",
+      "accepted": "保留质地贡献；眼周实际使用与效果展示分别核对、分别提出具体拍法。",
+      "counterexample": "若商品任务就是手部质地展示，手背动作可能充分；功能讲解也可能满足现行 S3，不由本例判全局阶段不成立。",
+      "counterexample_basis": "scope_limitation",
+      "check": "执行者比较产品目标与实际部位；程序只查来源和结构，不能靠眼周/手背关键词判语义通过。"
+    },
+    {
+      "id": "papafeel-04-target-versus-action",
+      "scope": "PAPA FEEL submission 04; no general anatomical prohibition",
+      "source": {"path": "papafeel-pilot-execution-retrospective-20261016.md", "quote": "确有眼部涂抹，但大量动作着重脸颊"},
+      "observed": "有眼部施用，但大量动作着重脸颊。",
+      "wrong": "既然有涂抹动作就直接保留使用，只改结果。",
+      "accepted": "既保留真实使用贡献，也检查过程是否突出本条眼周目标；使用偏差与结果展示分别处理。",
+      "counterexample": "另一个产品或已确认用途可能适合脸颊；看不清过程时留待核，不自动判跑偏。",
+      "counterexample_basis": "scope_limitation",
+      "check": "看相邻画面及目标用途；不设动作比例阈值，不凭单帧肯定用法到位。"
+    },
+    {
+      "id": "papafeel-05-pointing-versus-use",
+      "scope": "PAPA FEEL submission 05; scoped user confirmation of no actual use",
+      "source": {"path": "papafeel-pilot-execution-retrospective-20261016.md", "quote": "05 用户已确认全片未实际使用"},
+      "observed": "46–52秒指眼袋，不是施用产品；用户核实全片无实际使用。",
+      "wrong": "指向眼周即是实际用法；选了两个补拍点便不再检查整片结构。",
+      "accepted": "纠正实际使用判断，保留痛点表达；仍检查铺陈和重复是否挤掉重要信息。",
+      "counterexample": "指示可以有效解释位置；另有独立结果材料时保留，不由无使用推断无结果。",
+      "counterexample_basis": "scope_limitation",
+      "check": "不得仅因字段写了动作便认可使用；未知结果单列，不重问已确认的使用事实。"
+    },
+    {
+      "id": "niumo-one-reason-two-contexts",
+      "scope": "NIUMO X9 planning; supported connector convenience only, other reasons may remain pending",
+      "source": {"path": "content-planning.md", "quote": "区分购买理由不同、同理由换情境、同理由换拍摄条件；换布景不是独立方向。"},
+      "observed": "两部不同接口手机与借线接口不对，均围绕换接头、少另带线。",
+      "wrong": "有两套脚本，所以覆盖了两个独立功能卖点。",
+      "accepted": "标为同一购买理由的情境或条件变体；保留不同资源要求，不悄悄删除待核的其他理由。",
+      "counterexample": "同理由的不同情境仍可有用；确有独立依据的快充等理由应另列，不能因缺画面永远排除。",
+      "counterexample_basis": "scope_limitation",
+      "check": "分别复述购买理由与拍摄条件；方向数量不当作质量分。"
+    },
+    {
+      "id": "visible-personal-results-positive-protection",
+      "scope": "User-confirmed content-review principle; not a newly reviewed product/video",
+      "source": {"path": "creator-communication.md", "quote": "真实连续使用记录可以作为带货视频的效果依据。"},
+      "observed": "个人真实使用记录清楚呈现可辨变化时，记录具有内容信息价值。",
+      "wrong": "跨天也不能证明功效，所以一律不认可效果展示；或给所有人强加七天任务。",
+      "accepted": "结合实际材料认可当次或跨日可见结果，不套临床证明标准，也不发明固定天数或结果。",
+      "counterexample": "普通状态、单纯施用或只有字幕宣称，不自动等于观察到效果；个人记录不扩成人人必然改善。",
+      "counterexample_basis": "confirmed_boundary",
+      "check": "这是正向保护原则，不能由日期/变白等关键词自动判记录真实或效果成立。"
+    }
+  ]
+}
