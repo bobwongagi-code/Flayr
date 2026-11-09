@@ -35,12 +35,37 @@ from flayr_core.video_evidence import (  # noqa: E402
     build_video_evidence_artifacts,
     select_timeline_transcript,
     write_selection_report_html,
+    write_contact_sheet,
 )
 from flayr_core.postprocess.repair_stages import infer_s1_boundary_candidate  # noqa: E402
 from flayr_core.postprocess.validate import validate_transcript_attribution  # noqa: E402
 
 
 class VideoEvidenceSelectionTests(unittest.TestCase):
+    def test_contact_sheet_roundtrip_preserves_sources_and_visible_tiles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            red = root / "red.png"
+            Image.new("RGB", (90, 60), (240, 20, 20)).save(red, format="PNG")
+            blue = self._write_frame(root, "blue.jpg", (20, 20, 240))
+            before = [red.read_bytes(), blue.read_bytes()]
+            output = root / "sheet.jpg"
+            write_contact_sheet(
+                [{"path": str(red), "timestamp_seconds": 1.0},
+                 {"path": str(blue), "timestamp_seconds": 2.0}],
+                output, "Synthetic evidence", cols=2, cell_width=100, cell_height=80,
+            )
+            with Image.open(output) as sheet:
+                sheet.load()
+                self.assertEqual(sheet.format, "JPEG")
+                self.assertEqual(sheet.size, (200, 152))
+                left, right = sheet.getpixel((50, 82)), sheet.getpixel((150, 82))
+                self.assertGreater(left[0], 180)
+                self.assertLess(left[2], 80)
+                self.assertGreater(right[2], 180)
+                self.assertLess(right[0], 80)
+            self.assertEqual([red.read_bytes(), blue.read_bytes()], before)
+
     def test_ocr_aggregate_distinguishes_empty_failed_partial_and_skipped(self) -> None:
         cases = (
             ([([], "ocr_empty"), ([], "ocr_empty")], "empty", "full"),

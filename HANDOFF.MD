@@ -1,5 +1,11 @@
 # Flayr Handoff
 
+## Dependency Security Pins (2026-11-09)
+
+- Pillow is pinned to `13.0.0` and Black to `26.10.1`. Earlier notes accepting a Pillow/Black audit blocker describe historical pushes, not permission to ignore future audit failures.
+- Keep the lock, dependency documentation, Unreleased maintenance note and project contract tests synchronized. The synthetic contact-sheet test exercises real PNG/JPEG decoding, resizing, text and JPEG output without modifying its inputs or processing business videos.
+- Dependency upgrades require an isolated install, `pip check`, dependency audit, full offline tests and the complete quality-gate chain. Do not suppress advisory IDs or weaken tests/coverage to obtain green CI. No scoring, GT, model configuration or production source is changed by this maintenance batch.
+
 ## Offline Skill Improvement (2026-11-09)
 
 - `SKILL.md` routes product briefs, shooting cards, submission feedback, explicit requirements and content-experience entry tasks without defaulting to the old comparison chain. Legacy commands remain in `references/legacy-analysis-workflow.md`; historical JSON imports are audit-only/degraded.

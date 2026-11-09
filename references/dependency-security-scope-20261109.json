@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "name": "pillow-black-security-pins-2026-11-09",
+  "description": "Upgrade the two affected dependency pins, synchronize their documentation/contracts and add a synthetic image-rendering control. No production rules, model configuration, GT or business media changes.",
+  "change_scope": {
+    "max_files": 7,
+    "max_added_lines": 150,
+    "max_deleted_lines": 30,
+    "allowed_globs": [
+      "requirements-dev.lock", "DEPENDENCIES.md", "CHANGELOG.md", "HANDOFF.MD",
+      "tests/test_project_contracts.py", "tests/test_video_evidence_selection.py",
+      "references/dependency-security-scope-20261109.json"
+    ],
+    "forbidden_globs": [
+      "runs/**", "outputs/**", "jobs*.json", ".github/**", "VERSION",
+      "scripts/**", "references/semantic-baseline*", "references/analysis-output-schema.json"
+    ]
+  }
+}
