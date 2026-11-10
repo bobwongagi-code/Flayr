@@ -4,7 +4,7 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "86457a05b8f8826b0c2166527ac9f6e50e837a3a",
+  "production_behavior_commit": "387c001c8b97c4532c9cb94784dfa3ba2ec8adc0",
   "execution_readiness": {
     "status": "gemini_draft_production_active_human_review_required",
     "scope": "company_gemini_default_route_with_original_funasr_and_human_delivery",
@@ -23,8 +23,9 @@
   "latest_refreeze": {
     "status": "applied_and_refrozen",
     "date": "2026-11-10",
-    "scope": "Bind preprocessing publication rollback (0e1ab17) and backup admission protection (86457a0). Retain old generation until the new artifact manifest is complete; failure withdraws incomplete publication and restores old data when filesystem operations succeed. Failed rollback keeps backup and diagnostics; directory preparation rejects an incomplete current generation before housekeeping can remove its recovery backup. Complete current generations may clean obsolete backups. Earlier reviewed-report cleanup remains included. No model calls, business-video reruns, production judgment, gap-scale, GT, qualification, prompt, route, budget, acceptance-threshold or historical-artifact changes. No promotion or accuracy claim.",
-    "previous_production_behavior_commit": "0e1ab1711ee06c32d03e376a2c96ac286228d687",
+    "scope": "Bind user-authorized deletion of four unused private helpers (387c001). Repository-wide identifier search found definitions only; deleting those top-level, undecorated functions leaves the remaining module AST unchanged. No callers, execution paths, prompts, qualification, judgment, gap scale, GT, routes, budgets, acceptance thresholds or historical artifacts changed. Prior preprocessing rollback and backup protections remain included. No model calls, video reruns, promotion or accuracy claim. Local commits only; no push authorized.",
+    "previous_production_behavior_commit": "86457a05b8f8826b0c2166527ac9f6e50e837a3a",
+    "unused_private_helper_removal_commit": "387c001c8b97c4532c9cb94784dfa3ba2ec8adc0",
     "preprocess_backup_admission_commit": "86457a05b8f8826b0c2166527ac9f6e50e837a3a",
     "preprocess_publication_rollback_commit": "0e1ab1711ee06c32d03e376a2c96ac286228d687",
     "reviewed_report_interruption_cleanup_commit": "8074042419c58d599150a572f143202aba1c9937",
