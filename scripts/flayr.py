@@ -1469,20 +1469,29 @@ def _promote_preprocess_generation(
     _rewrite_generation_json_artifacts(staging_dir, staging_dir, role_dir)
 
     backup_dir = role_dir.parent / f".{role_dir.name}.previous-{uuid.uuid4().hex}"
-    if role_dir.exists():
-        role_dir.replace(backup_dir)
     try:
+        if role_dir.exists():
+            role_dir.replace(backup_dir)
         staging_dir.replace(role_dir)
-    except Exception:
+        # The manifest is the commit point; keep the previous generation until then.
+        published["preprocess_artifacts"] = _build_preprocess_artifact_manifest(role_dir)
+        write_json(role_dir / "_preprocess.json", published)
+    except BaseException as exc:
+        if not staging_dir.exists() and role_dir.exists():
+            try:
+                role_dir.replace(staging_dir)
+            except OSError as rollback_error:
+                exc.add_note(f"Cannot withdraw incomplete generation: {rollback_error}")
         if not role_dir.exists() and backup_dir.exists():
-            backup_dir.replace(role_dir)
+            try:
+                backup_dir.replace(role_dir)
+            except OSError as rollback_error:
+                exc.add_note(f"Cannot restore previous generation at {backup_dir}: {rollback_error}")
+        elif backup_dir.exists():
+            exc.add_note(f"Previous generation retained for recovery at {backup_dir}")
         raise
     if backup_dir.exists():
         shutil.rmtree(backup_dir, ignore_errors=True)
-    # Rewriting JSON artifacts changes their bytes, so the manifest must be
-    # rebuilt after publication instead of carrying staging-time hashes.
-    published["preprocess_artifacts"] = _build_preprocess_artifact_manifest(role_dir)
-    write_json(role_dir / "_preprocess.json", published)
     return published
 
 
