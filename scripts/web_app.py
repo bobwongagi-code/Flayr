@@ -800,6 +800,7 @@ class JobStore:
         self._lock = threading.RLock()
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="flayr-job")
         self._running_processes: dict[str, subprocess.Popen] = {}
+        self._deleting_jobs: set[str] = set()
         self._shutdown_requested = False
         self._shutdown_state_dirty = False
         self._admission_reservations: dict[tuple[str, str], int] = {}
@@ -1276,48 +1277,67 @@ class JobStore:
     ) -> bool:
         owner_id = _identity_value(owner_id, "owner_id", DEFAULT_OWNER_ID)
         workspace_id = _identity_value(workspace_id, "workspace_id", self.workspace_id)
-        process: subprocess.Popen | None = None
-        with self._lock:
-            job = self.jobs.get(job_id)
-            if not job or not self._matches_scope(job, owner_id, workspace_id):
-                return False
-            process = self._running_processes.get(job_id)
-            self.jobs.pop(job_id, None)
-            try:
-                self._persist_locked()
-            except BaseException as exc:
-                self.jobs[job_id] = job
+        claimed = False
+        try:
+            with self._lock:
+                original = self.jobs.get(job_id)
+                if not original or not self._matches_scope(original, owner_id, workspace_id):
+                    return False
+                if job_id in self._deleting_jobs:
+                    return False
+                self._deleting_jobs.add(job_id)
+                claimed = True
+                process = self._running_processes.get(job_id)
+                job = dict(original)
+                self._mark_incomplete_deletion(job_id, job)
                 try:
                     self._persist_locked()
-                except Exception as restore_error:
-                    exc.add_note(f"Cannot restore job index after failed deletion: {restore_error}")
-                raise
-        job_root = None
-        try:
-            job_root = self._job_root(job_id)
-            if job_root is None:
-                raise OSError("Cannot safely locate job directory")
-            if process is not None:
-                stop_process_group(process, grace_seconds=5.0)
-                if process.poll() is None:
-                    raise RuntimeError("任务进程仍在运行，未删除素材。")
-            if job_root.exists():
-                shutil.rmtree(job_root)
-        except BaseException as exc:
-            with self._lock:
-                try:
-                    self._retain_incomplete_deletion(job_id, job, job_root, exc)
-                finally:
+                except BaseException as exc:
+                    self.jobs[job_id] = original
                     try:
                         self._persist_locked()
                     except Exception as restore_error:
-                        exc.add_note(f"Cannot persist incomplete deletion: {restore_error}")
-            raise
-        if process is not None:
+                        exc.add_note(f"Cannot restore job index after failed deletion: {restore_error}")
+                    raise
+            job_root = None
+            try:
+                job_root = self._job_root(job_id)
+                if job_root is None:
+                    raise OSError("Cannot safely locate job directory")
+                if process is not None:
+                    stop_process_group(process, grace_seconds=5.0)
+                    if process.poll() is None:
+                        raise RuntimeError("任务进程仍在运行，未删除素材。")
+                if job_root.exists():
+                    shutil.rmtree(job_root)
+            except BaseException as exc:
+                with self._lock:
+                    try:
+                        self._retain_incomplete_deletion(job_id, job, job_root, exc)
+                    finally:
+                        try:
+                            self._persist_locked()
+                        except Exception as restore_error:
+                            exc.add_note(f"Cannot persist incomplete deletion: {restore_error}")
+                raise
             with self._lock:
-                if self._running_processes.get(job_id) is process:
+                self.jobs.pop(job_id, None)
+                try:
+                    self._persist_locked()
+                except BaseException as exc:
+                    self.jobs[job_id] = job
+                    try:
+                        self._persist_locked()
+                    except Exception as restore_error:
+                        exc.add_note(f"Cannot persist completed deletion: {restore_error}")
+                    raise
+                if process is not None and self._running_processes.get(job_id) is process:
                     self._running_processes.pop(job_id, None)
-        return True
+            return True
+        finally:
+            if claimed:
+                with self._lock:
+                    self._deleting_jobs.discard(job_id)
 
     def _mark_incomplete_deletion(self, job_id: str, job: dict[str, Any]) -> None:
         job.update(status="failed", phase="删除未完成", deletion_incomplete=True, estimated_remaining_seconds=0,

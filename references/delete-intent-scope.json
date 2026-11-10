@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "delete-intent-20261110",
+  "description": "Persist manual deletion intent before stopping workers or removing files; fence duplicate deletion per job without blocking unrelated jobs. No model calls or frozen-core changes.",
+  "change_scope": {
+    "max_files": 4,
+    "max_added_lines": 400,
+    "max_deleted_lines": 110,
+    "allowed_globs": [
+      "DEVELOPMENT.md",
+      "scripts/web_app.py",
+      "tests/test_delete_intent.py",
+      "references/delete-intent-scope.json"
+    ],
+    "forbidden_globs": ["scripts/flayr_core/**", "scripts/flayr.py", "frontend/**", "runs/**", "outputs/**", "jobs*.json", "**/*.mp4", "**/.env*"]
+  }
+}
