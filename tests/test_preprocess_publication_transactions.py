@@ -155,6 +155,37 @@ class PreprocessPublicationTransactionTests(unittest.TestCase):
             self.assertEqual(self.contents(backups[0]), original)
             self.assertIn("retained for recovery", " ".join(failure.__notes__))
 
+    def test_incomplete_generation_backup_survives_directory_preparation(self):
+        for reuse in (False, True):
+            with self.subTest(reuse=reuse), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp).resolve()
+                role = root / "creator"
+                role.mkdir()
+                (role / "new.txt").write_bytes(b"incomplete candidate")
+                backup = root / ".creator.previous-recovery"
+                backup.mkdir()
+                (backup / "old.txt").write_bytes(b"only complete copy")
+                original = self.contents(root)
+                with self.assertRaises(SystemExit):
+                    flayr._prepare_explicit_run_dir(root, reuse=reuse)
+                self.assertEqual(self.contents(root), original)
+
+    def test_complete_generation_allows_obsolete_backup_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            role, staging = self.fixture(root)
+            published = flayr._promote_preprocess_generation(staging, role, {})
+            backup = root / ".creator.previous-obsolete"
+            backup.mkdir()
+            (backup / "old.txt").write_bytes(b"obsolete")
+            flayr._prepare_explicit_run_dir(root, reuse=True)
+            self.assertFalse(backup.exists())
+            self.assertTrue(
+                flayr._preprocess_artifacts_match(
+                    role, published["preprocess_artifacts"]
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

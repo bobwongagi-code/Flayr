@@ -656,6 +656,22 @@ def _prepare_explicit_run_dir(
     if run_dir.exists() and not run_dir.is_dir():
         raise SystemExit(f"--output-dir 不是目录：{run_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
+    for role in _RUN_ROLE_DIRS:
+        backups = [entry for entry in run_dir.glob(f".{role}.previous-*")
+                   if entry.is_dir() and not entry.is_symlink()]
+        if not backups:
+            continue
+        role_dir = run_dir / role
+        try:
+            cached = json.loads((role_dir / "_preprocess.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cached = None
+        if not isinstance(cached, dict) or not _preprocess_artifacts_match(
+            role_dir, cached.get("preprocess_artifacts")
+        ):
+            raise SystemExit(
+                f"{role} 存在未恢复的预处理备份；请先保全备份并使用新的运行目录：{backups[0]}"
+            )
     if reuse:
         # Validate the complete directory before moving the active review
         # sidecar or deleting reviewed reports.  An unknown file must leave
