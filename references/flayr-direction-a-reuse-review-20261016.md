@@ -91,7 +91,7 @@ A 可以沿用的判断方式是：**本品、本环节要传达什么；视频�
 
 ## 6. 整片判断与具体拍法应接起来
 
-来源：[整体设计与建议筛选](../PRD.md)、[产品—人—场景](../references/observation-guide.md)、[现行阶段边界](../scripts/flayr_core/stage_contract_registry.py)、[全局诊断](../scripts/flayr_core/postprocess/global_diagnosis.py)、[拍摄模块](../structure_library_full.md)。
+来源：[整体设计与建议筛选](archive/history/PRD-20260522.md)、[产品—人—场景](../references/observation-guide.md)、[现行阶段边界](../scripts/flayr_core/stage_contract_registry.py)、[全局诊断](../scripts/flayr_core/postprocess/global_diagnosis.py)、[拍摄模块](../structure_library_full.md)。
 
 整体检查保留六个问题：
 
