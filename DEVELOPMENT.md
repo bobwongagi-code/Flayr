@@ -139,6 +139,23 @@ python3 scripts/replay_finalization.py /path/to/source-run /path/to/new-output
 .venv/bin/python -B -m unittest tests.test_web_submission tests.test_web_shutdown tests.test_web_app tests.test_review_regressions -v
 ```
 
+## 上传暂存与预留释放
+
+multipart解析、输入接管和HTTP响应各有独立的资源所有权。解析中断也清理本次已创建的分片，
+一个文件删不掉仍尝试其余文件；清理失败作为附注保留，不替换原解析异常或中断。
+输入接管先独占新建任务目录，失败只回滚本次目录；ID冲突不能复用或删除旧任务目录。
+
+最终清理与容量/接单预留释放分别执行。分片或上传体清理失败会警告，但不跳过预留释放，
+也不把已接受的任务改说成未接收。残留文件仍计入已有磁盘用量检查，按既有暂存TTL回收；
+这不是文件必已删除或进程强杀后的恢复保证。正常路径不增加模型请求、重试或全盘扫描。
+
+[上传回收回归](tests/test_upload_cleanup.py)含中断、文件锁注入、原异常保留、独占目录保护及
+真实loopback HTTP接单测试；执行器被替换，使用合成字节，不启动分析或模型。
+
+```bash
+.venv/bin/python -B -m unittest tests.test_upload_cleanup tests.test_web_submission tests.test_web_app -v
+```
+
 ## 前端异步状态
 
 旧Web入口的HTTP成功不等于拿到合法任务。`app.js` 拒绝坏JSON、非对象、缺ID、未知状态、错误列表结构及详情ID错配；无效响应不创建假任务、不清空已有列表。提交响应不明时提示查看任务列表，不自动重试或宣称服务器未接收。

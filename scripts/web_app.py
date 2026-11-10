@@ -750,18 +750,38 @@ def parse_multipart(
                 if suffix != b"\r\n":
                     raise RequestError("multipart 边界结束符无效")
         return fields, files
-    except Exception:
-        for path in temp_paths:
-            path.unlink(missing_ok=True)
+    except BaseException as exc:
+        try:
+            _cleanup_upload_paths(temp_paths)
+        except OSError as cleanup_error:
+            exc.add_note(f"Cannot remove incomplete upload parts: {cleanup_error}")
         raise
+
+
+def _cleanup_upload_paths(paths: list[Path]) -> None:
+    failure: OSError | None = None
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            if failure is None:
+                failure = exc
+            else:
+                failure.add_note(f"Additional upload cleanup failure: {exc}")
+    if failure is not None:
+        raise failure
+
+
+def _warn_upload_cleanup(error: OSError) -> None:
+    try:
+        sys.stderr.write(f"[flayr-web] upload cleanup incomplete: {type(error).__name__}\n")
+    except (OSError, ValueError):
+        pass
 
 
 def cleanup_upload_files(files: dict[str, dict[str, Any]]) -> None:
     """Remove parsed upload files that were not adopted into a job."""
-    for item in files.values():
-        raw_path = item.get("path")
-        if raw_path:
-            Path(str(raw_path)).unlink(missing_ok=True)
+    _cleanup_upload_paths([Path(str(item["path"])) for item in files.values() if item.get("path")])
 
 
 class JobStore:
@@ -1261,8 +1281,7 @@ class JobStore:
         enforce_limits: bool = False,
     ) -> dict[str, Any]:
         if "benchmark_video" not in files or "creator_video" not in files:
-            for item in files.values():
-                Path(str(item.get("path"))).unlink(missing_ok=True)
+            cleanup_upload_files(files)
             raise RequestError("请同时上传标杆视频和达人视频")
         with self._lock:
             stopping = self._shutdown_requested
@@ -1292,9 +1311,12 @@ class JobStore:
         job_root = self.jobs_root / job_id
         input_root = job_root / "inputs"
         run_dir = job_root / "run"
+        job_root_owned = False
         try:
             try:
-                input_root.mkdir(parents=True, exist_ok=False)
+                job_root.mkdir(parents=True, exist_ok=False)
+                job_root_owned = True
+                input_root.mkdir(exist_ok=False)
                 moved: dict[str, Path] = {}
                 for role in ("benchmark_video", "creator_video"):
                     item = files[role]
@@ -1303,10 +1325,16 @@ class JobStore:
                     destination = input_root / f"{role}-{filename}"
                     shutil.move(str(original), destination)
                     moved[role] = destination
-            except Exception:
-                for item in files.values():
-                    Path(str(item.get("path"))).unlink(missing_ok=True)
-                shutil.rmtree(job_root, ignore_errors=True)
+            except BaseException as exc:
+                try:
+                    cleanup_upload_files(files)
+                except OSError as cleanup_error:
+                    exc.add_note(f"Cannot remove unadopted upload parts: {cleanup_error}")
+                if job_root_owned:
+                    try:
+                        shutil.rmtree(job_root)
+                    except OSError as cleanup_error:
+                        exc.add_note(f"Cannot remove incomplete upload directory: {cleanup_error}")
                 raise
             run_dir.mkdir(parents=True, exist_ok=False)
             now = utc_now()
@@ -1363,9 +1391,13 @@ class JobStore:
                 shutil.rmtree(job_root, ignore_errors=True)
             raise
         finally:
-            cleanup_upload_files(files)
-            if enforce_limits:
-                self._release_admission(owner_id, workspace_id)
+            try:
+                cleanup_upload_files(files)
+            except OSError as cleanup_error:
+                _warn_upload_cleanup(cleanup_error)
+            finally:
+                if enforce_limits:
+                    self._release_admission(owner_id, workspace_id)
 
     @staticmethod
     def _matches_scope(job: dict[str, Any], owner_id: str | None, workspace_id: str | None) -> bool:
@@ -1944,14 +1976,20 @@ class FlayrHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._json(500, {"error": f"任务创建失败：{str(exc)[:200]}"})
         finally:
-            cleanup_upload_files(files)
-            if body_path:
-                body_path.unlink(missing_ok=True)
-            if reserved_storage_bytes:
-                self.server.store.release_upload(
-                    self.server.store.workspace_id,
-                    reserved_storage_bytes,
-                )
+            try:
+                try:
+                    cleanup_upload_files(files)
+                finally:
+                    if body_path:
+                        _cleanup_upload_paths([body_path])
+            except OSError as cleanup_error:
+                _warn_upload_cleanup(cleanup_error)
+            finally:
+                if reserved_storage_bytes:
+                    self.server.store.release_upload(
+                        self.server.store.workspace_id,
+                        reserved_storage_bytes,
+                    )
 
     def do_DELETE(self) -> None:
         if not self._authorize_request(state_changing=True):

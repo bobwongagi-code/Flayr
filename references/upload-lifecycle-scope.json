@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "upload-lifecycle-20261110",
+  "description": "Close interrupted upload staging/adoption and cleanup-failure reservation leaks. No frozen core, model calls, video processing, budget or business-rule changes.",
+  "change_scope": {
+    "max_files": 4,
+    "max_added_lines": 450,
+    "max_deleted_lines": 60,
+    "allowed_globs": [
+      "DEVELOPMENT.md",
+      "scripts/web_app.py",
+      "tests/test_upload_cleanup.py",
+      "references/upload-lifecycle-scope.json"
+    ],
+    "forbidden_globs": ["scripts/flayr_core/**", "scripts/flayr.py", "frontend/**", "runs/**", "outputs/**", "jobs*.json", "**/*.mp4", "**/.env*"]
+  }
+}
