@@ -1587,7 +1587,7 @@ class JobStore:
     def _read_analysis_scope(run_dir: Path) -> str:
         try:
             payload = json.loads((run_dir / "analysis.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeError):
             return ""
         scope = payload.get("analysis_scope") if isinstance(payload, dict) else None
         return str(scope.get("level") or "") if isinstance(scope, dict) else ""

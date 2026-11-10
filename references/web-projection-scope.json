@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "web-projection-20261110",
+  "description": "Treat encoding failure in optional analysis-scope metadata like existing read/JSON failures, preserving task API availability without changing lifecycle or publication gates.",
+  "change_scope": {
+    "max_files": 4,
+    "max_added_lines": 170,
+    "max_deleted_lines": 5,
+    "allowed_globs": [
+      "DEVELOPMENT.md",
+      "scripts/web_app.py",
+      "tests/test_web_projection_isolation.py",
+      "references/web-projection-scope.json"
+    ],
+    "forbidden_globs": ["scripts/flayr_core/**", "scripts/flayr.py", "frontend/**", "runs/**", "outputs/**", "jobs*.json", "**/*.mp4", "**/.env*"]
+  }
+}

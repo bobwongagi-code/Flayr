@@ -151,6 +151,11 @@ Web恢复边界把生命周期/完成清单的已知读取和类型错误视为�
 [恢复隔离回归](tests/test_web_recovery_isolation.py)使用两个以上合成任务同时重启，
 覆盖坏字节/类型、缺索引重建、单任务写盘失败及身份不匹配，并保护健康报告与上述硬失败。
 
+列表和详情展示中的`analysis_scope`是可选提示：读取失败、JSON无效或编码损坏时视为未知，
+不让单个任务中断整份列表，也不改任务终态、源文件或报告发布资格。
+[展示隔离回归](tests/test_web_projection_isolation.py)覆盖坏数据/健康对照和真实loopback列表、详情、归属隔离。
+沿用一次既有读取，不新增扫描、写入、重试或模型请求。
+
 ```bash
 .venv/bin/python -B -m unittest tests.test_web_recovery_isolation tests.test_web_app -v
 ```
