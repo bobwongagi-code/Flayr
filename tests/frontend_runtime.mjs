@@ -46,6 +46,8 @@ const views = ['view-upload', 'view-jobs', 'view-report'].map(el);
 el('view-upload').classList.add('active');
 el('report-done-content').innerHTML = 'PROTOTYPE CONTENT ONLY';
 const timers = new Map();
+const deadlines = new Map();
+const storage = new Map();
 let timerId = 0;
 let fetchImpl = () => Promise.resolve(response({jobs: []}));
 const context = vm.createContext({
@@ -58,11 +60,13 @@ const context = vm.createContext({
   },
   window: {
     location: {origin: 'http://fixture.test'},
-    localStorage: {getItem: () => null, setItem() {}, removeItem() {}},
-    setTimeout: () => 0,
+    localStorage: {getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key)},
+    setTimeout: (callback, delay) => { const id = ++timerId; deadlines.set(id, {callback, delay}); return id; },
+    clearTimeout: id => deadlines.delete(id),
   },
   URL: {createObjectURL: () => 'blob:fixture', revokeObjectURL() {}},
   FormData: class { append() {} },
+  AbortController,
   fetch: (...args) => fetchImpl(...args),
   setTimeout: () => 0,
   setInterval: callback => { const id = ++timerId; timers.set(id, callback); return id; },
@@ -88,7 +92,8 @@ async function moduleAt(filename) {
     assert.match(source, /\}\)\(\);\s*$/);
     source = source.replace(/\}\)\(\);\s*$/, `
       globalThis.hooks = {apiJson, mapJob, loadJobs, refreshJob, startPolling, stopPolling,
-        openReport, renderReportShell, mergeJob, uploadState, getJobs: () => jobs};
+        openReport, renderReportShell, mergeJob, uploadState, getJobs: () => jobs,
+        loadReportAudience, resetReportFrameState, reportAudienceState, goTab};
     })();`);
   }
   const module = new vm.SourceTextModule(source, {context, identifier: filename});
@@ -102,6 +107,18 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 await flush();
 const h = context.hooks;
 const text = node => node.textContent + node.innerHTML + node.children.map(text).join('');
+
+function reportContext(job, audience = 'internal') {
+  h.resetReportFrameState();
+  const shell = new Element(), empty = new Element(), loading = new Element();
+  const previous = audience ? new Element() : null;
+  if (previous) shell.appendChild(previous);
+  shell.querySelector = selector => selector === '.report-frame-empty' ? empty
+    : selector === '.report-frame-loading' ? loading : previous;
+  Object.assign(h.reportAudienceState, {jobId: job.id, shell, activeFrame: previous, activeAudience: audience});
+  return {shell, empty, loading, previous};
+}
+const headResponse = (status = 200, type = 'text/html') => ({ok: status === 200, headers: {get: () => type}});
 
 const cases = {
   async api_errors() {
@@ -220,6 +237,131 @@ const cases = {
     assert.equal(h.getJobs().length, 2, 'a detail update discarded unrelated list jobs');
     assert.equal(h.getJobs().find(job => job.id === 'b').status, 'done');
     assert.equal(h.getJobs().find(job => job.id === 'a').progress, 63, 'list overwrote a local detail update');
+  },
+  async detail_after_list() {
+    h.mergeJob(h.mapJob(raw('cross', 'running')));
+    const detail = deferred(), list = deferred();
+    fetchImpl = url => url === '/api/jobs' ? list.promise : detail.promise;
+    const older = h.refreshJob('cross', true), newer = h.loadJobs();
+    list.resolve(response({jobs: [raw('cross', 'completed')]}));
+    await newer;
+    detail.resolve(response(raw('cross', 'failed')));
+    await older;
+    assert.equal(h.getJobs()[0].status, 'done', 'old detail replaced a newer list result');
+    fetchImpl = () => Promise.resolve(response(raw('cross', 'failed')));
+    await h.refreshJob('cross', true);
+    assert.equal(h.getJobs()[0].status, 'failed', 'fresh terminal correction was blocked');
+  },
+  async removed_job_detail() {
+    h.mergeJob(h.mapJob(raw('removed', 'running')));
+    const detail = deferred(), list = deferred();
+    fetchImpl = url => url === '/api/jobs' ? list.promise : detail.promise;
+    const older = h.refreshJob('removed', true), newer = h.loadJobs();
+    list.resolve(response({jobs: []}));
+    await newer;
+    detail.resolve(response(raw('removed', 'running')));
+    await older;
+    assert.equal(h.getJobs().length, 0, 'old detail resurrected a removed job');
+  },
+  async list_terminal_state() {
+    h.mergeJob(h.mapJob(raw('terminal', 'completed')));
+    fetchImpl = () => Promise.resolve(response({jobs: [raw('terminal', 'running')]}));
+    await h.loadJobs();
+    assert.equal(h.getJobs()[0].status, 'done', 'list reopened a known terminal job');
+    fetchImpl = () => Promise.resolve(response({jobs: [raw('terminal', 'failed')]}));
+    await h.loadJobs();
+    assert.equal(h.getJobs()[0].status, 'failed', 'list could not correct a terminal result');
+  },
+  async report_timeout() {
+    const job = h.mapJob(raw('report-timeout', 'completed', {bd_report_url: '/bd', creator_report_url: '/creator'}));
+    const view = reportContext(job);
+    const pending = deferred();
+    let signal, calls = 0;
+    fetchImpl = (_url, options) => { calls++; signal = options.signal; return pending.promise; };
+    h.loadReportAudience(job, 'creator');
+    const frame = view.shell.children.at(-1);
+    const deadline = [...deadlines.entries()].find(([, item]) => item.delay === 30000);
+    assert.ok(deadline, 'report load has no bounded failure transition');
+    deadlines.delete(deadline[0]);
+    deadline[1].callback();
+    assert.equal(signal.aborted, true);
+    assert.equal(h.reportAudienceState.activeFrame, view.previous);
+    assert.equal(view.shell.getAttribute('aria-busy'), 'false');
+    assert.equal(view.loading.hidden, true);
+    pending.resolve(headResponse());
+    await flush();
+    frame.onload();
+    assert.equal(h.reportAudienceState.activeFrame, view.previous, 'late response defeated timeout');
+    assert.equal(calls, 1, 'timeout automatically retried the request');
+  },
+  async report_cancel_and_success() {
+    const job = h.mapJob(raw('report-old', 'completed', {bd_report_url: '/old', creator_report_url: '/old-creator'}));
+    const view = reportContext(job, null), pending = deferred();
+    let signal;
+    fetchImpl = (_url, options) => { signal = options.signal; return pending.promise; };
+    h.loadReportAudience(job, 'creator');
+    const abandoned = view.shell.children.at(-1);
+    const next = h.mapJob(raw('report-next', 'completed', {bd_report_url: '/next', creator_report_url: '/next-creator'}));
+    const current = reportContext(next, null);
+    assert.equal(signal.aborted, true, 'switching jobs did not cancel report loading');
+    fetchImpl = () => Promise.resolve(headResponse());
+    h.loadReportAudience(next, 'creator');
+    await flush();
+    const frame = current.shell.children.at(-1);
+    frame.contentDocument = {contentType: 'text/html'};
+    frame.onload();
+    assert.equal(h.reportAudienceState.activeFrame, frame);
+    assert.equal(h.reportAudienceState.activeAudience, 'creator');
+    pending.resolve(headResponse());
+    await flush();
+    abandoned.onload();
+    abandoned.onerror();
+    frame.onload();
+    assert.equal(h.reportAudienceState.activeFrame, frame, 'stale or duplicate callback changed the active frame');
+    assert.equal(frame.parentNode, current.shell);
+    assert.equal([...deadlines.values()].some(item => item.delay === 30000), false);
+  },
+  async report_leave_loading() {
+    for (const destination of ['running', 'failed', 'jobs', 'upload']) {
+      const job = h.mapJob(raw('loading-' + destination, 'completed', {bd_report_url: '/bd', creator_report_url: '/creator'}));
+      const view = reportContext(job, null), pending = deferred();
+      let signal;
+      fetchImpl = (_url, options) => {
+        if (options?.method === 'HEAD') { signal = options.signal; return pending.promise; }
+        return Promise.resolve(response({jobs: []}));
+      };
+      h.loadReportAudience(job, 'creator');
+      const frame = view.shell.children.at(-1);
+      if (destination === 'jobs' || destination === 'upload') h.goTab(destination);
+      else {
+        const next = h.mapJob(raw('next-' + destination, destination));
+        h.mergeJob(next);
+        fetchImpl = (_url, options) => options?.method === 'HEAD' ? pending.promise : Promise.resolve(response(raw(next.id, destination)));
+        h.openReport(next.id);
+      }
+      assert.equal(signal.aborted, true, 'leaving a report did not cancel its pending request');
+      assert.equal(h.reportAudienceState.jobId, null);
+      const message = el('toast-text').textContent;
+      pending.resolve(headResponse());
+      await flush();
+      frame.onerror();
+      assert.equal(el('toast-text').textContent, message, 'old report emitted a failure in another view');
+      h.stopPolling();
+    }
+  },
+  async report_rejection() {
+    const job = h.mapJob(raw('report-errors', 'completed', {bd_report_url: '/bd', creator_report_url: '/creator'}));
+    for (const failure of ['head', 'mime', 'frame']) {
+      const view = reportContext(job);
+      fetchImpl = () => Promise.resolve(headResponse(failure === 'head' ? 404 : 200, failure === 'mime' ? 'application/pdf' : 'text/html'));
+      h.loadReportAudience(job, 'creator');
+      const frame = view.shell.children.at(-1);
+      await flush();
+      if (failure === 'frame') frame.onerror();
+      assert.equal(h.reportAudienceState.activeFrame, view.previous);
+      assert.equal(h.reportAudienceState.selectedAudience, 'internal');
+      assert.equal(view.shell.getAttribute('aria-busy'), 'false');
+    }
   },
   async missing_report() {
     for (const status of ['completed', 'degraded']) {

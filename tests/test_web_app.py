@@ -344,6 +344,7 @@ class WebAppHelpersTests(unittest.TestCase):
                 job_id = str(public["id"])
                 job_root = root / "jobs" / job_id
                 process = mock.Mock()
+                process.poll.return_value = 0
                 with store._lock:
                     store._running_processes[job_id] = process
                 with mock.patch("scripts.web_app.stop_process_group") as stop:
@@ -1039,6 +1040,7 @@ class WebAppHelpersTests(unittest.TestCase):
             }
             with mock.patch.object(store._executor, "submit"):
                 public = store.create({"product_name": "测试"}, files)
+            store._update(str(public["id"]), status="running")
             store._finish(str(public["id"]), 1)
             failed = store.public(store.get(str(public["id"])) or {})
             self.assertEqual(failed["status"], "failed")

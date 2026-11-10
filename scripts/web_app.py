@@ -912,6 +912,9 @@ class JobStore:
         job.setdefault("market", "未指定市场")
         job.setdefault("failure_reason", "")
         job.setdefault("degraded_reason", "")
+        if job.get("deletion_incomplete") is True:
+            job.update(status="failed", phase="删除未完成", estimated_remaining_seconds=0)
+            return job
         if not job.get("created_at"):
             try:
                 created = dt.datetime.fromtimestamp(job_root.stat().st_mtime, dt.timezone.utc)
@@ -1100,6 +1103,12 @@ class JobStore:
             job.update(changes)
             self._persist_locked()
 
+    def _update_running_job(self, job_id: str, **changes: Any) -> None:
+        with self._lock:
+            current = self.jobs.get(job_id)
+            if current and current.get("status") == "running":
+                self._update(job_id, **changes)
+
     def _admission_error_locked(self, owner_id: str, workspace_id: str) -> str | None:
         if self._shutdown_requested:
             return "服务正在停止，暂时不能接收新任务。"
@@ -1204,12 +1213,42 @@ class JobStore:
                 return False
             process = self._running_processes.get(job_id)
             self.jobs.pop(job_id, None)
-            self._persist_locked()
-        if process is not None:
-            stop_process_group(process, grace_seconds=5.0)
+            try:
+                self._persist_locked()
+            except BaseException as exc:
+                self.jobs[job_id] = job
+                try:
+                    self._persist_locked()
+                except Exception as restore_error:
+                    exc.add_note(f"Cannot restore job index after failed deletion: {restore_error}")
+                raise
         job_root = self._job_root(job_id)
-        if job_root:
-            shutil.rmtree(job_root, ignore_errors=True)
+        try:
+            if process is not None:
+                stop_process_group(process, grace_seconds=5.0)
+                if process.poll() is None:
+                    raise RuntimeError("任务进程仍在运行，未删除素材。")
+            if job_root and job_root.exists():
+                shutil.rmtree(job_root)
+        except BaseException as exc:
+            with self._lock:
+                job.update(status="failed", phase="删除未完成", deletion_incomplete=True, estimated_remaining_seconds=0,
+                           failure_reason="任务删除未完成，请重试；进程停止和文件清理尚未全部确认。")
+                self.jobs[job_id] = job
+                if job_root is not None:
+                    try:
+                        self._write_job_metadata(job_root, job)
+                    except Exception as metadata_error:
+                        exc.add_note(f"Cannot persist incomplete deletion metadata: {metadata_error}")
+                try:
+                    self._persist_locked()
+                except Exception as restore_error:
+                    exc.add_note(f"Cannot persist incomplete deletion: {restore_error}")
+            raise
+        if process is not None:
+            with self._lock:
+                if self._running_processes.get(job_id) is process:
+                    self._running_processes.pop(job_id, None)
         return True
 
     def create(
@@ -1460,13 +1499,20 @@ class JobStore:
                 if self._shutdown_requested:
                     raise RuntimeError("服务正在停止，任务未启动。")
                 self._update(job_id, status="running", phase="素材处理与转写")
-            run_dir.parent.mkdir(parents=True, exist_ok=True)
-            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._lock:
+                current = self.jobs.get(job_id)
+                if not current or current.get("status") != "running":
+                    return
+                run_dir.parent.mkdir(parents=True, exist_ok=True)
+                log_path.parent.mkdir(parents=True, exist_ok=True)
             command = self._command(job)
             with log_path.open("ab") as log:
                 log.write(("$ " + " ".join(command) + "\n").encode("utf-8", "replace"))
                 # Fence launch and registration against the shutdown snapshot.
                 with self._lock:
+                    current = self.jobs.get(job_id)
+                    if not current or current.get("status") != "running":
+                        return
                     if self._shutdown_requested:
                         raise RuntimeError("服务正在停止，任务未启动。")
                     process = subprocess.Popen(
@@ -1482,7 +1528,7 @@ class JobStore:
                     current = self.get(job_id)
                     if current:
                         progress, phase = progress_for_run(run_dir)
-                        self._update(
+                        self._update_running_job(
                             job_id,
                             progress=progress,
                             phase=phase,
@@ -1492,21 +1538,25 @@ class JobStore:
                 returncode = process.wait()
             self._finish(job_id, returncode)
         except Exception as exc:  # keep worker failures visible in the job list
-            reason = f"任务启动或执行失败：{str(exc)[:240]}"
-            try:
-                recover_run_state(run_dir, FAILED, job_id=job_id, reason=reason)
-            except Exception as state_error:
-                sys.stderr.write(f"[flayr-web] cannot persist failed lifecycle: {state_error}\n")
-            try:
-                self._update(
-                    job_id,
-                    status="failed",
-                    failure_reason=reason,
-                    phase="分析失败",
-                    estimated_remaining_seconds=0,
-                )
-            except Exception as persistence_error:
-                sys.stderr.write(f"[flayr-web] cannot persist worker failure: {persistence_error}\n")
+            with self._lock:
+                current = self.jobs.get(job_id)
+                if not current or current.get("status") != "running":
+                    return
+                reason = f"任务启动或执行失败：{str(exc)[:240]}"
+                try:
+                    recover_run_state(run_dir, FAILED, job_id=job_id, reason=reason)
+                except Exception as state_error:
+                    sys.stderr.write(f"[flayr-web] cannot persist failed lifecycle: {state_error}\n")
+                try:
+                    self._update(
+                        job_id,
+                        status="failed",
+                        failure_reason=reason,
+                        phase="分析失败",
+                        estimated_remaining_seconds=0,
+                    )
+                except Exception as persistence_error:
+                    sys.stderr.write(f"[flayr-web] cannot persist worker failure: {persistence_error}\n")
         finally:
             if process is not None:
                 try:
@@ -1586,7 +1636,7 @@ class JobStore:
         }
         publication = _publication_status(run_dir, expected, returncode=returncode)
         if publication == "completed":
-            self._update(job_id, status="completed", progress=100, phase="报告生成",
+            self._update_running_job(job_id, status="completed", progress=100, phase="报告生成",
                          estimated_remaining_seconds=0)
             return
         if publication == "degraded":
@@ -1596,24 +1646,28 @@ class JobStore:
                 reason = str(payload.get("reason") or reason)
             except (OSError, json.JSONDecodeError):
                 pass
-            self._update(job_id, status="degraded", progress=100,
+            self._update_running_job(job_id, status="degraded", progress=100,
                          phase="报告生成（部分分析能力降级）",
                          estimated_remaining_seconds=0, degraded_reason=reason[:500])
             return
         if returncode == 0:
             returncode = 1
         reason = self._log_failure(Path(str(job["log_path"])), returncode)
-        try:
-            recover_run_state(run_dir, FAILED, job_id=job_id, reason=reason[:500])
-        except RunStateError:
-            pass
-        self._update(
-            job_id,
-            status="failed",
-            phase="分析失败",
-            estimated_remaining_seconds=0,
-            failure_reason=reason[:500],
-        )
+        with self._lock:
+            current = self.jobs.get(job_id)
+            if not current or current.get("status") != "running":
+                return
+            try:
+                recover_run_state(run_dir, FAILED, job_id=job_id, reason=reason[:500])
+            except RunStateError:
+                pass
+            self._update_running_job(
+                job_id,
+                status="failed",
+                phase="分析失败",
+                estimated_remaining_seconds=0,
+                failure_reason=reason[:500],
+            )
 
     @staticmethod
     def _log_failure(log_path: Path, returncode: int) -> str:
@@ -1914,11 +1968,16 @@ class FlayrHandler(BaseHTTPRequestHandler):
                 return
             job_id = match.group(1)
             workspace_id = self._workspace_id()
-        if workspace_id is None or not self.server.store.delete(
-            job_id,
-            owner_id=self._client_id(),
-            workspace_id=workspace_id,
-        ):
+        try:
+            deleted = workspace_id is not None and self.server.store.delete(
+                job_id,
+                owner_id=self._client_id(),
+                workspace_id=workspace_id,
+            )
+        except Exception:
+            self._json(500, {"error": "任务删除未完成，请稍后重试。"})
+            return
+        if not deleted:
             self._json(404, {"error": "任务不存在"})
             return
         self.send_response(204)

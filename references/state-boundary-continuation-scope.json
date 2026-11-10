@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "name": "state-boundary-continuation-20261110",
+  "description": "Local continuation after 592c88b: delete/worker ownership, browser list/detail consistency and bounded report loading. The separately authorized preprocessing repair and mechanical refreeze are separate commits. No provider calls, business video processing, GT, scoring or route changes. No automatic business approval or sending.",
+  "change_scope": {
+    "max_files": 9,
+    "max_added_lines": 700,
+    "max_deleted_lines": 160,
+    "allowed_globs": [
+      "DEVELOPMENT.md",
+      "frontend/app.js",
+      "references/state-boundary-continuation-scope.json",
+      "scripts/web_app.py",
+      "tests/frontend_runtime.mjs",
+      "tests/test_frontend_contracts.py",
+      "tests/test_web_app.py",
+      "tests/test_web_deletion.py",
+      "tests/test_review_regressions.py"
+    ],
+    "forbidden_globs": ["runs/**", "outputs/**", "jobs*.json", "**/*.mp4", "**/.env*", "**/__pycache__/**"]
+  }
+}

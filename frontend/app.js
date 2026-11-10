@@ -30,7 +30,8 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
     activeAudience: null,
     activeFrame: null,
     shell: null,
-    transitionId: 0
+    transitionId: 0,
+    cancelPending: null
   };
   function $(id){ return document.getElementById(id); }
 
@@ -108,13 +109,16 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
   function loadJobs(){
     var requestVersion = ++listVersion;
     var snapshot = Object.create(null);
+    var detailVersions = Object.assign(Object.create(null), refreshVersions);
     jobs.forEach(function(job){ snapshot[job.id] = job; });
     return apiJson('/api/jobs').then(function(body){
       if (requestVersion !== listVersion) return jobs;
       if (!Array.isArray(body.jobs)) throw new Error('任务列表响应格式不正确');
       // Preserve only locally changed jobs, not the entire old list.
       var changedJobs = Object.create(null);
+      var currentJobs = Object.create(null);
       jobs.forEach(function(job){
+        currentJobs[job.id] = job;
         if (snapshot[job.id] !== job) changedJobs[job.id] = job;
       });
       var nextJobs = body.jobs.map(function(raw){
@@ -124,9 +128,13 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
           delete changedJobs[job.id];
           return localJob;
         }
+        if (currentJobs[job.id] && currentJobs[job.id].status !== 'generating' && job.status === 'generating') return currentJobs[job.id];
         return job;
       });
       Object.keys(changedJobs).forEach(function(id){ nextJobs.push(changedJobs[id]); });
+      Object.keys(detailVersions).forEach(function(id){
+        appliedRefreshVersions[id] = Math.max(appliedRefreshVersions[id] || 0, detailVersions[id]);
+      });
       if (body.recovery_warning && !recoveryWarningShown){
         recoveryWarningShown = true;
         showToast(body.recovery_warning);
@@ -194,6 +202,7 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
   }
 
   function goTab(tab){
+    if (tab === 'upload' || tab === 'jobs') resetReportFrameState();
     if (tab === 'upload'){
       setActiveTab('upload');
       switchView('view-upload');
@@ -287,6 +296,8 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
   }
 
   function resetReportFrameState(){
+    if (reportAudienceState.cancelPending) reportAudienceState.cancelPending();
+    if (reportAudienceState.activeFrame) reportAudienceState.activeFrame.remove();
     reportAudienceState.transitionId += 1;
     reportAudienceState.jobId = null;
     reportAudienceState.selectedAudience = null;
@@ -299,6 +310,7 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
     var url = reportUrlForAudience(job, audience);
     if (!url || reportAudienceState.jobId !== job.id || !reportAudienceState.shell) return;
     if (reportAudienceState.activeAudience === audience && reportAudienceState.activeFrame) return;
+    if (reportAudienceState.cancelPending) reportAudienceState.cancelPending();
 
     var shell = reportAudienceState.shell;
     var previousFrame = reportAudienceState.activeFrame;
@@ -340,13 +352,38 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
     }
 
     var frameReady = false;
+    var settled = false;
+    var timeoutId = null;
+    var controller = new AbortController();
     var frame = document.createElement('iframe');
     frame.className = 'report-frame report-frame-pending';
     frame.title = job.name + ' · ' + reportAudienceLabel(audience) + '报告';
-    frame.onload = function(){
-      if (!frameReady) return;
+    function finishLoading(){
+      if (settled) return false;
+      settled = true;
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+      if (reportAudienceState.cancelPending === cancelPendingLoad) reportAudienceState.cancelPending = null;
+      return true;
+    }
+    function cancelPendingLoad(){
+      if (!finishLoading()) return;
+      controller.abort();
+      frame.remove();
+    }
+    function failLoading(){
       if (transitionId !== reportAudienceState.transitionId){
-        frame.remove();
+        cancelPendingLoad();
+        return;
+      }
+      if (!finishLoading()) return;
+      controller.abort();
+      frame.remove();
+      restorePreviousReport();
+    }
+    frame.onload = function(){
+      if (settled || !frameReady) return;
+      if (transitionId !== reportAudienceState.transitionId){
+        cancelPendingLoad();
         return;
       }
       var contentType = '';
@@ -356,10 +393,10 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
         contentType = '';
       }
       if (contentType && contentType !== 'text/html' && contentType !== 'application/xhtml+xml'){
-        frame.remove();
-        restorePreviousReport();
+        failLoading();
         return;
       }
+      if (!finishLoading()) return;
       frame.classList.remove('report-frame-pending');
       frame.classList.add('report-frame-active');
       emptyState.hidden = true;
@@ -376,18 +413,14 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
         }, 220);
       }
     };
-    frame.onerror = function(){
-      if (transitionId !== reportAudienceState.transitionId){
-        frame.remove();
-        return;
-      }
-      frame.remove();
-      restorePreviousReport();
-    };
+    frame.onerror = failLoading;
     shell.appendChild(frame);
-    fetch(url, {method:'HEAD', credentials:'same-origin', cache:'no-store'}).then(function(response){
+    reportAudienceState.cancelPending = cancelPendingLoad;
+    timeoutId = window.setTimeout(failLoading, 30000);
+    fetch(url, {method:'HEAD', credentials:'same-origin', cache:'no-store', signal:controller.signal}).then(function(response){
+      if (settled) return;
       if (transitionId !== reportAudienceState.transitionId){
-        frame.remove();
+        cancelPendingLoad();
         return;
       }
       var contentType = String(response.headers.get('content-type') || '').toLowerCase();
@@ -396,14 +429,7 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
       }
       frameReady = true;
       frame.src = url;
-    }).catch(function(){
-      if (transitionId !== reportAudienceState.transitionId){
-        frame.remove();
-        return;
-      }
-      frame.remove();
-      restorePreviousReport();
-    });
+    }).catch(failLoading);
   }
 
   function renderLegacyReport(job){
@@ -476,6 +502,7 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
   }
 
   function renderReportShell(job){
+    if (reportAudienceState.jobId && (reportAudienceState.jobId !== job.id || job.status !== 'done')) resetReportFrameState();
     $('report-title').textContent = job.name + ' · 提升报告';
     $('report-meta').textContent = '产品：' + job.name + ' · 市场：' + job.market;
 

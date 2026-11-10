@@ -397,14 +397,20 @@ class ReviewRegressions(unittest.TestCase):
                                       'log_path': str(root / 'worker.log')}
             child = mock.Mock()
             child.poll.return_value = None
+
+            def update_after_claim(job_id, **changes):
+                if changes.get('status') == 'running':
+                    store.jobs[job_id].update(changes)
+                    return
+                raise OSError('monitor failed')
+
             try:
                 with (
                     mock.patch.object(store, '_command', return_value=['fake-worker']),
-                    mock.patch.object(store, '_update', side_effect=OSError('cannot persist')),
+                    mock.patch.object(store, '_update', side_effect=update_after_claim),
                     mock.patch.object(web.subprocess, 'Popen', return_value=child),
                 ):
                     # Fail only after Popen so the cleanup path has a live child.
-                    store._update.side_effect = [None, OSError('monitor failed'), OSError('report failed')]
                     with mock.patch.object(web, 'stop_process_group', side_effect=OSError('kill failed')):
                         store._run_job('job-test')
                 self.assertIs(store._running_processes['job-test'], child)

@@ -22,6 +22,13 @@ class FrontendContractTests(unittest.TestCase):
             "poll_slow",
             "list_order",
             "list_partial_update",
+            "detail_after_list",
+            "removed_job_detail",
+            "list_terminal_state",
+            "report_timeout",
+            "report_cancel_and_success",
+            "report_rejection",
+            "report_leave_loading",
             "missing_report",
             "upload_protocol",
             "upload_singleflight",
@@ -90,7 +97,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("previousFrame.classList.add('report-frame-exiting')", app)
         self.assertIn("showToast('报告打开失败，请稍后重试')", app)
         self.assertIn(
-            "if (transitionId !== reportAudienceState.transitionId){\n        frame.remove();",
+            "if (transitionId !== reportAudienceState.transitionId){\n        cancelPendingLoad();",
             app,
         )
 
