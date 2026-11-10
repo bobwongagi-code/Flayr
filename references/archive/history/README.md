@@ -12,5 +12,6 @@
 | [早期明确要求试点](first-delivery-pilot-kit-20261015.md) | `references/first-delivery-pilot-kit-20261015.md` | 保留原 3+3 笔试点方案；不能混入后来商品起步帮助的样本或门槛 |
 | [转写窗口迁移](transcript-window-migration.md) | `references/transcript-window-migration.md` | 保留当时的历史输入盘点；文件数量和 GT 状态不是当前统计 |
 | [早期上游借鉴记录](upstream-borrowing-20260930.md) | `references/upstream-borrowing-20260930.md` | 保留实现来源与当时验证；现行旧链路用法见[工作流入口](../../legacy-analysis-workflow.md) |
+| [已退出历史运行的结论](historical-runs-conclusions-20261110.md) | 8 月基线/验证、10 月适配实验及历史 Gemini 基线 | 用户批准删除四批运行原件，保留结论；原路径不再可用于回放或逐格复验 |
 
-本次只整理无运行读取的历史文档，正文保留；内部相对链接随移动修正。未提交材料、付费模型原始响应、人工 GT、原片、交付及复核证据不在清理范围。
+首次整理只移动无运行读取的历史文档，正文保留，内部相对链接随移动修正。随后用户另行批准退出上表所列四批运行原件，只保留结论；具体删除边界见该记录。未提交材料、人工 GT 及四批范围外的媒体、交付和复核证据仍保留，不能据此扩大删除范围。

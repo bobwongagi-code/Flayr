@@ -295,6 +295,8 @@ python3 scripts/review_requirements.py --help
 
 历史计划和案例的归档入口见[历史文档](references/archive/history/README.md)。日期旧不代表无用：生产规则、冻结身份、GT 和仍被代码读取的资料保留原位；旧预算、验证记录和过期计划不作为新任务授权。
 
+2026-11-10 经用户批准退出的四批运行原件及不可再回放的边界，见[历史运行结论](references/archive/history/historical-runs-conclusions-20261110.md)。原文中的旧运行路径是历史出处，不代表文件仍在；不能因缺失自动重采或恢复预算。
+
 支持 Python 3.11、3.12、3.13。媒体处理需要 `ffmpeg`、`ffprobe`；在线 ASR 使用 `curl`。纯文档阅读和离线材料检查不要求配置模型密钥。依赖见 [requirements-dev.lock](requirements-dev.lock) 与 [DEPENDENCIES.md](DEPENDENCIES.md)。
 
 ```bash
