@@ -12,10 +12,16 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
     files: { benchmark: null, creator: null },
     urls: { benchmark: null, creator: null }
   };
+  var uploadPending = false;
 
   var jobs = [];
   var activeJobId = null;
   var pollTimer = null;
+  var pollJobId = null;
+  var pollVersion = 0;
+  var refreshVersions = Object.create(null);
+  var appliedRefreshVersions = Object.create(null);
+  var listVersion = 0;
   var demoReportMarkup = null;
   var recoveryWarningShown = false;
   var reportAudienceState = {
@@ -42,8 +48,11 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
 
   function apiJson(url, options){
     return fetch(url, options).then(function(response){
-      return response.json().catch(function(){ return {}; }).then(function(body){
-        if (!response.ok) throw new Error(body.error || '请求失败');
+      return response.json().catch(function(){
+        throw new Error(response.ok ? '服务器响应无效' : '请求失败（HTTP ' + response.status + '）');
+      }).then(function(body){
+        if (!response.ok) throw new Error(body && body.error || '请求失败（HTTP ' + response.status + '）');
+        if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('服务器响应格式不正确');
         return body;
       });
     });
@@ -59,7 +68,13 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
   }
 
   function mapJob(raw){
-    var rawStatus = raw.status || 'failed';
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || typeof raw.id !== 'string' || !raw.id.trim()){
+      throw new Error('任务响应缺少有效标识');
+    }
+    if (['queued','running','completed','degraded','failed'].indexOf(raw.status) === -1){
+      throw new Error('任务响应包含未知状态');
+    }
+    var rawStatus = raw.status;
     var status = (rawStatus === 'completed' || rawStatus === 'degraded') ? 'done' :
       (rawStatus === 'failed' ? 'failed' : 'generating');
     return {
@@ -91,30 +106,60 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
   }
 
   function loadJobs(){
+    var requestVersion = ++listVersion;
+    var snapshot = Object.create(null);
+    jobs.forEach(function(job){ snapshot[job.id] = job; });
     return apiJson('/api/jobs').then(function(body){
+      if (requestVersion !== listVersion) return jobs;
+      if (!Array.isArray(body.jobs)) throw new Error('任务列表响应格式不正确');
+      // Preserve only locally changed jobs, not the entire old list.
+      var changedJobs = Object.create(null);
+      jobs.forEach(function(job){
+        if (snapshot[job.id] !== job) changedJobs[job.id] = job;
+      });
+      var nextJobs = body.jobs.map(function(raw){
+        var job = mapJob(raw);
+        if (changedJobs[job.id]){
+          var localJob = changedJobs[job.id];
+          delete changedJobs[job.id];
+          return localJob;
+        }
+        return job;
+      });
+      Object.keys(changedJobs).forEach(function(id){ nextJobs.push(changedJobs[id]); });
       if (body.recovery_warning && !recoveryWarningShown){
         recoveryWarningShown = true;
         showToast(body.recovery_warning);
       }
-      jobs = (body.jobs || []).map(mapJob);
+      jobs = nextJobs;
       updateNavBadge();
       if ($('view-jobs').classList.contains('active')) renderJobList();
       return jobs;
     }).catch(function(error){
       showToast('任务列表加载失败：' + error.message);
-      return [];
+      return jobs;
     });
   }
 
   function refreshJob(id, silent){
+    var requestVersion = (refreshVersions[id] || 0) + 1;
+    refreshVersions[id] = requestVersion;
+    var pollingVersion = pollVersion;
     return apiJson('/api/jobs/' + encodeURIComponent(id)).then(function(body){
-      var job = mergeJob(mapJob(body));
+      if (requestVersion <= (appliedRefreshVersions[id] || 0)) return null;
+      if (body.id !== id) throw new Error('任务响应与当前请求不一致');
+      var job = mapJob(body);
+      for (var i=0;i<jobs.length;i++){
+        if (jobs[i].id === id && jobs[i].status !== 'generating' && job.status === 'generating') return jobs[i];
+      }
+      mergeJob(job);
+      appliedRefreshVersions[id] = requestVersion;
       updateNavBadge();
       if (activeJobId === id && $('view-report').classList.contains('active')){
         renderReportShell(job);
       }
       if ($('view-jobs').classList.contains('active')) renderJobList();
-      if (job.status !== 'generating') stopPolling();
+      if (job.status !== 'generating' && pollJobId === id && pollingVersion === pollVersion) stopPolling();
       return job;
     }).catch(function(error){
       if (!silent) showToast('任务状态获取失败：' + error.message);
@@ -123,11 +168,17 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
   }
 
   function startPolling(id){
-    if (pollTimer) clearInterval(pollTimer);
-    pollTimer = setInterval(function(){ refreshJob(id, true); }, 30000);
+    stopPolling();
+    pollJobId = id;
+    var version = pollVersion;
+    pollTimer = setInterval(function(){
+      if (pollJobId === id && version === pollVersion) refreshJob(id, true);
+    }, 30000);
   }
 
   function stopPolling(){
+    pollVersion += 1;
+    pollJobId = null;
     if (pollTimer){ clearInterval(pollTimer); pollTimer = null; }
   }
 
@@ -413,6 +464,17 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
     buildStageTabsAndPanels();
   }
 
+  function renderUnavailableReport(job){
+    var content = $('report-done-content');
+    resetReportFrameState();
+    content.setAttribute('data-real-job', job.id);
+    content.innerHTML = '';
+    var message = document.createElement('div');
+    message.className = 'report-frame-empty';
+    message.textContent = '报告文件暂不可用，请刷新任务状态或返回任务列表。';
+    content.appendChild(message);
+  }
+
   function renderReportShell(job){
     $('report-title').textContent = job.name + ' · 提升报告';
     $('report-meta').textContent = '产品：' + job.name + ' · 市场：' + job.market;
@@ -429,7 +491,7 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
     var hasLegacyReport = Boolean(job.legacyReportUrl);
     var hasReport = hasAudienceReport || hasLegacyReport;
     var demoBadge = document.querySelector('.badge-demo');
-    demoBadge.style.display = hasReport ? 'none' : 'inline-flex';
+    demoBadge.style.display = 'none';
     $('report-audience').hidden = job.status !== 'done' || !hasAudienceReport;
     $('report-degraded-inline').style.display = job.degraded ? 'flex' : 'none';
     $('report-degraded-label').textContent = job.degraded
@@ -455,7 +517,7 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
     if (job.status === 'done'){
       if (hasAudienceReport) renderActualReport(job);
       else if (hasLegacyReport) renderLegacyReport(job);
-      else renderDemoReport();
+      else renderUnavailableReport(job);
     }
   }
 
@@ -482,7 +544,7 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
   /* ---------- upload dropzones ---------- */
   function checkReady(){
     var ready = uploadState.files.benchmark && uploadState.files.creator;
-    $('btn-start').disabled = !ready;
+    $('btn-start').disabled = uploadPending || !ready;
     $('cta-hint').textContent = ready ? '两条视频已就绪 · 提交后会根据素材和模型情况处理' : '请上传两条视频后开始分析';
   }
 
@@ -496,6 +558,7 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
     var sizeEl = $('size-' + role);
 
     function handleFile(file){
+      if (uploadPending) return;
       if (!file || file.type.indexOf('video') === -1) return;
       uploadState.files[role] = file;
       if (uploadState.urls[role]) URL.revokeObjectURL(uploadState.urls[role]);
@@ -521,6 +584,7 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
     });
 
     dz.querySelector('[data-swap]').addEventListener('click', function(){
+      if (uploadPending) return;
       emptyEl.style.display = 'flex';
       filledEl.classList.remove('show');
       uploadState.files[role] = null;
@@ -549,22 +613,24 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
   }
 
   $('btn-start').addEventListener('click', function(){
-    if ($('btn-start').disabled) return;
+    if (uploadPending || $('btn-start').disabled) return;
     var productName = $('f-product-name').value.trim() || '未命名分析';
 
-    $('btn-start').disabled = true;
+    uploadPending = true;
+    checkReady();
     $('btn-start-label').textContent = '提交中…';
 
-    var form = new FormData();
-    form.append('benchmark_video', uploadState.files.benchmark, uploadState.files.benchmark.name);
-    form.append('creator_video', uploadState.files.creator, uploadState.files.creator.name);
-    form.append('product_name', productName);
-    form.append('category', $('f-category').value);
-    form.append('market', $('f-market').value);
-    form.append('price', $('f-price').value);
-    form.append('selling_point', $('f-selling-point').value);
-
-    apiJson('/api/jobs', { method:'POST', body:form }).then(function(raw){
+    Promise.resolve().then(function(){
+      var form = new FormData();
+      form.append('benchmark_video', uploadState.files.benchmark, uploadState.files.benchmark.name);
+      form.append('creator_video', uploadState.files.creator, uploadState.files.creator.name);
+      form.append('product_name', productName);
+      form.append('category', $('f-category').value);
+      form.append('market', $('f-market').value);
+      form.append('price', $('f-price').value);
+      form.append('selling_point', $('f-selling-point').value);
+      return apiJson('/api/jobs', { method:'POST', body:form });
+    }).then(function(raw){
       var job = mergeJob(mapJob(raw));
       updateNavBadge();
       showToast('已提交分析任务，处理时间会根据视频和模型情况变化');
@@ -572,9 +638,11 @@ import { hasAudienceReport as hasAudienceReports, reportUrlForAudience } from '.
       $('btn-start-label').textContent = '开始分析';
       openReport(job.id);
     }).catch(function(error){
-      $('btn-start').disabled = false;
+      showToast('提交未确认：' + error.message + '；请先查看任务列表。');
+    }).finally(function(){
+      uploadPending = false;
       $('btn-start-label').textContent = '开始分析';
-      showToast('提交失败：' + error.message);
+      checkReady();
     });
   });
 

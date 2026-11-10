@@ -352,6 +352,7 @@ class ReviewRegressions(unittest.TestCase):
                     self.assertIs(stop.call_args.args[0], child)
             finally:
                 # A failing test must not cause cleanup to touch a real process.
+                child.poll.return_value = 0
                 with mock.patch.object(web, 'stop_process_group'):
                     store.shutdown()
 
@@ -392,7 +393,7 @@ class ReviewRegressions(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             store = web.JobStore(root)
-            store.jobs['job-test'] = {'id': 'job-test', 'run_dir': str(root / 'run'),
+            store.jobs['job-test'] = {'id': 'job-test', 'status': 'queued', 'run_dir': str(root / 'run'),
                                       'log_path': str(root / 'worker.log')}
             child = mock.Mock()
             child.poll.return_value = None
@@ -407,10 +408,12 @@ class ReviewRegressions(unittest.TestCase):
                     with mock.patch.object(web, 'stop_process_group', side_effect=OSError('kill failed')):
                         store._run_job('job-test')
                 self.assertIs(store._running_processes['job-test'], child)
+                child.poll.return_value = 0
                 with mock.patch.object(web, 'stop_process_group') as stop:
                     store.shutdown()
                     stop.assert_called_with(child, grace_seconds=5.0)
             finally:
+                child.poll.return_value = 0
                 with mock.patch.object(web, 'stop_process_group'):
                     store.shutdown()
 

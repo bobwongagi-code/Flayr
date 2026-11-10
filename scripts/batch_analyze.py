@@ -741,9 +741,10 @@ def _run_jobs(
         except BaseException:
             log_file.close()
             raise
+        # Own the live process before any fallible status write.
+        running.append((job, proc, log_file))
         status["jobs"][job["name"]].update({"state": "running", "started": now(), "log": str(log_path)})
         write_status(status_path, status)
-        running.append((job, proc, log_file))
 
     try:
         while idx < len(pending) or running:
@@ -777,11 +778,26 @@ def _run_jobs(
     except BaseException:
         for job, proc, _ in running:
             status["jobs"][job["name"]].update({"state": "interrupted", "ended": now()})
-        write_status(status_path, status)
-        for _, proc, log_file in running:
-            if proc.poll() is None:
-                _stop_process(proc)
-            log_file.close()
+        cleanup_errors: list[str] = []
+        try:
+            write_status(status_path, status)
+        except Exception as exc:
+            cleanup_errors.append(f"cannot persist interruption: {exc}")
+        for job, proc, log_file in running:
+            try:
+                if proc.poll() is None:
+                    _stop_process(proc)
+            except Exception as exc:
+                cleanup_errors.append(f"cannot stop {job['name']}: {exc}")
+            try:
+                log_file.close()
+            except Exception as exc:
+                cleanup_errors.append(f"cannot close log for {job['name']}: {exc}")
+        for error in cleanup_errors:
+            try:
+                print(f"[batch] cleanup warning: {error}", file=sys.stderr)
+            except OSError:
+                pass  # A full/broken log destination must not replace the original failure.
         raise
 
     done_n = sum(1 for item in status["jobs"].values() if item["state"] == "done")

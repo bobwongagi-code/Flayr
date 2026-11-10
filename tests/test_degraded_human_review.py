@@ -4,8 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts import web_app
 from scripts.flayr_core import human_review as hr
-from scripts.flayr_core.bd_report import build_bd_report_data
+from scripts.flayr_core.bd_report import build_bd_report_data, write_bd_report
+from scripts.flayr_core.creator_report import write_creator_report
 from scripts.flayr_core.run_manifest import BASE_REQUIRED_ARTIFACTS, REPORT_VARIANT_ARTIFACTS
 from scripts.flayr_core.utils import write_json
 
@@ -57,6 +59,31 @@ class DegradedHumanReviewTests(unittest.TestCase):
         self.assertFalse((self.root / "_SUCCESS.json").exists())
         with self.assertRaises(hr.HumanReviewError):
             hr.update_stage(self.root, "S5", "confirmed")
+
+    def test_reviewed_degraded_draft_stays_degraded_across_publication_and_review(self):
+        write_json(self.root / "degraded_manifest.json", {
+            "analysis_run_state": "degraded", "degraded_flags": ["S5 unresolved"], "reason": "S5 unresolved",
+        })
+        write_bd_report(self.root, self.analysis)
+        write_creator_report(self.root, self.analysis)
+        self.assertTrue(web_app.report_variants_ready(self.root))
+        self.assertEqual(web_app._publication_status(self.root, {}, returncode=0), "degraded")
+        before = (self.root / "analysis.json").read_bytes()
+        hr.init_review(self.root)
+        for code in hr.STAGE_CODES:
+            if code == "S5":
+                hr.update_stage(self.root, code, "insufficient_evidence", note="Trust evidence remains unresolved")
+            else:
+                hr.update_stage(self.root, code, "confirmed")
+        self.assertEqual(hr.load_review(self.root)["status"], "approved")
+        self.assertTrue(all(path.is_file() for path in hr.write_reviewed_reports(self.root)))
+        projected = hr.project_reviewed_analysis(self.root)
+        self.assertEqual(projected["review_status"], "approved")
+        self.assertFalse(projected["review_delivery"]["model_completed"])
+        self.assertEqual(projected["analysis_run_state"], "degraded")
+        self.assertEqual(web_app._publication_status(self.root, {}, recovery=True), "degraded")
+        self.assertEqual((self.root / "analysis.json").read_bytes(), before)
+        self.assertFalse((self.root / "_SUCCESS.json").exists())
 
     def test_failed_and_partial_runs_rejected(self):
         for state in ("FAILED", "PROCESSING", "COMPLETED"):

@@ -775,6 +775,7 @@ class JobStore:
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="flayr-job")
         self._running_processes: dict[str, subprocess.Popen] = {}
         self._shutdown_requested = False
+        self._shutdown_state_dirty = False
         self._admission_reservations: dict[tuple[str, str], int] = {}
         self._storage_reservations: dict[str, int] = {}
         self.jobs: dict[str, dict[str, Any]] = {}
@@ -1100,6 +1101,8 @@ class JobStore:
             self._persist_locked()
 
     def _admission_error_locked(self, owner_id: str, workspace_id: str) -> str | None:
+        if self._shutdown_requested:
+            return "服务正在停止，暂时不能接收新任务。"
         reservation_total = sum(self._admission_reservations.values())
         active = [
             job
@@ -1222,6 +1225,11 @@ class JobStore:
             for item in files.values():
                 Path(str(item.get("path"))).unlink(missing_ok=True)
             raise RequestError("请同时上传标杆视频和达人视频")
+        with self._lock:
+            stopping = self._shutdown_requested
+        if stopping:
+            cleanup_upload_files(files)
+            raise AdmissionError("服务正在停止，暂时不能接收新任务。")
         product_name = str(fields.get("product_name") or "未命名分析").strip()[:200]
         market_label = str(fields.get("market") or "未指定市场").strip()[:80]
         try:
@@ -1287,11 +1295,34 @@ class JobStore:
                 "log_path": str((job_root / "worker.log").resolve()),
             }
             with self._lock:
-                self._write_job_metadata(job_root, job)
-                self.jobs[job_id] = job
-                self._persist_locked()
-            self._executor.submit(self._run_job, job_id)
+                if self._shutdown_requested:
+                    raise AdmissionError("服务正在停止，暂时不能接收新任务。")
+                try:
+                    self._write_job_metadata(job_root, job)
+                    self.jobs[job_id] = job
+                    self._persist_locked()
+                    self._executor.submit(self._run_job, job_id)
+                except Exception as exc:
+                    # A submit error can occur after enqueue; reject it before unlocking.
+                    job.update(status="failed", phase="任务未启动", estimated_remaining_seconds=0,
+                               failure_reason=f"任务未启动：{str(exc)[:240]}")
+                    self.jobs[job_id] = job
+                    try:
+                        self._write_job_metadata(job_root, job)
+                    except Exception as metadata_error:
+                        exc.add_note(f"Cannot persist failed job metadata: {metadata_error}")
+                    try:
+                        self._persist_locked()
+                    except Exception as index_error:
+                        exc.add_note(f"Cannot persist failed job index: {index_error}")
+                    raise
             return self.public(job)
+        except AdmissionError:
+            with self._lock:
+                registered = job_id in self.jobs
+            if not registered:
+                shutil.rmtree(job_root, ignore_errors=True)
+            raise
         finally:
             cleanup_upload_files(files)
             if enforce_limits:
@@ -1420,27 +1451,33 @@ class JobStore:
             return
         run_dir = Path(str(job["run_dir"]))
         log_path = Path(str(job["log_path"]))
-        run_dir.parent.mkdir(parents=True, exist_ok=True)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        command = self._command(job)
         process: subprocess.Popen | None = None
         try:
-            self._update(job_id, status="running", phase="素材处理与转写")
+            with self._lock:
+                current = self.jobs.get(job_id)
+                if not current or current.get("status") != "queued":
+                    return
+                if self._shutdown_requested:
+                    raise RuntimeError("服务正在停止，任务未启动。")
+                self._update(job_id, status="running", phase="素材处理与转写")
+            run_dir.parent.mkdir(parents=True, exist_ok=True)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            command = self._command(job)
             with log_path.open("ab") as log:
                 log.write(("$ " + " ".join(command) + "\n").encode("utf-8", "replace"))
-                process = subprocess.Popen(
-                    command,
-                    cwd=str(ROOT),
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    env=os.environ.copy(),
-                    **process_group_popen_kwargs(),
-                )
+                # Fence launch and registration against the shutdown snapshot.
                 with self._lock:
+                    if self._shutdown_requested:
+                        raise RuntimeError("服务正在停止，任务未启动。")
+                    process = subprocess.Popen(
+                        command,
+                        cwd=str(ROOT),
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        env=os.environ.copy(),
+                        **process_group_popen_kwargs(),
+                    )
                     self._running_processes[job_id] = process
-                    stop_requested = self._shutdown_requested
-                if stop_requested:
-                    stop_process_group(process, grace_seconds=5.0)
                 while process.poll() is None:
                     current = self.get(job_id)
                     if current:
@@ -1592,10 +1629,36 @@ class JobStore:
     def shutdown(self) -> None:
         with self._lock:
             self._shutdown_requested = True
-            running = list(self._running_processes.values())
-        for process in running:
-            stop_process_group(process, grace_seconds=5.0)
-        self._executor.shutdown(wait=True, cancel_futures=True)
+            running = list(self._running_processes.items())
+        errors: list[str] = []
+        for job_id, process in running:
+            try:
+                stop_process_group(process, grace_seconds=5.0)
+                if process.poll() is None:
+                    errors.append(f"{job_id}: worker is still running")
+            except Exception as exc:
+                errors.append(f"{job_id}: {exc}")
+        try:
+            # Never wait on a worker whose child could not be stopped.
+            self._executor.shutdown(wait=not errors, cancel_futures=True)
+        except Exception as exc:
+            errors.append(f"cannot shut down worker pool: {exc}")
+        with self._lock:
+            pending = [job for job in self.jobs.values() if job.get("status") == "queued"]
+            for job in pending:
+                job.update(status="failed", phase="任务未启动", estimated_remaining_seconds=0,
+                           failure_reason="服务停止，排队任务未执行。")
+            if pending:
+                self._shutdown_state_dirty = True
+            if self._shutdown_state_dirty:
+                try:
+                    self._persist_locked()
+                except Exception as exc:
+                    errors.append(f"cannot persist cancelled jobs: {exc}")
+                else:
+                    self._shutdown_state_dirty = False
+        if errors:
+            raise RuntimeError("服务未完全停止：" + "; ".join(errors))
 
 
 class FlayrServer(ThreadingHTTPServer):

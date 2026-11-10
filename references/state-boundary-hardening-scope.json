@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "name": "state-boundary-hardening-20261110",
+  "description": "Consolidate six offline engineering batches: state authority and regression coverage, retry/cache contracts, batch process cleanup, Web shutdown and admission ownership, and frontend asynchronous boundaries. No model calls, business media reruns, scoring, GT, route or dependency changes. Excludes business records and the complete local handoff.",
+  "change_scope": {
+    "max_files": 15,
+    "max_added_lines": 2800,
+    "max_deleted_lines": 100,
+    "allowed_globs": [
+      "DEVELOPMENT.md",
+      "frontend/app.js",
+      "references/review-improvement.md",
+      "references/state-boundary-hardening-scope.json",
+      "scripts/batch_analyze.py",
+      "scripts/web_app.py",
+      "tests/frontend_runtime.mjs",
+      "tests/test_batch_cleanup.py",
+      "tests/test_degraded_human_review.py",
+      "tests/test_delivery_state_transitions.py",
+      "tests/test_frontend_contracts.py",
+      "tests/test_retry_cache_protocols.py",
+      "tests/test_review_regressions.py",
+      "tests/test_web_shutdown.py",
+      "tests/test_web_submission.py"
+    ],
+    "forbidden_globs": [
+      "runs/**",
+      "outputs/**",
+      "jobs*.json",
+      "**/*.mp4",
+      "**/.env*",
+      "**/__pycache__/**"
+    ]
+  }
+}
