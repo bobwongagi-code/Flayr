@@ -1076,8 +1076,8 @@ def write_reviewed_reports(run_dir: Path) -> tuple[Path, Path]:
             review_status="approved",
         )
         return bd_path, creator_path
-    except Exception:
-        # A failed second render must not leave a misleading half-approved
-        # report pair behind.
+    except BaseException:
+        # Failed or interrupted rendering must not leave a misleading
+        # half-approved report pair behind. Preserve the original interruption.
         invalidate_reviewed_reports(root)
         raise
