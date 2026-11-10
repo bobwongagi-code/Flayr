@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "restart-recovery-20261110",
+  "description": "Contain known per-run data/persistence failures at the Web recovery boundary without relaxing publication, core lifecycle contracts, or global index failure handling. No provider calls or task resubmission.",
+  "change_scope": {
+    "max_files": 4,
+    "max_added_lines": 330,
+    "max_deleted_lines": 80,
+    "allowed_globs": [
+      "DEVELOPMENT.md",
+      "scripts/web_app.py",
+      "tests/test_web_recovery_isolation.py",
+      "references/restart-recovery-scope.json"
+    ],
+    "forbidden_globs": ["scripts/flayr_core/**", "scripts/flayr.py", "frontend/**", "runs/**", "outputs/**", "jobs*.json", "**/*.mp4", "**/.env*"]
+  }
+}

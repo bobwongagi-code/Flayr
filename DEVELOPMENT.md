@@ -139,6 +139,22 @@ python3 scripts/replay_finalization.py /path/to/source-run /path/to/new-output
 .venv/bin/python -B -m unittest tests.test_web_submission tests.test_web_shutdown tests.test_web_app tests.test_review_regressions -v
 ```
 
+## 重启恢复故障隔离
+
+Web恢复边界把生命周期/完成清单的已知读取和类型错误视为不可交付，不据此推导成功。
+单个任务的恢复写入或身份核验失败时，只把该任务标为failed、清空剩余时间并给出通用警告，
+继续核验其他任务；不自动提交执行器、不重跑视频或模型，也不放宽核心状态转换与清单合同。
+失败理由不包含原始异常正文、来源路径或其他任务身份。
+
+全局任务索引持久化失败仍阻止启动；校验器的RuntimeError等程序错误仍传播。
+故障隔离不代表磁盘已修好，也不允许把恢复失败当成人工批准或重新接单权限。
+[恢复隔离回归](tests/test_web_recovery_isolation.py)使用两个以上合成任务同时重启，
+覆盖坏字节/类型、缺索引重建、单任务写盘失败及身份不匹配，并保护健康报告与上述硬失败。
+
+```bash
+.venv/bin/python -B -m unittest tests.test_web_recovery_isolation tests.test_web_app -v
+```
+
 ## 上传暂存与预留释放
 
 multipart解析、输入接管和HTTP响应各有独立的资源所有权。解析中断也清理本次已创建的分片，

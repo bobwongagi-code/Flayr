@@ -445,7 +445,10 @@ def _verified_client_cookie(value: str, secret: bytes) -> str | None:
 
 
 def _run_state(run_dir: Path) -> str:
-    payload = read_run_state(run_dir)
+    try:
+        payload = read_run_state(run_dir)
+    except (OSError, ValueError, TypeError):
+        return ""
     return str(payload.get("state") or "") if payload else ""
 
 
@@ -606,9 +609,12 @@ def _publication_status(
         return "failed"
     analysis_state = _analysis_state(run_dir)
     if lifecycle == COMPLETED:
-        return "completed" if (recovery or analysis_state == "completed") and validate_success_manifest(
-            run_dir, expected_inputs
-        ) else "failed"
+        try:
+            return "completed" if (recovery or analysis_state == "completed") and validate_success_manifest(
+                run_dir, expected_inputs
+            ) else "failed"
+        except (OSError, ValueError, TypeError):
+            return "failed"
     if lifecycle == DEGRADED and analysis_state == "degraded" and report_variants_ready(run_dir):
         try:
             degraded = json.loads((run_dir / "degraded_manifest.json").read_text(encoding="utf-8"))
@@ -1043,6 +1049,22 @@ class JobStore:
         write_json(job_root / JOB_METADATA_FILE, job)
         _fsync_directory(job_root)
 
+    def _recover_job_lifecycle(
+        self, job: dict[str, Any], run_dir: Path, target: str, *,
+        reason: str, artifacts: tuple[str, ...] = (),
+    ) -> bool:
+        try:
+            recover_run_state(run_dir, target, job_id=str(job.get("id") or ""),
+                              reason=reason, artifacts=artifacts)
+        except (OSError, ValueError, TypeError) as exc:
+            job.update(status="failed", phase="恢复核验失败", estimated_remaining_seconds=0,
+                       failure_reason=f"任务恢复未完成（{type(exc).__name__}）；运行状态未能安全确认，未自动重跑。")
+            warning = "部分任务状态恢复未完成，请核对失败任务；未自动重跑。"
+            if warning not in self.recovery_warning:
+                self.recovery_warning = f"{self.recovery_warning} {warning}".strip()
+            return False
+        return True
+
     def _recover_incomplete(self) -> None:
         with self._lock:
             changed = False
@@ -1067,13 +1089,14 @@ class JobStore:
                 }
                 publication = _publication_status(run_dir, expected, recovery=True)
                 if publication == "completed":
-                    recover_run_state(
-                        run_dir,
+                    if not self._recover_job_lifecycle(
+                        job, run_dir,
                         COMPLETED,
-                        job_id=str(job.get("id") or ""),
                         reason="服务重启后校验成功清单并恢复完成状态。",
                         artifacts=(SUCCESS_MANIFEST_NAME, "bd_report.html", "creator_report.html"),
-                    )
+                    ):
+                        changed = True
+                        continue
                     job.update({
                         "status": "completed",
                         "progress": 100,
@@ -1081,13 +1104,14 @@ class JobStore:
                         "estimated_remaining_seconds": 0,
                     })
                 elif publication == "degraded":
-                    recover_run_state(
-                        run_dir,
+                    if not self._recover_job_lifecycle(
+                        job, run_dir,
                         DEGRADED,
-                        job_id=str(job.get("id") or ""),
                         reason="服务重启后恢复降级报告。",
                         artifacts=("degraded_manifest.json", "bd_report.html", "creator_report.html"),
-                    )
+                    ):
+                        changed = True
+                        continue
                     job.update({
                         "status": "degraded",
                         "progress": 100,
@@ -1096,16 +1120,9 @@ class JobStore:
                     })
                 else:
                     reason = "服务重新启动时任务尚未完成，请重新上传后重试。"
-                    if run_dir.is_dir():
-                        try:
-                            recover_run_state(
-                                run_dir,
-                                FAILED,
-                                job_id=str(job.get("id") or ""),
-                                reason=reason,
-                            )
-                        except RunStateError:
-                            pass
+                    if run_dir.is_dir() and not self._recover_job_lifecycle(job, run_dir, FAILED, reason=reason):
+                        changed = True
+                        continue
                     job.update({
                         "status": "failed",
                         "estimated_remaining_seconds": 0,
