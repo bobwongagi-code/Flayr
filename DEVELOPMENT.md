@@ -32,6 +32,8 @@ python3 scripts/replay_finalization.py /path/to/source-run /path/to/new-output
 
 本节说明现有状态由谁写、谁核验，不新增状态框架、审批队列或全局“通过”。旧分析报告与 Zero/A/B/C 人工辅助产物分开执行；后者不要求先跑旧分析链来获得 `_SUCCESS.json`。
 
+原始 54 项的决定、提交、回归及未闭合项见[逐项对账](references/state-governance-ledger.md)；“已选工程修复收口”不能解释成 54 项全部修复或全面验收。遇到进程未停、删除未完成、索引异常时，先按[异常处置说明](references/state-recovery-runbook.md)核对，不靠反复重跑消除错误。
+
 | 回答的问题 | 权威记录及写入者 | 消费与边界 |
 | --- | --- | --- |
 | 运行走到哪一步 | `run_state.json`；`run_state.py` 约束转换，由 CLI 编排推进 | 普通转换不能离开终态；恢复必须记录 recovered，且只能修正为终态。`recover_run_state` 不替调用方核验产物；新一轮通过显式目录复用/reset 开始，不冒充旧轮续接 |
