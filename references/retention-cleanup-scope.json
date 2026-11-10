@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "retention-cleanup-20261110",
+  "description": "Retain durable ownership until expired job files are removed; contain per-directory cleanup failures and protect same-ID direct-child paths. No online cleanup service, provider calls or frozen-core changes.",
+  "change_scope": {
+    "max_files": 4,
+    "max_added_lines": 450,
+    "max_deleted_lines": 100,
+    "allowed_globs": [
+      "DEVELOPMENT.md",
+      "scripts/web_app.py",
+      "tests/test_retention_cleanup.py",
+      "references/retention-cleanup-scope.json"
+    ],
+    "forbidden_globs": ["scripts/flayr_core/**", "scripts/flayr.py", "frontend/**", "runs/**", "outputs/**", "jobs*.json", "**/*.mp4", "**/.env*"]
+  }
+}

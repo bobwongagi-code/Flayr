@@ -839,33 +839,66 @@ class JobStore:
             return None
         jobs_root = self.jobs_root.resolve()
         candidate = (self.jobs_root / str(job_id)).resolve()
-        try:
-            candidate.relative_to(jobs_root)
-        except ValueError:
+        if candidate.parent != jobs_root or candidate.name != str(job_id):
             return None
         return candidate
 
     def _garbage_collect(self) -> None:
         cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=JOB_RETENTION_SECONDS)
-        expired: list[str] = []
+        expired: list[tuple[str, dict[str, Any]]] = []
         with self._lock:
             for job_id, job in self.jobs.items():
-                if job.get("status") not in {"completed", "degraded", "failed"}:
+                if job_id in self._running_processes or job.get("status") not in {"completed", "degraded", "failed"}:
                     continue
                 try:
                     created_at = parse_iso(str(job.get("created_at") or ""))
                 except (TypeError, ValueError):
                     continue
                 if created_at <= cutoff:
-                    expired.append(job_id)
-            for job_id in expired:
-                self.jobs.pop(job_id, None)
-            if expired:
+                    expired.append((job_id, job))
+            if not expired:
+                return
+            # Keep durable ownership until files are gone; batch both index commits.
+            for job_id, job in expired:
+                self._mark_incomplete_deletion(job_id, dict(job))
+            try:
                 self._persist_locked()
-        for job_id in expired:
-            job_root = self._job_root(job_id)
-            if job_root:
-                shutil.rmtree(job_root, ignore_errors=True)
+            except BaseException as exc:
+                self.jobs.update(expired)
+                try:
+                    self._persist_locked()
+                except Exception as restore_error:
+                    exc.add_note(f"Cannot restore retained job index: {restore_error}")
+                raise
+            cleanup_failed = False
+            try:
+                for job_id, _job in expired:
+                    job_root = None
+                    try:
+                        job_root = self._job_root(job_id)
+                        if job_root is None:
+                            raise OSError("Cannot safely locate expired job directory")
+                        if job_root.exists():
+                            shutil.rmtree(job_root)
+                    except BaseException as exc:
+                        self._retain_incomplete_deletion(job_id, self.jobs[job_id], job_root, exc)
+                        if not isinstance(exc, OSError):
+                            raise
+                        cleanup_failed = True
+                    else:
+                        self.jobs.pop(job_id, None)
+            except BaseException as exc:
+                try:
+                    self._persist_locked()
+                except Exception as restore_error:
+                    exc.add_note(f"Cannot persist interrupted retention cleanup: {restore_error}")
+                raise
+            else:
+                self._persist_locked()
+            if cleanup_failed:
+                warning = "过期任务清理遇到错误，已保留相关任务供核查。"
+                if warning not in self.recovery_warning:
+                    self.recovery_warning = f"{self.recovery_warning} {warning}".strip()
 
     @staticmethod
     def _coerce_jobs_payload(payload: Any) -> dict[str, dict[str, Any]] | None:
@@ -1259,34 +1292,48 @@ class JobStore:
                 except Exception as restore_error:
                     exc.add_note(f"Cannot restore job index after failed deletion: {restore_error}")
                 raise
-        job_root = self._job_root(job_id)
+        job_root = None
         try:
+            job_root = self._job_root(job_id)
+            if job_root is None:
+                raise OSError("Cannot safely locate job directory")
             if process is not None:
                 stop_process_group(process, grace_seconds=5.0)
                 if process.poll() is None:
                     raise RuntimeError("任务进程仍在运行，未删除素材。")
-            if job_root and job_root.exists():
+            if job_root.exists():
                 shutil.rmtree(job_root)
         except BaseException as exc:
             with self._lock:
-                job.update(status="failed", phase="删除未完成", deletion_incomplete=True, estimated_remaining_seconds=0,
-                           failure_reason="任务删除未完成，请重试；进程停止和文件清理尚未全部确认。")
-                self.jobs[job_id] = job
-                if job_root is not None:
-                    try:
-                        self._write_job_metadata(job_root, job)
-                    except Exception as metadata_error:
-                        exc.add_note(f"Cannot persist incomplete deletion metadata: {metadata_error}")
                 try:
-                    self._persist_locked()
-                except Exception as restore_error:
-                    exc.add_note(f"Cannot persist incomplete deletion: {restore_error}")
+                    self._retain_incomplete_deletion(job_id, job, job_root, exc)
+                finally:
+                    try:
+                        self._persist_locked()
+                    except Exception as restore_error:
+                        exc.add_note(f"Cannot persist incomplete deletion: {restore_error}")
             raise
         if process is not None:
             with self._lock:
                 if self._running_processes.get(job_id) is process:
                     self._running_processes.pop(job_id, None)
         return True
+
+    def _mark_incomplete_deletion(self, job_id: str, job: dict[str, Any]) -> None:
+        job.update(status="failed", phase="删除未完成", deletion_incomplete=True, estimated_remaining_seconds=0,
+                   failure_reason="任务删除未完成，请重试；进程停止和文件清理尚未全部确认。")
+        self.jobs[job_id] = job
+
+    def _retain_incomplete_deletion(
+        self, job_id: str, job: dict[str, Any], job_root: Path | None, error: BaseException,
+    ) -> None:
+        # Caller owns the lock and decides whether to batch the index write.
+        self._mark_incomplete_deletion(job_id, job)
+        if job_root is not None:
+            try:
+                self._write_job_metadata(job_root, job)
+            except Exception as metadata_error:
+                error.add_note(f"Cannot persist incomplete deletion metadata: {metadata_error}")
 
     def create(
         self,
