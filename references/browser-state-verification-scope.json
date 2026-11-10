@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "browser-state-verification-20261110",
+  "description": "Close the real-browser verification gap with a read-only loopback fixture and manual procedure. No production runtime changes, model calls, video processing, or business-state automation.",
+  "change_scope": {
+    "max_files": 4,
+    "max_added_lines": 330,
+    "max_deleted_lines": 10,
+    "allowed_globs": [
+      "DEVELOPMENT.md",
+      "tests/frontend_browser_fixture.py",
+      "tests/test_frontend_browser_fixture.py",
+      "references/browser-state-verification-scope.json"
+    ],
+    "forbidden_globs": ["scripts/**", "frontend/**", "runs/**", "outputs/**", "jobs*.json", "**/*.mp4", "**/.env*"]
+  }
+}

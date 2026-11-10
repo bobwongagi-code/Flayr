@@ -174,6 +174,30 @@ python3 scripts/replay_finalization.py /path/to/source-run /path/to/new-output
 不改变后台任务、报告内容或人工批准。实际iframe事件、HEAD失败、超时和迟到回调
 由真实JS运行夹具覆盖；最小DOM不是浏览器布局或跨设备验证。
 
+## 真实浏览器状态验收
+
+Node夹具不能证明浏览器实际的iframe事件与取消行为。需要核对这层时，运行：
+
+```bash
+.venv/bin/python tests/frontend_browser_fixture.py
+```
+
+打开终端打印的本机URL；它提供真实前端及六个合成任务，不启动JobStore、视频处理或模型。
+只绑定127.0.0.1，静态文件走白名单，POST/PUT/DELETE拒绝。结束后Ctrl-C停止；不用于部署。
+
+| 合成任务与操作 | 应观察到的结果 |
+| --- | --- |
+| Ready：依次选自己用、给达人 | 内容与用途一致，动画结束后只有一个iframe，按钮恢复可用 |
+| Rejected：先打开自己用，再切给达人 | 拒绝后保留原报告，按钮恢复，不留下空白帧 |
+| Slow HEAD：先打开自己用，再切给达人，等待至少35秒 | HEAD超时后恢复原报告，不因迟到响应切换 |
+| Slow iframe：首次选给达人，等待至少35秒 | HEAD成功但正文未到仍受总期限约束，回到空态且按钮可用 |
+| Slow iframe：开始加载后立刻回列表，再打开Running | 未完成帧移除，35秒后仍是运行页，无旧报告或超时反馈污染 |
+| Failed：从列表进入 | 失败页没有旧报告；重新进入Ready仍能正常选择报告 |
+
+`/fixture/events`只记录本轮夹具收到的方法与路径；是否重试须结合手动操作记录判断。
+浏览器验收记录存当前任务诊断目录，不把人工操作结果冒充CI自动浏览器测试。
+[夹具单测](tests/test_frontend_browser_fixture.py)检查只读白名单和故障路由，不能替代上表操作。
+
 ## 状态边界覆盖图
 
 不把所有状态收进一个全局FSM。以下边界分别由现有所有者维护：
