@@ -402,12 +402,6 @@ def write_bytes(path: Path, content: bytes) -> None:
             Path(temporary_path).unlink(missing_ok=True)
 
 
-def _timeout_text(value: str | bytes | None) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value or ""
-
-
 def read_optional_text(path: Path) -> str:
     if not path.exists():
         return "（缺失）"

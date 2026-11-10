@@ -912,20 +912,6 @@ def _s1_repair_ready(stage: dict[str, Any]) -> bool:
     return marker.get("facts_sha256") == hard_fact_fingerprint(hooks, S1_HOOK_FLOOR_FIELDS)
 
 
-def _s3_basic_process(flag: dict[str, Any]) -> bool:
-    return all(
-        flag.get(key) is True
-        for key in (
-            "usage_process_visible",
-            "core_selling_point_visible",
-            "action_proof_met",
-            "action_target_contact_met",
-            "action_application_change_visible",
-            "critical_action_continuity_met",
-        )
-    )
-
-
 def _s3_basic_process_state(flag: dict[str, Any]) -> str:
     keys = (
         "usage_process_visible",

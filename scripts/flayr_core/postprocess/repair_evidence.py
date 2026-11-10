@@ -1131,16 +1131,6 @@ def _s5_flag_product_claim_or_offer(flag: dict[str, Any]) -> bool:
     )
 
 
-def _set_s5_absent_stage_side(stage: dict[str, Any], role: str) -> None:
-    label = "标杆" if role == "benchmark" else "达人"
-    stage[f"{role}_summary"] = f"{label}未提供可核验的独立信任材料。"
-    stage[f"{role}_key_message"] = stage[f"{role}_summary"]
-    stage[f"{role}_quote"] = ""
-    stage[f"{role}_quote_zh"] = ""
-    stage[f"{role}_support_status"] = "visual_only"
-    stage[f"{role}_visual_evidence"] = ["未引用到可核验的独立信任来源。"]
-
-
 def _s5_improvement_targets_benchmark(item: dict[str, Any]) -> bool:
     target = str(item.get("target_stage") or "").upper()
     if re.search(r"\bS5\b", target):
