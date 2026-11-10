@@ -690,7 +690,7 @@ class FactCacheProtocolTests(unittest.TestCase):
                                 "target_stages"
                             ] = ["S5"]
                         cache._write_cache_result(path, record)
-                        record = json.loads(path.read_text())
+                        record = json.loads(path.read_text(encoding="utf-8"))
                     write_json(path, record)
                     before = path.read_bytes()
                     self.assertIsNone(

@@ -192,7 +192,9 @@ class DeliveryStateJourneyTests(unittest.TestCase):
             )
             with self.assertRaises(human_review.HumanReviewError):
                 human_review.init_review(root)
-            execution = json.loads((root / "execution_status.json").read_text())
+            execution = json.loads(
+                (root / "execution_status.json").read_text(encoding="utf-8")
+            )
             self.assertFalse(execution["review_source_ready"])
             self.assertFalse((root / "_SUCCESS.json").exists())
 

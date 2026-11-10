@@ -106,10 +106,15 @@ class WebSubmissionTests(unittest.TestCase):
                 self.assert_failed_without_losing_inputs(job)
                 job_root = Path(job["run_dir"]).parent
                 self.assertEqual(
-                    json.loads((job_root / "job.json").read_text())["status"], "failed"
+                    json.loads((job_root / "job.json").read_text(encoding="utf-8"))[
+                        "status"
+                    ],
+                    "failed",
                 )
                 self.assertEqual(
-                    json.loads(self.store.state_path.read_text())[job["id"]]["status"],
+                    json.loads(self.store.state_path.read_text(encoding="utf-8"))[
+                        job["id"]
+                    ]["status"],
                     "failed",
                 )
                 self.assertEqual(self.store._admission_reservations, {})

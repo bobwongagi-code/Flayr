@@ -190,7 +190,7 @@ class WebShutdownTests(unittest.TestCase):
         ):
             self.store._run_job(job["id"])
         spawn.assert_not_called()
-        saved = json.loads(self.store.state_path.read_text())[job["id"]]
+        saved = json.loads(self.store.state_path.read_text(encoding="utf-8"))[job["id"]]
         self.assertEqual(saved["status"], "failed")
         self.assertIn("invalid worker configuration", saved["failure_reason"])
         self.assertEqual(saved["estimated_remaining_seconds"], 0)
@@ -229,7 +229,9 @@ class WebShutdownTests(unittest.TestCase):
                 self.assertFalse(thread.is_alive(), "shutdown did not finish")
                 self.assertEqual(errors, [])
                 spawn.assert_not_called()
-                saved = json.loads(self.store.state_path.read_text())[job["id"]]
+                saved = json.loads(self.store.state_path.read_text(encoding="utf-8"))[
+                    job["id"]
+                ]
                 self.assertEqual(saved["status"], "failed")
                 self.assertIn("停止", saved["failure_reason"])
             finally:
@@ -253,12 +255,18 @@ class WebShutdownTests(unittest.TestCase):
         self.assertTrue(self.store._shutdown_requested)
         self.assertTrue(self.store._shutdown_state_dirty)
         self.assertEqual(
-            json.loads(self.store.state_path.read_text())[job["id"]]["status"], "queued"
+            json.loads(self.store.state_path.read_text(encoding="utf-8"))[job["id"]][
+                "status"
+            ],
+            "queued",
         )
         self.store.shutdown()
         self.assertFalse(self.store._shutdown_state_dirty)
         self.assertEqual(
-            json.loads(self.store.state_path.read_text())[job["id"]]["status"], "failed"
+            json.loads(self.store.state_path.read_text(encoding="utf-8"))[job["id"]][
+                "status"
+            ],
+            "failed",
         )
 
     def test_pool_error_does_not_skip_pending_status_finalization(self):
@@ -273,7 +281,10 @@ class WebShutdownTests(unittest.TestCase):
         ):
             self.store.shutdown()
         self.assertEqual(
-            json.loads(self.store.state_path.read_text())[job["id"]]["status"], "failed"
+            json.loads(self.store.state_path.read_text(encoding="utf-8"))[job["id"]][
+                "status"
+            ],
+            "failed",
         )
 
 
