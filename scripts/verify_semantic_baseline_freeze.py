@@ -57,23 +57,12 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verify_freeze() -> list[str]:
+def _verify_gt_snapshot(
+    freeze: dict[str, Any],
+    baseline_gt: dict[str, Any],
+    baseline_manifest: dict[str, Any],
+) -> list[str]:
     errors: list[str] = []
-    freeze = _read_json(FREEZE_PATH)
-    ab = _read_json(AB_PATH)
-    expert = _read_json(EXPERT_PATH)
-    labels = _read_json(LABELS_PATH)
-    baseline_gt = _read_json(BASELINE_GT_PATH)
-    baseline_manifest = _read_json(BASELINE_MANIFEST_PATH)
-    inventory = _read_json(INVENTORY_PATH)
-
-    if freeze.get("schema_version") != 1 or freeze.get("status") != "frozen":
-        errors.append("semantic baseline freeze must use schema_version=1 and status=frozen")
-    if freeze.get("promotion_eligible") is not False:
-        errors.append("offline semantic baseline must never be promotion_eligible")
-    if freeze.get("evaluation_report_schema_version") != EVALUATION_REPORT_SCHEMA_VERSION:
-        errors.append("evaluation report schema version drifted from the frozen contract")
-
     gt_snapshot = freeze.get("gt_snapshot") or {}
     if gt_snapshot.get("labels_path") != "references/semantic-baseline-gt.json":
         errors.append("frozen GT snapshot path drifted")
@@ -127,7 +116,11 @@ def verify_freeze() -> list[str]:
         errors.append("frozen relation-cell count drifted")
     if present_key_events != gt_snapshot.get("present_key_events"):
         errors.append("frozen present-key-event count drifted")
+    return errors
 
+
+def _verify_source_identity(freeze: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
     commit = str(freeze.get("production_behavior_commit") or "")
     try:
         subprocess.check_call(
@@ -154,7 +147,11 @@ def verify_freeze() -> list[str]:
         changed = sorted((committed | working | staged) - {allowed_governance_change})
         if changed:
             errors.append("production semantic source drifted after the frozen behavior commit: " + ", ".join(changed))
+    return errors
 
+
+def _verify_execution_contract(freeze: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
     route = freeze.get("model_route") or {}
     expected_route = {
         "vision_model": "qwen3-vl-plus",
@@ -207,7 +204,14 @@ def verify_freeze() -> list[str]:
         "explicit_missing_sample_list",
     ]:
         errors.append("targeted-call preconditions are incomplete or have drifted")
+    return errors
 
+
+def _verify_s4_history(
+    ab: dict[str, Any],
+    expert: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
     if ab.get("execution", {}).get("live_responses") != 8:
         errors.append("strict S4 gradient A/B must record eight live responses")
     no_gradient = ab.get("arm_results", {}).get("no_gradient", {}).get("outputs")
@@ -233,7 +237,15 @@ def verify_freeze() -> list[str]:
             errors.append(f"{sample_id}/S4 none must use tie")
         elif gap in {"small", "medium", "large"} and relation not in {"creator_better", "benchmark_better"}:
             errors.append(f"{sample_id}/S4 comparable gap must set a direction")
+    return errors
 
+
+def _verify_legacy_gt_migration(
+    freeze: dict[str, Any],
+    labels: dict[str, Any],
+    inventory: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
     rebuilt_inventory = build_inventory(labels)
     if inventory != rebuilt_inventory:
         errors.append("legacy GT migration inventory is stale")
@@ -284,6 +296,31 @@ def verify_freeze() -> list[str]:
             errors.append(f"{sample_id}/{stage} claims relation confirmation without matching canonical GT")
         if canonical_relation and canonical_relation == proposed_relation and not confirmed:
             errors.append(f"{sample_id}/{stage} has canonical relation but the human review table is still pending")
+    return errors
+
+
+def verify_freeze() -> list[str]:
+    errors: list[str] = []
+    freeze = _read_json(FREEZE_PATH)
+    ab = _read_json(AB_PATH)
+    expert = _read_json(EXPERT_PATH)
+    labels = _read_json(LABELS_PATH)
+    baseline_gt = _read_json(BASELINE_GT_PATH)
+    baseline_manifest = _read_json(BASELINE_MANIFEST_PATH)
+    inventory = _read_json(INVENTORY_PATH)
+
+    if freeze.get("schema_version") != 1 or freeze.get("status") != "frozen":
+        errors.append("semantic baseline freeze must use schema_version=1 and status=frozen")
+    if freeze.get("promotion_eligible") is not False:
+        errors.append("offline semantic baseline must never be promotion_eligible")
+    if freeze.get("evaluation_report_schema_version") != EVALUATION_REPORT_SCHEMA_VERSION:
+        errors.append("evaluation report schema version drifted from the frozen contract")
+
+    errors.extend(_verify_gt_snapshot(freeze, baseline_gt, baseline_manifest))
+    errors.extend(_verify_source_identity(freeze))
+    errors.extend(_verify_execution_contract(freeze))
+    errors.extend(_verify_s4_history(ab, expert))
+    errors.extend(_verify_legacy_gt_migration(freeze, labels, inventory))
 
     initial_inventory = freeze.get("initial_offline_inventory") or {}
     if initial_inventory.get("identity_compatible_artifacts") != 0:
