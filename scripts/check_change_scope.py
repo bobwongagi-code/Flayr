@@ -7,6 +7,7 @@ import argparse
 import fnmatch
 import json
 import subprocess
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -125,48 +126,73 @@ def check_scope(spec: dict[str, Any], base_ref: str) -> list[str]:
     return issues
 
 
-def _committed_changed_paths(base_ref: str, head_ref: str) -> set[str]:
+def _publication_changes(base_ref: str, head_ref: str) -> Iterator[tuple[str, list[str]]]:
     head = _git("rev-parse", "--verify", "--end-of-options", f"{head_ref}^{{commit}}").strip()
-    base = (
-        EMPTY_TREE_SHA
-        if _is_zero_ref(base_ref)
-        else _git("rev-parse", "--verify", "--end-of-options", f"{base_ref}^{{commit}}").strip()
-    )
-    paths = _git("diff", "--name-only", "--no-renames", "-z", base, head, "--", raw_paths=True)
-    return set(filter(None, paths.split("\0")))
+    revisions = [head]
+    if not _is_zero_ref(base_ref):
+        base = _git("rev-parse", "--verify", "--end-of-options", f"{base_ref}^{{commit}}").strip()
+        revisions.append(f"^{base}")
+    commits = _git("rev-list", "--reverse", "--topo-order", *revisions, "--").splitlines()
+    for commit in commits:
+        # Walk both sides of merges, but attribute only paths changed from
+        # all parents to the merge itself, not files inherited from a parent.
+        paths = _git(
+            "diff-tree", "--root", "-c", "--no-commit-id", "--name-only",
+            "--no-renames", "-r", "-z", commit, "--", raw_paths=True,
+        )
+        yield commit, sorted(filter(None, paths.split("\0")))
 
 
-def check_publication(spec: dict[str, Any], base_ref: str, *, head_ref: str = "HEAD") -> list[str]:
-    """Apply publication exclusions to the base and candidate commit trees."""
+def check_publication(
+    spec: dict[str, Any],
+    base_ref: str,
+    *,
+    head_ref: str = "HEAD",
+    approved_paths: Sequence[str] | None = None,
+) -> list[str]:
+    """Check paths introduced, changed or removed by each outgoing commit."""
     forbidden = [str(item) for item in spec["change_scope"]["forbidden_globs"]]
-    return [f"forbidden path: {path}" for path in sorted(_committed_changed_paths(base_ref, head_ref))
-            if _matches(path, forbidden)]
+    approved = None if approved_paths is None else set(approved_paths)
+    issues = []
+    for commit, paths in _publication_changes(base_ref, head_ref):
+        for path in paths:
+            if _matches(path, forbidden):
+                issues.append(f"{commit}: forbidden path: {path}")
+            elif approved is not None and path not in approved:
+                issues.append(f"{commit}: path outside approved publication scope: {path}")
+    return issues
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base-ref", default="HEAD", help="Git ref used as the baseline")
+    parser.add_argument("--base-ref", help="Git ref used as the baseline (default: HEAD)")
     parser.add_argument("--head-ref", help="Candidate commit for --publication (default: HEAD)")
     parser.add_argument("--spec", type=Path, default=SPEC_PATH)
     parser.add_argument("--publication", action="store_true",
-                        help="Check forbidden publication paths across the full range, not a single batch budget")
+                        help="Check publication paths in each outgoing commit, without batch budgets")
+    parser.add_argument("--approved-path", action="append", metavar="PATH",
+                        help="Exact repo-relative path approved for this push; repeat for each file")
     args = parser.parse_args()
     if args.head_ref is not None and not args.publication:
         parser.error("--head-ref requires --publication")
+    if args.approved_path is not None and (not args.publication or args.base_ref is None):
+        parser.error("--approved-path requires --publication and an explicit --base-ref")
+    base_ref = args.base_ref if args.base_ref is not None else "HEAD"
     spec = json.loads(args.spec.expanduser().resolve().read_text(encoding="utf-8"))
     if args.publication:
         issues = check_publication(
-            spec, args.base_ref, head_ref=args.head_ref if args.head_ref is not None else "HEAD"
+            spec, base_ref, head_ref=args.head_ref if args.head_ref is not None else "HEAD",
+            approved_paths=args.approved_path,
         )
     else:
-        issues = check_scope(spec, args.base_ref)
+        issues = check_scope(spec, base_ref)
     gate = "publication boundary" if args.publication else "change scope"
     if issues:
         print(f"{gate} gate failed:")
         for issue in issues:
             print(f"- {issue}")
         return 1
-    print(f"{gate} gate passed: base={args.base_ref}")
+    print(f"{gate} gate passed: base={base_ref}")
     return 0
 
 

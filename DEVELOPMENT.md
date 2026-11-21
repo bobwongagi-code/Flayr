@@ -315,19 +315,20 @@ bash scripts/run-quality-gates.sh
 1. **先查调用方。** 区分上线运行的代码、兼容入口和仅供历史测试的代码；行数和复杂度只用来找候选。没有明确职责边界或离线验证方式，就不拆。
 2. **先固定旧行为。** 对门禁在旧实现上先跑允许和拒绝用例；对编排明确哪些状态、异常、调用顺序和落盘结果不能变。行为不变的重构，新回归应能在旧版通过。
 3. **两轮复核换方法。** 先核检查顺序、循环跳转及副作用，再用同一批离线输入对照新旧结果与异常。发布检查的回归用临时 Git 仓库，不改业务资料或真实 GT。技术验证不代表业务准确率提升。
-4. **分清批次和发布范围。** 批次模式核本地改动及文件预算；发布模式只比较基点和待推提交的树，忽略暂存、未暂存和未跟踪文件。发布前另核提交清单和最终文件清单；若涉及生产源码冻结，确认机械重冻与源码一起交付。推送后只认对应 SHA 的 CI。
+4. **分清批次和发布范围。** 批次模式核本地改动及文件预算；发布模式检查候选 SHA 可达、远端基点不可达的每笔提交，忽略工作区和暂存区。推送前按本次批准清单逐笔核对；若涉及生产源码冻结，确认机械重冻与源码一起交付。推送后只认对应 SHA 的 CI。
 
-先核实远端基点，再把它和待推提交的 SHA 分别放到 `base_sha`、`candidate_sha`，执行：
+先核实远端基点和待推 SHA（`base_sha`、`candidate_sha`），再按本次授权列出确切文件路径。单文件示例：
 
 ```bash
 git log --oneline "$base_sha..$candidate_sha"
 git diff --name-only "$base_sha" "$candidate_sha" --
 python3 scripts/check_change_scope.py --publication \
   --spec references/bitter-lesson-runtime-fix-scope.json \
-  --base-ref "$base_sha" --head-ref "$candidate_sha"
+  --base-ref "$base_sha" --head-ref "$candidate_sha" \
+  --approved-path "$approved_path"
 ```
 
-`--head-ref` 省略时检查 `HEAD`；首次推送的全零基点与空树比较。发布模式是两棵提交树之间的路径检查，不是逐提交历史或密钥扫描。
+`approved_path` 为已批准的仓库相对路径；多个文件就逐个重复 `--approved-path`，不使用通配符，也不从待推差异反推批准范围。`git diff` 只辅助看最终差异，不替代逐笔核对。首次推送的全零基点会检查候选的全部历史。中间误带内部文件即使后来删掉也会拦截，报告对应 SHA 和路径；不要只补一笔删除就推送。通过只表示路径在范围内，仍要核阅实际提交内容是否适合公开。CI 未获知本次批准清单，只检查通用禁止路径。
 
 历史记录：2026-11-07 的 CI 曾被当时锁定的 Pillow / Black 安全审计阻断；该记录不代表后续版本的当前状态。现行锁定版本及升级记录见 [DEPENDENCIES.md](DEPENDENCIES.md)，本批是否通过以实际验证为准，不能继承旧失败或旧 PASS，也不跳过审计。
 

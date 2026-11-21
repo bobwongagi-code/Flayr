@@ -6,7 +6,7 @@ import json
 import subprocess
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -23,7 +23,7 @@ class CIScopeTests(unittest.TestCase):
     def test_publication_range_does_not_use_an_old_batch_allowlist_or_budget(self):
         paths = {f"tests/test_batch_{number}.py" for number in range(91)}
         with (
-            mock.patch.object(scope, "_committed_changed_paths", return_value=paths),
+            mock.patch.object(scope, "_publication_changes", return_value=[("candidate", sorted(paths))]),
             mock.patch.object(scope, "_changed_paths", return_value=paths),
             mock.patch.object(scope, "_line_counts", return_value=(9000, 4000)) as counts,
         ):
@@ -35,11 +35,11 @@ class CIScopeTests(unittest.TestCase):
     def test_publication_range_still_rejects_every_private_artifact_class(self):
         paths = {"runs/draft/analysis.json", "outputs/report.html", "jobs-private.json",
                  "scripts/flayr_core/__pycache__/payload.pyc", "scripts/flayr.py"}
-        with mock.patch.object(scope, "_committed_changed_paths", return_value=paths):
+        with mock.patch.object(scope, "_publication_changes", return_value=[("candidate", sorted(paths))]):
             issues = scope.check_publication(self.spec, "base")
         self.assertEqual(len(issues), 4)
         for path in paths - {"scripts/flayr.py"}:
-            self.assertIn("forbidden path: " + path, issues)
+            self.assertIn("candidate: forbidden path: " + path, issues)
 
     def test_ci_selects_publication_mode_and_preserves_event_base(self):
         workflow = (ROOT / ".github/workflows/tests.yml").read_text()
@@ -96,9 +96,9 @@ class PublicationRepositoryTests(unittest.TestCase):
 
     def test_local_deletion_cannot_hide_a_committed_forbidden_file(self):
         path = self.write("runs/report.json", "{}")
-        self.commit("include artifact")
+        introduced = self.commit("include artifact")
         path.unlink()
-        expected = ["forbidden path: runs/report.json"]
+        expected = [f"{introduced}: forbidden path: runs/report.json"]
         self.assertEqual(scope.check_publication(self.spec, self.base), expected)
         self.git("add", "--", "runs/report.json")
         self.assertEqual(scope.check_publication(self.spec, self.base), expected)
@@ -112,6 +112,7 @@ class PublicationRepositoryTests(unittest.TestCase):
 
         self.assertEqual(scope.check_publication(self.spec, self.base), [])
         self.assertEqual(scope.check_publication(self.spec, "0" * 40), [])
+        self.assertEqual(scope.check_publication(self.spec, self.base, approved_paths=["notes.txt"]), [])
         self.assertEqual(scope.check_scope(self.spec, self.base), [
             "forbidden path: outputs/untracked.html",
             "forbidden path: runs/staged.json",
@@ -121,27 +122,82 @@ class PublicationRepositoryTests(unittest.TestCase):
         self.write("notes.txt", "candidate")
         candidate = self.commit("safe candidate")
         self.write("runs/later.json", "{}")
-        self.commit("not the candidate")
+        later = self.commit("not the candidate")
         spec = self.write("spec.json", json.dumps(self.spec))
         with mock.patch("sys.argv", [
             "check_change_scope.py", "--publication", "--spec", str(spec),
-            "--base-ref", self.base, "--head-ref", candidate,
+            "--base-ref", self.base, "--head-ref", candidate, "--approved-path", "notes.txt",
         ]), redirect_stdout(io.StringIO()):
             self.assertEqual(scope.main(), 0)
         self.assertEqual(
-            scope.check_publication(self.spec, self.base), ["forbidden path: runs/later.json"]
+            scope.check_publication(self.spec, self.base), [f"{later}: forbidden path: runs/later.json"]
         )
 
     def test_initial_push_checks_complete_candidate_tree(self):
         artifact = "runs/old \u62a5\u544a.json"
         self.write(artifact, "{}")
-        self.commit("add artifact")
+        introduced = self.commit("add artifact")
         self.write("notes.txt", "candidate")
         candidate = self.commit("notes only")
         self.assertEqual(
             scope.check_publication(self.spec, "0" * 40, head_ref=candidate),
-            [f"forbidden path: {artifact}"],
+            [f"{introduced}: forbidden path: {artifact}"],
         )
+
+    def test_publication_rejects_internal_files_added_and_removed_in_the_range(self):
+        self.write("notes.txt", "approved change")
+        self.commit("publish notes")
+        internal = self.write("references/internal draft.md", "private fixture")
+        artifact = self.write("runs/middle.json", "{}")
+        introduced = self.commit("accidentally add internal files")
+        internal.unlink()
+        artifact.unlink()
+        candidate = self.commit("remove internal files again")
+        self.assertEqual(self.git("diff", "--name-only", self.base, candidate), "notes.txt")
+        self.assertIn(
+            f"{introduced}: forbidden path: runs/middle.json",
+            scope.check_publication(self.spec, self.base, head_ref=candidate),
+        )
+
+        spec = self.write("spec.json", json.dumps(self.spec))
+        out = io.StringIO()
+        with mock.patch("sys.argv", [
+            "check_change_scope.py", "--publication", "--spec", str(spec),
+            "--base-ref", self.base, "--head-ref", candidate, "--approved-path", "notes.txt",
+        ]), redirect_stdout(out):
+            self.assertEqual(scope.main(), 1)
+        for commit in (introduced, candidate):
+            self.assertIn(f"{commit}: path outside approved publication scope: references/internal draft.md",
+                          out.getvalue())
+            self.assertIn(f"{commit}: forbidden path: runs/middle.json", out.getvalue())
+
+    def test_publication_checks_merge_edits_without_reattributing_base_changes(self):
+        self.git("branch", "incoming")
+        self.write("already-public.txt", "on the base only")
+        public_base = self.commit("advance public base")
+        self.git("checkout", "-q", "incoming")
+        self.write("notes.txt", "approved")
+        self.write("references/branch draft.md", "internal")
+        branch_commit = self.commit("prepare branch")
+        self.git("merge", "--no-commit", "--no-ff", public_base)
+        self.write("references/merge draft.md", "internal")
+        merge = self.commit("complete merge")
+
+        self.assertEqual(scope.check_publication(
+            self.spec, public_base, head_ref=merge, approved_paths=["notes.txt"],
+        ), [
+            f"{branch_commit}: path outside approved publication scope: references/branch draft.md",
+            f"{merge}: path outside approved publication scope: references/merge draft.md",
+        ])
+
+    def test_approved_paths_require_explicit_publication_base(self):
+        err = io.StringIO()
+        with mock.patch("sys.argv", [
+            "check_change_scope.py", "--publication", "--approved-path", "notes.txt",
+        ]), redirect_stderr(err), self.assertRaises(SystemExit) as raised:
+            scope.main()
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("explicit --base-ref", err.getvalue())
 
 
 if __name__ == "__main__":

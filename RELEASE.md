@@ -19,8 +19,13 @@ Local implementation batches use `scripts/run-tests.sh` with an explicit
 that batch's path allowlist and file/line budgets.
 
 CI uses `FLAYR_SCOPE_MODE=publication` for the full push/PR range. A cumulative
-range is not one implementation batch: CI retains the forbidden-path checks
-for run outputs, local job manifests and cache files without applying an old
-batch's allowlist or budget. Initial pushes check the entire tree. Full tests,
-semantic freeze verification and quality gates still run; this mode does not
-authorize business-rule changes or replace local batch review.
+range is not one implementation batch: CI checks each outgoing commit for
+forbidden paths, without applying an old batch's allowlist or budget. Initial
+pushes check all commits reachable from the candidate. A later deletion does
+not clear an earlier violation. Full tests, semantic freeze verification and
+quality gates still run.
+
+Before pushing, use the same publication check with the verified remote base,
+candidate SHA and one `--approved-path` per file authorized for the push. See
+[the local command](DEVELOPMENT.md#工程改动的验证与收口). This is a path check,
+not approval of the content of those files.
