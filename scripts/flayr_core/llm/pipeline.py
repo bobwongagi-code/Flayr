@@ -121,6 +121,7 @@ from .payload import (
 )
 from .stage1_qualification import (
     STAGE1_QUALIFICATION_BINDING_ERROR_CODE,  # noqa: F401
+    Stage1QualificationPlan,
     _normalize_stage1_qualification_bindings,  # noqa: F401
     _prepare_stage1_qualification_response,
     _unknown_stage_qualification_check,
@@ -4022,6 +4023,205 @@ def has_product_foundation_anchor(analysis: dict[str, Any]) -> bool:
     return any("\u4e00" <= ch <= "\u9fff" for ch in name)
 
 
+def _execute_stage1_qualification_group(
+    args: argparse.Namespace,
+    analysis: dict[str, Any],
+    run_dir: Path,
+    api_key: str,
+    role: str,
+    facts: dict[str, Any],
+    targets: list[str],
+    plan: Stage1QualificationPlan,
+    *,
+    replay_source: Path | None,
+    provider_fallback_allowed: bool,
+) -> bool:
+    """Execute one group and report success of publication and sidecar cleanup."""
+    provider_phase = plan.provider_phase
+    phase_label = plan.phase_label
+    valid_ids = plan.valid_ids
+    checks_by_stage = plan.checks_by_stage
+    group_records = plan.group_records
+    failed_stage_codes = plan.failed_stage_codes
+    label = "_".join(targets)
+    request_kind = (
+        "requalification" if plan.focused_requalification else "qualification"
+    )
+    request_path = run_dir / f"llm_facts_{role}_{request_kind}_{label}_request.json"
+    response_path = run_dir / f"llm_facts_{role}_{request_kind}_{label}_response.json"
+    artifact_path = stage_fact_artifact_path(run_dir, role, provider_phase, targets)
+    payload: dict[str, Any] = {}
+    response_meta: dict[str, Any] = {}
+    execution_source = "provider"
+    response: dict[str, Any] | None = None
+    qualification_normalization: dict[str, Any] | None = None
+    normalized_by_stage: dict[str, dict[str, Any]] | None = None
+    replay_artifact_path = (
+        stage_fact_artifact_path(replay_source, role, provider_phase, targets)
+        if replay_source is not None
+        else None
+    )
+    preserve_resume_source = (
+        provider_fallback_allowed
+        and _same_existing_artifact(replay_artifact_path, artifact_path)
+    )
+    resume_failure_path = _resume_failure_artifact_path(artifact_path)
+    group_published = False
+    try:
+        payload = build_stage_evidence_qualification_payload(
+            judgment_model(args),
+            role,
+            analysis,
+            facts,
+            targets,
+        )
+        if replay_source is not None:
+            execution_source = "replay"
+            try:
+                response, response_meta, _source_artifact = _read_replayable_stage_fact(
+                    replay_source,
+                    role=role,
+                    phase=provider_phase,
+                    group=targets,
+                    payload=payload,
+                    args=args,
+                )
+                normalized_by_stage, qualification_normalization, blocked_stage_codes = prepare_stage1_qualification_group(
+                    response,
+                    targets=targets,
+                    valid_ids=valid_ids,
+                    phase_label=phase_label,
+                    prepare_response=_prepare_stage1_qualification_response,
+                )
+            except (StageFactArtifactError, ValueError) as exc:
+                if not provider_fallback_allowed:
+                    if isinstance(exc, StageFactArtifactError):
+                        raise
+                    raise StageFactArtifactError(
+                        f"{phase_label} replay content contract invalid: {exc}"
+                    ) from exc
+                execution_source = "provider"
+                response = None
+                response_meta = {}
+                normalized_by_stage = None
+                qualification_normalization = None
+        if response is None:
+            write_json(request_path, payload)
+            response_text = fetch_json_completion(
+                args,
+                api_key,
+                request_path,
+                response_path,
+                response_meta=response_meta,
+                route_role=_stage1_route_role(provider_phase),
+            )
+            response = parse_json_text(response_text)
+        if normalized_by_stage is None:
+            normalized_by_stage, qualification_normalization, blocked_stage_codes = prepare_stage1_qualification_group(
+                response,
+                targets=targets,
+                valid_ids=valid_ids,
+                phase_label=phase_label,
+                prepare_response=_prepare_stage1_qualification_response,
+            )
+        if qualification_normalization is not None:
+            failed_stage_codes.extend(
+                stage for stage in targets if stage in blocked_stage_codes
+            )
+        for stage in targets:
+            checks_by_stage[stage] = normalized_by_stage.get(
+                stage,
+                _unknown_stage_qualification_check(
+                    stage,
+                    f"{phase_label} 响应缺少目标阶段，资格保持未知。",
+                ),
+            )
+        artifact = completed_stage_fact_artifact(
+            role=role,
+            phase=provider_phase,
+            group=targets,
+            payload=payload,
+            response=response,
+            model=judgment_model(args),
+            api_url=provider_api_url(args, _stage1_route_role(provider_phase)),
+            response_meta=response_meta,
+            artifact_name=artifact_path.name,
+        )
+        write_json(artifact_path, artifact)
+        resume_failure_path.unlink(missing_ok=True)
+        group_published = True
+        group_records.append(
+            {
+                "phase": provider_phase,
+                "group": targets,
+                "status": "completed",
+                "execution_source": execution_source,
+                "provider_artifact": artifact_path.name,
+                "request_identity_sha256": artifact["request_identity"]["sha256"],
+                "response_sha256": artifact["response_sha256"],
+                "completion_attempts": response_meta.get("completion_attempts", 0),
+            }
+        )
+        if qualification_normalization is not None:
+            group_records[-1]["qualification_normalization"] = copy.deepcopy(
+                qualification_normalization
+            )
+    except (OSError, ValueError, RuntimeError, SystemExit) as exc:
+        if _is_strict_replay_failure(args, exc):
+            raise
+        safe_error = str(exc).strip()
+        if api_key and safe_error:
+            safe_error = safe_error.replace(api_key, "[REDACTED]")
+        failed_stage_codes.extend(targets)
+        for stage in targets:
+            checks_by_stage[stage] = _unknown_stage_qualification_check(
+                stage,
+                f"{phase_label} 该阶段组失败，资格保持未知；Stage1-A/C 原子观察仍保留。",
+            )
+        failure_record = {
+            "phase": provider_phase,
+            "group": targets,
+            "status": "failed",
+            "execution_source": execution_source,
+            "failure_kind": _localized_failure_kind(
+                exc,
+                execution_source=execution_source,
+                default="provider_call_or_validation",
+            ),
+            "cause_type": exc.__class__.__name__,
+            "failure_reason": safe_error[:500] or type(exc).__name__,
+            "completion_attempts": response_meta.get("completion_attempts", 0),
+        }
+        if payload:
+            failure_artifact = failed_stage_fact_artifact(
+                role=role,
+                phase=provider_phase,
+                group=targets,
+                payload=payload,
+                model=judgment_model(args),
+                api_url=provider_api_url(args, _stage1_route_role(provider_phase)),
+                error=safe_error or type(exc).__name__,
+                artifact_name=artifact_path.name,
+                response_meta=response_meta,
+                response=response,
+            )
+            failure_path = resume_failure_path if preserve_resume_source else artifact_path
+            write_json(failure_path, failure_artifact)
+            failure_record.update(
+                {
+                    "provider_artifact": failure_path.name,
+                    "request_identity_sha256": failure_artifact["request_identity"]["sha256"],
+                    "response_sha256": failure_artifact.get("response_sha256", ""),
+                }
+            )
+        if qualification_normalization is not None:
+            failure_record["qualification_normalization"] = copy.deepcopy(
+                qualification_normalization
+            )
+        group_records.append(failure_record)
+    return group_published
+
+
 def _run_stage1_qualification(
     args: argparse.Namespace,
     analysis: dict[str, Any],
@@ -4047,16 +4247,6 @@ def _run_stage1_qualification(
         target_stages,
         include_existing_state=not args.llm_dry_run,
     )
-    requested_stages = plan.requested_stages
-    groups_to_run = plan.groups_to_run
-    focused_requalification = plan.focused_requalification
-    provider_phase = plan.provider_phase
-    phase_label = plan.phase_label
-    valid_ids = plan.valid_ids
-    checks_by_stage = plan.checks_by_stage
-    group_records = plan.group_records
-    prior_failed_stage_codes = plan.prior_failed_stage_codes
-    failed_stage_codes = plan.failed_stage_codes
     if args.llm_dry_run:
         facts["stage1_qualification"] = {
             "source": "pipeline",
@@ -4065,217 +4255,57 @@ def _run_stage1_qualification(
         }
         _block_stage_qualifications(
             facts,
-            sorted(requested_stages, key=list(stage_codes()).index),
+            sorted(plan.requested_stages, key=list(stage_codes()).index),
             reason="Stage1-B 在 dry-run 中未执行，阶段资格保持未知。",
         )
         return facts
     current_successful_group_count = 0
     replay_source, provider_fallback_allowed = _stage1_replay_source(args)
 
-    for targets in groups_to_run:
-        label = "_".join(targets)
-        request_kind = "requalification" if focused_requalification else "qualification"
-        request_path = run_dir / f"llm_facts_{role}_{request_kind}_{label}_request.json"
-        response_path = run_dir / f"llm_facts_{role}_{request_kind}_{label}_response.json"
-        artifact_path = stage_fact_artifact_path(run_dir, role, provider_phase, targets)
-        payload: dict[str, Any] = {}
-        response_meta: dict[str, Any] = {}
-        execution_source = "provider"
-        response: dict[str, Any] | None = None
-        qualification_normalization: dict[str, Any] | None = None
-        normalized_by_stage: dict[str, dict[str, Any]] | None = None
-        replay_artifact_path = (
-            stage_fact_artifact_path(replay_source, role, provider_phase, targets)
-            if replay_source is not None
-            else None
-        )
-        preserve_resume_source = (
-            provider_fallback_allowed
-            and _same_existing_artifact(replay_artifact_path, artifact_path)
-        )
-        resume_failure_path = _resume_failure_artifact_path(artifact_path)
-        try:
-            payload = build_stage_evidence_qualification_payload(
-                judgment_model(args),
-                role,
-                analysis,
-                facts,
-                targets,
-            )
-            if replay_source is not None:
-                execution_source = "replay"
-                try:
-                    response, response_meta, _source_artifact = _read_replayable_stage_fact(
-                        replay_source,
-                        role=role,
-                        phase=provider_phase,
-                        group=targets,
-                        payload=payload,
-                        args=args,
-                    )
-                    normalized_by_stage, qualification_normalization, blocked_stage_codes = prepare_stage1_qualification_group(
-                        response,
-                        targets=targets,
-                        valid_ids=valid_ids,
-                        phase_label=phase_label,
-                        prepare_response=_prepare_stage1_qualification_response,
-                    )
-                except (StageFactArtifactError, ValueError) as exc:
-                    if not provider_fallback_allowed:
-                        if isinstance(exc, StageFactArtifactError):
-                            raise
-                        raise StageFactArtifactError(
-                            f"{phase_label} replay content contract invalid: {exc}"
-                        ) from exc
-                    execution_source = "provider"
-                    response = None
-                    response_meta = {}
-                    normalized_by_stage = None
-                    qualification_normalization = None
-            if response is None:
-                write_json(request_path, payload)
-                response_text = fetch_json_completion(
-                    args,
-                    api_key,
-                    request_path,
-                    response_path,
-                    response_meta=response_meta,
-                    route_role=_stage1_route_role(provider_phase),
-                )
-                response = parse_json_text(response_text)
-            if normalized_by_stage is None:
-                normalized_by_stage, qualification_normalization, blocked_stage_codes = prepare_stage1_qualification_group(
-                    response,
-                    targets=targets,
-                    valid_ids=valid_ids,
-                    phase_label=phase_label,
-                    prepare_response=_prepare_stage1_qualification_response,
-                )
-            if qualification_normalization is not None:
-                failed_stage_codes.extend(
-                    stage for stage in targets if stage in blocked_stage_codes
-                )
-            for stage in targets:
-                checks_by_stage[stage] = normalized_by_stage.get(
-                    stage,
-                    _unknown_stage_qualification_check(
-                        stage,
-                        f"{phase_label} 响应缺少目标阶段，资格保持未知。",
-                    ),
-                )
-            artifact = completed_stage_fact_artifact(
-                role=role,
-                phase=provider_phase,
-                group=targets,
-                payload=payload,
-                response=response,
-                model=judgment_model(args),
-                api_url=provider_api_url(args, _stage1_route_role(provider_phase)),
-                response_meta=response_meta,
-                artifact_name=artifact_path.name,
-            )
-            write_json(artifact_path, artifact)
-            resume_failure_path.unlink(missing_ok=True)
+    for targets in plan.groups_to_run:
+        if _execute_stage1_qualification_group(
+            args,
+            analysis,
+            run_dir,
+            api_key,
+            role,
+            facts,
+            targets,
+            plan,
+            replay_source=replay_source,
+            provider_fallback_allowed=provider_fallback_allowed,
+        ):
             current_successful_group_count += 1
-            group_records.append(
-                {
-                    "phase": provider_phase,
-                    "group": targets,
-                    "status": "completed",
-                    "execution_source": execution_source,
-                    "provider_artifact": artifact_path.name,
-                    "request_identity_sha256": artifact["request_identity"]["sha256"],
-                    "response_sha256": artifact["response_sha256"],
-                    "completion_attempts": response_meta.get("completion_attempts", 0),
-                }
-            )
-            if qualification_normalization is not None:
-                group_records[-1]["qualification_normalization"] = copy.deepcopy(
-                    qualification_normalization
-                )
-        except (OSError, ValueError, RuntimeError, SystemExit) as exc:
-            if _is_strict_replay_failure(args, exc):
-                raise
-            safe_error = str(exc).strip()
-            if api_key and safe_error:
-                safe_error = safe_error.replace(api_key, "[REDACTED]")
-            failed_stage_codes.extend(targets)
-            for stage in targets:
-                checks_by_stage[stage] = _unknown_stage_qualification_check(
-                    stage,
-                    f"{phase_label} 该阶段组失败，资格保持未知；Stage1-A/C 原子观察仍保留。",
-                )
-            failure_record = {
-                "phase": provider_phase,
-                "group": targets,
-                "status": "failed",
-                "execution_source": execution_source,
-                "failure_kind": _localized_failure_kind(
-                    exc,
-                    execution_source=execution_source,
-                    default="provider_call_or_validation",
-                ),
-                "cause_type": exc.__class__.__name__,
-                "failure_reason": safe_error[:500] or type(exc).__name__,
-                "completion_attempts": response_meta.get("completion_attempts", 0),
-            }
-            if payload:
-                failure_artifact = failed_stage_fact_artifact(
-                    role=role,
-                    phase=provider_phase,
-                    group=targets,
-                    payload=payload,
-                    model=judgment_model(args),
-                    api_url=provider_api_url(args, _stage1_route_role(provider_phase)),
-                    error=safe_error or type(exc).__name__,
-                    artifact_name=artifact_path.name,
-                    response_meta=response_meta,
-                    response=response,
-                )
-                failure_path = resume_failure_path if preserve_resume_source else artifact_path
-                write_json(failure_path, failure_artifact)
-                failure_record.update(
-                    {
-                        "provider_artifact": failure_path.name,
-                        "request_identity_sha256": failure_artifact["request_identity"]["sha256"],
-                        "response_sha256": failure_artifact.get("response_sha256", ""),
-                    }
-                )
-            if qualification_normalization is not None:
-                failure_record["qualification_normalization"] = copy.deepcopy(
-                    qualification_normalization
-                )
-            group_records.append(failure_record)
 
     facts["stage_evidence_checks"] = normalize_stage_evidence_checks(
-        list(checks_by_stage.values()),
-        valid_ids,
+        list(plan.checks_by_stage.values()),
+        plan.valid_ids,
     )
     facts["stage_evidence_contract_version"] = STAGE_EVIDENCE_CONTRACT_VERSION
-    failed_stage_codes = list(dict.fromkeys(failed_stage_codes))
+    failed_stage_codes = list(dict.fromkeys(plan.failed_stage_codes))
     qualification = {
         "source": "pipeline",
         "status": (
             "failed"
-            if focused_requalification and failed_stage_codes
+            if plan.focused_requalification and failed_stage_codes
             else "completed"
             if current_successful_group_count
             else "failed"
         ),
         "contract_version": STAGE_EVIDENCE_CONTRACT_VERSION,
         "stage_codes": list(stage_codes()),
-        "evidence_id_count": len(valid_ids),
-        "group_records": group_records,
+        "evidence_id_count": len(plan.valid_ids),
+        "group_records": plan.group_records,
         "failed_stage_codes": failed_stage_codes,
     }
-    if focused_requalification:
+    if plan.focused_requalification:
         qualification["requalification_source_failed_stage_codes"] = sorted(
-            prior_failed_stage_codes.intersection(requested_stages),
+            plan.prior_failed_stage_codes.intersection(plan.requested_stages),
             key=list(stage_codes()).index,
         )
     if failed_stage_codes:
         qualification["failure_reason"] = (
-            f"一个或多个 {phase_label} 阶段组或阶段资格失败；仅对应阶段保持未知。"
+            f"一个或多个 {plan.phase_label} 阶段组或阶段资格失败；仅对应阶段保持未知。"
         )
     facts["stage1_qualification"] = qualification
     return facts

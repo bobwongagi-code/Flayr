@@ -321,6 +321,83 @@ class Stage1QualificationBindingNormalizationTests(unittest.TestCase):
             self.assertEqual(record["status"], "failed")
             self.assertNotIn("qualification_normalization", record)
 
+    def test_in_place_resume_keeps_source_until_provider_recovers(self) -> None:
+        targets = ["S1"]
+        payload = {"fixture": "S1"}
+        invalid = self._response(status_by_stage={"S1": "not-a-status"})
+        valid = self._response(status_by_stage={"S1": "unknown"})
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            source = stage_fact_artifact_path(run_dir, "creator", "D", targets)
+            sidecar = source.with_name(f"{source.stem}.resume-failed.json")
+            saved = completed_stage_fact_artifact(
+                role="creator",
+                phase="D",
+                group=targets,
+                payload=payload,
+                response=invalid,
+                model="test-model",
+                api_url="https://example.invalid",
+                response_meta={
+                    "logical_request_id": "saved-resume",
+                    "completion_attempts": 1,
+                    "retry_reasons": [],
+                    "usage": {},
+                },
+            )
+            original = json.dumps(saved).encode()
+            source.write_bytes(original)
+            args = self._args()
+            args.stage1_resume_from = run_dir
+            api_key = "fixture-key"
+            responses = iter([ValueError(f"provider failed with {api_key}"), json.dumps(valid)])
+
+            def provider_call(*_args, response_meta, **_kwargs):
+                response_meta.update(
+                    logical_request_id="resume-attempt",
+                    completion_attempts=1,
+                    retry_reasons=[],
+                    usage={},
+                )
+                response = next(responses)
+                if isinstance(response, ValueError):
+                    raise response
+                return response
+
+            def qualify():
+                return pipeline._run_stage1_qualification(
+                    args,
+                    {},
+                    run_dir,
+                    api_key,
+                    "creator",
+                    self._facts(),
+                    target_stages=targets,
+                )["stage1_qualification"]
+
+            with patch.object(
+                pipeline, "build_stage_evidence_qualification_payload", return_value=payload
+            ), patch.object(pipeline, "fetch_json_completion", side_effect=provider_call) as fetch:
+                failed = qualify()
+                self.assertEqual(fetch.call_count, 1)
+                self.assertEqual(failed["status"], "failed")
+                record = failed["group_records"][-1]
+                self.assertEqual(record["execution_source"], "provider")
+                self.assertEqual(record["provider_artifact"], sidecar.name)
+                self.assertEqual(record["failure_reason"], "provider failed with [REDACTED]")
+                self.assertEqual(source.read_bytes(), original)
+                failure = json.loads(sidecar.read_bytes())
+                self.assertEqual(failure["error"], record["failure_reason"])
+                self.assertEqual(failure["request_identity"], saved["request_identity"])
+                self.assertNotIn("provider_response", failure)
+
+                recovered = qualify()
+                self.assertEqual(fetch.call_count, 2)
+                self.assertEqual(recovered["status"], "completed")
+                self.assertEqual(recovered["failed_stage_codes"], [])
+                self.assertFalse(sidecar.exists())
+                self.assertEqual(json.loads(source.read_bytes())["provider_response"], valid)
+
 
 if __name__ == "__main__":
     unittest.main()

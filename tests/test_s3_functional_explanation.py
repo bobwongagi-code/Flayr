@@ -213,6 +213,41 @@ def s3_result(creator_side, benchmark_side, creator_flag=None, benchmark_flag=No
 
 
 class FunctionalExplanationTest(unittest.TestCase):
+    def test_stage_check_diagnostics_preserve_order_across_rule_groups(self):
+        contract = stage_evidence_contract("S3")
+        check = {
+            "status": "present",
+            "coverage": "partial",
+            "evidence_ids": ["C1", "C9"],
+            "invalid_evidence_ids": ["C0"],
+            "observed_signals": ["functional_explanation"],
+            "missing_signals": ["functional_explanation"],
+            "signal_bindings": {
+                "functional_explanation": {
+                    "status": "supported",
+                    "evidence_ids": ["C2"],
+                    "invalid_evidence_ids": ["C0"],
+                },
+            },
+        }
+        units = {
+            "C1": {"evidence_strength": "direct", "visual_fact": "Shows product."},
+            "C2": {"evidence_strength": "direct", "visual_fact": "Shows packaging."},
+        }
+        self.assertEqual(
+            _stage_check_issues(contract, check, units),
+            [
+                "S3:invalid_evidence_ids:C0",
+                "S3:unknown_evidence_id:C9",
+                "S3:signal_both_observed_and_missing:functional_explanation",
+                "S3:signal_binding_invalid_evidence:functional_explanation",
+                "S3:signal_binding_outside_stage_evidence:functional_explanation:C2",
+                "S3:present_without_complete_coverage",
+                "S3:present_without_evidence_strength",
+                "S3:signal_channel_missing:functional_explanation",
+            ],
+        )
+
     def test_alternative_does_not_weaken_physical_signal_group(self):
         contract = stage_evidence_contract("S3")
         self.assertTrue(

@@ -1928,6 +1928,202 @@ def _budget_recovery_allows_qualification(side: Any, stage_code: str) -> bool:
     return stage_code not in unresolved
 
 
+def _stage_signal_binding_issues(
+    code: str,
+    signal_bindings: dict[str, Any],
+    evidence_ids: list[str],
+    observed: set[str],
+) -> list[str]:
+    issues: list[str] = []
+    # Validate every binding, including bindings for optional signals and
+    # negative/unknown stages.  Checking only ``observed`` would let an
+    # invalid or unsupported binding hide inside an ``absent`` or ``unknown``
+    # projection without blocking qualification.
+    for signal, binding in signal_bindings.items():
+        if not isinstance(binding, dict):
+            issues.append(f"{code}:invalid_signal_binding:{signal}")
+            continue
+        binding_ids = [
+            str(value).strip()
+            for value in binding.get("evidence_ids") or []
+            if str(value).strip()
+        ]
+        if binding.get("invalid_evidence_ids"):
+            issues.append(f"{code}:signal_binding_invalid_evidence:{signal}")
+        outside_stage = sorted(set(binding_ids) - set(evidence_ids))
+        if outside_stage:
+            issues.append(
+                f"{code}:signal_binding_outside_stage_evidence:{signal}:{','.join(outside_stage)}"
+            )
+        if binding.get("status") == "supported" and not binding_ids:
+            issues.append(f"{code}:supported_signal_without_evidence:{signal}")
+        elif binding.get("status") != "supported" and binding_ids:
+            issues.append(f"{code}:unsupported_signal_with_evidence:{signal}")
+
+    # Every observed signal must point to the exact atomic facts that support
+    # it.  The stage-level evidence_ids list remains a compatibility index, but
+    # it is no longer sufficient for qualification on its own.
+    for signal in sorted(observed):
+        binding = signal_bindings.get(signal)
+        if not isinstance(binding, dict) or binding.get("status") != "supported":
+            issues.append(f"{code}:observed_signal_without_supported_binding:{signal}")
+    return issues
+
+
+def _positive_stage_requirement_issues(
+    contract: StageEvidenceContract,
+    status: str,
+    coverage: Any,
+    evidence_ids: list[str],
+    observed: set[str],
+    missing: set[str],
+    required: set[str],
+    observed_disqualifiers: set[str],
+    signal_bindings: dict[str, Any],
+) -> list[str]:
+    issues: list[str] = []
+    if status == "present" and coverage != "complete":
+        issues.append(f"{contract.code}:present_without_complete_coverage")
+    if status == "partial" and coverage not in {"complete", "partial"}:
+        issues.append(f"{contract.code}:partial_without_observed_coverage")
+    if not evidence_ids:
+        issues.append(f"{contract.code}:{status}_without_evidence")
+    missing_required = sorted(required - observed)
+    requirements_satisfied = required_stage_signals_satisfied(contract, observed)
+    if status == "present" and not requirements_satisfied:
+        issues.append(f"{contract.code}:present_missing_required_signals:{','.join(missing_required)}")
+    participation_signals = set(contract.participation_signals or contract.required_signals)
+    supported_signals = {
+        signal
+        for signal, binding in signal_bindings.items()
+        if isinstance(binding, dict)
+        and binding.get("status") == "supported"
+        and binding.get("evidence_ids")
+    }
+    if status == "partial" and requirements_satisfied:
+        issues.append(f"{contract.code}:partial_with_complete_required_signals")
+    if status == "partial" and not supported_signals.intersection(participation_signals):
+        issues.append(f"{contract.code}:partial_without_participation_signal")
+    if status == "partial" and not (required - observed).issubset(missing):
+        issues.append(f"{contract.code}:partial_without_explicit_missing_signals")
+    missing_bindings: list[str] = []
+    if status == "present" and contract.required_signal_mode in {"any", "usage_or_explanation"}:
+        supported_required = {
+            signal
+            for signal in required
+            if isinstance(signal_bindings.get(signal), dict)
+            and signal_bindings[signal].get("status") == "supported"
+        }
+        if not required_stage_signals_satisfied(contract, supported_required):
+            missing_bindings = sorted(required)
+    elif status == "present":
+        for signal in sorted(required):
+            binding = signal_bindings.get(signal)
+            if not isinstance(binding, dict) or binding.get("status") != "supported":
+                missing_bindings.append(signal)
+    if missing_bindings:
+        issues.append(
+            f"{contract.code}:present_missing_required_signal_bindings:{','.join(missing_bindings)}"
+        )
+    blocking_disqualifiers = (
+        observed_disqualifiers
+        if status == "present"
+        else observed_disqualifiers - set(contract.partial_compatible_disqualifiers)
+    )
+    if blocking_disqualifiers:
+        issues.append(
+            f"{contract.code}:{status}_with_disqualifiers:{','.join(sorted(blocking_disqualifiers))}"
+        )
+    return issues
+
+
+def _positive_stage_evidence_issues(
+    contract: StageEvidenceContract,
+    status: str,
+    units_by_id: dict[str, dict[str, Any]],
+    evidence_ids: list[str],
+    observed: set[str],
+    signal_bindings: dict[str, Any],
+) -> list[str]:
+    issues: list[str] = []
+    strengths = _unit_strengths(units_by_id, evidence_ids)
+    if any(strength is None for strength in strengths):
+        issues.append(f"{contract.code}:{status}_without_evidence_strength")
+    elif any(strength not in {"direct", "explicit"} for strength in strengths):
+        issues.append(f"{contract.code}:{status}_without_explicit_strength")
+    referenced_units = [units_by_id[evidence_id] for evidence_id in evidence_ids if evidence_id in units_by_id]
+    if contract.code == "S3":
+        for signal in ("target_contact", "real_action", "application_change", "functional_explanation"):
+            binding = signal_bindings.get(signal) or {}
+            if signal not in observed and binding.get("status") != "supported":
+                continue
+            bound_units = [units_by_id[value] for value in binding.get("evidence_ids", []) if value in units_by_id]
+            channels = ("voiceover", "subtitle") if signal == "functional_explanation" else ("visual",)
+            if not any(_unit_has_channel(unit, channel) for unit in bound_units for channel in channels):
+                issues.append(f"S3:signal_channel_missing:{signal}")
+    if contract.code == "S5" and not any(
+        _unit_has_typed_s5_trust_source(unit) for unit in referenced_units
+    ):
+        issues.append(f"S5:{status}_without_typed_trust_source")
+    if contract.channel_policy == "visual_required":
+        if not any(_unit_has_channel(unit, "visual") for unit in referenced_units):
+            issues.append(f"{contract.code}:required_visual_channel_missing")
+    elif contract.channel_policy == "visual_or_voiceover":
+        if not any(
+            _unit_has_channel(unit, "visual")
+            or _unit_has_channel(unit, "subtitle")
+            or _unit_has_channel(unit, "voiceover")
+            for unit in referenced_units
+        ):
+            issues.append(f"{contract.code}:required_observation_channel_missing")
+    return issues
+
+
+def _nonpositive_stage_status_issues(
+    code: str,
+    status: Any,
+    coverage: Any,
+    check: dict[str, Any],
+    evidence_ids: list[str],
+    missing: set[str],
+    required: set[str],
+    signal_bindings: dict[str, Any],
+) -> list[str]:
+    issues: list[str] = []
+    if status == "absent":
+        supported_bindings = sorted(
+            signal
+            for signal, binding in signal_bindings.items()
+            if isinstance(binding, dict)
+            and binding.get("status") == "supported"
+        )
+        if coverage != "complete":
+            issues.append(f"{code}:absence_without_complete_coverage")
+        if evidence_ids:
+            issues.append(f"{code}:absence_with_evidence")
+        if supported_bindings:
+            issues.append(f"{code}:absence_with_supported_signals")
+        if not required.issubset(missing):
+            issues.append(f"{code}:absence_missing_required_signals")
+    elif status == "not_applicable":
+        if coverage != "complete" or evidence_ids or signal_bindings or not str(check.get("reason") or "").strip():
+            issues.append(f"{code}:not_applicable_without_explicit_basis")
+    elif status in {"unknown", "conflict"}:
+        bound_ids = [
+            value
+            for binding in signal_bindings.values()
+            if isinstance(binding, dict)
+            for value in binding.get("evidence_ids") or []
+            if str(value).strip()
+        ]
+        if evidence_ids or bound_ids:
+            issues.append(f"{code}:{status}_with_evidence")
+    else:
+        issues.append(f"{code}:invalid_status")
+
+    return issues
+
+
 def _stage_check_issues(
     contract: StageEvidenceContract,
     check: Any,
@@ -1974,153 +2170,41 @@ def _stage_check_issues(
     if contradictory_signals:
         issues.append(f"{contract.code}:signal_both_observed_and_missing:{','.join(contradictory_signals)}")
 
-    # Validate every binding, including bindings for optional signals and
-    # negative/unknown stages.  Checking only ``observed`` would let an
-    # invalid or unsupported binding hide inside an ``absent`` or ``unknown``
-    # projection without blocking qualification.
-    for signal, binding in signal_bindings.items():
-        if not isinstance(binding, dict):
-            issues.append(f"{contract.code}:invalid_signal_binding:{signal}")
-            continue
-        binding_ids = [
-            str(value).strip()
-            for value in binding.get("evidence_ids") or []
-            if str(value).strip()
-        ]
-        if binding.get("invalid_evidence_ids"):
-            issues.append(f"{contract.code}:signal_binding_invalid_evidence:{signal}")
-        outside_stage = sorted(set(binding_ids) - set(evidence_ids))
-        if outside_stage:
-            issues.append(
-                f"{contract.code}:signal_binding_outside_stage_evidence:{signal}:{','.join(outside_stage)}"
-            )
-        if binding.get("status") == "supported" and not binding_ids:
-            issues.append(f"{contract.code}:supported_signal_without_evidence:{signal}")
-        elif binding.get("status") != "supported" and binding_ids:
-            issues.append(f"{contract.code}:unsupported_signal_with_evidence:{signal}")
-
-    # Every observed signal must point to the exact atomic facts that support
-    # it.  The stage-level evidence_ids list remains a compatibility index, but
-    # it is no longer sufficient for qualification on its own.
-    for signal in sorted(observed):
-        binding = signal_bindings.get(signal)
-        if not isinstance(binding, dict) or binding.get("status") != "supported":
-            issues.append(f"{contract.code}:observed_signal_without_supported_binding:{signal}")
-
+    issues.extend(
+        _stage_signal_binding_issues(contract.code, signal_bindings, evidence_ids, observed)
+    )
     if status in {"present", "partial"}:
-        if status == "present" and coverage != "complete":
-            issues.append(f"{contract.code}:present_without_complete_coverage")
-        if status == "partial" and coverage not in {"complete", "partial"}:
-            issues.append(f"{contract.code}:partial_without_observed_coverage")
-        if not evidence_ids:
-            issues.append(f"{contract.code}:{status}_without_evidence")
-        missing_required = sorted(required - observed)
-        requirements_satisfied = required_stage_signals_satisfied(contract, observed)
-        if status == "present" and not requirements_satisfied:
-            issues.append(f"{contract.code}:present_missing_required_signals:{','.join(missing_required)}")
-        participation_signals = set(contract.participation_signals or contract.required_signals)
-        supported_signals = {
-            signal
-            for signal, binding in signal_bindings.items()
-            if isinstance(binding, dict)
-            and binding.get("status") == "supported"
-            and binding.get("evidence_ids")
-        }
-        if status == "partial" and requirements_satisfied:
-            issues.append(f"{contract.code}:partial_with_complete_required_signals")
-        if status == "partial" and not supported_signals.intersection(participation_signals):
-            issues.append(f"{contract.code}:partial_without_participation_signal")
-        if status == "partial" and not (required - observed).issubset(missing):
-            issues.append(f"{contract.code}:partial_without_explicit_missing_signals")
-        missing_bindings: list[str] = []
-        if status == "present" and contract.required_signal_mode in {"any", "usage_or_explanation"}:
-            supported_required = {
-                signal
-                for signal in required
-                if isinstance(signal_bindings.get(signal), dict)
-                and signal_bindings[signal].get("status") == "supported"
-            }
-            if not required_stage_signals_satisfied(contract, supported_required):
-                missing_bindings = sorted(required)
-        elif status == "present":
-            for signal in sorted(required):
-                binding = signal_bindings.get(signal)
-                if not isinstance(binding, dict) or binding.get("status") != "supported":
-                    missing_bindings.append(signal)
-        if missing_bindings:
-            issues.append(
-                f"{contract.code}:present_missing_required_signal_bindings:{','.join(missing_bindings)}"
+        issues.extend(
+            _positive_stage_requirement_issues(
+                contract,
+                status,
+                coverage,
+                evidence_ids,
+                observed,
+                missing,
+                required,
+                observed_disqualifiers,
+                signal_bindings,
             )
-        blocking_disqualifiers = (
-            observed_disqualifiers
-            if status == "present"
-            else observed_disqualifiers - set(contract.partial_compatible_disqualifiers)
         )
-        if blocking_disqualifiers:
-            issues.append(
-                f"{contract.code}:{status}_with_disqualifiers:{','.join(sorted(blocking_disqualifiers))}"
+        issues.extend(
+            _positive_stage_evidence_issues(
+                contract, status, units_by_id, evidence_ids, observed, signal_bindings
             )
-        strengths = _unit_strengths(units_by_id, evidence_ids)
-        if any(strength is None for strength in strengths):
-            issues.append(f"{contract.code}:{status}_without_evidence_strength")
-        elif any(strength not in {"direct", "explicit"} for strength in strengths):
-            issues.append(f"{contract.code}:{status}_without_explicit_strength")
-        referenced_units = [units_by_id[evidence_id] for evidence_id in evidence_ids if evidence_id in units_by_id]
-        if contract.code == "S3":
-            for signal in ("target_contact", "real_action", "application_change", "functional_explanation"):
-                binding = signal_bindings.get(signal) or {}
-                if signal not in observed and binding.get("status") != "supported":
-                    continue
-                bound_units = [units_by_id[value] for value in binding.get("evidence_ids", []) if value in units_by_id]
-                channels = ("voiceover", "subtitle") if signal == "functional_explanation" else ("visual",)
-                if not any(_unit_has_channel(unit, channel) for unit in bound_units for channel in channels):
-                    issues.append(f"S3:signal_channel_missing:{signal}")
-        if contract.code == "S5" and not any(
-            _unit_has_typed_s5_trust_source(unit) for unit in referenced_units
-        ):
-            issues.append(f"S5:{status}_without_typed_trust_source")
-        if contract.channel_policy == "visual_required":
-            if not any(_unit_has_channel(unit, "visual") for unit in referenced_units):
-                issues.append(f"{contract.code}:required_visual_channel_missing")
-        elif contract.channel_policy == "visual_or_voiceover":
-            if not any(
-                _unit_has_channel(unit, "visual")
-                or _unit_has_channel(unit, "subtitle")
-                or _unit_has_channel(unit, "voiceover")
-                for unit in referenced_units
-            ):
-                issues.append(f"{contract.code}:required_observation_channel_missing")
-    elif status == "absent":
-        supported_bindings = sorted(
-            signal
-            for signal, binding in signal_bindings.items()
-            if isinstance(binding, dict)
-            and binding.get("status") == "supported"
         )
-        if coverage != "complete":
-            issues.append(f"{contract.code}:absence_without_complete_coverage")
-        if evidence_ids:
-            issues.append(f"{contract.code}:absence_with_evidence")
-        if supported_bindings:
-            issues.append(f"{contract.code}:absence_with_supported_signals")
-        if not required.issubset(missing):
-            issues.append(f"{contract.code}:absence_missing_required_signals")
-    elif status == "not_applicable":
-        if coverage != "complete" or evidence_ids or signal_bindings or not str(check.get("reason") or "").strip():
-            issues.append(f"{contract.code}:not_applicable_without_explicit_basis")
-    elif status in {"unknown", "conflict"}:
-        bound_ids = [
-            value
-            for binding in signal_bindings.values()
-            if isinstance(binding, dict)
-            for value in binding.get("evidence_ids") or []
-            if str(value).strip()
-        ]
-        if evidence_ids or bound_ids:
-            issues.append(f"{contract.code}:{status}_with_evidence")
     else:
-        issues.append(f"{contract.code}:invalid_status")
-
+        issues.extend(
+            _nonpositive_stage_status_issues(
+                contract.code,
+                status,
+                coverage,
+                check,
+                evidence_ids,
+                missing,
+                required,
+                signal_bindings,
+            )
+        )
     return issues
 
 
