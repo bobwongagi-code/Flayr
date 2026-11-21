@@ -1105,6 +1105,60 @@ def _materialize_sparse_variant_unit(
     return expanded
 
 
+def _normalize_understanding_unit(
+    unit: dict[str, Any],
+    role: str,
+    index: int,
+    *,
+    preserve_locked_fields: bool,
+) -> dict[str, Any]:
+    normalized_unit = {
+        "id": str(unit.get("id") or f"{role[0].upper()}{index}").strip(),
+        "time_range": str(unit.get("time_range") or "").strip(),
+        "information": str(unit.get("information") or "").strip(),
+        "voiceover": str(unit.get("voiceover") or "").strip(),
+        "voiceover_zh": str(unit.get("voiceover_zh") or "").strip(),
+        "visual_fact": str(unit.get("visual_fact") or "").strip(),
+        "subtitle_fact": str(unit.get("subtitle_fact") or "").strip(),
+        "audio_fact": str(unit.get("audio_fact") or "").strip(),
+        "evidence_strength": normalize_evidence_strength(unit.get("evidence_strength")),
+        "fact_quality": normalize_fact_quality(unit.get("fact_quality")),
+        "product_visible": normalize_demo_flag(unit.get("product_visible")),
+        "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
+        # F 项背书劈成两个纯观察信道，替代旧的单字段硬判定：
+        "endorsement_verbal": normalize_demo_flag(unit.get("endorsement_verbal")),
+        "endorsement_visual": normalize_demo_flag(unit.get("endorsement_visual")),
+        "trust_source_signals": normalize_s5_source_signals(unit.get("trust_source_signals")),
+        "trust_source_reference": str(unit.get("trust_source_reference") or "").strip(),
+        "trust_source_status": normalize_s5_source_status(unit),
+        "functions": normalize_functions(unit.get("functions")),
+    }
+    normalized_unit.update(normalize_variant_unit_fields(unit))
+    if preserve_locked_fields:
+        # A locked Stage1 fact may deliberately preserve ``missing``
+        # (rather than infer ``explicit_absent``) and may retain an
+        # invalid variant shape for audit. The normalized container
+        # loses the raw-field-presence information used to derive
+        # those values, so preserve the already-locked parser result
+        # or a second normalization would change the frozen hash.
+        for field in (
+            "trust_source_status",
+            "primary_variant_id",
+            "variant_attribution_confident",
+            "variant_data_valid",
+        ):
+            if field in unit:
+                normalized_unit[field] = copy.deepcopy(unit[field])
+        # ``fact_quality`` was added after older frozen ledgers were
+        # produced. Preserve the old field shape while re-reading a
+        # trusted ledger so its immutable digest remains stable.
+        if "fact_quality" in unit:
+            normalized_unit["fact_quality"] = copy.deepcopy(unit["fact_quality"])
+        else:
+            normalized_unit.pop("fact_quality", None)
+    return normalized_unit
+
+
 def normalize_video_understanding(
     value: Any,
     *,
@@ -1135,54 +1189,18 @@ def normalize_video_understanding(
         for index, unit in enumerate(units, start=1):
             if not isinstance(unit, dict):
                 continue
-            normalized_unit = {
-                "id": str(unit.get("id") or f"{role[0].upper()}{index}").strip(),
-                "time_range": str(unit.get("time_range") or "").strip(),
-                "information": str(unit.get("information") or "").strip(),
-                "voiceover": str(unit.get("voiceover") or "").strip(),
-                "voiceover_zh": str(unit.get("voiceover_zh") or "").strip(),
-                "visual_fact": str(unit.get("visual_fact") or "").strip(),
-                "subtitle_fact": str(unit.get("subtitle_fact") or "").strip(),
-                "audio_fact": str(unit.get("audio_fact") or "").strip(),
-                "evidence_strength": normalize_evidence_strength(unit.get("evidence_strength")),
-                "fact_quality": normalize_fact_quality(unit.get("fact_quality")),
-                "product_visible": normalize_demo_flag(unit.get("product_visible")),
-                "product_coverage": normalize_product_coverage(unit.get("product_coverage")),
-                # F 项背书劈成两个纯观察信道，替代旧的单字段硬判定：
-                "endorsement_verbal": normalize_demo_flag(unit.get("endorsement_verbal")),
-                "endorsement_visual": normalize_demo_flag(unit.get("endorsement_visual")),
-                "trust_source_signals": normalize_s5_source_signals(unit.get("trust_source_signals")),
-                "trust_source_reference": str(unit.get("trust_source_reference") or "").strip(),
-                "trust_source_status": normalize_s5_source_status(unit),
-                "functions": normalize_functions(unit.get("functions")),
-            }
-            normalized_unit.update(normalize_variant_unit_fields(unit))
-            if (
-                allow_trusted_pipeline_metadata
-                and item.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION
-            ):
-                # A locked Stage1 fact may deliberately preserve ``missing``
-                # (rather than infer ``explicit_absent``) and may retain an
-                # invalid variant shape for audit. The normalized container
-                # loses the raw-field-presence information used to derive
-                # those values, so preserve the already-locked parser result
-                # or a second normalization would change the frozen hash.
-                for field in (
-                    "trust_source_status",
-                    "primary_variant_id",
-                    "variant_attribution_confident",
-                    "variant_data_valid",
-                ):
-                    if field in unit:
-                        normalized_unit[field] = copy.deepcopy(unit[field])
-                # ``fact_quality`` was added after older frozen ledgers were
-                # produced. Preserve the old field shape while re-reading a
-                # trusted ledger so its immutable digest remains stable.
-                if "fact_quality" in unit:
-                    normalized_unit["fact_quality"] = copy.deepcopy(unit["fact_quality"])
-                else:
-                    normalized_unit.pop("fact_quality", None)
-            normalized_units.append(normalized_unit)
+            normalized_units.append(
+                _normalize_understanding_unit(
+                    unit,
+                    role,
+                    index,
+                    preserve_locked_fields=(
+                        allow_trusted_pipeline_metadata
+                        and item.get("stage_evidence_contract_version")
+                        == STAGE_EVIDENCE_CONTRACT_VERSION
+                    ),
+                )
+            )
         valid_ids = {unit["id"] for unit in normalized_units}
         raw_gate_status = item.get("gate_observation_status") if isinstance(item.get("gate_observation_status"), dict) else {}
         raw_stage_evidence_checks = item.get("stage_evidence_checks")
@@ -1362,6 +1380,189 @@ def adapt_misnested_analysis_result(result: dict[str, Any]) -> dict[str, Any]:
     return adapted
 
 
+def _normalize_analysis_stage(
+    item: Any,
+    index: int,
+    stage_eligibility: dict[str, Any],
+    *,
+    segmented_result: bool,
+) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        raise SystemExit("Each stage_analysis item must be an object.")
+    stage_name, _default_range, core_question = STAGES[index]
+    stage_code = f"S{index + 1}"
+    stage_scope = stage_eligibility.get(stage_code)
+    stage_scope_status = (
+        str(stage_scope.get("status") or "").strip().lower()
+        if isinstance(stage_scope, dict)
+        else ""
+    )
+    if stage_scope_status == "not_applicable":
+        comparison_status = "not_applicable"
+        model_comparison_status = stage_scope_status
+    elif stage_scope_status == "not_comparable":
+        comparison_status = "not_directly_comparable"
+        model_comparison_status = stage_scope_status
+    elif segmented_result:
+        # In the segmented contract, comparison scope is a pipeline-owned
+        # decision. A model cannot close a direct/structural stage by
+        # returning a similarly named field and thereby bypass the
+        # evidence handoff gate.
+        comparison_status = ""
+        model_comparison_status = ""
+    else:
+        # Preserve legacy result compatibility for non-segmented imports.
+        comparison_status = str(item.get("comparison_status") or "").strip().lower()
+        model_comparison_status = str(item.get("model_comparison_status") or "").strip().lower()
+    # Stage-specific ranges are evidence, not presentation defaults. Missing
+    # or malformed ranges remain empty and are rejected by time coherence
+    # validation instead of being silently assigned a catalog window.
+    benchmark_time_range = normalize_time_range_value(item.get("benchmark_time_range"))
+    creator_time_range = normalize_time_range_value(item.get("creator_time_range"))
+    return {
+        "stage": str(item.get("stage") or stage_name),
+        "time_range": str(item.get("time_range") or f"标杆 {benchmark_time_range} / 达人 {creator_time_range}"),
+        "benchmark_time_range": benchmark_time_range,
+        "creator_time_range": creator_time_range,
+        "core_question": str(item.get("core_question") or core_question),
+        "creator_module_id": normalize_module_id(item.get("creator_module_id"), index + 1),
+        "benchmark_module_id": normalize_module_id(item.get("benchmark_module_id"), index + 1),
+        "module_fit": normalize_choice(item.get("module_fit"), {"fit", "degraded", "unfit", "unknown"}, "unknown"),
+        "module_fit_reason": str(item.get("module_fit_reason") or "").strip(),
+        "task_completion": normalize_task_completion(item.get("task_completion")),
+        "gap_type": normalize_choice(item.get("gap_type"), {"structural", "execution", "resource", "unknown"}, "unknown"),
+        "gap_summary": normalize_evidence(item.get("gap_summary")),
+        "voice_performance": normalize_voice_performance(item.get("voice_performance")),
+        "benchmark_summary": required_text(item, "benchmark_summary"),
+        "benchmark_key_message": str(item.get("benchmark_key_message") or item.get("benchmark_summary") or "").strip(),
+        "benchmark_evidence_ids": normalize_evidence(item.get("benchmark_evidence_ids")),
+        "benchmark_visual_evidence": normalize_evidence(item.get("benchmark_visual_evidence")),
+        "benchmark_support_status": normalize_support_status(item.get("benchmark_support_status"), item.get("benchmark_quote")),
+        # S4 效果呈现布尔（结构库 S4-A~F 判定）：缺失为 None，不触发确定性约束。
+        "benchmark_has_effect_demo": normalize_demo_flag(item.get("benchmark_has_effect_demo")),
+        # S3 使用过程布尔（结构库 S3-A~E 判定）：缺失为 None → derive S3 放大器不触发（保留旧空白行为）
+        "benchmark_has_usage_demo": normalize_demo_flag(item.get("benchmark_has_usage_demo")),
+        "benchmark_quote": str(item.get("benchmark_quote") or "").strip(),
+        "benchmark_quote_zh": str(item.get("benchmark_quote_zh") or "").strip(),
+        "creator_summary": required_text(item, "creator_summary"),
+        "creator_key_message": str(item.get("creator_key_message") or item.get("creator_summary") or "").strip(),
+        "creator_evidence_ids": normalize_evidence(item.get("creator_evidence_ids")),
+        "creator_visual_evidence": normalize_evidence(item.get("creator_visual_evidence")),
+        "creator_support_status": normalize_support_status(item.get("creator_support_status"), item.get("creator_quote")),
+        "creator_has_effect_demo": normalize_demo_flag(item.get("creator_has_effect_demo")),
+        "creator_has_usage_demo": normalize_demo_flag(item.get("creator_has_usage_demo")),
+        "creator_quote": str(item.get("creator_quote") or "").strip(),
+        "creator_quote_zh": str(item.get("creator_quote_zh") or "").strip(),
+        "gap": required_text(item, "gap"),
+        "evidence": normalize_evidence(item.get("evidence")),
+        # Segmented Stage2 owns these small semantic outputs. They are
+        # preserved as typed audit fields; links, severity and all
+        # other mechanical projections remain code-owned below.
+        "stage_state": normalize_choice(
+            item.get("stage_state"),
+            {"completed", "unknown", "conflict", "blocked"},
+            "unknown",
+        ),
+        **{
+            ("stage_handoff_status" if segmented_result else "analysis_status"): normalize_choice(
+                item.get("stage_handoff_status") or item.get("analysis_status"),
+                {
+                    "grounded",
+                    "handoff_loss",
+                    "evidence_blocked",
+                    "not_comparable",
+                    "not_applicable",
+                    "unknown",
+                },
+                "unknown",
+            )
+        },
+        # Code-owned comparison scope survives normalization so the
+        # finalizer can replay an already-normalized segmented result
+        # without turning a closed stage back into a handoff failure.
+        "comparison_status": comparison_status,
+        "model_comparison_status": model_comparison_status,
+        "relation": normalize_choice(
+            item.get("relation"),
+            {"creator_better", "benchmark_better", "equivalent", "uncertain"},
+            "uncertain",
+        ),
+        "model_gap_magnitude": normalize_choice(
+            item.get("model_gap_magnitude"),
+            {"none", "small", "medium", "large", "uncertain"},
+            "uncertain",
+        ),
+        "judgment_reason": str(item.get("judgment_reason") or "").strip(),
+        "severity": normalize_severity(item.get("severity")),
+        # 模型直判快照（归一时定格）：Phase C 和其它再收口路径必须保留
+        # 已存在的模型基线，不能把上轮 derive 后的最终 severity 误作模型判断。
+        "model_severity": normalize_severity(item.get("model_severity") or item.get("severity")),
+        # 4d：两侧独立执行分（0/0.5/1/2），缺失为 None → derive 优雅跳过
+        "creator_execution": normalize_execution_score(item.get("creator_execution")),
+        "benchmark_execution": normalize_execution_score(item.get("benchmark_execution")),
+        # 痛点相关性是商业优先级事实，缺失为 None，不进入 severity resolver。
+        "painpoint_relevance": normalize_painpoint_relevance(item.get("painpoint_relevance")),
+        # 到位标准达成事实（全阶段统一，见 prompt 对照表；先收集，暂不卡分）
+        "stage_standard_delivery": normalize_stage_standard_delivery(item.get("stage_standard_delivery")),
+        # 阶段级跨模态综合：保留各渠道事实，并显式记录主导渠道、交互关系和净效果。
+        # 缺失时为 None，旧结果继续走既有 stage flags，保证历史兼容。
+        "creator_multimodal": normalize_multimodal_assessment(item.get("creator_multimodal")),
+        "benchmark_multimodal": normalize_multimodal_assessment(item.get("benchmark_multimodal")),
+        # S1 Hook 结构化 flag（仅 S1 有意义）：四维 dims 推执行分、exists 红线、anchors 命题锚。
+        # 缺失为 None → derive 回退模型执行分（优雅降级）。模型在 Stage2 产出（切片 B 接线）。
+        "creator_hook": normalize_hook_flags(item.get("creator_hook")),
+        "benchmark_hook": normalize_hook_flags(item.get("benchmark_hook")),
+        # S2 产品引出契约 flag：只判 S1→S2 是否自然交接、产品身份/角色是否明确。
+        # 不做四维执行分，缺失为 None → derive 保守降级。
+        "creator_s2": normalize_s2_flags(item.get("creator_s2")),
+        "benchmark_s2": normalize_s2_flags(item.get("benchmark_s2")),
+        # S3 separates functional explanation from actual-use facts.
+        # 缺失为 None → derive 保守降级。
+        "creator_s3": normalize_s3_flags(item.get("creator_s3")),
+        "benchmark_s3": normalize_s3_flags(item.get("benchmark_s3")),
+        # S4 效果因果 flag：只约束"效果是否可信地由产品造成"，缺失则保留旧 S4 判断。
+        "creator_s4": normalize_s4_flags(item.get("creator_s4")),
+        "benchmark_s4": normalize_s4_flags(item.get("benchmark_s4")),
+        # S5 信任放大 flag：只判信任材料是否可见、可信、与本品相关；缺失则保留旧 S5 判断。
+        "creator_s5": normalize_s5_flags(item.get("creator_s5")),
+        "benchmark_s5": normalize_s5_flags(item.get("benchmark_s5")),
+        # S6 CTA flag：只判购买指令、路径、利益/紧迫/保障是否成立；缺失则保留旧 S6 判断。
+        "creator_s6": normalize_s6_flags(item.get("creator_s6")),
+        "benchmark_s6": normalize_s6_flags(item.get("benchmark_s6")),
+    }
+
+
+def _normalize_analysis_improvement(item: Any, index: int) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        raise SystemExit("Each improvement item must be an object.")
+    creator_time_range = str(item.get("creator_time_range") or item.get("time_range") or "").strip()
+    benchmark_time_range = str(item.get("benchmark_time_range") or item.get("time_range") or "").strip()
+    return {
+        "title": required_text(item, "title"),
+        "target_stage": str(item.get("target_stage") or "").strip(),
+        "gmv_impact": str(item.get("gmv_impact") or "").strip(),
+        "gap_type": normalize_choice(item.get("gap_type"), {"structural", "execution", "resource", "unknown"}, "unknown"),
+        "time_range": required_text(item, "time_range"),
+        "creator_time_range": creator_time_range or required_text(item, "time_range"),
+        "benchmark_time_range": benchmark_time_range or required_text(item, "time_range"),
+        "problem": required_text(item, "problem"),
+        "benchmark_reference": required_text(item, "benchmark_reference"),
+        "benchmark_evidence_ids": normalize_evidence(item.get("benchmark_evidence_ids")),
+        "suggestion": required_text(item, "suggestion"),
+        "actions": normalize_evidence(item.get("actions")) or normalize_evidence(item.get("suggestion")),
+        "gmv_reason": required_text(item, "gmv_reason"),
+        "evidence": normalize_evidence(item.get("evidence")),
+        "creator_script": str(item.get("creator_script") or "").strip(),
+        "creator_script_zh": str(item.get("creator_script_zh") or "").strip(),
+        "base_frame_suitability": normalize_base_frame_suitability(item.get("base_frame_suitability"), item.get("best_base_frame_time")),
+        "best_base_frame_time": normalized_base_frame_time(item),
+        "base_frame_evidence_id": str(item.get("base_frame_evidence_id") or "").strip(),
+        "base_frame_reason": str(item.get("base_frame_reason") or "").strip(),
+        "expected_effect": str(item.get("expected_effect") or item.get("gmv_reason") or "").strip(),
+        "priority": normalize_priority(item.get("priority"), index),
+    }
+
+
 def normalize_analysis_result(
     result: dict[str, Any],
     *,
@@ -1386,187 +1587,15 @@ def normalize_analysis_result(
     stage_eligibility = comparison_eligibility.get("stage_eligibility")
     stage_eligibility = stage_eligibility if isinstance(stage_eligibility, dict) else {}
 
-    normalized_stages = []
-    for index, item in enumerate(stage_analysis):
-        if not isinstance(item, dict):
-            raise SystemExit("Each stage_analysis item must be an object.")
-        stage_name, _default_range, core_question = STAGES[index]
-        stage_code = f"S{index + 1}"
-        stage_scope = stage_eligibility.get(stage_code)
-        stage_scope_status = (
-            str(stage_scope.get("status") or "").strip().lower()
-            if isinstance(stage_scope, dict)
-            else ""
-        )
-        segmented_result = result.get("stage2_pipeline_version") == "segmented_stage_v1"
-        if stage_scope_status == "not_applicable":
-            comparison_status = "not_applicable"
-            model_comparison_status = stage_scope_status
-        elif stage_scope_status == "not_comparable":
-            comparison_status = "not_directly_comparable"
-            model_comparison_status = stage_scope_status
-        elif segmented_result:
-            # In the segmented contract, comparison scope is a pipeline-owned
-            # decision. A model cannot close a direct/structural stage by
-            # returning a similarly named field and thereby bypass the
-            # evidence handoff gate.
-            comparison_status = ""
-            model_comparison_status = ""
-        else:
-            # Preserve legacy result compatibility for non-segmented imports.
-            comparison_status = str(item.get("comparison_status") or "").strip().lower()
-            model_comparison_status = str(item.get("model_comparison_status") or "").strip().lower()
-        # Stage-specific ranges are evidence, not presentation defaults. Missing
-        # or malformed ranges remain empty and are rejected by time coherence
-        # validation instead of being silently assigned a catalog window.
-        benchmark_time_range = normalize_time_range_value(item.get("benchmark_time_range"))
-        creator_time_range = normalize_time_range_value(item.get("creator_time_range"))
-        normalized_stages.append(
-            {
-                "stage": str(item.get("stage") or stage_name),
-                "time_range": str(item.get("time_range") or f"标杆 {benchmark_time_range} / 达人 {creator_time_range}"),
-                "benchmark_time_range": benchmark_time_range,
-                "creator_time_range": creator_time_range,
-                "core_question": str(item.get("core_question") or core_question),
-                "creator_module_id": normalize_module_id(item.get("creator_module_id"), index + 1),
-                "benchmark_module_id": normalize_module_id(item.get("benchmark_module_id"), index + 1),
-                "module_fit": normalize_choice(item.get("module_fit"), {"fit", "degraded", "unfit", "unknown"}, "unknown"),
-                "module_fit_reason": str(item.get("module_fit_reason") or "").strip(),
-                "task_completion": normalize_task_completion(item.get("task_completion")),
-                "gap_type": normalize_choice(item.get("gap_type"), {"structural", "execution", "resource", "unknown"}, "unknown"),
-                "gap_summary": normalize_evidence(item.get("gap_summary")),
-                "voice_performance": normalize_voice_performance(item.get("voice_performance")),
-                "benchmark_summary": required_text(item, "benchmark_summary"),
-                "benchmark_key_message": str(item.get("benchmark_key_message") or item.get("benchmark_summary") or "").strip(),
-                "benchmark_evidence_ids": normalize_evidence(item.get("benchmark_evidence_ids")),
-                "benchmark_visual_evidence": normalize_evidence(item.get("benchmark_visual_evidence")),
-                "benchmark_support_status": normalize_support_status(item.get("benchmark_support_status"), item.get("benchmark_quote")),
-                # S4 效果呈现布尔（结构库 S4-A~F 判定）：缺失为 None，不触发确定性约束。
-                "benchmark_has_effect_demo": normalize_demo_flag(item.get("benchmark_has_effect_demo")),
-                # S3 使用过程布尔（结构库 S3-A~E 判定）：缺失为 None → derive S3 放大器不触发（保留旧空白行为）
-                "benchmark_has_usage_demo": normalize_demo_flag(item.get("benchmark_has_usage_demo")),
-                "benchmark_quote": str(item.get("benchmark_quote") or "").strip(),
-                "benchmark_quote_zh": str(item.get("benchmark_quote_zh") or "").strip(),
-                "creator_summary": required_text(item, "creator_summary"),
-                "creator_key_message": str(item.get("creator_key_message") or item.get("creator_summary") or "").strip(),
-                "creator_evidence_ids": normalize_evidence(item.get("creator_evidence_ids")),
-                "creator_visual_evidence": normalize_evidence(item.get("creator_visual_evidence")),
-                "creator_support_status": normalize_support_status(item.get("creator_support_status"), item.get("creator_quote")),
-                "creator_has_effect_demo": normalize_demo_flag(item.get("creator_has_effect_demo")),
-                "creator_has_usage_demo": normalize_demo_flag(item.get("creator_has_usage_demo")),
-                "creator_quote": str(item.get("creator_quote") or "").strip(),
-                "creator_quote_zh": str(item.get("creator_quote_zh") or "").strip(),
-                "gap": required_text(item, "gap"),
-                "evidence": normalize_evidence(item.get("evidence")),
-                # Segmented Stage2 owns these small semantic outputs. They are
-                # preserved as typed audit fields; links, severity and all
-                # other mechanical projections remain code-owned below.
-                "stage_state": normalize_choice(
-                    item.get("stage_state"),
-                    {"completed", "unknown", "conflict", "blocked"},
-                    "unknown",
-                ),
-                **{
-                    ("stage_handoff_status" if segmented_result else "analysis_status"): normalize_choice(
-                        item.get("stage_handoff_status") or item.get("analysis_status"),
-                        {
-                            "grounded",
-                            "handoff_loss",
-                            "evidence_blocked",
-                            "not_comparable",
-                            "not_applicable",
-                            "unknown",
-                        },
-                        "unknown",
-                    )
-                },
-                # Code-owned comparison scope survives normalization so the
-                # finalizer can replay an already-normalized segmented result
-                # without turning a closed stage back into a handoff failure.
-                "comparison_status": comparison_status,
-                "model_comparison_status": model_comparison_status,
-                "relation": normalize_choice(
-                    item.get("relation"),
-                    {"creator_better", "benchmark_better", "equivalent", "uncertain"},
-                    "uncertain",
-                ),
-                "model_gap_magnitude": normalize_choice(
-                    item.get("model_gap_magnitude"),
-                    {"none", "small", "medium", "large", "uncertain"},
-                    "uncertain",
-                ),
-                "judgment_reason": str(item.get("judgment_reason") or "").strip(),
-                "severity": normalize_severity(item.get("severity")),
-                # 模型直判快照（归一时定格）：Phase C 和其它再收口路径必须保留
-                # 已存在的模型基线，不能把上轮 derive 后的最终 severity 误作模型判断。
-                "model_severity": normalize_severity(item.get("model_severity") or item.get("severity")),
-                # 4d：两侧独立执行分（0/0.5/1/2），缺失为 None → derive 优雅跳过
-                "creator_execution": normalize_execution_score(item.get("creator_execution")),
-                "benchmark_execution": normalize_execution_score(item.get("benchmark_execution")),
-                # 痛点相关性是商业优先级事实，缺失为 None，不进入 severity resolver。
-                "painpoint_relevance": normalize_painpoint_relevance(item.get("painpoint_relevance")),
-                # 到位标准达成事实（全阶段统一，见 prompt 对照表；先收集，暂不卡分）
-                "stage_standard_delivery": normalize_stage_standard_delivery(item.get("stage_standard_delivery")),
-                # 阶段级跨模态综合：保留各渠道事实，并显式记录主导渠道、交互关系和净效果。
-                # 缺失时为 None，旧结果继续走既有 stage flags，保证历史兼容。
-                "creator_multimodal": normalize_multimodal_assessment(item.get("creator_multimodal")),
-                "benchmark_multimodal": normalize_multimodal_assessment(item.get("benchmark_multimodal")),
-                # S1 Hook 结构化 flag（仅 S1 有意义）：四维 dims 推执行分、exists 红线、anchors 命题锚。
-                # 缺失为 None → derive 回退模型执行分（优雅降级）。模型在 Stage2 产出（切片 B 接线）。
-                "creator_hook": normalize_hook_flags(item.get("creator_hook")),
-                "benchmark_hook": normalize_hook_flags(item.get("benchmark_hook")),
-                # S2 产品引出契约 flag：只判 S1→S2 是否自然交接、产品身份/角色是否明确。
-                # 不做四维执行分，缺失为 None → derive 保守降级。
-                "creator_s2": normalize_s2_flags(item.get("creator_s2")),
-                "benchmark_s2": normalize_s2_flags(item.get("benchmark_s2")),
-                # S3 separates functional explanation from actual-use facts.
-                # 缺失为 None → derive 保守降级。
-                "creator_s3": normalize_s3_flags(item.get("creator_s3")),
-                "benchmark_s3": normalize_s3_flags(item.get("benchmark_s3")),
-                # S4 效果因果 flag：只约束"效果是否可信地由产品造成"，缺失则保留旧 S4 判断。
-                "creator_s4": normalize_s4_flags(item.get("creator_s4")),
-                "benchmark_s4": normalize_s4_flags(item.get("benchmark_s4")),
-                # S5 信任放大 flag：只判信任材料是否可见、可信、与本品相关；缺失则保留旧 S5 判断。
-                "creator_s5": normalize_s5_flags(item.get("creator_s5")),
-                "benchmark_s5": normalize_s5_flags(item.get("benchmark_s5")),
-                # S6 CTA flag：只判购买指令、路径、利益/紧迫/保障是否成立；缺失则保留旧 S6 判断。
-                "creator_s6": normalize_s6_flags(item.get("creator_s6")),
-                "benchmark_s6": normalize_s6_flags(item.get("benchmark_s6")),
-            }
-        )
-
-    normalized_improvements = []
-    for index, item in enumerate(improvements, start=1):
-        if not isinstance(item, dict):
-            raise SystemExit("Each improvement item must be an object.")
-        creator_time_range = str(item.get("creator_time_range") or item.get("time_range") or "").strip()
-        benchmark_time_range = str(item.get("benchmark_time_range") or item.get("time_range") or "").strip()
-        normalized_improvements.append(
-            {
-                "title": required_text(item, "title"),
-                "target_stage": str(item.get("target_stage") or "").strip(),
-                "gmv_impact": str(item.get("gmv_impact") or "").strip(),
-                "gap_type": normalize_choice(item.get("gap_type"), {"structural", "execution", "resource", "unknown"}, "unknown"),
-                "time_range": required_text(item, "time_range"),
-                "creator_time_range": creator_time_range or required_text(item, "time_range"),
-                "benchmark_time_range": benchmark_time_range or required_text(item, "time_range"),
-                "problem": required_text(item, "problem"),
-                "benchmark_reference": required_text(item, "benchmark_reference"),
-                "benchmark_evidence_ids": normalize_evidence(item.get("benchmark_evidence_ids")),
-                "suggestion": required_text(item, "suggestion"),
-                "actions": normalize_evidence(item.get("actions")) or normalize_evidence(item.get("suggestion")),
-                "gmv_reason": required_text(item, "gmv_reason"),
-                "evidence": normalize_evidence(item.get("evidence")),
-                "creator_script": str(item.get("creator_script") or "").strip(),
-                "creator_script_zh": str(item.get("creator_script_zh") or "").strip(),
-                "base_frame_suitability": normalize_base_frame_suitability(item.get("base_frame_suitability"), item.get("best_base_frame_time")),
-                "best_base_frame_time": normalized_base_frame_time(item),
-                "base_frame_evidence_id": str(item.get("base_frame_evidence_id") or "").strip(),
-                "base_frame_reason": str(item.get("base_frame_reason") or "").strip(),
-                "expected_effect": str(item.get("expected_effect") or item.get("gmv_reason") or "").strip(),
-                "priority": normalize_priority(item.get("priority"), index),
-            }
-        )
+    segmented_result = result.get("stage2_pipeline_version") == "segmented_stage_v1"
+    normalized_stages = [
+        _normalize_analysis_stage(item, index, stage_eligibility, segmented_result=segmented_result)
+        for index, item in enumerate(stage_analysis)
+    ]
+    normalized_improvements = [
+        _normalize_analysis_improvement(item, index)
+        for index, item in enumerate(improvements, start=1)
+    ]
 
     # key_conclusions：消费者视角关键结论（1-5 条）
     raw_conclusions = result.get("key_conclusions")
@@ -1618,7 +1647,7 @@ def normalize_analysis_result(
         **{
             (
                 "stage2_candidate_status"
-                if result.get("stage2_pipeline_version") == "segmented_stage_v1"
+                if segmented_result
                 else "stage2_pipeline_status"
             ): str(
                 result.get("stage2_candidate_status")

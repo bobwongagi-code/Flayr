@@ -77,6 +77,26 @@ class OfflineReplayTests(unittest.TestCase):
             }],
         })
 
+    def test_segmented_scope_and_handoff_remain_separate_from_legacy_fields(self) -> None:
+        source = self._canonical_result()
+        source["comparison_contract"] = {"scope": "same_product"}
+        stage = source["stage_analysis"][0]
+        stage["comparison_status"] = "not_applicable"
+        stage["model_comparison_status"] = "not_applicable"
+        stage["analysis_status"] = "grounded"
+
+        legacy = normalize_analysis_result(source)["stage_analysis"][0]
+        self.assertEqual(legacy["comparison_status"], "not_applicable")
+        self.assertEqual(legacy["analysis_status"], "grounded")
+        self.assertNotIn("stage_handoff_status", legacy)
+
+        source["stage2_pipeline_version"] = "segmented_stage_v1"
+        segmented = normalize_analysis_result(source)["stage_analysis"][0]
+        self.assertEqual(segmented["comparison_status"], "")
+        self.assertEqual(segmented["model_comparison_status"], "")
+        self.assertEqual(segmented["stage_handoff_status"], "grounded")
+        self.assertNotIn("analysis_status", segmented)
+
     def test_complete_finalization_replay_is_deterministic_and_does_not_mutate_canonical(self) -> None:
         canonical = self._canonical_result()
         before = json.loads(json.dumps(canonical))

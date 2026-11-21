@@ -5053,6 +5053,36 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertEqual(stages[2]["benchmark_quote"], "")
         self.assertEqual(stages[2]["benchmark_quote_zh"], "")
 
+    def test_qualified_quote_skips_ineffective_voiceover_without_losing_its_range(self) -> None:
+        creator = self._segmented_active_side(
+            "C",
+            {"S2": ["C1", "C2"]},
+            [
+                {
+                    "id": "C1",
+                    "time_range": "1.0s - 2.0s",
+                    "evidence_strength": "direct",
+                    "visual_fact": "Shows the product.",
+                    "voiceover": "[music]",
+                },
+                {
+                    "id": "C2",
+                    "time_range": "2.0s - 3.0s",
+                    "evidence_strength": "direct",
+                    "voiceover": "cara guna produk ini",
+                    "voiceover_zh": "这个产品的用法",
+                },
+            ],
+        )
+        stages = [{"stage": f"S{index}"} for index in range(1, 7)]
+        stages[1]["creator_quote"] = "old quote"
+        bind_timed_transcript_quotes(
+            {"stage_analysis": stages, "video_understanding": {"creator": creator}}, {}
+        )
+        self.assertEqual(stages[1]["creator_time_range"], "1.0s - 3.0s")
+        self.assertEqual(stages[1]["creator_quote"], "cara guna produk ini")
+        self.assertEqual(stages[1]["creator_quote_zh"], "这个产品的用法")
+
     def test_non_s5_quote_preserves_qualified_certification_unit(self) -> None:
         creator = self._segmented_active_side(
             "C",
@@ -5340,6 +5370,34 @@ class StageEvidenceContractTests(unittest.TestCase):
         self.assertTrue(flag["exists"])
         self.assertNotIn("C_NO_CTA", {unit["id"] for unit in result["video_understanding"]["creator"]["evidence_units"]})
         self.assertEqual(result["stage_analysis"][5]["creator_evidence_ids"], [])
+
+    def test_blocked_benchmark_cta_does_not_skip_legacy_creator_reconciliation(self) -> None:
+        creator_units = [
+            {"id": "C1", "information": "Click the shopping bag.", "voiceover": "klik"},
+            {"id": "C_NO_CTA"},
+        ]
+        cta = {
+            "benchmark_s6": {"exists": True, "evidence_ids": []},
+            "benchmark_evidence_ids": ["B6"],
+            "creator_s6": {"exists": True, "direct_order_met": True, "evidence_ids": ["C1"]},
+            "creator_evidence_ids": ["C_NO_CTA"],
+        }
+        result = {
+            "stage_analysis": [{} for _ in range(5)] + [cta],
+            "video_understanding": {
+                "benchmark": self._active_side("B", "present"),
+                "creator": {"evidence_units": creator_units},
+            },
+        }
+
+        reconcile_unsupported_cta(result)
+
+        self.assertEqual(cta["benchmark_evidence_ids"], [])
+        self.assertEqual(cta["creator_evidence_ids"], ["C1"])
+        self.assertEqual(cta["creator_quote"], "klik")
+        self.assertEqual([unit["id"] for unit in creator_units], ["C1"])
+        self.assertIn("存在有效 flag 但无资格化引用", cta["gap"])
+        self.assertEqual(cta["evidence"], [])
 
     def test_present_s6_evidence_does_not_turn_incomplete_cta_into_absence(self) -> None:
         result = {

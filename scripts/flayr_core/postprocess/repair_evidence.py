@@ -79,6 +79,59 @@ def _flag_claims_stage_evidence(flag_name: str, flag: dict[str, Any]) -> bool:
         return state != "none" if state else flag.get("effect_visible") is True
     return flag.get("exists") is True
 
+
+def _bind_stage_side_quote(
+    stage: dict[str, Any], role: str, stage_code: str, side: Any
+) -> None:
+    if isinstance(side, dict) and side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
+        readiness = stage_evidence_readiness(side, stage_code)
+        if readiness not in {"present", "partial"}:
+            stage[f"{role}_quote"] = ""
+            stage[f"{role}_quote_zh"] = ""
+            return
+        allowed_ids = qualified_stage_evidence_ids(side, stage_code)
+        units = [
+            unit
+            for unit in side.get("evidence_units") or []
+            if isinstance(unit, dict) and str(unit.get("id") or "").strip() in allowed_ids
+        ]
+        timed_ranges = [
+            parsed
+            for unit in units
+            if (parsed := parse_time_range_seconds(unit.get("time_range"), None)) is not None
+        ]
+        if timed_ranges:
+            start = min(item[0] for item in timed_ranges)
+            end = max(item[1] for item in timed_ranges)
+            stage[f"{role}_time_range"] = (
+                f"{format_canonical_seconds(start)} - "
+                f"{format_canonical_seconds(max(end, start + 0.5))}"
+            )
+        if stage_code == "S5":
+            spoken = next(
+                (unit for unit in units if is_effective_voiceover(unit.get("voiceover"))),
+                None,
+            )
+            quote = str(spoken.get("voiceover") or "").strip() if spoken else ""
+            quote_zh = str(spoken.get("voiceover_zh") or "").strip() if spoken else ""
+        else:
+            quote = quote_zh = ""
+            for unit in units:
+                candidate = str(unit.get("voiceover") or "").strip()
+                if not is_effective_voiceover(candidate):
+                    continue
+                quote = candidate
+                quote_zh = str(unit.get("voiceover_zh") or "").strip()
+                break
+        stage[f"{role}_quote"] = quote
+        stage[f"{role}_quote_zh"] = quote_zh
+        return
+    references = [str(value) for value in stage.get(f"{role}_evidence_ids", [])]
+    if any("_NO_" in value for value in references):
+        stage[f"{role}_quote"] = ""
+        stage[f"{role}_quote_zh"] = ""
+
+
 def bind_timed_transcript_quotes(result: dict[str, Any], analysis: dict[str, Any]) -> None:
     """Bind stage ranges and quotes to the locked Stage1 evidence set.
 
@@ -94,53 +147,125 @@ def bind_timed_transcript_quotes(result: dict[str, Any], analysis: dict[str, Any
             continue
         for role in ("benchmark", "creator"):
             side = understanding.get(role) if isinstance(understanding, dict) else None
-            if isinstance(side, dict) and side.get("stage_evidence_contract_version") == STAGE_EVIDENCE_CONTRACT_VERSION:
-                readiness = stage_evidence_readiness(side, f"S{index}")
-                if readiness not in {"present", "partial"}:
-                    stage[f"{role}_quote"] = ""
-                    stage[f"{role}_quote_zh"] = ""
-                    continue
-                allowed_ids = qualified_stage_evidence_ids(side, f"S{index}")
-                units = [
-                    unit
-                    for unit in side.get("evidence_units") or []
-                    if isinstance(unit, dict) and str(unit.get("id") or "").strip() in allowed_ids
-                ]
-                timed_ranges = [
-                    parsed
-                    for unit in units
-                    if (parsed := parse_time_range_seconds(unit.get("time_range"), None)) is not None
-                ]
-                if timed_ranges:
-                    start = min(item[0] for item in timed_ranges)
-                    end = max(item[1] for item in timed_ranges)
-                    stage[f"{role}_time_range"] = (
-                        f"{format_canonical_seconds(start)} - "
-                        f"{format_canonical_seconds(max(end, start + 0.5))}"
-                    )
-                if f"S{index}" == "S5":
-                    spoken = next(
-                        (unit for unit in units if is_effective_voiceover(unit.get("voiceover"))),
-                        None,
-                    )
-                    quote = str(spoken.get("voiceover") or "").strip() if spoken else ""
-                    quote_zh = str(spoken.get("voiceover_zh") or "").strip() if spoken else ""
-                else:
-                    quote = quote_zh = ""
-                    for unit in units:
-                        candidate = str(unit.get("voiceover") or "").strip()
-                        if not is_effective_voiceover(candidate):
-                            continue
-                        quote = candidate
-                        quote_zh = str(unit.get("voiceover_zh") or "").strip()
-                        break
-                stage[f"{role}_quote"] = quote
-                stage[f"{role}_quote_zh"] = quote_zh
-                continue
-            references = [str(value) for value in stage.get(f"{role}_evidence_ids", [])]
-            if any("_NO_" in value for value in references):
-                stage[f"{role}_quote"] = ""
-                stage[f"{role}_quote_zh"] = ""
+            _bind_stage_side_quote(stage, role, f"S{index}", side)
+
+
+def _merge_stage_multimodal_refs(
+    stage: dict[str, Any],
+    role: str,
+    units: list[Any],
+    allowed_stage_ids: set[str] | None,
+    stage_ids: list[str],
+) -> None:
+    # 多模态判断和阶段主结论消费同一批锁定事实。模型可能在 channel_evidence_ids
+    # 引用同阶段真实单元，却漏把它同步到主 evidence_ids；只将同侧、真实且与阶段
+    # 时间相交的引用并入主列表，未知或跨时段引用仍留给 validator 阻断。
+    multimodal = stage.get(f"{role}_multimodal")
+    channel_refs = multimodal.get("channel_evidence_ids") if isinstance(multimodal, dict) else None
+    if isinstance(channel_refs, dict):
+        multimodal_ids = list(dict.fromkeys(
+            str(value)
+            for refs in channel_refs.values()
+            if isinstance(refs, list)
+            for value in refs
+            if str(value).strip() and "_NO_" not in str(value)
+        ))
+        valid_multimodal_ids = {
+            str(unit.get("id"))
+            for unit in units
+            if isinstance(unit, dict)
+            and str(unit.get("id")) in multimodal_ids
+            and (allowed_stage_ids is None or str(unit.get("id")) in allowed_stage_ids)
+            and evidence_overlaps_range(unit, stage.get(f"{role}_time_range"))
+        }
+        for evidence_id in multimodal_ids:
+            if evidence_id in valid_multimodal_ids and evidence_id not in stage_ids:
+                stage_ids.append(evidence_id)
+        if stage_ids:
+            stage[f"{role}_evidence_ids"] = stage_ids
+
+
+def _align_stage_side_flag(
+    result: dict[str, Any],
+    stage: dict[str, Any],
+    understanding: dict[str, Any],
+    role: str,
+    stage_code: str,
+    flag_name: str,
+) -> None:
+    flag = stage.get(f"{role}_{flag_name}")
+    stage_key = f"{role}_evidence_ids"
+    stage_ids = [
+        str(value)
+        for value in stage.get(stage_key, [])
+        if str(value).strip()
+    ]
+    units = understanding.get(role, {}).get("evidence_units", [])
+    allowed_stage_ids = _stage_contract_allowed_ids(result, role, stage_code)
+    if allowed_stage_ids is not None:
+        stage_ids = [value for value in stage_ids if value in allowed_stage_ids]
+        if (
+            not stage_ids
+            and _stage_contract_readiness(result, role, stage_code) in {"present", "partial"}
+        ):
+            # Stage1 is the authority for evidence qualification.  A
+            # Stage2 response may omit citation IDs even though its
+            # positive fact is otherwise complete; restore only the
+            # same-role, same-stage frozen IDs rather than asking a
+            # repair call to rediscover or invent evidence.
+            stage_ids = sorted(allowed_stage_ids)
+        stage[stage_key] = stage_ids
+    _merge_stage_multimodal_refs(stage, role, units, allowed_stage_ids, stage_ids)
+
+    if not isinstance(flag, dict):
+        return
+    flag_ids = [str(value) for value in flag.get("evidence_ids", []) if str(value).strip()]
+    if allowed_stage_ids is not None:
+        flag_ids = [value for value in flag_ids if value in allowed_stage_ids]
+        flag["evidence_ids"] = flag_ids
+        if flag_name == "s5":
+            flag["trust_source_evidence_ids"] = [
+                str(value)
+                for value in flag.get("trust_source_evidence_ids") or []
+                if str(value).strip() in allowed_stage_ids
+            ]
+    flag_units = [
+        unit
+        for unit in units
+        if isinstance(unit, dict)
+        and str(unit.get("id")) in flag_ids
+        and (allowed_stage_ids is None or str(unit.get("id")) in allowed_stage_ids)
+        and evidence_overlaps_range(unit, stage.get(f"{role}_time_range"))
+    ]
+    if flag_units and (not stage_ids or any("_NO_" in value for value in stage_ids)):
+        restored_ids = [str(unit.get("id")) for unit in flag_units]
+        stage[stage_key] = restored_ids
+        primary = flag_units[0]
+        for key in ("summary", "key_message"):
+            field = f"{role}_{key}"
+            current = str(stage.get(field) or "").strip()
+            if not current or current.startswith("（LLM 未填写"):
+                stage[field] = str(primary.get("information") or primary.get("visual_fact") or "").strip()
+        if not is_effective_voiceover(stage.get(f"{role}_quote")):
+            stage[f"{role}_quote"] = str(primary.get("voiceover") or "").strip()
+            stage[f"{role}_quote_zh"] = str(primary.get("voiceover_zh") or "").strip()
+        stage[f"{role}_support_status"] = (
+            "supported" if is_effective_voiceover(primary.get("voiceover")) else "visual_only"
+        )
+        stage_ids = restored_ids
+    if stage_ids and not flag_ids and _flag_claims_stage_evidence(flag_name, flag):
+        flag["evidence_ids"] = stage_ids
+        stage[f"{role}_support_status"] = "visual_only"
+        return
+    if flag_ids:
+        return
+    if allowed_stage_ids is not None:
+        return
+    reliable_unit = referenced_spoken_unit(result, stage, role)
+    if reliable_unit:
+        stage[f"{role}_quote"] = str(reliable_unit.get("voiceover") or "")
+        stage[f"{role}_quote_zh"] = str(reliable_unit.get("voiceover_zh") or "")
+        return
 
 
 def align_stage_flag_evidence(result: dict[str, Any]) -> None:
@@ -157,104 +282,7 @@ def align_stage_flag_evidence(result: dict[str, Any]) -> None:
         if not flag_name or not isinstance(stage, dict):
             continue
         for role in ("benchmark", "creator"):
-            flag = stage.get(f"{role}_{flag_name}")
-            stage_key = f"{role}_evidence_ids"
-            stage_ids = [
-                str(value)
-                for value in stage.get(stage_key, [])
-                if str(value).strip()
-            ]
-            units = understanding.get(role, {}).get("evidence_units", [])
-            allowed_stage_ids = _stage_contract_allowed_ids(result, role, f"S{index}")
-            if allowed_stage_ids is not None:
-                stage_ids = [value for value in stage_ids if value in allowed_stage_ids]
-                if (
-                    not stage_ids
-                    and _stage_contract_readiness(result, role, f"S{index}") in {"present", "partial"}
-                ):
-                    # Stage1 is the authority for evidence qualification.  A
-                    # Stage2 response may omit citation IDs even though its
-                    # positive fact is otherwise complete; restore only the
-                    # same-role, same-stage frozen IDs rather than asking a
-                    # repair call to rediscover or invent evidence.
-                    stage_ids = sorted(allowed_stage_ids)
-                stage[stage_key] = stage_ids
-            # 多模态判断和阶段主结论消费同一批锁定事实。模型可能在 channel_evidence_ids
-            # 引用同阶段真实单元，却漏把它同步到主 evidence_ids；只将同侧、真实且与阶段
-            # 时间相交的引用并入主列表，未知或跨时段引用仍留给 validator 阻断。
-            multimodal = stage.get(f"{role}_multimodal")
-            channel_refs = multimodal.get("channel_evidence_ids") if isinstance(multimodal, dict) else None
-            if isinstance(channel_refs, dict):
-                multimodal_ids = list(dict.fromkeys(
-                    str(value)
-                    for refs in channel_refs.values()
-                    if isinstance(refs, list)
-                    for value in refs
-                    if str(value).strip() and "_NO_" not in str(value)
-                ))
-                valid_multimodal_ids = {
-                    str(unit.get("id"))
-                    for unit in units
-                    if isinstance(unit, dict)
-                    and str(unit.get("id")) in multimodal_ids
-                    and (allowed_stage_ids is None or str(unit.get("id")) in allowed_stage_ids)
-                    and evidence_overlaps_range(unit, stage.get(f"{role}_time_range"))
-                }
-                for evidence_id in multimodal_ids:
-                    if evidence_id in valid_multimodal_ids and evidence_id not in stage_ids:
-                        stage_ids.append(evidence_id)
-                if stage_ids:
-                    stage[stage_key] = stage_ids
-
-            if not isinstance(flag, dict):
-                continue
-            flag_ids = [str(value) for value in flag.get("evidence_ids", []) if str(value).strip()]
-            if allowed_stage_ids is not None:
-                flag_ids = [value for value in flag_ids if value in allowed_stage_ids]
-                flag["evidence_ids"] = flag_ids
-                if flag_name == "s5":
-                    flag["trust_source_evidence_ids"] = [
-                        str(value)
-                        for value in flag.get("trust_source_evidence_ids") or []
-                        if str(value).strip() in allowed_stage_ids
-                    ]
-            flag_units = [
-                unit
-                for unit in units
-                if isinstance(unit, dict)
-                and str(unit.get("id")) in flag_ids
-                and (allowed_stage_ids is None or str(unit.get("id")) in allowed_stage_ids)
-                and evidence_overlaps_range(unit, stage.get(f"{role}_time_range"))
-            ]
-            if flag_units and (not stage_ids or any("_NO_" in value for value in stage_ids)):
-                restored_ids = [str(unit.get("id")) for unit in flag_units]
-                stage[stage_key] = restored_ids
-                primary = flag_units[0]
-                for key in ("summary", "key_message"):
-                    field = f"{role}_{key}"
-                    current = str(stage.get(field) or "").strip()
-                    if not current or current.startswith("（LLM 未填写"):
-                        stage[field] = str(primary.get("information") or primary.get("visual_fact") or "").strip()
-                if not is_effective_voiceover(stage.get(f"{role}_quote")):
-                    stage[f"{role}_quote"] = str(primary.get("voiceover") or "").strip()
-                    stage[f"{role}_quote_zh"] = str(primary.get("voiceover_zh") or "").strip()
-                stage[f"{role}_support_status"] = (
-                    "supported" if is_effective_voiceover(primary.get("voiceover")) else "visual_only"
-                )
-                stage_ids = restored_ids
-            if stage_ids and not flag_ids and _flag_claims_stage_evidence(flag_name, flag):
-                flag["evidence_ids"] = stage_ids
-                stage[f"{role}_support_status"] = "visual_only"
-                continue
-            if flag_ids:
-                continue
-            if allowed_stage_ids is not None:
-                continue
-            reliable_unit = referenced_spoken_unit(result, stage, role)
-            if reliable_unit:
-                stage[f"{role}_quote"] = str(reliable_unit.get("voiceover") or "")
-                stage[f"{role}_quote_zh"] = str(reliable_unit.get("voiceover_zh") or "")
-                continue
+            _align_stage_side_flag(result, stage, understanding, role, f"S{index}", flag_name)
 
 
 def prune_multimodal_evidence_to_stage(result: dict[str, Any]) -> None:
@@ -826,6 +854,135 @@ def bind_improvement_base_material(item: dict[str, Any], creator_units: list[Any
 
 # region reconcile -----------------------------------------------------------
 
+def _reconcile_cta_side(
+    result: dict[str, Any],
+    cta: dict[str, Any],
+    role: str,
+    code: str,
+    readiness: str,
+) -> bool:
+    """Reconcile one side; return whether a present CTA has no qualified references."""
+    quote = str(cta.get(f"{role}_quote") or "")
+    flag = cta.get(f"{role}_s6") if isinstance(cta.get(f"{role}_s6"), dict) else {}
+    has_direct_or_path = (
+        flag.get("direct_order_met") is True
+        or flag.get("action_path_clear") is True
+    )
+    has_valid_soft_invitation = (
+        flag.get("soft_purchase_invitation_met") is True
+        and flag.get("offer_or_incentive_clear") is True
+    )
+    units = result.get("video_understanding", {}).get(role, {}).get("evidence_units", [])
+    allowed_stage_ids = _stage_contract_allowed_ids(result, role, "S6")
+    flag_ids = [str(value) for value in flag.get("evidence_ids", []) if str(value).strip()]
+    if allowed_stage_ids is not None:
+        flag_ids = [value for value in flag_ids if value in allowed_stage_ids]
+        flag["evidence_ids"] = flag_ids
+    referenced = [
+        unit for unit in units
+        if isinstance(unit, dict) and str(unit.get("id")) in flag_ids and "_NO_CTA" not in str(unit.get("id"))
+    ]
+    if readiness == "absent":
+        # Stage1 can authoritatively establish that no CTA was observed.
+        # Keep the negative state untouched, but still materialize the
+        # required audit explanation when the model omitted it.
+        if flag.get("exists") is False and not str(flag.get("cta_reason") or "").strip():
+            flag["cta_reason"] = "Stage1 已完整覆盖 S6，但未观察到明确的购买指令或购买路径。"
+        cta[f"{role}_evidence_ids"] = []
+        return False
+    if readiness == "present" and flag.get("exists") is True and not referenced:
+        cta[f"{role}_evidence_ids"] = []
+        return True
+    if readiness not in {"legacy", "present"}:
+        cta[f"{role}_evidence_ids"] = []
+        return False
+    # A present Stage1 ledger does not make an incomplete Stage2 CTA flag
+    # authoritative. Missing direct/path/soft-invitation facts are
+    # unknown, not proof that ``exists`` is false. Leave the flag and
+    # references untouched so validation can surface the missing contract
+    # instead of repair inventing an absence.
+    if flag.get("exists") is True:
+        direct_or_path_observed = (
+            flag.get("direct_order_met"),
+            flag.get("action_path_clear"),
+        )
+        has_explicit_direct_or_path = any(value is True for value in direct_or_path_observed)
+        if not has_explicit_direct_or_path and any(
+            not isinstance(value, bool) for value in direct_or_path_observed
+        ):
+            flag["_cta_source_status"] = "unknown"
+            return False
+        if not has_explicit_direct_or_path and any(
+            not isinstance(flag.get(key), bool)
+            for key in ("soft_purchase_invitation_met", "offer_or_incentive_clear")
+        ):
+            flag["_cta_source_status"] = "unknown"
+            return False
+    if flag.get("exists") is True and not has_direct_or_path and not has_valid_soft_invitation:
+        # S6 的“软促单”必须同时有面向用户的购买邀请和明确利益点。
+        # 只有在 Stage1 资格已完成、且确实有可核验引用时，才允许把模型 flag
+        # 确定性降级为无 CTA；证据未知时不能借 repair 伪造结论。
+        flag["exists"] = False
+        flag["soft_purchase_invitation_met"] = False
+        flag["module_fit_met"] = False
+        flag["ending_position_met"] = False
+        flag["evidence_ids"] = []
+        previous_reason = str(flag.get("cta_reason") or "").strip()
+        reason = "未见明确下单/路径，且不满足“购买邀请+利益点”的软促单定义，按无 CTA 处理。"
+        flag["cta_reason"] = f"{previous_reason} {reason}".strip()
+    referenced_text = json.dumps(referenced, ensure_ascii=False)
+    has_positive_flag = (
+        flag.get("exists") is True
+        and (
+            has_direct_or_path
+            or has_valid_soft_invitation
+        )
+        and bool(referenced)
+    )
+    has_positive_text = allowed_stage_ids is None and bool(
+        re.search(
+            r"\b(beli|troli|klik|cart|checkout|order|link|shop)\b|购买|下单|购物车|点击|购买号召|购买指令",
+            quote + " " + referenced_text,
+            flags=re.IGNORECASE,
+        )
+    )
+    if has_positive_flag or has_positive_text:
+        # 旧结果可能已被本函数写过 _NO_CTA；一旦结构化 flag + 原始事实证明 CTA 存在，
+        # 恢复真实引用并移除代码生成的过期占位，避免后续建议继续引用假缺失。
+        if referenced:
+            cta[f"{role}_evidence_ids"] = flag_ids
+            cta[f"{role}_key_message"] = str(referenced[0].get("information") or "").strip()
+            cta[f"{role}_summary"] = cta[f"{role}_key_message"]
+            cta[f"{role}_quote"] = str(referenced[0].get("voiceover") or "").strip()
+            cta[f"{role}_quote_zh"] = str(referenced[0].get("voiceover_zh") or "").strip()
+            cta[f"{role}_support_status"] = "voice_only" if cta[f"{role}_quote"] else "visual_only"
+        units[:] = [unit for unit in units if str(unit.get("id") or "") != f"{code}_NO_CTA"]
+        return False
+    if readiness != "legacy":
+        cta[f"{role}_evidence_ids"] = []
+        return False
+
+    unit_id = f"{code}_NO_CTA"
+    placeholder = {
+        "id": unit_id,
+        "time_range": str(cta.get(f"{role}_time_range") or ""),
+        "information": "结尾未识别到明确的购买或点击指令。",
+        "voiceover": "",
+        "voiceover_zh": "",
+        "visual_fact": "结尾仅可见产品或人物表现，未见可验证的购物车或下单提示。",
+        "subtitle_fact": "",
+    }
+    ensure_evidence_unit(units, placeholder)
+    cta[f"{role}_evidence_ids"] = [unit_id]
+    cta[f"{role}_key_message"] = placeholder["information"]
+    cta[f"{role}_summary"] = placeholder["information"]
+    cta[f"{role}_quote"] = ""
+    cta[f"{role}_quote_zh"] = ""
+    cta[f"{role}_visual_evidence"] = [placeholder["visual_fact"]]
+    cta[f"{role}_support_status"] = "visual_only"
+    return False
+
+
 def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
     """S6 没有可识别的购买指令时写占位；字幕/画面驱动 CTA 不得被空 quote 覆盖。"""
     stages = result.get("stage_analysis", [])
@@ -842,125 +999,8 @@ def reconcile_unsupported_cta(result: dict[str, Any]) -> None:
     ]
     active_without_evidence = False
     for role, code in (("benchmark", "B"), ("creator", "C")):
-        quote = str(cta.get(f"{role}_quote") or "")
-        flag = cta.get(f"{role}_s6") if isinstance(cta.get(f"{role}_s6"), dict) else {}
-        has_direct_or_path = (
-            flag.get("direct_order_met") is True
-            or flag.get("action_path_clear") is True
-        )
-        has_valid_soft_invitation = (
-            flag.get("soft_purchase_invitation_met") is True
-            and flag.get("offer_or_incentive_clear") is True
-        )
-        units = result.get("video_understanding", {}).get(role, {}).get("evidence_units", [])
-        allowed_stage_ids = _stage_contract_allowed_ids(result, role, "S6")
-        flag_ids = [str(value) for value in flag.get("evidence_ids", []) if str(value).strip()]
-        if allowed_stage_ids is not None:
-            flag_ids = [value for value in flag_ids if value in allowed_stage_ids]
-            flag["evidence_ids"] = flag_ids
-        referenced = [
-            unit for unit in units
-            if isinstance(unit, dict) and str(unit.get("id")) in flag_ids and "_NO_CTA" not in str(unit.get("id"))
-        ]
-        if readiness_by_role[role] == "absent":
-            # Stage1 can authoritatively establish that no CTA was observed.
-            # Keep the negative state untouched, but still materialize the
-            # required audit explanation when the model omitted it.
-            if flag.get("exists") is False and not str(flag.get("cta_reason") or "").strip():
-                flag["cta_reason"] = "Stage1 已完整覆盖 S6，但未观察到明确的购买指令或购买路径。"
-            cta[f"{role}_evidence_ids"] = []
-            continue
-        if readiness_by_role[role] == "present" and flag.get("exists") is True and not referenced:
-            cta[f"{role}_evidence_ids"] = []
+        if _reconcile_cta_side(result, cta, role, code, readiness_by_role[role]):
             active_without_evidence = True
-            continue
-        if readiness_by_role[role] not in {"legacy", "present"}:
-            cta[f"{role}_evidence_ids"] = []
-            continue
-        # A present Stage1 ledger does not make an incomplete Stage2 CTA flag
-        # authoritative. Missing direct/path/soft-invitation facts are
-        # unknown, not proof that ``exists`` is false. Leave the flag and
-        # references untouched so validation can surface the missing contract
-        # instead of repair inventing an absence.
-        if flag.get("exists") is True:
-            direct_or_path_observed = (
-                flag.get("direct_order_met"),
-                flag.get("action_path_clear"),
-            )
-            has_explicit_direct_or_path = any(value is True for value in direct_or_path_observed)
-            if not has_explicit_direct_or_path and any(
-                not isinstance(value, bool) for value in direct_or_path_observed
-            ):
-                flag["_cta_source_status"] = "unknown"
-                continue
-            if not has_explicit_direct_or_path and any(
-                not isinstance(flag.get(key), bool)
-                for key in ("soft_purchase_invitation_met", "offer_or_incentive_clear")
-            ):
-                flag["_cta_source_status"] = "unknown"
-                continue
-        if flag.get("exists") is True and not has_direct_or_path and not has_valid_soft_invitation:
-            # S6 的“软促单”必须同时有面向用户的购买邀请和明确利益点。
-            # 只有在 Stage1 资格已完成、且确实有可核验引用时，才允许把模型 flag
-            # 确定性降级为无 CTA；证据未知时不能借 repair 伪造结论。
-            flag["exists"] = False
-            flag["soft_purchase_invitation_met"] = False
-            flag["module_fit_met"] = False
-            flag["ending_position_met"] = False
-            flag["evidence_ids"] = []
-            previous_reason = str(flag.get("cta_reason") or "").strip()
-            reason = "未见明确下单/路径，且不满足“购买邀请+利益点”的软促单定义，按无 CTA 处理。"
-            flag["cta_reason"] = f"{previous_reason} {reason}".strip()
-        referenced_text = json.dumps(referenced, ensure_ascii=False)
-        has_positive_flag = (
-            flag.get("exists") is True
-            and (
-                has_direct_or_path
-                or has_valid_soft_invitation
-            )
-            and bool(referenced)
-        )
-        has_positive_text = allowed_stage_ids is None and bool(
-            re.search(
-                r"\b(beli|troli|klik|cart|checkout|order|link|shop)\b|购买|下单|购物车|点击|购买号召|购买指令",
-                quote + " " + referenced_text,
-                flags=re.IGNORECASE,
-            )
-        )
-        if has_positive_flag or has_positive_text:
-            # 旧结果可能已被本函数写过 _NO_CTA；一旦结构化 flag + 原始事实证明 CTA 存在，
-            # 恢复真实引用并移除代码生成的过期占位，避免后续建议继续引用假缺失。
-            if referenced:
-                cta[f"{role}_evidence_ids"] = flag_ids
-                cta[f"{role}_key_message"] = str(referenced[0].get("information") or "").strip()
-                cta[f"{role}_summary"] = cta[f"{role}_key_message"]
-                cta[f"{role}_quote"] = str(referenced[0].get("voiceover") or "").strip()
-                cta[f"{role}_quote_zh"] = str(referenced[0].get("voiceover_zh") or "").strip()
-                cta[f"{role}_support_status"] = "voice_only" if cta[f"{role}_quote"] else "visual_only"
-            units[:] = [unit for unit in units if str(unit.get("id") or "") != f"{code}_NO_CTA"]
-            continue
-        if readiness_by_role[role] != "legacy":
-            cta[f"{role}_evidence_ids"] = []
-            continue
-
-        unit_id = f"{code}_NO_CTA"
-        placeholder = {
-            "id": unit_id,
-            "time_range": str(cta.get(f"{role}_time_range") or ""),
-            "information": "结尾未识别到明确的购买或点击指令。",
-            "voiceover": "",
-            "voiceover_zh": "",
-            "visual_fact": "结尾仅可见产品或人物表现，未见可验证的购物车或下单提示。",
-            "subtitle_fact": "",
-        }
-        ensure_evidence_unit(units, placeholder)
-        cta[f"{role}_evidence_ids"] = [unit_id]
-        cta[f"{role}_key_message"] = placeholder["information"]
-        cta[f"{role}_summary"] = placeholder["information"]
-        cta[f"{role}_quote"] = ""
-        cta[f"{role}_quote_zh"] = ""
-        cta[f"{role}_visual_evidence"] = [placeholder["visual_fact"]]
-        cta[f"{role}_support_status"] = "visual_only"
 
     if unresolved_roles or active_without_evidence:
         blocked = ", ".join(
