@@ -16,14 +16,17 @@ SPEC_PATH = ROOT / "references" / "bitter-lesson-frozen-spec.json"
 EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
-def _git(*args: str) -> str:
+def _git(*args: str, raw_paths: bool = False) -> str:
     completed = subprocess.run(
         ["git", *args],
         cwd=ROOT,
         check=True,
         capture_output=True,
-        text=True,
+        text=not raw_paths,
     )
+    if raw_paths:
+        # NUL-delimited Git paths are unquoted bytes, regardless of locale.
+        return completed.stdout.decode("utf-8", errors="surrogateescape")
     return completed.stdout
 
 
@@ -122,22 +125,41 @@ def check_scope(spec: dict[str, Any], base_ref: str) -> list[str]:
     return issues
 
 
-def check_publication(spec: dict[str, Any], base_ref: str) -> list[str]:
-    """A push can contain multiple batches; only publication exclusions apply."""
+def _committed_changed_paths(base_ref: str, head_ref: str) -> set[str]:
+    head = _git("rev-parse", "--verify", "--end-of-options", f"{head_ref}^{{commit}}").strip()
+    base = (
+        EMPTY_TREE_SHA
+        if _is_zero_ref(base_ref)
+        else _git("rev-parse", "--verify", "--end-of-options", f"{base_ref}^{{commit}}").strip()
+    )
+    paths = _git("diff", "--name-only", "--no-renames", "-z", base, head, "--", raw_paths=True)
+    return set(filter(None, paths.split("\0")))
+
+
+def check_publication(spec: dict[str, Any], base_ref: str, *, head_ref: str = "HEAD") -> list[str]:
+    """Apply publication exclusions to the base and candidate commit trees."""
     forbidden = [str(item) for item in spec["change_scope"]["forbidden_globs"]]
-    return [f"forbidden path: {path}" for path in sorted(_changed_paths(base_ref))
+    return [f"forbidden path: {path}" for path in sorted(_committed_changed_paths(base_ref, head_ref))
             if _matches(path, forbidden)]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base-ref", default="HEAD", help="Git ref used as the batch baseline")
+    parser.add_argument("--base-ref", default="HEAD", help="Git ref used as the baseline")
+    parser.add_argument("--head-ref", help="Candidate commit for --publication (default: HEAD)")
     parser.add_argument("--spec", type=Path, default=SPEC_PATH)
     parser.add_argument("--publication", action="store_true",
                         help="Check forbidden publication paths across the full range, not a single batch budget")
     args = parser.parse_args()
+    if args.head_ref is not None and not args.publication:
+        parser.error("--head-ref requires --publication")
     spec = json.loads(args.spec.expanduser().resolve().read_text(encoding="utf-8"))
-    issues = (check_publication if args.publication else check_scope)(spec, args.base_ref)
+    if args.publication:
+        issues = check_publication(
+            spec, args.base_ref, head_ref=args.head_ref if args.head_ref is not None else "HEAD"
+        )
+    else:
+        issues = check_scope(spec, args.base_ref)
     gate = "publication boundary" if args.publication else "change scope"
     if issues:
         print(f"{gate} gate failed:")
