@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "semantic-baseline-refreeze-after-unused-helper-cleanup-2026-11-10",
-  "description": "Bind user-authorized deletion of four unused private helpers to 387c001. Remaining module AST is unchanged. Prior preprocessing and review repairs, qualification v11, observation v7 and result reuse version 2 retained. No historical artifact, gap-scale, GT, prompt, route, budget, threshold or promotion changes; zero provider calls. Local commits only, no push. Only these three governance records change in this mechanical refreeze.",
+  "name": "semantic-baseline-refreeze-after-qualification-extraction-2026-11-21",
+  "description": "Bind the user-authorized Stage1 qualification execution and stage evidence validation refactor to 9392ebd. Qualification v11, observation v7 and result reuse version 2 retained. No historical artifact, gap scale, GT, prompt, route, budget, threshold, or promotion changes; zero provider calls. Local commits only, no push. Only these three governance records change in this mechanical refreeze.",
   "change_scope": {
     "max_files": 3,
     "max_added_lines": 100,
