@@ -11,11 +11,47 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stderr
+from contextlib import contextmanager, redirect_stderr
 from pathlib import Path
 from unittest import mock
 
 from scripts import batch_analyze as batch
+
+
+STUBBORN_DESCENDANT = """
+import signal, sys, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with Path(sys.argv[1]).open("ab", buffering=0) as output:
+    while True:
+        output.write(b"x")
+        time.sleep(0.03)
+"""
+LEADER_WITH_DESCENDANT = """
+import subprocess, sys, time
+subprocess.Popen([sys.executable, "-B", "-c", sys.argv[1], sys.argv[2]])
+time.sleep(45)
+"""
+
+
+@contextmanager
+def _worker_with_stubborn_descendant(root):
+    heartbeat = root / "heartbeat"
+    with subprocess.Popen([sys.executable, "-B", "-c", LEADER_WITH_DESCENDANT, STUBBORN_DESCENDANT, str(heartbeat)],
+                          start_new_session=True) as worker:
+        try:
+            deadline = time.monotonic() + 10
+            while (not heartbeat.exists() or not heartbeat.stat().st_size) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            if not heartbeat.exists() or not heartbeat.stat().st_size:
+                raise RuntimeError("descendant fixture did not start")
+            yield worker, heartbeat
+        finally:
+            try:
+                os.killpg(worker.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            worker.wait(timeout=5)
 
 
 class BatchCleanupTests(unittest.TestCase):
@@ -290,6 +326,64 @@ class BatchCleanupTests(unittest.TestCase):
                 work.assert_not_called()
                 self.assertEqual(status.read_bytes(), before)
 
+    @unittest.skipUnless(os.name == "posix", "real POSIX process group")
+    def test_stop_waits_for_stubborn_descendant_after_leader_exits(self):
+        with tempfile.TemporaryDirectory() as temp, _worker_with_stubborn_descendant(Path(temp)) as (worker, heartbeat):
+            batch._stop_process(worker, grace_seconds=0.5)
+            self.assertIsNotNone(worker.poll())
+            last = heartbeat.stat().st_size
+            time.sleep(0.2)
+            self.assertEqual(heartbeat.stat().st_size, last, "a descendant survived shutdown")
+
+    @unittest.skipUnless(os.name == "posix", "real POSIX process group")
+    def test_restart_blocks_live_descendant_of_exited_leader(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with _worker_with_stubborn_descendant(root) as (worker, _):
+                identity = batch._lock_identity(worker.pid)
+                worker.terminate()  # Deliberately leave the rest of the process group alive.
+                worker.wait(timeout=5)
+                status = root / "status.json"
+                lock = root / "runner.lock"
+                batch.write_status(status, {"jobs": {"sample": {"state": "interrupted", "worker": identity}}})
+                before = status.read_bytes()
+                run = mock.Mock(return_value=0)
+                with self.assertRaisesRegex(RuntimeError, "拒绝重新派发"):
+                    batch._run_owned_batch(lock, status, run)
+                run.assert_not_called()
+                self.assertEqual(status.read_bytes(), before)
+                batch._stop_process(worker, grace_seconds=0.5)
+                self.assertEqual(batch._run_owned_batch(lock, status, run), 0)
+
+    def test_group_probe_distinguishes_zombies_and_fails_closed_on_uncertainty(self):
+        for output, code, alive in (
+            ("72 Z+\n72 X\n81 R\n", 0, False),
+            ("72 Z+\n72 S\n", 0, True),
+            ("81 R\n", 0, True),
+            ("", 1, True),
+        ):
+            with (
+                self.subTest(output=output, code=code),
+                mock.patch.object(batch, "_process_group_present", return_value=True),
+                mock.patch.object(batch.subprocess, "run", return_value=mock.Mock(stdout=output, returncode=code)),
+            ):
+                self.assertEqual(batch._process_group_alive(72), alive)
+        with mock.patch.object(batch, "_process_group_present", side_effect=PermissionError):
+            self.assertTrue(batch._process_group_alive(72))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process group")
+    def test_reused_pid_is_not_signaled(self):
+        stale_leader = mock.Mock(pid=12345)
+        stale_leader.poll.return_value = 0
+        with (
+            mock.patch.object(batch.os, "getpgrp", return_value=56789),
+            mock.patch.object(batch, "_pid_alive", return_value=True),
+            mock.patch.object(batch.os, "killpg") as kill,
+            self.assertRaisesRegex(RuntimeError, "Cannot safely signal"),
+        ):
+            batch._signal_process_group(stale_leader, force=True)
+        kill.assert_not_called()
+
     @unittest.skipUnless(os.name == "posix", "POSIX descriptor inheritance")
     def test_worker_retains_runner_guard_after_parent_closes_descriptor(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -318,9 +412,11 @@ from scripts import batch_analyze as batch
 root = Path(sys.argv[1])
 status = root / "status.json"
 job = {"name": "sample", "creator": "fixture", "benchmark": "fixture"}
+stop = batch._stop_process
 with patch.object(batch, "_completion_gate", return_value=(False, "new")), \
-     patch.object(batch, "build_command", return_value=[sys.executable, "-c",
-         "import time; time.sleep(120)"]):
+     patch.object(batch, "build_command", return_value=[
+         sys.executable, "-B", "-c", sys.argv[2], sys.argv[3], str(root / "heartbeat")]), \
+     patch.object(batch, "_stop_process", side_effect=lambda proc: stop(proc, grace_seconds=0.5)):
     raise SystemExit(batch._run_owned_batch(root / "runner.lock", status,
         lambda fd, stopping: batch._run_jobs([job], [], root, status, 1,
             inherited_lock_fd=fd, stop_requested=stopping)))
@@ -328,9 +424,10 @@ with patch.object(batch, "_completion_gate", return_value=(False, "new")), \
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             status = root / "status.json"
+            heartbeat = root / "heartbeat"
             worker_pid = None
             with subprocess.Popen(
-                [sys.executable, "-B", "-c", script, str(root)],
+                [sys.executable, "-B", "-c", script, str(root), LEADER_WITH_DESCENDANT, STUBBORN_DESCENDANT],
                 cwd=Path(__file__).resolve().parents[1],
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
             ) as runner:
@@ -341,20 +438,27 @@ with patch.object(batch, "_completion_gate", return_value=(False, "new")), \
                             job = json.loads(status.read_text())["jobs"]["sample"]
                             if job["state"] == "running":
                                 worker_pid = job["worker"]["pid"]
-                                break
+                                self.assertEqual(job["worker"]["process_group"], worker_pid)
+                                if heartbeat.exists() and heartbeat.stat().st_size:
+                                    break
                         time.sleep(0.02)
                     self.assertIsNotNone(worker_pid)
+                    self.assertTrue(heartbeat.exists() and heartbeat.stat().st_size)
                     runner.send_signal(signal.SIGTERM)
                     _, error = runner.communicate(timeout=14)
                     self.assertEqual(runner.returncode, 128 + signal.SIGTERM, error)
                     self.assertFalse(batch._pid_alive(worker_pid))
+                    self.assertFalse(batch._process_group_alive(worker_pid))
                     self.assertEqual(json.loads(status.read_text())["jobs"]["sample"]["state"], "interrupted")
                     self.assertEqual(batch._run_owned_batch(root / "runner.lock", status, lambda *_: 0), 0)
                 finally:
                     if runner.poll() is None:
                         runner.kill()
-                    if worker_pid is not None and batch._pid_alive(worker_pid):
-                        os.killpg(worker_pid, signal.SIGKILL)
+                    if worker_pid is not None:
+                        try:
+                            os.killpg(worker_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
 
 
 if __name__ == "__main__":

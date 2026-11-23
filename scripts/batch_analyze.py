@@ -510,9 +510,7 @@ def _lock_owner_alive(identity: dict[str, Any]) -> bool:
     if str(identity.get("host") or "") != socket.gethostname():
         # A shared filesystem may contain a live runner on another host.
         return True
-    current_boot = _boot_id()
-    recorded_boot = str(identity.get("boot_id") or "unknown")
-    if current_boot != "unknown" and recorded_boot != "unknown" and current_boot != recorded_boot:
+    if _previous_boot(identity):
         return False
     if not _pid_alive(pid):
         return False
@@ -521,6 +519,12 @@ def _lock_owner_alive(identity: dict[str, Any]) -> bool:
     if recorded_start != "unknown" and current_start != "unknown" and recorded_start != current_start:
         return False
     return True
+
+
+def _previous_boot(identity: dict[str, Any]) -> bool:
+    recorded = identity.get("boot_id") or "unknown"
+    current = _boot_id()
+    return isinstance(recorded, str) and recorded != "unknown" and current != "unknown" and recorded != current
 
 
 def acquire_lock(lock_path: Path) -> None:
@@ -561,6 +565,32 @@ class _BatchTerminated(Exception):
     """A termination request observed at a safe runner checkpoint."""
 
 
+def _previous_worker_active(identity: dict[str, Any]) -> bool:
+    if os.name != "posix":
+        return _lock_owner_alive(identity)
+    pid = identity.get("pid")
+    # Existing POSIX runners also used start_new_session; older status
+    # records only stored the leader PID, which is also their group ID.
+    pgid = identity.get("process_group", pid)
+    if (identity.get("schema_version") != LOCK_SCHEMA_VERSION
+            or identity.get("host") != socket.gethostname()
+            or type(pid) is not int or type(pgid) is not int or pid <= 1 or pgid != pid):
+        return True
+    if _previous_boot(identity):
+        return False
+    # A reused group ID is ambiguous. Block rather than signal it.
+    if _process_group_alive(pgid):
+        return True
+    try:
+        # A live recorded leader outside the expected group is not verified
+        # stopped. A matching group with only zombies is already inert.
+        return os.getpgid(pid) != pgid and _lock_owner_alive(identity)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def _assert_previous_workers_stopped(status_path: Path) -> None:
     if not status_path.exists():
         return
@@ -571,7 +601,7 @@ def _assert_previous_workers_stopped(status_path: Path) -> None:
             if job.get("state") not in {"starting", "running", "interrupted"}:
                 continue
             worker = job.get("worker")
-            if not isinstance(worker, dict) or _lock_owner_alive(worker):
+            if not isinstance(worker, dict) or _previous_worker_active(worker):
                 raise RuntimeError("无法确认上次运行的子任务已停止；保留状态并拒绝重新派发。")
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
         raise RuntimeError("无法核验上次批处理的子任务状态；拒绝重新派发。") from exc
@@ -711,15 +741,52 @@ def _pid_alive(pid: int) -> bool:
         return True  # 进程存在但无权发信号 = 存活
 
 
+def _process_group_present(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def _process_group_alive(pgid: int) -> bool:
+    try:
+        if not _process_group_present(pgid):
+            return False
+    except PermissionError:
+        return True
+    # An orphan zombie may remain in a group until its new parent reaps it.
+    # It cannot run or write output, but killpg(group, 0) still sees it.
+    try:
+        snapshot = subprocess.run(
+            ["ps", "-axo", "pgid=,stat="], capture_output=True, text=True, timeout=1, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    if snapshot.returncode:
+        return True
+    members = [row.split(maxsplit=1) for row in snapshot.stdout.splitlines() if row.strip()]
+    states = [row[1] if len(row) > 1 else "" for row in members if row[0] == str(pgid)]
+    if not states:
+        try:
+            return _process_group_present(pgid)
+        except PermissionError:
+            return True
+    return any(not state.startswith(("Z", "X")) for state in states)
+
+
 def _signal_process_group(proc: subprocess.Popen, *, force: bool = False) -> None:
+    if os.name == "posix":
+        pgid = proc.pid
+        if pgid <= 1 or pgid == os.getpgrp() or (proc.poll() is not None and _pid_alive(pgid)):
+            raise RuntimeError(f"Cannot safely signal worker process group {pgid}")
+        try:
+            os.killpg(pgid, signal.SIGKILL if force else signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        return
     if proc.poll() is not None:
         return
-    if os.name == "posix":
-        try:
-            os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
-            return
-        except (ProcessLookupError, PermissionError):
-            pass
     try:
         if force:
             proc.kill()
@@ -729,9 +796,27 @@ def _signal_process_group(proc: subprocess.Popen, *, force: bool = False) -> Non
         pass
 
 
+def _wait_for_process_group(proc: subprocess.Popen, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        if proc.poll() is not None and not _process_group_alive(proc.pid):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.1, remaining))
+
+
 def _stop_process(proc: subprocess.Popen, grace_seconds: float = SHUTDOWN_GRACE_SECONDS) -> None:
     """Stop one child process group with its own grace window."""
     _signal_process_group(proc)
+    if os.name == "posix":
+        if _wait_for_process_group(proc, grace_seconds):
+            return
+        _signal_process_group(proc, force=True)
+        if not _wait_for_process_group(proc, grace_seconds):
+            raise RuntimeError(f"Worker process group {proc.pid} did not stop")
+        return
     try:
         proc.wait(timeout=grace_seconds)
         return
@@ -784,6 +869,7 @@ def _run_jobs(
 
     pending = [job for job in jobs if status["jobs"][job["name"]]["state"] == "pending"]
     running: list[tuple[dict, subprocess.Popen, object]] = []
+    check_worker_groups = inherited_lock_fd is not None and os.name == "posix"
     idx = 0
 
     def stop_if_requested() -> None:
@@ -825,6 +911,8 @@ def _run_jobs(
         running.append((job, proc, log_file))
         if inherited_lock_fd is not None:
             row["worker"] = _lock_identity(proc.pid)
+            if check_worker_groups:
+                row["worker"]["process_group"] = proc.pid
         row.update({"state": "running", "started": now(), "log": str(log_path)})
         write_status(status_path, status)
 
@@ -842,6 +930,8 @@ def _run_jobs(
                 job, proc, log_file = entry
                 if proc.poll() is None:
                     continue
+                if check_worker_groups and _process_group_alive(proc.pid):
+                    _stop_process(proc)
                 log_file.close()
                 out = job_output_dir(job, runs_dir)
                 ok, reason = _completion_gate(
@@ -871,7 +961,7 @@ def _run_jobs(
             cleanup_errors.append(f"cannot persist interruption: {exc}")
         for job, proc, log_file in running:
             try:
-                if proc.poll() is None:
+                if proc.poll() is None or (check_worker_groups and _process_group_alive(proc.pid)):
                     _stop_process(proc)
             except Exception as exc:
                 cleanup_errors.append(f"cannot stop {job['name']}: {exc}")
