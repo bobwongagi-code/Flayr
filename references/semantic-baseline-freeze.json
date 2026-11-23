@@ -4,7 +4,7 @@
   "decision_scope": "offline_semantic_baseline",
   "promotion_eligible": false,
   "frozen_at": "2026-09-23",
-  "production_behavior_commit": "ef2dc21a134b1a4b59b3b4b1d0ccf4605bda7a66",
+  "production_behavior_commit": "555847c0298f460f610fd75078bab0ba33cdc812",
   "execution_readiness": {
     "status": "gemini_draft_production_active_human_review_required",
     "scope": "company_gemini_default_route_with_original_funasr_and_human_delivery",
@@ -22,9 +22,10 @@
   },
   "latest_refreeze": {
     "status": "applied_and_refrozen",
-    "date": "2026-11-21",
-    "scope": "Bind the behavior-preserving result normalization and evidence repair refactor (ef2dc21). Differential checks preserved serialized outputs, exceptions, evidence mutations, and gate call order. Prior Stage1 qualification refactor remains included. No prompt, qualification rule, judgment, gap scale, GT, route, budget, threshold, or historical artifact changes. No model calls, video reruns, promotion, or accuracy claim. Local commits only; no push authorized.",
-    "previous_production_behavior_commit": "9392ebd91afeccf12d6aacc060da97a62a05e924",
+    "date": "2026-11-23",
+    "scope": "Bind the eight runtime and review integrity fixes. Submission identity, concurrent notes, process ownership, import preservation, degraded review roles, strict replay cache isolation, and Web wording were checked offline. No prompt, qualification rule, judgment, gap scale, GT, route, budget, threshold, or historical artifact changes. No model calls, video reruns, promotion, or accuracy claim.",
+    "previous_production_behavior_commit": "ef2dc21a134b1a4b59b3b4b1d0ccf4605bda7a66",
+    "runtime_audit_closeout_commit": "555847c0298f460f610fd75078bab0ba33cdc812",
     "normalization_evidence_repair_refactor_commit": "ef2dc21a134b1a4b59b3b4b1d0ccf4605bda7a66",
     "qualification_execution_refactor_commit": "9392ebd91afeccf12d6aacc060da97a62a05e924",
     "unused_private_helper_removal_commit": "387c001c8b97c4532c9cb94784dfa3ba2ec8adc0",
