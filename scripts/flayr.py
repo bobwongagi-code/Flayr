@@ -22,7 +22,7 @@ from flayr_core.audio_quality import analyze_audio_quality
 from flayr_core.analysis_model import ANALYSIS_RESULT_CONTRACT, placeholder_stages
 from flayr_core.artifacts import resolve_artifact_path
 from flayr_core.bd_report import write_bd_report
-from flayr_core.cli import build_parser, effective_run_identity, resolve_model_defaults
+from flayr_core.cli import REQUIRED_VIDEO_ROLES, build_parser, effective_run_identity, resolve_model_defaults
 from flayr_core.asr import (
     ASR_FAILURE_PLACEHOLDER,
     DEFAULT_FUN_ASR_MODEL,
@@ -609,6 +609,9 @@ def _generate_reports_and_publish(
 def create_run_dir(args: argparse.Namespace) -> Path:
     if args.output_dir:
         run_dir = args.output_dir.expanduser().resolve()
+        import_source = getattr(args, "analysis_result_json", None)
+        if import_source and Path(import_source).expanduser().resolve().is_relative_to(run_dir):
+            raise SystemExit("--analysis-result-json must be outside --output-dir; use a separate output directory")
         preserved_prefixes: set[str] = set()
         preserved_files: set[str] = set()
         for option, prefix in (
@@ -828,12 +831,13 @@ def validate_inputs(args: argparse.Namespace) -> dict[str, Path]:
         if configuration_error:
             raise SystemExit(configuration_error)
 
-    if args.mode in {"breakdown", "compare", "improve", "scope"}:
+    roles = REQUIRED_VIDEO_ROLES[args.mode]
+    if "benchmark" in roles:
         if not args.benchmark_video:
             raise SystemExit("--benchmark-video is required.")
         inputs["benchmark"] = validate_video_path(args.benchmark_video)
 
-    if args.mode in {"compare", "improve", "scope"}:
+    if "creator" in roles:
         if not args.creator_video:
             raise SystemExit("--creator-video is required for compare/improve mode.")
         inputs["creator"] = validate_video_path(args.creator_video)
@@ -1120,6 +1124,7 @@ def build_preprocess_fingerprint(
         },
         "transcription": {
             "backend": "fun-asr",
+            "provider_replay": bool(getattr(args, "provider_replay_from", None)),
             "api_url": str(getattr(args, "asr_api_url", "") or ""),
             "model": str(getattr(args, "asr_model", DEFAULT_FUN_ASR_MODEL) or DEFAULT_FUN_ASR_MODEL),
             "requested_language": str(getattr(args, "asr_language", "auto") or "auto"),
@@ -1522,7 +1527,9 @@ def process_video(
     role_dir = run_dir / role
     budget = budget or getattr(args, "_resource_budget", None)
     no_product_speech_attestation = _verified_no_product_speech_for_video(role, video_path, args)
-    if getattr(args, "reuse_preprocessing", False):
+    # Strict replay must consume the records from this invocation's source.
+    # Local preprocessing may contain live transcripts or a different replay.
+    if getattr(args, "reuse_preprocessing", False) and not getattr(args, "provider_replay_from", None):
         cached_info = None
         cache_path = role_dir / "_preprocess.json"
         if cache_path.is_file():

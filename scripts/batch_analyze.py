@@ -45,11 +45,13 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 try:  # works both as ``python scripts/batch_analyze.py`` and as a test module
     from flayr_core.cli import build_parser, effective_run_identity
+    from flayr_core.file_lock import exclusive_file_lock
     from flayr_core.llm.api import (
         DEFAULT_BEIJING_MAAS_LLM_API_URL,
         DEFAULT_COMPANY_JUDGMENT_MODEL,
@@ -69,6 +71,7 @@ try:  # works both as ``python scripts/batch_analyze.py`` and as a test module
     from flayr_core.utils import process_group_popen_kwargs
 except ModuleNotFoundError:  # pragma: no cover - package import path in test runners
     from scripts.flayr_core.cli import build_parser, effective_run_identity
+    from scripts.flayr_core.file_lock import exclusive_file_lock
     from scripts.flayr_core.llm.api import (
         DEFAULT_BEIJING_MAAS_LLM_API_URL,
         DEFAULT_COMPANY_JUDGMENT_MODEL,
@@ -332,7 +335,7 @@ def _success_manifest_valid(
         expected_inputs["analysis_result_json"] = Path(analysis_result)
     command = build_command(job, out_dir, common_args or [], trusted_args)
     expected_provenance = {"argv_sha256": command_digest(command[2:])}
-    if not reuse_historical_results:
+    if not reuse_historical_results or _option_value(effective_args, "--provider-replay-from"):
         try:
             expected_provenance["effective_run_identity"] = effective_run_identity(
                 build_parser().parse_args(command[2:])
@@ -554,6 +557,51 @@ def release_lock(lock_path: Path) -> None:
         lock_path.unlink(missing_ok=True)
 
 
+class _BatchTerminated(Exception):
+    """A termination request observed at a safe runner checkpoint."""
+
+
+def _assert_previous_workers_stopped(status_path: Path) -> None:
+    if not status_path.exists():
+        return
+    try:
+        previous = json.loads(status_path.read_text(encoding="utf-8"))
+        jobs = previous["jobs"].values()
+        for job in jobs:
+            if job.get("state") not in {"starting", "running", "interrupted"}:
+                continue
+            worker = job.get("worker")
+            if not isinstance(worker, dict) or _lock_owner_alive(worker):
+                raise RuntimeError("无法确认上次运行的子任务已停止；保留状态并拒绝重新派发。")
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise RuntimeError("无法核验上次批处理的子任务状态；拒绝重新派发。") from exc
+
+
+def _run_owned_batch(lock_path: Path, status_path: Path, run: Callable[[int, Callable[[], bool]], int]) -> int:
+    stopping = False
+
+    def request_stop(signum, frame):
+        nonlocal stopping
+        stopping = True
+
+    previous_handler = signal.signal(signal.SIGTERM, request_stop)
+    try:
+        with exclusive_file_lock(lock_path.with_suffix(".guard")) as guard_fd:
+            acquire_lock(lock_path)
+            try:
+                _assert_previous_workers_stopped(status_path)
+                if stopping:
+                    return 128 + signal.SIGTERM
+                result = run(guard_fd, lambda: stopping)
+                return 128 + signal.SIGTERM if stopping else result
+            finally:
+                release_lock(lock_path)
+    except _BatchTerminated:
+        return 128 + signal.SIGTERM
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Flayr 批量分析 runner")
     parser.add_argument("jobs_file", help="作业清单 JSON")
@@ -602,22 +650,16 @@ def main() -> int:
 
     lock_path = batch_dir / "runner.lock"
     try:
-        acquire_lock(lock_path)
-    except RuntimeError as error:
-        print(f"[batch] {error}，拒绝重复启动。")
-        return 1
-    try:
-        return _run_jobs(
-            jobs,
-            common_args,
-            runs_dir,
-            status_path,
-            args.concurrency,
-            _trusted_runner_args(args),
-            reuse_historical_results=args.reuse_historical_results,
+        return _run_owned_batch(
+            lock_path, status_path, lambda guard_fd, stop_requested: _run_jobs(
+                jobs, common_args, runs_dir, status_path, args.concurrency, _trusted_runner_args(args),
+                reuse_historical_results=args.reuse_historical_results,
+                inherited_lock_fd=guard_fd, stop_requested=stop_requested,
+            ),
         )
-    finally:
-        release_lock(lock_path)
+    except (OSError, RuntimeError) as error:
+        print(f"[batch] {error}")
+        return 1
 
 
 def _trusted_runner_args(args: argparse.Namespace) -> list[str]:
@@ -643,6 +685,23 @@ def _trusted_runner_args(args: argparse.Namespace) -> list[str]:
 
 
 def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel.WaitForSingleObject.restype = wintypes.DWORD
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE, not terminate access.
+        if not handle:
+            return ctypes.get_last_error() != 87  # ERROR_INVALID_PARAMETER: no such PID.
+        try:
+            return kernel.WaitForSingleObject(handle, 0) != 0
+        finally:
+            kernel.CloseHandle(handle)
     try:
         os.kill(pid, 0)
         return True
@@ -678,7 +737,7 @@ def _stop_process(proc: subprocess.Popen, grace_seconds: float = SHUTDOWN_GRACE_
         return
     except subprocess.TimeoutExpired:
         _signal_process_group(proc, force=True)
-        proc.wait()
+        proc.wait(timeout=grace_seconds)
 
 
 def _run_jobs(
@@ -690,6 +749,8 @@ def _run_jobs(
     trusted_args: list[str] | None = None,
     *,
     reuse_historical_results: bool = False,
+    inherited_lock_fd: int | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> int:
     batch_dir = status_path.parent
     status: dict = {
@@ -725,33 +786,58 @@ def _run_jobs(
     running: list[tuple[dict, subprocess.Popen, object]] = []
     idx = 0
 
+    def stop_if_requested() -> None:
+        if stop_requested is not None and stop_requested():
+            raise _BatchTerminated()
+
     def launch(job: dict) -> None:
         out = job_output_dir(job, runs_dir)
         log_path = batch_dir / f"{job['name']}.log"
         log_file = open(log_path, "a", encoding="utf-8")  # noqa: SIM115 — 进程存活期间需保持打开
+        row = status["jobs"][job["name"]]
         try:
             log_file.write(f"\n=== attempt started {now()} pid={os.getpid()} job={job['name']} ===\n")
             log_file.flush()
-            proc = subprocess.Popen(
-                build_command(job, out, common_args, trusted_args),
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                **process_group_popen_kwargs(),
-            )
+            options = process_group_popen_kwargs()
+            if inherited_lock_fd is not None:
+                # A crash before the PID is durable must not look like a job
+                # that definitely never launched, even without FD inheritance.
+                row["state"] = "starting"
+                write_status(status_path, status)
+                if os.name == "posix":
+                    options["pass_fds"] = (inherited_lock_fd,)
+            command = build_command(job, out, common_args, trusted_args)
+            try:
+                proc = subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT, **options)
+            except (OSError, ValueError):
+                if inherited_lock_fd is not None:
+                    row["state"] = "failed"
+                    row["failure_reason"] = "worker could not start"
+                    try:
+                        write_status(status_path, status)
+                    except OSError:
+                        pass  # Retain the starting record if disk writes fail.
+                raise
         except BaseException:
             log_file.close()
             raise
         # Own the live process before any fallible status write.
         running.append((job, proc, log_file))
-        status["jobs"][job["name"]].update({"state": "running", "started": now(), "log": str(log_path)})
+        if inherited_lock_fd is not None:
+            row["worker"] = _lock_identity(proc.pid)
+        row.update({"state": "running", "started": now(), "log": str(log_path)})
         write_status(status_path, status)
 
     try:
         while idx < len(pending) or running:
+            stop_if_requested()
             while idx < len(pending) and len(running) < concurrency:
+                stop_if_requested()
                 launch(pending[idx])
                 idx += 1
+            stop_if_requested()
             time.sleep(5)
+            stop_if_requested()
             for entry in list(running):
                 job, proc, log_file = entry
                 if proc.poll() is None:

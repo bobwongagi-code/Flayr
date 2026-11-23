@@ -42,6 +42,24 @@ from scripts.flayr_core.run_state import (
 
 
 class BatchAnalyzeValidationTests(unittest.TestCase):
+    def test_historical_reuse_cannot_skip_strict_replay_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            replay = root / "provider-source"
+            replay.mkdir()
+            job = self._job()
+            flags = ["--provider-replay-from", str(replay)]
+            from scripts import batch_analyze as batch
+
+            with (
+                mock.patch.object(batch, "effective_run_identity", return_value="strict-identity"),
+                mock.patch.object(batch, "validate_success_manifest", return_value=False) as validate,
+            ):
+                self.assertFalse(batch._success_manifest_valid(
+                    job, root / "run", flags, reuse_historical_results=True,
+                ))
+            self.assertEqual(validate.call_args.args[2]["effective_run_identity"], "strict-identity")
+
     def _job(self, name: str = "sample") -> dict[str, object]:
         return {"name": name, "creator": "/tmp/creator.mp4", "benchmark": "/tmp/benchmark.mp4"}
 

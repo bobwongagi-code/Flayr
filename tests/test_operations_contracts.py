@@ -22,6 +22,63 @@ from scripts.flayr_core.run_state import (  # noqa: E402
 
 
 class OperationsContractTests(unittest.TestCase):
+    def test_legacy_import_inside_output_is_rejected_before_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "existing"
+            output.mkdir()
+            source = output / "analysis_result.json"
+            source.write_text('{"import": true}', encoding="utf-8")
+            initialize_run_state(output)
+            before = {path.name: path.read_bytes() for path in output.iterdir()}
+            args = SimpleNamespace(output_dir=output, reuse_preprocessing=True,
+                                   analysis_result_json=source, mode="improve")
+            with self.assertRaisesRegex(SystemExit, "must be outside"):
+                flayr.create_run_dir(args)
+            self.assertEqual({path.name: path.read_bytes() for path in output.iterdir()}, before)
+            args.analysis_result_json = root / "external.json"
+            args.analysis_result_json.write_bytes(source.read_bytes())
+            self.assertEqual(flayr.create_run_dir(args), output.resolve())
+            self.assertTrue(args.analysis_result_json.is_file())
+
+    def test_strict_provider_replay_cannot_reuse_a_live_preprocessing_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            replay = root / "recorded"
+            replay.mkdir()
+            run_dir = root / "run"
+            role_dir = run_dir / "creator"
+            role_dir.mkdir(parents=True)
+            video = root / "creator.mp4"
+            video.write_bytes(b"fixture")
+            args = SimpleNamespace(provider_replay_from=replay, reuse_preprocessing=True)
+
+            def check_replay(role, _video, staging, _deps, config, **_kwargs):
+                audio = staging / "audio.wav"
+                audio.write_bytes(b"synthetic audio")
+                flayr.run_online_asr(
+                    "https://example.invalid/asr", "fixture-model", "", "en",
+                    audio, staging, staging / "transcript.txt", {},
+                    provider_replay_from=config.provider_replay_from, replay_role_name=role,
+                )
+
+            with (
+                mock.patch.object(flayr, "_verified_no_product_speech_for_video", return_value=None),
+                mock.patch.object(flayr, "build_preprocess_fingerprint", return_value={}),
+                mock.patch.object(flayr, "load_existing_video_result", return_value={
+                    "path": str(video), "transcription_status": "completed",
+                    "transcription_execution_source": "live", "frame_count": 1,
+                }) as cache,
+                mock.patch.object(flayr, "ensure_video_evidence_artifacts"),
+                mock.patch.object(flayr, "_process_video_generation", side_effect=check_replay),
+                mock.patch.object(flayr.asr_core, "audio_to_mp3_data_url", return_value="data:audio/mpeg;base64,AA=="),
+                mock.patch.object(flayr.asr_core, "_call_asr_endpoint") as remote,
+                self.assertRaises(flayr.ProviderReplayError),
+            ):
+                flayr.process_video("creator", video, run_dir, {}, args)
+            cache.assert_not_called()
+            remote.assert_not_called()
+
     def test_analysis_only_finishes_without_publication(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)

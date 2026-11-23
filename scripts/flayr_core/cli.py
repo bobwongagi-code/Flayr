@@ -20,6 +20,12 @@ from .resources import ResourceLimits
 
 # Bump for result-affecting code/contract changes, not documentation-only commits.
 RESULT_REUSE_VERSION = 2
+REQUIRED_VIDEO_ROLES = {
+    "breakdown": ("benchmark",),
+    "compare": ("benchmark", "creator"),
+    "improve": ("benchmark", "creator"),
+    "scope": ("benchmark", "creator"),
+}
 
 
 def resolve_model_defaults(args: argparse.Namespace) -> None:
@@ -55,6 +61,9 @@ def effective_run_identity(args: argparse.Namespace) -> str:
     }
     config["provider_routes"] = provider_run_metadata(args)
     config["result_reuse_version"] = RESULT_REUSE_VERSION
+    if getattr(args, "provider_replay_from", None):
+        # Pre-fix strict replays could publish a live preprocessing cache.
+        config["provider_replay_preprocess_contract"] = 1
     # An attestation file can change in place without changing argv.
     attestation = getattr(args, "verified_no_product_speech_attestation_file", None)
     if attestation:

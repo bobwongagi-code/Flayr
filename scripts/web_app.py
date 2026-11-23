@@ -22,6 +22,7 @@ import time
 import uuid
 from argparse import Namespace
 from collections import deque
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from email.message import Message
 from http.cookies import CookieError, SimpleCookie
@@ -36,6 +37,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.flayr_core.file_lock import FileLockBusy, exclusive_file_lock
 from scripts.flayr_core.llm.api import (
     DEFAULT_BEIJING_MAAS_LLM_API_URL,
     DEFAULT_COMPANY_JUDGMENT_MODEL,
@@ -1837,13 +1839,12 @@ class FlayrServer(ThreadingHTTPServer):
     def __init__(
         self,
         address: tuple[str, int],
-        store: JobStore,
+        store: JobStore | Callable[[], JobStore],
         *,
         public_mode: bool = False,
         auth_token: str = "",
         allowed_hosts: set[tuple[str, int | None]] | None = None,
     ) -> None:
-        self.store = store
         self.public_mode = bool(public_mode)
         self.auth_token = auth_token
         self.allowed_hosts = set(allowed_hosts or ())
@@ -1853,8 +1854,21 @@ class FlayrServer(ThreadingHTTPServer):
             if not self.allowed_hosts:
                 raise ValueError("对外监听必须设置允许的 Host")
         self.submission_limiter = SubmissionRateLimiter()
-        self.client_cookie_secret = _load_client_cookie_secret(store.root)
         super().__init__(address, FlayrHandler)
+        owned_store = None
+        try:
+            if callable(store):
+                owned_store = store()
+                store = owned_store
+            self.store = store
+            self.client_cookie_secret = _load_client_cookie_secret(store.root)
+        except BaseException:
+            try:
+                self.server_close()
+            finally:
+                if owned_store is not None:
+                    owned_store.shutdown()
+            raise
 
 
 class FlayrHandler(BaseHTTPRequestHandler):
@@ -2321,6 +2335,30 @@ class FlayrHandler(BaseHTTPRequestHandler):
             )
 
 
+def _serve_web(
+    root: Path, address: tuple[str, int], *, public_mode: bool,
+    auth_token: str, allowed_hosts: set[tuple[str, int | None]],
+) -> int:
+    with exclusive_file_lock(root / ".web-owner.lock"):
+        # Reserve the listener before JobStore performs recovery or GC.
+        server = FlayrServer(
+            address, lambda: JobStore(root), public_mode=public_mode,
+            auth_token=auth_token, allowed_hosts=allowed_hosts,
+        )
+        try:
+            host, port = server.server_address[:2]
+            print(f"Flayr web app: http://{host}:{port}/", flush=True)
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            try:
+                server.server_close()
+            finally:
+                server.store.shutdown()
+    return 0
+
+
 def main() -> int:
     import argparse
 
@@ -2344,23 +2382,14 @@ def main() -> int:
     configuration_error = _llm_configuration_error(route_args, models)
     if configuration_error:
         parser.error(configuration_error)
-    store = JobStore()
-    server = FlayrServer(
-        (args.host, args.port),
-        store,
-        public_mode=public_mode,
-        auth_token=auth_token,
-        allowed_hosts=allowed_hosts,
-    )
-    print(f"Flayr web app: http://{args.host}:{args.port}/", flush=True)
     try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        return 0
-    finally:
-        server.server_close()
-        store.shutdown()
-    return 0
+        return _serve_web(
+            WEB_ROOT, (args.host, args.port), public_mode=public_mode,
+            auth_token=auth_token, allowed_hosts=allowed_hosts,
+        )
+    except FileLockBusy:
+        print(f"任务目录已有 Web 服务在使用：{WEB_ROOT}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

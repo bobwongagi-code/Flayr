@@ -4,17 +4,22 @@ import copy
 import hashlib
 import io
 import json
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from scripts.flayr_core import requirement_review as rr
 from scripts.flayr_core.human_review import HumanReviewError
+from scripts.flayr_core.run_manifest import write_success_manifest
 from scripts.flayr_core.utils import write_json
 from scripts.flayr_core import human_review
 from scripts import review_requirements as cli
 from tests import test_human_review as review_fixtures
+from tests import test_degraded_human_review as degraded_fixtures
 
 
 class RequirementReviewTests(unittest.TestCase):
@@ -217,7 +222,7 @@ class RequirementReviewTests(unittest.TestCase):
         rr.load_packet(self.output)
         self.assertEqual(before, [_hash(path) for path in paths])
 
-    def test_real_source_gate_and_existing_review_fixture(self):
+    def completed_run(self):
         helper = review_fixtures.HumanReviewTests()
         temp, run = helper.fresh_run()
         self.addCleanup(temp.cleanup)
@@ -233,13 +238,97 @@ class RequirementReviewTests(unittest.TestCase):
         }
         analysis["video_understanding"]["creator"]["evidence_units"][0]["time_range"] = [2, 4]
         helper._replace_run_analysis(temp, run, analysis)
+        video = Path(temp.name) / "input.mp4"
+        write_success_manifest(run, {"creator_video": video}, analysis)
+        return run, video
+
+    def test_real_source_gate_and_existing_review_fixture(self):
+        run, video = self.completed_run()
         with mock.patch.object(rr, "load_analysis", human_review.load_analysis):
+            original = video.read_bytes()
+            video.write_bytes(b"x" * len(original))
+            with self.assertRaisesRegex(HumanReviewError, "creator video"):
+                rr.init_packet(run, self.requirements, self.links, self.output)
+            self.assertFalse(self.output.exists())
+            video.write_bytes(original)
             rr.init_packet(run, self.requirements, self.links, self.output)
             rr.record_note(self.output, "R1", "operator", "Candidate needs visual review.")
             self.assertEqual(len(rr.load_packet(self.output)["human_notes"]), 1)
+            before = self.output.read_bytes()
+            video.write_bytes(b"x" * len(original))
+            with self.assertRaises(HumanReviewError):
+                rr.record_note(self.output, "R1", "operator", "Wrong revision")
+            self.assertEqual(self.output.read_bytes(), before)
+            video.write_bytes(original)
             (run / "analysis.json").write_text("{}", encoding="utf-8")
             with self.assertRaises(HumanReviewError):
                 rr.load_packet(self.output)
+
+    def test_two_cli_processes_preserve_both_notes(self):
+        run, _ = self.completed_run()
+        with mock.patch.object(rr, "load_analysis", human_review.load_analysis):
+            rr.init_packet(run, self.requirements, self.links, self.output)
+        # Force a long read/write interval so the old unlocked implementation
+        # read the same packet twice. The locks must work across interpreters.
+        script = """
+import sys
+import time
+from pathlib import Path
+from scripts import review_requirements as cli
+from scripts.flayr_core import requirement_review as rr
+original = rr.load_packet
+def delayed_read(path):
+    result = original(path)
+    time.sleep(1)
+    return result
+rr.load_packet = delayed_read
+Path(sys.argv[3]).touch()
+while not Path(sys.argv[4]).exists():
+    time.sleep(0.01)
+raise SystemExit(cli.main(["note", sys.argv[1], "--requirement-id", "R1",
+                          "--reviewer", sys.argv[2], "--note", sys.argv[2]]))
+"""
+        children = []
+        try:
+            barrier = self.root / "start"
+            for name in ("one", "two"):
+                children.append(subprocess.Popen(
+                    [sys.executable, "-B", "-c", script, str(self.output), name,
+                     str(self.root / name), str(barrier)],
+                    cwd=Path(__file__).resolve().parents[1],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                ))
+            stop = time.monotonic() + 15
+            while not all((self.root / name).exists() for name in ("one", "two")):
+                self.assertLess(time.monotonic(), stop, "note workers did not start")
+                time.sleep(0.01)
+            barrier.touch()
+            for child in children:
+                _, error = child.communicate(timeout=15)
+                self.assertEqual(child.returncode, 0, error)
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                child.communicate(timeout=5)
+        with mock.patch.object(rr, "load_analysis", human_review.load_analysis):
+            notes = rr.load_packet(self.output)["human_notes"]
+        self.assertCountEqual([note["note"] for note in notes], ["one", "two"])
+
+    def test_valid_degraded_review_needs_no_success_manifest(self):
+        fixture = degraded_fixtures.DegradedHumanReviewTests()
+        self.addCleanup(fixture.doCleanups)
+        fixture.setUp()
+        fixture.analysis["mode"] = "improve"
+        fixture.analysis["videos"]["creator"]["duration_seconds"] = 12
+        fixture.analysis["video_understanding"] = {"creator": {"evidence_units": [
+            {"id": "C1", "time_range": [2, 4], "visual_fact": "Fixture evidence"},
+        ]}}
+        write_json(fixture.root / "analysis.json", fixture.analysis)
+        with mock.patch.object(rr, "load_analysis", human_review.load_analysis):
+            packet = rr.init_packet(fixture.root, self.requirements, self.links, self.output)
+        self.assertEqual(packet["rows"][0]["candidates"][0]["evidence_id"], "C1")
+        self.assertFalse((fixture.root / "_SUCCESS.json").exists())
 
     def test_cli_round_trip_and_failure_exit(self):
         with mock.patch.object(cli, "init_packet", rr.init_packet), \

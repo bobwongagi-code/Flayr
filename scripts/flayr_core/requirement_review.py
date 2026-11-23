@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import get_analysis_frame_entries, parse_time_range_seconds, parse_timestamp_seconds
+from .file_lock import exclusive_file_lock
 from .human_review import HumanReviewError, load_analysis
+from .run_manifest import SUCCESS_MANIFEST_NAME
 from .utils import write_json
 
 
@@ -99,7 +101,13 @@ def build_packet(run_dir: Path, requirements: Path, links: Path) -> dict[str, An
     requirements, links = requirements.expanduser().resolve(), links.expanduser().resolve()
     analysis = load_analysis(root)  # Reuse the existing success/degraded source gate.
     bindings: dict[str, str] = {}
-    _bind(root / "analysis.json", bindings)
+    analysis_path = root / "analysis.json"
+    analysis_bytes = analysis_path.read_bytes()
+    snapshot = json.loads(analysis_bytes)
+    if snapshot != analysis:
+        raise RequirementReviewError("The analysis changed while loading review sources")
+    analysis = snapshot
+    bindings[str(analysis_path.resolve())] = hashlib.sha256(analysis_bytes).hexdigest()
     bundle = _requirements(requirements, bindings)
     candidate_map = _read(_bind(links, bindings))
     expected_ids = {item["id"] for item in bundle["requirements"]}
@@ -109,6 +117,21 @@ def build_packet(run_dir: Path, requirements: Path, links: Path) -> dict[str, An
     if not isinstance(info, dict):
         raise RequirementReviewError("Missing creator video")
     video = _bind(_local(root, info.get("path")), bindings)
+    success = root / SUCCESS_MANIFEST_NAME
+    if analysis.get("analysis_run_state") == "completed" or success.exists():
+        manifest = _read(success)
+        expected = manifest.get("inputs", {}).get("creator_video")
+        if expected != {"path": str(video), "size_bytes": video.stat().st_size,
+                        "sha256": bindings[str(video)]}:
+            raise RequirementReviewError("The creator video no longer matches the analysis publication")
+        recorded_analysis = manifest.get("artifacts", {}).get("analysis.json", {})
+        if recorded_analysis.get("sha256") != bindings[str(analysis_path.resolve())]:
+            raise RequirementReviewError("The analysis no longer matches its publication")
+    elif analysis.get("analysis_run_state") == "degraded":
+        expected = (info.get("preprocess_fingerprint") or {}).get("source_video") or {}
+        if (expected.get("sha256") != bindings[str(video)]
+                or expected.get("size_bytes") != video.stat().st_size):
+            raise RequirementReviewError("The creator video no longer matches the degraded analysis")
     duration = info.get("duration_seconds")
     duration_range = parse_time_range_seconds([0, duration], duration)
     if isinstance(duration, bool) or duration_range is None or duration_range[1] <= 0:
@@ -175,11 +198,16 @@ def build_packet(run_dir: Path, requirements: Path, links: Path) -> dict[str, An
 
 def init_packet(run_dir: Path, requirements: Path, links: Path, output: Path) -> dict[str, Any]:
     output = output.expanduser().resolve()
-    if output.exists():
-        raise RequirementReviewError("Review packet already exists; do not overwrite prior review")
-    packet = build_packet(run_dir, requirements, links)
-    write_json(output, packet)
-    return packet
+    with _packet_lock(output):
+        if output.exists():
+            raise RequirementReviewError("Review packet already exists; do not overwrite prior review")
+        packet = build_packet(run_dir, requirements, links)
+        write_json(output, packet)
+        return packet
+
+
+def _packet_lock(path: Path):
+    return exclusive_file_lock(path.with_name(f".{path.name}.lock"), timeout=30)
 
 
 def load_packet(path: Path) -> dict[str, Any]:
@@ -204,15 +232,17 @@ def load_packet(path: Path) -> dict[str, Any]:
 
 
 def record_note(path: Path, requirement_id: str, reviewer: str, note: str) -> dict[str, Any]:
-    packet = load_packet(path)
-    if requirement_id not in {row["requirement"]["id"] for row in packet["rows"]}:
-        raise RequirementReviewError("Unknown requirement")
-    packet["human_notes"].append({
-        "requirement_id": requirement_id, "reviewer": _text(reviewer), "note": _text(note),
-        "recorded_at": datetime.now(timezone.utc).isoformat(),
-    })
-    write_json(path, packet)
-    return packet
+    path = path.expanduser().resolve()
+    with _packet_lock(path):
+        packet = load_packet(path)
+        if requirement_id not in {row["requirement"]["id"] for row in packet["rows"]}:
+            raise RequirementReviewError("Unknown requirement")
+        packet["human_notes"].append({
+            "requirement_id": requirement_id, "reviewer": _text(reviewer), "note": _text(note),
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        })
+        write_json(path, packet)
+        return packet
 
 
 def render_packet(packet: dict[str, Any]) -> str:

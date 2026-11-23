@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .cli import REQUIRED_VIDEO_ROLES
 from .run_manifest import BASE_REQUIRED_ARTIFACTS, REPORT_VARIANT_ARTIFACTS
 from .run_state import read_run_state
 from .speech_attestation import has_verified_no_product_speech
@@ -47,8 +48,8 @@ def degraded_source_fingerprint(root: Path) -> dict[str, Any]:
     videos = analysis.get("videos")
     if not isinstance(videos, dict) or not videos:
         raise ValueError("缺少草稿原视频来源")
-    expected_roles = {"benchmark", "creator"} if analysis.get("mode") == "compare" else {"creator"}
-    if set(videos) != expected_roles or analysis.get("mode") not in {"compare", "improve"}:
+    mode = analysis.get("mode")
+    if mode not in ("compare", "improve") or set(videos) != set(REQUIRED_VIDEO_ROLES[mode]):
         raise ValueError("草稿模式与视频角色不完整")
     inputs = {}
     for role, info in videos.items():

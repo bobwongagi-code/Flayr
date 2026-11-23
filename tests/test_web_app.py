@@ -12,6 +12,7 @@ from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
 from unittest import mock
 
+from scripts.flayr_core.file_lock import FileLockBusy, exclusive_file_lock
 from scripts.web_app import (
     FlayrServer,
     JobStore,
@@ -24,6 +25,7 @@ from scripts.web_app import (
     WEB_ALLOWED_HOSTS_ENV,
     WEB_AUTH_TOKEN_ENV,
     _resolve_web_security,
+    _serve_web,
     _llm_configuration_from_env,
     _signed_client_cookie,
     cleanup_upload_files,
@@ -51,6 +53,34 @@ from scripts.flayr_core.llm.api import (
 
 
 class WebAppHelpersTests(unittest.TestCase):
+    def test_duplicate_store_root_is_rejected_before_recovery(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with (
+                exclusive_file_lock(root / ".web-owner.lock"),
+                mock.patch("scripts.web_app.JobStore") as store,
+                self.assertRaises(FileLockBusy),
+            ):
+                _serve_web(root, ("127.0.0.1", 0), public_mode=False, auth_token="", allowed_hosts=set())
+            store.assert_not_called()
+
+    def test_busy_port_does_not_start_recovery_even_with_distinct_store_root(self):
+        with tempfile.TemporaryDirectory() as temp, socket.socket() as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen()
+            root = Path(temp)
+            with mock.patch("scripts.web_app.JobStore") as store, self.assertRaises(OSError):
+                _serve_web(root, occupied.getsockname(), public_mode=False, auth_token="", allowed_hosts=set())
+            store.assert_not_called()
+            with exclusive_file_lock(root / ".web-owner.lock"):
+                pass
+
+    def test_product_form_does_not_promise_unsupported_strategy_upgrade(self):
+        index = Path(__file__).resolve().parents[1] / "frontend" / "index.html"
+        content = index.read_text(encoding="utf-8")
+        self.assertIn("产品信息", content)
+        self.assertNotIn("策略增强分析", content)
+
     def test_web_defaults_share_the_company_gemini_route(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
             args, models, route = _llm_configuration_from_env()

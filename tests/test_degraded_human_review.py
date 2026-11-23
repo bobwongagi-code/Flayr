@@ -60,6 +60,15 @@ class DegradedHumanReviewTests(unittest.TestCase):
         with self.assertRaises(hr.HumanReviewError):
             hr.update_stage(self.root, "S5", "confirmed")
 
+    def test_web_improve_draft_requires_both_cli_video_roles(self):
+        self.analysis["mode"] = "improve"
+        write_json(self.root / "analysis.json", self.analysis)
+        self.assertEqual(hr.init_review(self.root)["source"]["source_run_state"], "DEGRADED")
+        self.analysis["videos"].pop("benchmark")
+        write_json(self.root / "analysis.json", self.analysis)
+        with self.assertRaisesRegex(hr.HumanReviewError, "视频角色不完整"):
+            hr.load_analysis(self.root)
+
     def test_reviewed_degraded_draft_stays_degraded_across_publication_and_review(self):
         write_json(self.root / "degraded_manifest.json", {
             "analysis_run_state": "degraded", "degraded_flags": ["S5 unresolved"], "reason": "S5 unresolved",

@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import io
+import json
+import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -268,6 +272,89 @@ class BatchCleanupTests(unittest.TestCase):
                 for process in children:
                     if process.poll() is None:
                         real_stop(process, grace_seconds=1)
+
+    def test_restart_refuses_live_or_unidentified_previous_workers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            status = root / "status.json"
+            for state, worker in (
+                ("starting", None), ("running", None),
+                ("running", batch._lock_identity()),
+                ("interrupted", batch._lock_identity()),
+            ):
+                batch.write_status(status, {"jobs": {"sample": {"state": state, "worker": worker}}})
+                before = status.read_bytes()
+                work = mock.Mock()
+                with self.assertRaisesRegex(RuntimeError, "拒绝重新派发"):
+                    batch._run_owned_batch(root / "runner.lock", status, work)
+                work.assert_not_called()
+                self.assertEqual(status.read_bytes(), before)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX descriptor inheritance")
+    def test_worker_retains_runner_guard_after_parent_closes_descriptor(self):
+        with tempfile.TemporaryDirectory() as temp:
+            lock = Path(temp) / "runner.lock"
+            status = lock.with_name("status.json")
+            with batch.exclusive_file_lock(lock.with_suffix(".guard")) as fd:
+                worker = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(60)"], pass_fds=(fd,),
+                )
+            try:
+                with self.assertRaisesRegex(OSError, "Another process holds the lock"):
+                    batch._run_owned_batch(lock, status, lambda *_: self.fail("dispatched a second runner"))
+                self.assertFalse(status.exists())
+            finally:
+                worker.terminate()
+                worker.wait(timeout=5)
+            self.assertEqual(batch._run_owned_batch(lock, status, lambda *_: 0), 0)
+
+    @unittest.skipUnless(os.name == "posix", "real POSIX SIGTERM and process group")
+    def test_sigterm_reaps_worker_before_releasing_runner(self):
+        script = """
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from scripts import batch_analyze as batch
+root = Path(sys.argv[1])
+status = root / "status.json"
+job = {"name": "sample", "creator": "fixture", "benchmark": "fixture"}
+with patch.object(batch, "_completion_gate", return_value=(False, "new")), \
+     patch.object(batch, "build_command", return_value=[sys.executable, "-c",
+         "import time; time.sleep(120)"]):
+    raise SystemExit(batch._run_owned_batch(root / "runner.lock", status,
+        lambda fd, stopping: batch._run_jobs([job], [], root, status, 1,
+            inherited_lock_fd=fd, stop_requested=stopping)))
+"""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            status = root / "status.json"
+            worker_pid = None
+            with subprocess.Popen(
+                [sys.executable, "-B", "-c", script, str(root)],
+                cwd=Path(__file__).resolve().parents[1],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+            ) as runner:
+                try:
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline and runner.poll() is None:
+                        if status.exists():
+                            job = json.loads(status.read_text())["jobs"]["sample"]
+                            if job["state"] == "running":
+                                worker_pid = job["worker"]["pid"]
+                                break
+                        time.sleep(0.02)
+                    self.assertIsNotNone(worker_pid)
+                    runner.send_signal(signal.SIGTERM)
+                    _, error = runner.communicate(timeout=14)
+                    self.assertEqual(runner.returncode, 128 + signal.SIGTERM, error)
+                    self.assertFalse(batch._pid_alive(worker_pid))
+                    self.assertEqual(json.loads(status.read_text())["jobs"]["sample"]["state"], "interrupted")
+                    self.assertEqual(batch._run_owned_batch(root / "runner.lock", status, lambda *_: 0), 0)
+                finally:
+                    if runner.poll() is None:
+                        runner.kill()
+                    if worker_pid is not None and batch._pid_alive(worker_pid):
+                        os.killpg(worker_pid, signal.SIGKILL)
 
 
 if __name__ == "__main__":
