@@ -66,6 +66,8 @@ class WebAppHelpersTests(unittest.TestCase):
 
     def test_busy_port_does_not_start_recovery_even_with_distinct_store_root(self):
         with tempfile.TemporaryDirectory() as temp, socket.socket() as occupied:
+            if os.name == "nt":
+                occupied.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
             occupied.bind(("127.0.0.1", 0))
             occupied.listen()
             root = Path(temp)

@@ -18,7 +18,7 @@ from scripts import flayr, web_app
 from scripts.flayr_core import human_review, requirement_review, run_state
 from scripts.flayr_core.llm import pipeline
 from scripts.flayr_core.llm.stage1_qualification import build_stage1_qualification_plan
-from scripts.flayr_core.run_manifest import validate_success_manifest
+from scripts.flayr_core.run_manifest import validate_success_manifest, write_success_manifest
 from scripts.flayr_core.utils import write_json
 from tests import test_human_review as review_fixtures
 from tests.test_creator_report import ONE_PIXEL_PNG
@@ -269,6 +269,7 @@ class DeliveryStateJourneyTests(unittest.TestCase):
             "time_range"
         ] = [2, 4]
         self.helper._replace_run_analysis(self.temp, self.run, analysis)
+        write_success_manifest(self.run, {"creator_video": self.inputs["input.mp4"]}, analysis)
         self.approve()
         review_before = (self.run / human_review.SIDECAR_NAME).read_bytes()
         source = Path(self.temp.name) / "requirements.txt"
